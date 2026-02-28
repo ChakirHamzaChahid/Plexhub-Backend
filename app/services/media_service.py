@@ -32,7 +32,12 @@ class MediaService:
         if server_id:
             query = query.where(Media.server_id == server_id)
         if parent_rating_key:
-            query = query.where(Media.parent_rating_key == parent_rating_key)
+            # Auto-detect series queries: if parent_rating_key starts with "series_",
+            # filter by grandparent_rating_key (episodes belong to series via grandparent)
+            if parent_rating_key.startswith("series_"):
+                query = query.where(Media.grandparent_rating_key == parent_rating_key)
+            else:
+                query = query.where(Media.parent_rating_key == parent_rating_key)
         if not include_filtered:
             query = query.where(Media.is_in_allowed_categories == True)
 

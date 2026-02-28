@@ -435,6 +435,10 @@ async def sync_account(account_id: str):
 
             server_id = f"xtream_{account_id}"
             total_synced = 0
+            # Load category configuration
+            filter_mode, allowed_vod, allowed_series = await _load_category_config(db, account_id)
+            logger.info(f"Category filter mode: {filter_mode} (VOD: {len(allowed_vod)} configured, Series: {len(allowed_series)} configured)")
+
 
             # --- VOD Sync (incremental with detailed metadata) ---
             logger.info(f"Syncing VOD for account {account_id}")
@@ -462,6 +466,10 @@ async def sync_account(account_id: str):
                     continue
                 ext = (dto.get("container_extension") or "").strip() or None
                 stream_id = dto.get("stream_id")
+                # Check category filtering
+                category_id = str(dto.get("category_id", ""))
+                if not _should_sync_category(category_id, filter_mode, allowed_vod):
+                    continue  # Skip disallowed category
                 if not stream_id:
                     continue
                 rating_key = f"vod_{stream_id}.{ext}" if ext else f"vod_{stream_id}"
@@ -490,6 +498,7 @@ async def sync_account(account_id: str):
                             logger.warning(f"Failed to fetch vod_info for stream {dto.get('stream_id')}: {e}")
                         row = map_vod_to_media(dto, account_id, index, vod_info)
                         row["dto_hash"] = dto_hash
+                        row["is_in_allowed_categories"] = True
                         return row
                     except Exception as e:
                         logger.error(f"Failed to process VOD item {index}: {e}", exc_info=True)

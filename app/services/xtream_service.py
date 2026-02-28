@@ -47,12 +47,21 @@ class XtreamService:
         resp.raise_for_status()
         return resp.json()
 
-    async def authenticate(self, base_url: str, port: int, username: str, password: str) -> dict[str, Any]:
-        """Authenticate and get account info."""
+    async def authenticate(self, account_or_url, port: int = None, username: str = None, password: str = None) -> dict[str, Any]:
+        """Authenticate and get account info. Accepts account object or individual params."""
+        if hasattr(account_or_url, 'base_url'):
+            # Account object
+            base_url, port, username, password = account_or_url.base_url, account_or_url.port, account_or_url.username, account_or_url.password
+        else:
+            base_url = account_or_url
         data = await self._get(base_url, port, username, password)
         return data
 
-    async def get_vod_categories(self, base_url: str, port: int, username: str, password: str) -> list[dict]:
+    async def get_vod_categories(self, account_or_url, port: int = None, username: str = None, password: str = None) -> list[dict]:
+        if hasattr(account_or_url, 'base_url'):
+            base_url, port, username, password = account_or_url.base_url, account_or_url.port, account_or_url.username, account_or_url.password
+        else:
+            base_url = account_or_url
         data = await self._get(
             base_url, port, username, password,
             action="get_vod_categories",
@@ -60,9 +69,13 @@ class XtreamService:
         return data if isinstance(data, list) else []
 
     async def get_vod_streams(
-        self, base_url: str, port: int, username: str, password: str,
+        self, account_or_url, port: int = None, username: str = None, password: str = None,
         category_id: str | None = None,
     ) -> list[dict]:
+        if hasattr(account_or_url, 'base_url'):
+            base_url, port, username, password = account_or_url.base_url, account_or_url.port, account_or_url.username, account_or_url.password
+        else:
+            base_url = account_or_url
         kwargs = {}
         if category_id:
             kwargs["category_id"] = category_id
@@ -73,7 +86,11 @@ class XtreamService:
         )
         return data if isinstance(data, list) else []
 
-    async def get_vod_info(self, base_url: str, port: int, username: str, password: str, vod_id: int) -> dict:
+    async def get_vod_info(self, account_or_url, port: int = None, username: str = None, password: str = None, vod_id: int = None) -> dict:
+        if hasattr(account_or_url, 'base_url'):
+            base_url, port, username, password = account_or_url.base_url, account_or_url.port, account_or_url.username, account_or_url.password
+        else:
+            base_url = account_or_url
         data = await self._get(
             base_url, port, username, password,
             action="get_vod_info",
@@ -81,7 +98,11 @@ class XtreamService:
         )
         return data if isinstance(data, dict) else {}
 
-    async def get_series_categories(self, base_url: str, port: int, username: str, password: str) -> list[dict]:
+    async def get_series_categories(self, account_or_url, port: int = None, username: str = None, password: str = None) -> list[dict]:
+        if hasattr(account_or_url, 'base_url'):
+            base_url, port, username, password = account_or_url.base_url, account_or_url.port, account_or_url.username, account_or_url.password
+        else:
+            base_url = account_or_url
         data = await self._get(
             base_url, port, username, password,
             action="get_series_categories",
@@ -89,9 +110,13 @@ class XtreamService:
         return data if isinstance(data, list) else []
 
     async def get_series(
-        self, base_url: str, port: int, username: str, password: str,
+        self, account_or_url, port: int = None, username: str = None, password: str = None,
         category_id: str | None = None,
     ) -> list[dict]:
+        if hasattr(account_or_url, 'base_url'):
+            base_url, port, username, password = account_or_url.base_url, account_or_url.port, account_or_url.username, account_or_url.password
+        else:
+            base_url = account_or_url
         kwargs = {}
         if category_id:
             kwargs["category_id"] = category_id
@@ -102,7 +127,11 @@ class XtreamService:
         )
         return data if isinstance(data, list) else []
 
-    async def get_series_info(self, base_url: str, port: int, username: str, password: str, series_id: int) -> dict:
+    async def get_series_info(self, account_or_url, port: int = None, username: str = None, password: str = None, series_id: int = None) -> dict:
+        if hasattr(account_or_url, 'base_url'):
+            base_url, port, username, password = account_or_url.base_url, account_or_url.port, account_or_url.username, account_or_url.password
+        else:
+            base_url = account_or_url
         data = await self._get(
             base_url, port, username, password,
             action="get_series_info",

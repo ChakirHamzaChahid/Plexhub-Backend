@@ -290,16 +290,23 @@ async def upsert_media_batch(db, rows: list[dict]):
 
 
 async def enqueue_for_enrichment(db, rows: list[dict]):
-    """Insert items into enrichment_queue if not already present.
+    """Insert items into enrichment_queue if either tmdb_id or imdb_id is missing.
 
-    Skips items that already have a tmdb_id from the sync phase.
+    Saves existing IDs to enable optimized enrichment that only fetches missing data.
     """
     for row in rows:
         if row["type"] not in ("movie", "show"):
             continue
-        # Skip items already enriched during sync (have tmdb_id)
-        if row.get("tmdb_id"):
+        
+        # Get existing IDs
+        existing_tmdb = row.get("tmdb_id")
+        existing_imdb = row.get("imdb_id")
+        
+        # Skip only if BOTH IDs are present
+        if existing_tmdb and existing_imdb:
             continue
+        
+        # Enqueue with existing IDs saved
         stmt = sqlite_upsert(EnrichmentQueue).values(
             rating_key=row["rating_key"],
             server_id=row["server_id"],
@@ -309,12 +316,18 @@ async def enqueue_for_enrichment(db, rows: list[dict]):
             status="pending",
             attempts=0,
             created_at=now_ms(),
+            existing_tmdb_id=existing_tmdb,
+            existing_imdb_id=existing_imdb,
         )
-        stmt = stmt.on_conflict_do_nothing(
-            index_elements=["rating_key", "server_id"]
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["rating_key", "server_id"],
+            set_={
+                "status": "pending",
+                "existing_tmdb_id": existing_tmdb,
+                "existing_imdb_id": existing_imdb,
+            }
         )
         await db.execute(stmt)
-
 
 async def differential_cleanup(
     db, server_id: str, filter_val: str, api_rating_keys: set[str],

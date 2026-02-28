@@ -175,6 +175,11 @@ async def bulk_update_categories(
     """
     Bulk update category configuration.
 
+    In whitelist mode: categories in the request get their isAllowed value,
+    all OTHER categories are set to is_allowed=False.
+    In blacklist mode: categories in the request get their isAllowed value,
+    all OTHER categories are set to is_allowed=True.
+
     Args:
         db: Database session
         account_id: Xtream account ID
@@ -184,16 +189,50 @@ async def bulk_update_categories(
     # Update filter mode
     await update_filter_mode(db, account_id, filter_mode)
 
-    # Update each category's is_allowed status
+    # Build set of explicitly listed category keys
+    listed_keys = set()
     for cat_dict in categories:
         category_id = cat_dict.get("categoryId")
         category_type = cat_dict.get("categoryType")
         is_allowed = cat_dict.get("isAllowed", True)
 
         if category_id and category_type:
+            listed_keys.add((str(category_id), category_type))
             await update_category_allowed(
-                db, account_id, category_id, category_type, is_allowed
+                db, account_id, str(category_id), category_type, is_allowed
             )
+
+    # Set default for unlisted categories based on filter mode
+    if filter_mode in ("whitelist", "blacklist"):
+        default_allowed = filter_mode == "blacklist"  # whitelist: False, blacklist: True
+
+        all_cats_result = await db.execute(
+            select(XtreamCategory).where(
+                XtreamCategory.account_id == account_id
+            )
+        )
+        all_cats = all_cats_result.scalars().all()
+
+        unlisted_count = 0
+        for cat in all_cats:
+            if (cat.category_id, cat.category_type) not in listed_keys:
+                stmt = (
+                    update(XtreamCategory)
+                    .where(
+                        XtreamCategory.account_id == account_id,
+                        XtreamCategory.category_id == cat.category_id,
+                        XtreamCategory.category_type == cat.category_type,
+                    )
+                    .values(is_allowed=default_allowed)
+                )
+                await db.execute(stmt)
+                unlisted_count += 1
+
+        await db.commit()
+        logger.info(
+            f"Set {unlisted_count} unlisted categories to is_allowed={default_allowed} "
+            f"(filter_mode={filter_mode})"
+        )
 
     logger.info(
         f"Bulk updated {len(categories)} categories for account {account_id}"

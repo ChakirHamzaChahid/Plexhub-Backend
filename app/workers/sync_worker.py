@@ -339,14 +339,21 @@ async def enqueue_for_enrichment(db, rows: list[dict]):
 
 async def differential_cleanup(
     db, server_id: str, filter_val: str, api_rating_keys: set[str],
+    media_type: str = None,
 ):
-    """Remove DB items not present in the API response (delisted content)."""
-    result = await db.execute(
-        select(Media.rating_key).where(
-            Media.server_id == server_id,
-            Media.filter == filter_val,
-        )
+    """Remove DB items not present in the API response (delisted content).
+
+    Only compares within the same media_type to avoid deleting items
+    from categories that were filtered out by whitelist/blacklist.
+    """
+    query = select(Media.rating_key).where(
+        Media.server_id == server_id,
+        Media.filter == filter_val,
     )
+    if media_type:
+        query = query.where(Media.type == media_type)
+
+    result = await db.execute(query)
     existing_keys = {row[0] for row in result}
     stale_keys = existing_keys - api_rating_keys
 
@@ -363,6 +370,7 @@ async def differential_cleanup(
             )
         logger.info(
             f"Removed {len(stale_keys)} stale items from {server_id}/{filter_val}"
+            f" (type={media_type or 'all'})"
         )
 
 
@@ -434,6 +442,70 @@ def _should_sync_category(
         return is_allowed is not False
     
     return True  # Default: sync
+async def _refresh_categories(db, account, account_id: str):
+    """Fetch categories from Xtream and upsert into xtream_categories table."""
+    from app.models.database import XtreamCategory
+    from sqlalchemy.dialects.sqlite import insert as sqlite_upsert
+
+    try:
+        vod_cats = await xtream_service.get_vod_categories(account)
+        series_cats = await xtream_service.get_series_categories(account)
+    except Exception as e:
+        logger.warning(f"Failed to fetch categories for account {account_id}: {e}")
+        return
+
+    now = now_ms()
+    count = 0
+
+    for cat in vod_cats:
+        if not isinstance(cat, dict):
+            continue
+        cat_id = str(cat.get("category_id", ""))
+        cat_name = cat.get("category_name", "Unknown")
+        if not cat_id:
+            continue
+        stmt = sqlite_upsert(XtreamCategory).values(
+            account_id=account_id,
+            category_id=cat_id,
+            category_type="vod",
+            category_name=cat_name,
+            is_allowed=True,
+            last_fetched_at=now,
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["account_id", "category_id", "category_type"],
+            set_={"category_name": cat_name, "last_fetched_at": now},
+        )
+        await db.execute(stmt)
+        count += 1
+
+    for cat in series_cats:
+        if not isinstance(cat, dict):
+            continue
+        cat_id = str(cat.get("category_id", ""))
+        cat_name = cat.get("category_name", "Unknown")
+        if not cat_id:
+            continue
+        stmt = sqlite_upsert(XtreamCategory).values(
+            account_id=account_id,
+            category_id=cat_id,
+            category_type="series",
+            category_name=cat_name,
+            is_allowed=True,
+            last_fetched_at=now,
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["account_id", "category_id", "category_type"],
+            set_={"category_name": cat_name, "last_fetched_at": now},
+        )
+        await db.execute(stmt)
+        count += 1
+
+    await db.commit()
+    logger.info(f"Refreshed {count} categories for account {account_id} "
+                f"({len(vod_cats)} VOD, {len(series_cats)} Series)")
+
+
 async def sync_account(account_id: str):
     """Full sync for a single Xtream account."""
     job_id = f"sync_{account_id}_{now_ms()}"
@@ -456,9 +528,17 @@ async def sync_account(account_id: str):
 
             server_id = f"xtream_{account_id}"
             total_synced = 0
+
+            # --- Fetch and store categories from Xtream ---
+            await _refresh_categories(db, account, account_id)
+
             # Load category configuration
             filter_mode, allowed_vod, allowed_series = await _load_category_config(db, account_id)
-            logger.info(f"Category filter mode: {filter_mode} (VOD: {len(allowed_vod)} configured, Series: {len(allowed_series)} configured)")
+            vod_allowed_count = sum(1 for v in allowed_vod.values() if v)
+            series_allowed_count = sum(1 for v in allowed_series.values() if v)
+            logger.info(f"Category filter mode: {filter_mode} "
+                       f"(VOD: {vod_allowed_count}/{len(allowed_vod)} allowed, "
+                       f"Series: {series_allowed_count}/{len(allowed_series)} allowed)")
 
 
             # --- VOD Sync (incremental with detailed metadata) ---
@@ -513,7 +593,7 @@ async def sync_account(account_id: str):
                     try:
                         vod_info = None
                         try:
-                            vod_info = await xtream_service.get_vod_info(account, dto["stream_id"])
+                            vod_info = await xtream_service.get_vod_info(account, vod_id=dto["stream_id"])
                             await asyncio.sleep(0.05)
                         except Exception as e:
                             logger.warning(f"Failed to fetch vod_info for stream {dto.get('stream_id')}: {e}")
@@ -545,9 +625,10 @@ async def sync_account(account_id: str):
                 logger.info(f"VOD batch {batch_end}/{len(items_to_fetch)} synced "
                            f"({len(batch_rows)} items in {batch_fetch_time}ms)")
 
-            # Cleanup uses ALL keys (including unchanged) to avoid deleting existing items
-            if all_vod_keys:
-                await differential_cleanup(db, server_id, "all", all_vod_keys)
+            # Cleanup: only remove stale items when syncing ALL categories
+            # In whitelist/blacklist mode, we only synced a subset — don't delete the rest
+            if filter_mode == "all" and all_vod_keys:
+                await differential_cleanup(db, server_id, "all", all_vod_keys, media_type="movie")
             if vod_rows:
                 await enqueue_for_enrichment(db, vod_rows)
             await db.commit()
@@ -575,6 +656,17 @@ async def sync_account(account_id: str):
             changed_series = []  # (dto, index, dto_hash)
             unchanged_count = 0
 
+            # Debug: log first few series category_ids to verify matching
+            if series_list and filter_mode != "all":
+                sample_cat_ids = set()
+                for s in series_list[:50]:
+                    if isinstance(s, dict):
+                        sample_cat_ids.add(str(s.get("category_id", "")))
+                logger.debug(f"Series sample category_ids from API: {sorted(sample_cat_ids)}")
+                logger.debug(f"Allowed series category_ids: "
+                           f"{sorted(k for k, v in allowed_series.items() if v)}")
+
+            filtered_out_series = 0
             for i, dto in enumerate(series_list):
                 if not isinstance(dto, dict):
                     continue
@@ -582,6 +674,7 @@ async def sync_account(account_id: str):
                 # Check category filtering
                 category_id = str(dto.get("category_id", ""))
                 if not _should_sync_category(category_id, filter_mode, allowed_series):
+                    filtered_out_series += 1
                     continue  # Skip disallowed category
                 if not series_id:
                     continue
@@ -594,7 +687,8 @@ async def sync_account(account_id: str):
                     continue
                 changed_series.append((dto, i, dto_hash))
 
-            logger.info(f"Series: {len(changed_series)} new/changed, {unchanged_count} unchanged")
+            logger.info(f"Series: {len(changed_series)} new/changed, {unchanged_count} unchanged, "
+                       f"{filtered_out_series} filtered out by category")
 
             # Map and upsert only changed series
             series_rows = []
@@ -602,16 +696,15 @@ async def sync_account(account_id: str):
                 try:
                     row = map_series_to_media(dto, account_id, i)
                     row["dto_hash"] = dto_hash
+                    row["is_in_allowed_categories"] = True
                     series_rows.append(row)
                 except Exception as e:
                     logger.error(f"Failed to process series item {i}: {e}", exc_info=True)
-
-                    row["is_in_allowed_categories"] = True
             if series_rows:
                 await upsert_media_batch(db, series_rows)
                 await enqueue_for_enrichment(db, series_rows)
-            if all_series_keys:
-                await differential_cleanup(db, server_id, "all", all_series_keys)
+            if filter_mode == "all" and all_series_keys:
+                await differential_cleanup(db, server_id, "all", all_series_keys, media_type="show")
             await db.commit()
             total_synced += len(all_series_keys)
             logger.info(f"Series sync: {len(series_rows)} updated, {unchanged_count} unchanged")
@@ -628,7 +721,7 @@ async def sync_account(account_id: str):
                         if not isinstance(series_dto, dict):
                             return []
                         series_info = await xtream_service.get_series_info(
-                            account, series_dto["series_id"]
+                            account, series_id=series_dto["series_id"]
                         )
                         episodes_data = series_info.get("episodes") or {} if isinstance(series_info, dict) else {}
                         if not isinstance(episodes_data, dict):

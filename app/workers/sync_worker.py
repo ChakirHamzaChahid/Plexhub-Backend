@@ -43,8 +43,16 @@ def map_vod_to_media(dto: dict, account_id: str, index: int, vod_info: dict | No
     # Extract detailed info if available (defensive: handle list responses)
     if vod_info and not isinstance(vod_info, dict):
         logger.warning(f"Unexpected vod_info type for stream {stream_id}: {type(vod_info).__name__}")
+
+    # Extract info and movie_data, ensuring they are dicts
     info = vod_info.get("info", {}) if vod_info and isinstance(vod_info, dict) else {}
+    if not isinstance(info, dict):
+        # Some Xtream APIs return info as a list - skip if not a dict
+        info = {}
+
     movie_data = vod_info.get("movie_data", {}) if vod_info and isinstance(vod_info, dict) else {}
+    if not isinstance(movie_data, dict):
+        movie_data = {}
 
     # Debug logging (first 3 items only to avoid spam)
     if index < 3 and vod_info and isinstance(vod_info, dict):

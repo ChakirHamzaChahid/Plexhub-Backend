@@ -92,6 +92,8 @@ class TMDBService:
         if imdb_id and not imdb_id.startswith("tt"):
             data["imdb_id"] = f"tt{imdb_id}"
         return data
+
+    def _best_match(
         self,
         results: list[dict],
         title: str,

@@ -558,6 +558,10 @@ async def sync_account(account_id: str):
                 if not isinstance(dto, dict):
                     continue
                 series_id = dto.get("series_id")
+                # Check category filtering
+                category_id = str(dto.get("category_id", ""))
+                if not _should_sync_category(category_id, filter_mode, allowed_series):
+                    continue  # Skip disallowed category
                 if not series_id:
                     continue
                 rating_key = f"series_{series_id}"
@@ -581,6 +585,7 @@ async def sync_account(account_id: str):
                 except Exception as e:
                     logger.error(f"Failed to process series item {i}: {e}", exc_info=True)
 
+                    row["is_in_allowed_categories"] = True
             if series_rows:
                 await upsert_media_batch(db, series_rows)
                 await enqueue_for_enrichment(db, series_rows)
@@ -613,9 +618,11 @@ async def sync_account(account_id: str):
                             season_num = int(season_str)
                             for ep in episodes:
                                 if isinstance(ep, dict):
-                                    rows.append(map_episode_to_media(
+                                    ep_row = map_episode_to_media(
                                         ep, series_dto, account_id, season_num
-                                    ))
+                                    )
+                                    ep_row["is_in_allowed_categories"] = True
+                                    rows.append(ep_row)
                         return rows
                     except Exception as e:
                         sid = series_dto.get('series_id') if isinstance(series_dto, dict) else '?'

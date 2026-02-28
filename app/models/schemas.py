@@ -164,6 +164,48 @@ class SyncStatusResponse(BaseModel):
     progress: Optional[dict] = None
 
 
+# --- Category Schemas ---
+
+class CategoryResponse(BaseModel):
+    """Single category item in camelCase."""
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        from_attributes=True,
+    )
+
+    category_id: str
+    category_name: str
+    category_type: str  # "vod" or "series"
+    is_allowed: bool
+    last_fetched_at: int
+
+
+class CategoryUpdate(BaseModel):
+    """Category update item for bulk operations."""
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    category_id: str
+    category_type: str
+    is_allowed: bool
+
+
+class CategoryUpdateRequest(BaseModel):
+    """Request body for updating category configuration."""
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    filter_mode: str  # "all", "whitelist", "blacklist"
+    categories: list[dict]  # List of category dicts with categoryId, categoryType, isAllowed
+
+
+class CategoryListResponse(BaseModel):
+    """Response for listing categories."""
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    items: list[CategoryResponse]
+    filter_mode: str
+
+
 # --- Health Schemas ---
 
 class HealthResponse(BaseModel):

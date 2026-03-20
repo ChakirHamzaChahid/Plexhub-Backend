@@ -1,0 +1,23 @@
+services:
+  backend:
+    build: .
+    container_name: plexhub-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - TMDB_API_KEY=${TMDB_API_KEY}
+      - SYNC_INTERVAL_HOURS=6
+      - ENRICHMENT_DAILY_LIMIT=50000
+      - HEALTH_CHECK_BATCH_SIZE=1000
+      - PLEX_LIBRARY_DIR=${PLEX_LIBRARY_DIR:-}
+      - TZ=Europe/Paris
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ${PLEX_LIBRARY_DIR:-./media}:/app/media
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1.0'

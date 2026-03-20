@@ -16,6 +16,7 @@ class Settings:
     SYNC_INTERVAL_HOURS: int = int(os.getenv("SYNC_INTERVAL_HOURS", "6"))
     ENRICHMENT_DAILY_LIMIT: int = int(os.getenv("ENRICHMENT_DAILY_LIMIT", "50000"))
     HEALTH_CHECK_BATCH_SIZE: int = int(os.getenv("HEALTH_CHECK_BATCH_SIZE", "1000"))
+    PLEX_LIBRARY_DIR: str = os.getenv("PLEX_LIBRARY_DIR", "")
 
     def __init__(self):
         self.DATA_DIR.mkdir(parents=True, exist_ok=True)

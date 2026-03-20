@@ -9,12 +9,12 @@ services:
       - SYNC_INTERVAL_HOURS=6
       - ENRICHMENT_DAILY_LIMIT=50000
       - HEALTH_CHECK_BATCH_SIZE=1000
-      - PLEX_LIBRARY_DIR=${PLEX_LIBRARY_DIR:-}
+      - PLEX_LIBRARY_DIR=/app/media
       - TZ=Europe/Paris
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
-      - ${PLEX_LIBRARY_DIR:-./media}:/app/media
+      - /mnt/raid0-3to:/app/media
     restart: unless-stopped
     deploy:
       resources:

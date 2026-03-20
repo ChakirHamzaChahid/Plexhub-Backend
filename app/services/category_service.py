@@ -6,7 +6,7 @@ import time
 from typing import List, Optional
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.models.database import XtreamCategory, XtreamAccount
+from app.models.database import XtreamCategory, XtreamAccount, Media
 
 logger = logging.getLogger(__name__)
 
@@ -234,6 +234,142 @@ async def bulk_update_categories(
             f"(filter_mode={filter_mode})"
         )
 
+    # Recalculate media visibility based on new category config
+    await update_media_category_visibility(db, account_id)
+
     logger.info(
         f"Bulk updated {len(categories)} categories for account {account_id}"
+    )
+
+
+async def update_media_category_visibility(
+    db: AsyncSession,
+    account_id: str,
+) -> None:
+    """
+    Recalculate is_in_allowed_categories for ALL media of an account
+    based on the current category configuration.
+
+    The media.filter column stores the category_id from Xtream.
+    - mode 'all': everything visible
+    - mode 'whitelist': only categories with is_allowed=True are visible
+    - mode 'blacklist': everything except categories with is_allowed=False
+
+    Episodes inherit visibility from their parent series (grandparent_rating_key).
+    """
+    server_id = f"xtream_{account_id}"
+
+    # Load current config
+    result = await db.execute(
+        select(XtreamAccount.category_filter_mode).where(
+            XtreamAccount.id == account_id
+        )
+    )
+    filter_mode = result.scalar_one_or_none() or "all"
+
+    if filter_mode == "all":
+        # Everything visible
+        await db.execute(
+            update(Media)
+            .where(Media.server_id == server_id)
+            .values(is_in_allowed_categories=True)
+        )
+        await db.commit()
+        logger.info(f"Visibility update [{account_id}]: mode=all, all media set to visible")
+        return
+
+    # Load category config
+    result = await db.execute(
+        select(XtreamCategory).where(XtreamCategory.account_id == account_id)
+    )
+    categories = result.scalars().all()
+
+    allowed_vod_ids = set()
+    allowed_series_ids = set()
+    for cat in categories:
+        if cat.category_type == "vod" and cat.is_allowed:
+            allowed_vod_ids.add(cat.category_id)
+        elif cat.category_type == "series" and cat.is_allowed:
+            allowed_series_ids.add(cat.category_id)
+
+    # --- Movies: set all to False, then True for allowed category IDs ---
+    await db.execute(
+        update(Media)
+        .where(Media.server_id == server_id, Media.type == "movie")
+        .values(is_in_allowed_categories=False)
+    )
+    if allowed_vod_ids:
+        chunk_size = 500
+        vod_list = list(allowed_vod_ids)
+        for i in range(0, len(vod_list), chunk_size):
+            chunk = vod_list[i : i + chunk_size]
+            await db.execute(
+                update(Media)
+                .where(
+                    Media.server_id == server_id,
+                    Media.type == "movie",
+                    Media.filter.in_(chunk),
+                )
+                .values(is_in_allowed_categories=True)
+            )
+
+    # --- Shows: set all to False, then True for allowed category IDs ---
+    await db.execute(
+        update(Media)
+        .where(Media.server_id == server_id, Media.type == "show")
+        .values(is_in_allowed_categories=False)
+    )
+    if allowed_series_ids:
+        chunk_size = 500
+        series_list = list(allowed_series_ids)
+        for i in range(0, len(series_list), chunk_size):
+            chunk = series_list[i : i + chunk_size]
+            await db.execute(
+                update(Media)
+                .where(
+                    Media.server_id == server_id,
+                    Media.type == "show",
+                    Media.filter.in_(chunk),
+                )
+                .values(is_in_allowed_categories=True)
+            )
+
+    # --- Episodes: inherit visibility from their parent series ---
+    # First set all episodes to False
+    await db.execute(
+        update(Media)
+        .where(Media.server_id == server_id, Media.type == "episode")
+        .values(is_in_allowed_categories=False)
+    )
+    # Get visible series rating_keys
+    visible_series_result = await db.execute(
+        select(Media.rating_key).where(
+            Media.server_id == server_id,
+            Media.type == "show",
+            Media.is_in_allowed_categories == True,
+        )
+    )
+    visible_series_keys = [row[0] for row in visible_series_result]
+
+    if visible_series_keys:
+        chunk_size = 500
+        for i in range(0, len(visible_series_keys), chunk_size):
+            chunk = visible_series_keys[i : i + chunk_size]
+            await db.execute(
+                update(Media)
+                .where(
+                    Media.server_id == server_id,
+                    Media.type == "episode",
+                    Media.grandparent_rating_key.in_(chunk),
+                )
+                .values(is_in_allowed_categories=True)
+            )
+
+    await db.commit()
+
+    logger.info(
+        f"Visibility update [{account_id}]: mode={filter_mode}, "
+        f"VOD categories={len(allowed_vod_ids)}, "
+        f"Series categories={len(allowed_series_ids)}, "
+        f"visible series={len(visible_series_keys)}"
     )

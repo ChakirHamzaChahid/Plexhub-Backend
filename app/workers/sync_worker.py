@@ -194,6 +194,68 @@ def map_series_to_media(dto: dict, account_id: str, index: int) -> dict:
     }
 
 
+def _build_media_parts(rating_key: str, ext: str | None, info: dict) -> str:
+    """Build mediaParts JSON from Xtream episode/VOD info (video + audio streams)."""
+    video = info.get("video")
+    audio = info.get("audio")
+
+    if not video and not audio:
+        return "[]"
+
+    streams = []
+
+    if isinstance(video, dict):
+        streams.append({
+            "type": "VideoStream",
+            "id": str(video.get("index", 0)),
+            "index": video.get("index", 0),
+            "codec": video.get("codec_name"),
+            "width": video.get("width"),
+            "height": video.get("height"),
+            "bitrate": int(video["bit_rate"]) if video.get("bit_rate") else None,
+            "selected": True,
+            "hasHDR": False,
+        })
+
+    if isinstance(audio, dict):
+        tags = audio.get("tags") or {}
+        lang_code = tags.get("language") if isinstance(tags, dict) else None
+        channels = audio.get("channels")
+        channel_layout = audio.get("channel_layout")
+        streams.append({
+            "type": "AudioStream",
+            "id": str(audio.get("index", 1)),
+            "index": audio.get("index", 1),
+            "codec": audio.get("codec_name"),
+            "channels": channels,
+            "language": lang_code,
+            "languageCode": lang_code,
+            "title": tags.get("title") if isinstance(tags, dict) else None,
+            "displayTitle": f"{audio.get('codec_name', '').upper()} {channel_layout or ''}"
+                .strip() if audio.get("codec_name") else None,
+            "selected": True,
+        })
+
+    duration_ms = None
+    if info.get("duration_secs"):
+        try:
+            duration_ms = int(info["duration_secs"]) * 1000
+        except (ValueError, TypeError):
+            pass
+
+    part = {
+        "id": rating_key,
+        "key": f"/stream/{rating_key}",
+        "duration": duration_ms,
+        "file": None,
+        "size": None,
+        "container": ext,
+        "streams": streams,
+    }
+
+    return json.dumps([part])
+
+
 def map_episode_to_media(
     episode: dict, series_dto: dict, account_id: str, season_num: int,
 ) -> dict:
@@ -237,7 +299,7 @@ def map_episode_to_media(
         "updated_at": now_ms(),
         "unification_id": "",
         "history_group_key": f"{rating_key}{server_id}",
-        "media_parts": "[]",
+        "media_parts": _build_media_parts(rating_key, ext, info),
     }
 
 
@@ -283,6 +345,18 @@ async def upsert_media_batch(db, rows: list[dict]):
 
     logger.debug(f"Upserting {len(rows)} media items to database")
     for row in rows:
+        # Evict any existing row occupying the same pagination slot
+        # but with a different rating_key (content shifted position)
+        await db.execute(
+            delete(Media).where(
+                Media.server_id == row["server_id"],
+                Media.library_section_id == row["library_section_id"],
+                Media.filter == row["filter"],
+                Media.sort_order == row["sort_order"],
+                Media.page_offset == row["page_offset"],
+                Media.rating_key != row["rating_key"],
+            )
+        )
         stmt = sqlite_upsert(Media).values(**row)
         update_fields = {
             k: v for k, v in row.items()
@@ -761,6 +835,10 @@ async def sync_account(account_id: str):
 
             total_synced += episode_count
             logger.info(f"Synced {episode_count} episodes")
+
+            # Recalculate visibility for ALL media based on category config
+            from app.services.category_service import update_media_category_visibility
+            await update_media_category_visibility(db, account_id)
 
             # Update account last_synced_at
             await db.execute(

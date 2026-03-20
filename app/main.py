@@ -60,6 +60,64 @@ root_logger.addHandler(file_handler)
 logger.info("Logging configured: Console=INFO, File=DEBUG")
 
 
+async def _auto_provision_xtream_account():
+    """Create an Xtream account from env vars if it doesn't already exist."""
+    import hashlib
+    from sqlalchemy import select
+    from app.db.database import async_session_factory
+    from app.models.database import XtreamAccount
+    from app.services.xtream_service import xtream_service
+
+    account_id = hashlib.md5(
+        f"{settings.XTREAM_BASE_URL}{settings.XTREAM_USERNAME}".encode()
+    ).hexdigest()[:8]
+
+    async with async_session_factory() as db:
+        result = await db.execute(
+            select(XtreamAccount).where(XtreamAccount.id == account_id)
+        )
+        if result.scalars().first():
+            logger.info(f"Xtream account {account_id} already exists (from env)")
+            return
+
+        # Authenticate to get server info
+        class _Acc:
+            base_url = settings.XTREAM_BASE_URL
+            port = settings.XTREAM_PORT
+            username = settings.XTREAM_USERNAME
+            password = settings.XTREAM_PASSWORD
+
+        try:
+            auth_data = await xtream_service.authenticate(_Acc())
+            user_info = auth_data.get("user_info", {})
+            server_info = auth_data.get("server_info", {})
+        except Exception as e:
+            logger.error(f"Xtream auto-provision auth failed: {e}")
+            return
+
+        account = XtreamAccount(
+            id=account_id,
+            label="Auto (env)",
+            base_url=settings.XTREAM_BASE_URL,
+            port=settings.XTREAM_PORT,
+            username=settings.XTREAM_USERNAME,
+            password=settings.XTREAM_PASSWORD,
+            status=user_info.get("status", "Unknown"),
+            expiration_date=int(user_info["exp_date"]) * 1000
+            if user_info.get("exp_date") else None,
+            max_connections=int(user_info.get("max_connections", 1)),
+            allowed_formats=",".join(user_info.get("allowed_output_formats", [])),
+            server_url=server_info.get("url"),
+            https_port=int(server_info["https_port"])
+            if server_info.get("https_port") else None,
+            is_active=True,
+            created_at=int(time.time() * 1000),
+        )
+        db.add(account)
+        await db.commit()
+        logger.info(f"Xtream account auto-provisioned from env: {account_id}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Master Worker election via lock file."""
@@ -87,6 +145,10 @@ async def lifespan(app: FastAPI):
                 is_master = True
             else:
                 is_master = False
+
+        # Auto-provision Xtream account from env vars
+        if settings.has_xtream_env:
+            await _auto_provision_xtream_account()
 
         if is_master:
             logger.info(f"[Worker {os.getpid()}] Master — Starting scheduler")

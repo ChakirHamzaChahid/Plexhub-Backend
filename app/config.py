@@ -18,6 +18,16 @@ class Settings:
     HEALTH_CHECK_BATCH_SIZE: int = int(os.getenv("HEALTH_CHECK_BATCH_SIZE", "1000"))
     PLEX_LIBRARY_DIR: str = os.getenv("PLEX_LIBRARY_DIR", "")
 
+    # Xtream account auto-provisioning from env
+    XTREAM_BASE_URL: str = os.getenv("XTREAM_BASE_URL", "")
+    XTREAM_PORT: int = int(os.getenv("XTREAM_PORT", "80"))
+    XTREAM_USERNAME: str = os.getenv("XTREAM_USERNAME", "")
+    XTREAM_PASSWORD: str = os.getenv("XTREAM_PASSWORD", "")
+
+    @property
+    def has_xtream_env(self) -> bool:
+        return bool(self.XTREAM_BASE_URL and self.XTREAM_USERNAME and self.XTREAM_PASSWORD)
+
     def __init__(self):
         self.DATA_DIR.mkdir(parents=True, exist_ok=True)
         self.LOG_DIR.mkdir(parents=True, exist_ok=True)

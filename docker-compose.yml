@@ -3,8 +3,9 @@ services:
     build: .
     container_name: plexhub-backend
     ports:
-      - "8000:8000"
+      - "${APP_PORT:-8000}:${APP_PORT:-8000}"
     environment:
+      - APP_PORT=${APP_PORT:-8000}
       - TMDB_API_KEY=${TMDB_API_KEY}
       - XTREAM_BASE_URL=${XTREAM_BASE_URL}
       - XTREAM_PORT=${XTREAM_PORT:-80}

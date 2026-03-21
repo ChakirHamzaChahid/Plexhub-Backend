@@ -34,14 +34,34 @@ class LocalStorage(LibraryStorage):
 
     def __init__(self, base_dir: Path):
         self.base_dir = base_dir
+        self._redirect_client: httpx.Client | None = None
 
     def _resolve(self, rel_path: str) -> Path:
         return self.base_dir / rel_path
 
+    def _get_redirect_client(self) -> httpx.Client:
+        if self._redirect_client is None or self._redirect_client.is_closed:
+            self._redirect_client = httpx.Client(timeout=10.0, follow_redirects=False)
+        return self._redirect_client
+
+    def _resolve_redirect(self, url: str) -> str:
+        """Follow a single 3xx redirect and return the final URL."""
+        try:
+            client = self._get_redirect_client()
+            resp = client.head(url)
+            if resp.status_code in (301, 302, 307, 308):
+                location = resp.headers.get("location", url)
+                logger.debug(f"Resolved redirect: {url} -> {location}")
+                return location
+        except Exception as e:
+            logger.debug(f"Failed to resolve redirect for {url}: {e}")
+        return url
+
     def write_strm(self, rel_path: str, url: str) -> None:
         full = self._resolve(rel_path)
         full.parent.mkdir(parents=True, exist_ok=True)
-        full.write_text(url.strip() + "\n", encoding="utf-8")
+        resolved = self._resolve_redirect(url)
+        full.write_text(resolved.strip() + "\n", encoding="utf-8")
 
     def write_file(self, rel_path: str, content: str) -> None:
         full = self._resolve(rel_path)

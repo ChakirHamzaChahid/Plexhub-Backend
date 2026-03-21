@@ -60,6 +60,48 @@ root_logger.addHandler(file_handler)
 logger.info("Logging configured: Console=INFO, File=DEBUG")
 
 
+async def _auto_generate_plex_library():
+    """Auto-generate Plex library for all active accounts if PLEX_LIBRARY_DIR is set."""
+    if not settings.PLEX_LIBRARY_DIR:
+        logger.info("PLEX_LIBRARY_DIR not set — skipping Plex library generation")
+        return
+
+    from pathlib import Path
+    from sqlalchemy import select
+    from app.db.database import async_session_factory
+    from app.models.database import XtreamAccount
+    from app.plex_generator.generator import PlexLibraryGenerator
+    from app.plex_generator.source import DatabaseSource
+    from app.plex_generator.storage import LocalStorage
+
+    output = Path(settings.PLEX_LIBRARY_DIR)
+    storage = LocalStorage(output)
+
+    async with async_session_factory() as db:
+        result = await db.execute(
+            select(XtreamAccount.id).where(XtreamAccount.is_active == True)
+        )
+        account_ids = [row[0] for row in result]
+
+    if not account_ids:
+        logger.warning("No active accounts — skipping Plex library generation")
+        return
+
+    logger.info(f"Auto-generating Plex library for {len(account_ids)} account(s)")
+    for aid in account_ids:
+        try:
+            source = DatabaseSource(aid)
+            gen = PlexLibraryGenerator(source, storage, output)
+            report = await gen.generate()
+            logger.info(
+                f"Plex generation for account {aid}: "
+                f"{report.created} created, {report.updated} updated, "
+                f"{report.deleted} deleted, {report.unchanged} unchanged"
+            )
+        except Exception as e:
+            logger.error(f"Plex generation failed for account {aid}: {e}", exc_info=True)
+
+
 async def _auto_provision_xtream_account():
     """Create an Xtream account from env vars if it doesn't already exist."""
     import hashlib
@@ -156,18 +198,20 @@ async def lifespan(app: FastAPI):
             from apscheduler.schedulers.asyncio import AsyncIOScheduler
             from app.workers import sync_worker, enrichment_worker, health_check_worker
 
+            async def scheduled_sync_enrich_generate():
+                """Periodic pipeline: sync -> enrichment -> Plex generation."""
+                await sync_worker.run_all_accounts()
+                logger.info("Scheduled sync done — starting enrichment")
+                await enrichment_worker.run()
+                logger.info("Scheduled enrichment done — starting Plex generation")
+                await _auto_generate_plex_library()
+
             scheduler = AsyncIOScheduler()
             scheduler.add_job(
-                sync_worker.run_all_accounts,
+                scheduled_sync_enrich_generate,
                 "interval",
                 hours=settings.SYNC_INTERVAL_HOURS,
-                id="xtream_sync",
-            )
-            scheduler.add_job(
-                enrichment_worker.run,
-                "interval",
-                hours=settings.SYNC_INTERVAL_HOURS,
-                id="tmdb_enrichment",
+                id="sync_enrich_generate",
             )
             scheduler.add_job(
                 health_check_worker.run,
@@ -177,11 +221,13 @@ async def lifespan(app: FastAPI):
             )
             scheduler.start()
 
-            # Non-blocking initial sync, then enrichment
+            # Non-blocking initial sync, then enrichment, then Plex generation
             async def initial_sync_then_enrich():
                 await sync_worker.run_all_accounts()
                 logger.info("Initial sync done — starting enrichment")
                 await enrichment_worker.run()
+                logger.info("Enrichment done — starting Plex library generation")
+                await _auto_generate_plex_library()
 
             asyncio.create_task(initial_sync_then_enrich())
         else:

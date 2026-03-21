@@ -21,6 +21,7 @@ async def run_migrations(engine: AsyncEngine) -> None:
     await _migration_002_add_category_filter_mode(engine)
     await _migration_003_add_media_category_visibility(engine)
     await _migration_004_add_enrichment_existing_ids(engine)
+    await _migration_005_add_media_cast(engine)
 
     logger.info("All migrations completed successfully")
 
@@ -117,3 +118,18 @@ async def _migration_004_add_enrichment_existing_ids(engine: AsyncEngine) -> Non
             logger.info("Migration 004: existing_imdb_id column added")
         except Exception as e:
             logger.warning(f"Migration 004: existing_imdb_id may already exist: {e}")
+
+
+async def _migration_005_add_media_cast(engine: AsyncEngine) -> None:
+    """Add cast column to media table."""
+    logger.info("Migration 005: Adding cast to media")
+
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(text("""
+                ALTER TABLE media
+                ADD COLUMN "cast" TEXT
+            """))
+            logger.info("Migration 005: cast column added")
+        except Exception as e:
+            logger.warning(f"Migration 005: Column may already exist: {e}")

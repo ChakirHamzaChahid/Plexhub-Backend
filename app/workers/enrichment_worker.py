@@ -107,7 +107,7 @@ async def _apply_enrichment_results(db, results):
             imdb_id = enrichment_data.imdb_id
             new_unif = f"imdb://{imdb_id}" if imdb_id else f"tmdb://{tmdb_id}"
 
-            # Build update dict: always set IDs + unification
+            # Build update dict: always overwrite all fields with TMDB data
             update_values = {
                 "tmdb_id": str(tmdb_id),
                 "imdb_id": imdb_id,
@@ -116,8 +116,21 @@ async def _apply_enrichment_results(db, results):
                 "tmdb_match_confidence": confidence,
             }
 
-            # Rich metadata: only fill in blanks (don't overwrite Xtream data)
-            # We'll use a conditional update in a moment
+            if enrichment_data.overview:
+                update_values["summary"] = enrichment_data.overview
+            if enrichment_data.genres:
+                update_values["genres"] = enrichment_data.genres
+            if enrichment_data.poster_url:
+                update_values["resolved_thumb_url"] = enrichment_data.poster_url
+            if enrichment_data.backdrop_url:
+                update_values["resolved_art_url"] = enrichment_data.backdrop_url
+            if enrichment_data.vote_average:
+                update_values["scraped_rating"] = enrichment_data.vote_average
+                update_values["display_rating"] = enrichment_data.vote_average
+            if enrichment_data.year:
+                update_values["year"] = enrichment_data.year
+            if enrichment_data.cast:
+                update_values["cast"] = enrichment_data.cast
 
             await db.execute(
                 update(Media)
@@ -127,48 +140,6 @@ async def _apply_enrichment_results(db, results):
                 )
                 .values(**update_values)
             )
-
-            # Conditional updates: only set fields that are currently empty
-            conditional_fields = {}
-            if enrichment_data.overview:
-                conditional_fields["summary"] = enrichment_data.overview
-            if enrichment_data.genres:
-                conditional_fields["genres"] = enrichment_data.genres
-            if enrichment_data.poster_url:
-                conditional_fields["resolved_thumb_url"] = enrichment_data.poster_url
-            if enrichment_data.backdrop_url:
-                conditional_fields["resolved_art_url"] = enrichment_data.backdrop_url
-            if enrichment_data.vote_average:
-                conditional_fields["scraped_rating"] = enrichment_data.vote_average
-            if enrichment_data.year:
-                conditional_fields["year"] = enrichment_data.year
-
-            # Update summary/genres only if currently null
-            if conditional_fields:
-                for field, value in conditional_fields.items():
-                    col = getattr(Media, field)
-                    # Only update if current value is NULL or empty
-                    await db.execute(
-                        update(Media)
-                        .where(
-                            Media.rating_key == item.rating_key,
-                            Media.server_id == item.server_id,
-                            (col.is_(None)) | (col == ""),
-                        )
-                        .values(**{field: value})
-                    )
-
-            # Always update display_rating if currently 0 and TMDB has a rating
-            if enrichment_data.vote_average:
-                await db.execute(
-                    update(Media)
-                    .where(
-                        Media.rating_key == item.rating_key,
-                        Media.server_id == item.server_id,
-                        Media.display_rating == 0.0,
-                    )
-                    .values(display_rating=enrichment_data.vote_average)
-                )
 
             item.status = "done"
         else:

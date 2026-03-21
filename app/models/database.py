@@ -73,6 +73,7 @@ class Media(Base):
     resolved_art_url = Column(Text)
     resolved_base_url = Column(Text)
     alternative_thumb_urls = Column(Text)  # pipe-separated
+    cast = Column(Text)  # comma-separated actor names from TMDB
 
     # Backend-specific
     stream_error_count = Column(Integer, nullable=False, default=0)

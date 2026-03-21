@@ -10,7 +10,7 @@ from app.utils.string_normalizer import normalize_for_sorting
 
 logger = logging.getLogger("plexhub.tmdb")
 
-POSTER_BASE = "https://image.tmdb.org/t/p/w500"
+POSTER_BASE = "https://image.tmdb.org/t/p/w342"
 BACKDROP_BASE = "https://image.tmdb.org/t/p/w1280"
 
 
@@ -24,7 +24,7 @@ class TMDBMatch:
 
 @dataclass
 class TMDBEnrichmentData:
-    """Rich metadata from TMDB movie/{id} or tv/{id} with append_to_response=external_ids."""
+    """Rich metadata from TMDB movie/{id} or tv/{id} with append_to_response=credits,external_ids."""
     tmdb_id: int
     imdb_id: str | None
     overview: str | None
@@ -33,6 +33,7 @@ class TMDBEnrichmentData:
     vote_average: float | None
     genres: str | None  # comma-separated
     year: int | None
+    cast: str | None  # comma-separated actor names
 
 
 class TMDBService:
@@ -63,7 +64,7 @@ class TMDBService:
         if not self.is_configured:
             return None
         client = await self._get_client()
-        params: dict = {"query": title, "language": "en-US"}
+        params: dict = {"query": title, "language": "fr-FR"}
         if year:
             params["year"] = year
         resp = await client.get(f"{self.BASE_URL}/search/movie", params=params)
@@ -77,7 +78,7 @@ class TMDBService:
         if not self.is_configured:
             return None
         client = await self._get_client()
-        params: dict = {"query": title, "language": "en-US"}
+        params: dict = {"query": title, "language": "fr-FR"}
         if year:
             params["first_air_date_year"] = year
         resp = await client.get(f"{self.BASE_URL}/search/tv", params=params)
@@ -90,7 +91,7 @@ class TMDBService:
         client = await self._get_client()
         resp = await client.get(
             f"{self.BASE_URL}/movie/{tmdb_id}",
-            params={"append_to_response": "external_ids", "language": "en-US"},
+            params={"append_to_response": "credits,external_ids", "language": "fr-FR"},
         )
         resp.raise_for_status()
         data = resp.json()
@@ -101,7 +102,7 @@ class TMDBService:
         client = await self._get_client()
         resp = await client.get(
             f"{self.BASE_URL}/tv/{tmdb_id}",
-            params={"append_to_response": "external_ids", "language": "en-US"},
+            params={"append_to_response": "credits,external_ids", "language": "fr-FR"},
         )
         resp.raise_for_status()
         data = resp.json()
@@ -122,6 +123,13 @@ class TMDBService:
         release_date = data.get(date_key, "")
         year = int(release_date[:4]) if release_date and len(release_date) >= 4 else None
 
+        # Extract cast (top 20 actors)
+        credits = data.get("credits", {})
+        cast_list = credits.get("cast", [])
+        cast = ", ".join(
+            a["name"] for a in cast_list[:20] if a.get("name")
+        ) or None
+
         return TMDBEnrichmentData(
             tmdb_id=tmdb_id,
             imdb_id=imdb_id,
@@ -131,6 +139,7 @@ class TMDBService:
             vote_average=data.get("vote_average"),
             genres=genres,
             year=year,
+            cast=cast,
         )
 
     def _best_match(

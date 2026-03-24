@@ -53,7 +53,6 @@ async def generate_plex_library(req: GenerateRequest):
     from app.plex_generator.source import DatabaseSource
     from app.plex_generator.storage import LocalStorage, DryRunStorage
 
-    storage = DryRunStorage() if req.dry_run else LocalStorage(output)
     reports = []
 
     if req.all_accounts:
@@ -71,12 +70,16 @@ async def generate_plex_library(req: GenerateRequest):
             raise HTTPException(status_code=404, detail="No active accounts found")
 
         for aid in account_ids:
+            account_output = output / aid
+            storage = DryRunStorage() if req.dry_run else LocalStorage(account_output)
             source = DatabaseSource(aid)
-            gen = PlexLibraryGenerator(source, storage, output, req.strm_only)
+            gen = PlexLibraryGenerator(source, storage, account_output, req.strm_only)
             reports.append(await gen.generate())
     else:
+        account_output = output / req.account_id
+        storage = DryRunStorage() if req.dry_run else LocalStorage(account_output)
         source = DatabaseSource(req.account_id)
-        gen = PlexLibraryGenerator(source, storage, output, req.strm_only)
+        gen = PlexLibraryGenerator(source, storage, account_output, req.strm_only)
         reports.append(await gen.generate())
 
     # Aggregate reports

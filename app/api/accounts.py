@@ -1,13 +1,12 @@
-import asyncio
 import hashlib
 import logging
-import time
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_db
+from app.utils.server_id import build_server_id
 from app.models.database import XtreamAccount
 from app.models.schemas import (
     AccountCreate,
@@ -16,6 +15,8 @@ from app.models.schemas import (
     AccountTestResponse,
 )
 from app.services.xtream_service import xtream_service
+from app.utils.tasks import create_background_task
+from app.utils.time import now_ms
 
 logger = logging.getLogger("plexhub.api.accounts")
 router = APIRouter(prefix="/accounts", tags=["accounts"])
@@ -24,10 +25,6 @@ router = APIRouter(prefix="/accounts", tags=["accounts"])
 def _generate_account_id(base_url: str, username: str) -> str:
     raw = f"{base_url}{username}"
     return hashlib.md5(raw.encode()).hexdigest()[:8]
-
-
-def now_ms() -> int:
-    return int(time.time() * 1000)
 
 
 @router.get("", response_model=list[AccountResponse])
@@ -88,11 +85,11 @@ async def create_account(
     )
 
     db.add(account)
-    await db.flush()
+    await db.commit()
 
-    # Trigger initial sync in background
+    # Trigger initial sync in background (after commit so the task can find the account)
     from app.workers.sync_worker import sync_account
-    asyncio.create_task(sync_account(account_id))
+    create_background_task(sync_account(account_id), name=f"sync_{account_id}")
 
     return account
 
@@ -134,13 +131,24 @@ async def delete_account(
     if not result.scalars().first():
         raise HTTPException(404, "Account not found")
 
-    # Delete account and its media
-    from app.models.database import Media, EnrichmentQueue
+    # Delete account and all related data
+    from app.models.database import (
+        Media, EnrichmentQueue, XtreamCategory, LiveChannel, EpgEntry,
+    )
 
-    server_id = f"xtream_{account_id}"
+    server_id = build_server_id(account_id)
     await db.execute(delete(Media).where(Media.server_id == server_id))
     await db.execute(
         delete(EnrichmentQueue).where(EnrichmentQueue.server_id == server_id)
+    )
+    await db.execute(
+        delete(XtreamCategory).where(XtreamCategory.account_id == account_id)
+    )
+    await db.execute(
+        delete(LiveChannel).where(LiveChannel.server_id == server_id)
+    )
+    await db.execute(
+        delete(EpgEntry).where(EpgEntry.server_id == server_id)
     )
     await db.execute(
         delete(XtreamAccount).where(XtreamAccount.id == account_id)

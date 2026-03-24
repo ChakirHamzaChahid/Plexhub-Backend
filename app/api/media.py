@@ -15,11 +15,15 @@ async def list_movies(
     offset: int = Query(0, ge=0),
     sort: str = Query("added_desc"),
     server_id: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    genre: Optional[str] = Query(None),
+    year: Optional[int] = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
     items, total = await media_service.get_media_list(
         db, media_type="movie", limit=limit, offset=offset,
         sort=sort, server_id=server_id,
+        search=search, genre=genre, year=year,
     )
     return MediaListResponse(
         items=[MediaResponse.model_validate(i) for i in items],
@@ -34,11 +38,15 @@ async def list_shows(
     offset: int = Query(0, ge=0),
     sort: str = Query("added_desc"),
     server_id: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    genre: Optional[str] = Query(None),
+    year: Optional[int] = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
     items, total = await media_service.get_media_list(
         db, media_type="show", limit=limit, offset=offset,
         sort=sort, server_id=server_id,
+        search=search, genre=genre, year=year,
     )
     return MediaListResponse(
         items=[MediaResponse.model_validate(i) for i in items],

@@ -136,7 +136,9 @@ async def refresh_categories(
                 cat.get("category_name", "Unknown"),
                 is_allowed=True,
             )
-        
+
+        await db.commit()
+
         total_count = len(vod_categories) + len(series_categories)
         logger.info(f"Refreshed {total_count} categories for account {account_id}")
         

@@ -10,11 +10,12 @@ from app.plex_generator.naming import (
     movie_poster_path,
     movie_fanart_path,
     series_episode_path,
+    series_episode_nfo_path,
     series_nfo_path,
     series_poster_path,
     series_fanart_path,
 )
-from app.plex_generator.nfo_builder import build_movie_nfo, build_tvshow_nfo
+from app.plex_generator.nfo_builder import build_movie_nfo, build_tvshow_nfo, build_episode_nfo
 from app.plex_generator.source import MediaSource
 from app.plex_generator.storage import LibraryStorage
 
@@ -46,8 +47,11 @@ class PlexLibraryGenerator:
         self.mapping = MappingStore(output_dir)
 
     async def generate(self) -> SyncReport:
+        from concurrent.futures import Future
         start = time.monotonic()
         report = SyncReport()
+        # Collect image download futures for non-blocking I/O
+        self._image_futures: list[Future] = []
 
         self.mapping.load()
         seen_source_ids: set[str] = set()
@@ -72,12 +76,32 @@ class PlexLibraryGenerator:
                 logger.error(msg, exc_info=True)
                 report.errors.append(msg)
 
-        # --- Delete stale entries ---
+        # --- Wait for all image downloads to complete ---
+        if self._image_futures:
+            logger.info(f"Waiting for {len(self._image_futures)} image downloads...")
+            for future in self._image_futures:
+                try:
+                    future.result(timeout=30.0)
+                except Exception:
+                    report.image_failures += 1
+            self._image_futures.clear()
+
+        # --- Delete stale entries (including associated NFO/images) ---
         stale_ids = self.mapping.all_source_ids() - seen_source_ids
         for source_id in stale_ids:
             entry = self.mapping.get(source_id)
             if entry:
                 self.storage.delete_file(entry.path)
+                # Also delete associated metadata files in same directory
+                from pathlib import PurePosixPath
+                p = PurePosixPath(entry.path)
+                parent = str(p.parent)
+                stem = p.stem
+                # Delete NFO with same stem as the media file
+                self.storage.delete_file(str(p.with_suffix(".nfo")))
+                # Delete well-known metadata files in the same directory
+                for name in ("poster.jpg", "fanart.jpg", "movie.nfo", "tvshow.nfo"):
+                    self.storage.delete_file(f"{parent}/{name}")
                 self.storage.cleanup_empty_dirs(entry.path)
                 self.mapping.remove(source_id)
                 report.deleted += 1
@@ -90,6 +114,7 @@ class PlexLibraryGenerator:
             f"Plex library sync complete: "
             f"{report.created} created, {report.updated} updated, "
             f"{report.deleted} deleted, {report.unchanged} unchanged, "
+            f"{report.image_failures} image failures, "
             f"{len(report.errors)} errors "
             f"({report.duration_seconds}s)"
         )
@@ -106,7 +131,7 @@ class PlexLibraryGenerator:
             # CREATE
             self.storage.write_strm(expected_path, movie.stream_url)
             if not self.strm_only:
-                self._write_movie_metadata(movie)
+                self._write_movie_metadata(movie, report)
             self.mapping.set(movie.source_id, expected_path, movie.stream_url)
             report.created += 1
             logger.debug(f"Created: {expected_path}")
@@ -117,7 +142,7 @@ class PlexLibraryGenerator:
             self.storage.cleanup_empty_dirs(existing.path)
             self.storage.write_strm(expected_path, movie.stream_url)
             if not self.strm_only:
-                self._write_movie_metadata(movie)
+                self._write_movie_metadata(movie, report)
             self.mapping.set(movie.source_id, expected_path, movie.stream_url)
             report.updated += 1
             logger.debug(f"Moved: {existing.path} -> {expected_path}")
@@ -132,25 +157,35 @@ class PlexLibraryGenerator:
         else:
             report.unchanged += 1
 
-    def _write_movie_metadata(self, movie: PlexMovie) -> None:
+    def _write_movie_metadata(self, movie: PlexMovie, report: SyncReport) -> None:
         nfo = build_movie_nfo(movie)
         self.storage.write_file(movie_nfo_path(movie.title, movie.year), nfo)
 
         if movie.poster_url:
-            self.storage.download_image(
-                movie_poster_path(movie.title, movie.year), movie.poster_url,
-            )
+            if hasattr(self.storage, 'submit_image_download'):
+                f = self.storage.submit_image_download(
+                    movie_poster_path(movie.title, movie.year), movie.poster_url)
+                if f is not None:
+                    self._image_futures.append(f)
+            elif not self.storage.download_image(
+                movie_poster_path(movie.title, movie.year), movie.poster_url):
+                report.image_failures += 1
         if movie.fanart_url:
-            self.storage.download_image(
-                movie_fanart_path(movie.title, movie.year), movie.fanart_url,
-            )
+            if hasattr(self.storage, 'submit_image_download'):
+                f = self.storage.submit_image_download(
+                    movie_fanart_path(movie.title, movie.year), movie.fanart_url)
+                if f is not None:
+                    self._image_futures.append(f)
+            elif not self.storage.download_image(
+                movie_fanart_path(movie.title, movie.year), movie.fanart_url):
+                report.image_failures += 1
 
     def _sync_series(
         self, series: PlexSeries, report: SyncReport, seen: set[str],
     ) -> None:
         # Write series-level metadata (NFO, poster, fanart) once
         if not self.strm_only:
-            self._write_series_metadata(series)
+            self._write_series_metadata(series, report)
 
         # Sync each episode
         for ep in series.episodes:
@@ -175,6 +210,8 @@ class PlexLibraryGenerator:
 
         if existing is None:
             self.storage.write_strm(expected_path, ep.stream_url)
+            if not self.strm_only:
+                self._write_episode_metadata(ep)
             self.mapping.set(ep.source_id, expected_path, ep.stream_url)
             report.created += 1
             logger.debug(f"Created: {expected_path}")
@@ -183,6 +220,8 @@ class PlexLibraryGenerator:
             self.storage.delete_file(existing.path)
             self.storage.cleanup_empty_dirs(existing.path)
             self.storage.write_strm(expected_path, ep.stream_url)
+            if not self.strm_only:
+                self._write_episode_metadata(ep)
             self.mapping.set(ep.source_id, expected_path, ep.stream_url)
             report.updated += 1
             logger.debug(f"Moved: {existing.path} -> {expected_path}")
@@ -196,15 +235,32 @@ class PlexLibraryGenerator:
         else:
             report.unchanged += 1
 
-    def _write_series_metadata(self, series: PlexSeries) -> None:
+    def _write_episode_metadata(self, ep) -> None:
+        nfo = build_episode_nfo(ep)
+        self.storage.write_file(
+            series_episode_nfo_path(ep.series_title, ep.season_num, ep.episode_num),
+            nfo,
+        )
+
+    def _write_series_metadata(self, series: PlexSeries, report: SyncReport) -> None:
         nfo = build_tvshow_nfo(series)
         self.storage.write_file(series_nfo_path(series.title), nfo)
 
         if series.poster_url:
-            self.storage.download_image(
-                series_poster_path(series.title), series.poster_url,
-            )
+            if hasattr(self.storage, 'submit_image_download'):
+                f = self.storage.submit_image_download(
+                    series_poster_path(series.title), series.poster_url)
+                if f is not None:
+                    self._image_futures.append(f)
+            elif not self.storage.download_image(
+                series_poster_path(series.title), series.poster_url):
+                report.image_failures += 1
         if series.fanart_url:
-            self.storage.download_image(
-                series_fanart_path(series.title), series.fanart_url,
-            )
+            if hasattr(self.storage, 'submit_image_download'):
+                f = self.storage.submit_image_download(
+                    series_fanart_path(series.title), series.fanart_url)
+                if f is not None:
+                    self._image_futures.append(f)
+            elif not self.storage.download_image(
+                series_fanart_path(series.title), series.fanart_url):
+                report.image_failures += 1

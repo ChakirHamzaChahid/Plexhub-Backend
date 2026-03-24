@@ -7,6 +7,7 @@ from app.db.database import async_session_factory
 from app.models.database import Media, XtreamAccount
 from app.plex_generator.models import PlexMovie, PlexEpisode, PlexSeries
 from app.services.stream_service import build_stream_url
+from app.utils.server_id import build_server_id
 
 logger = logging.getLogger("plexhub.plex_generator.source")
 
@@ -26,7 +27,7 @@ class DatabaseSource(MediaSource):
 
     def __init__(self, account_id: str):
         self.account_id = account_id
-        self.server_id = f"xtream_{account_id}"
+        self.server_id = build_server_id(account_id)
 
     async def _load_account(self, db) -> XtreamAccount | None:
         result = await db.execute(
@@ -46,12 +47,11 @@ class DatabaseSource(MediaSource):
                     Media.server_id == self.server_id,
                     Media.type == "movie",
                     Media.is_in_allowed_categories == True,
-                )
+                ).execution_options(yield_per=1000)
             )
-            rows = result.scalars().all()
 
             movies = []
-            for row in rows:
+            for row in result.scalars():
                 url = build_stream_url(account, row.rating_key)
                 if not url:
                     continue
@@ -67,6 +67,9 @@ class DatabaseSource(MediaSource):
                     imdb_id=row.imdb_id,
                     tmdb_id=int(row.tmdb_id) if row.tmdb_id and str(row.tmdb_id).isdigit() else None,
                     content_rating=row.content_rating,
+                    rating=row.display_rating if row.display_rating else row.scraped_rating,
+                    duration_ms=row.duration,
+                    cast=row.cast,
                 ))
 
             logger.info(f"Loaded {len(movies)} movies from database")
@@ -85,22 +88,19 @@ class DatabaseSource(MediaSource):
                     Media.server_id == self.server_id,
                     Media.type == "show",
                     Media.is_in_allowed_categories == True,
-                )
+                ).execution_options(yield_per=1000)
             )
-            shows = show_result.scalars().all()
+            shows = list(show_result.scalars())
 
-            # Load all episodes for this server
+            # Load all episodes and group by series in a single streaming pass
             ep_result = await db.execute(
                 select(Media).where(
                     Media.server_id == self.server_id,
                     Media.type == "episode",
-                )
+                ).execution_options(yield_per=1000)
             )
-            all_episodes = ep_result.scalars().all()
-
-            # Group episodes by grandparent_rating_key (series)
             episodes_by_series: dict[str, list[Media]] = {}
-            for ep in all_episodes:
+            for ep in ep_result.scalars():
                 key = ep.grandparent_rating_key or ""
                 episodes_by_series.setdefault(key, []).append(ep)
 
@@ -122,6 +122,8 @@ class DatabaseSource(MediaSource):
                         title=ep.title,
                         stream_url=url,
                         summary=ep.summary,
+                        duration_ms=ep.duration,
+                        thumb_url=ep.resolved_thumb_url or ep.thumb_url,
                     ))
 
                 if not plex_episodes:
@@ -137,6 +139,9 @@ class DatabaseSource(MediaSource):
                     summary=show.summary,
                     imdb_id=show.imdb_id,
                     tmdb_id=int(show.tmdb_id) if show.tmdb_id and str(show.tmdb_id).isdigit() else None,
+                    content_rating=show.content_rating,
+                    rating=show.display_rating if show.display_rating else show.scraped_rating,
+                    cast=show.cast,
                     episodes=plex_episodes,
                 ))
 

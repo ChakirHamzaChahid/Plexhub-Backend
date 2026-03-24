@@ -1,10 +1,45 @@
 import logging
+import threading
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import httpx
 
 logger = logging.getLogger("plexhub.plex_generator.storage")
+
+# Shared thread pool for image downloads (avoids creating a pool per image)
+_image_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="img-dl")
+# Thread-local httpx clients (httpx.Client is NOT thread-safe)
+_thread_local = threading.local()
+# Track all created clients so we can close them on shutdown
+_all_clients: list[httpx.Client] = []
+_all_clients_lock = threading.Lock()
+
+
+def _get_image_client() -> httpx.Client:
+    """Return a per-thread httpx.Client (thread-safe by isolation)."""
+    client = getattr(_thread_local, "http_client", None)
+    if client is None or client.is_closed:
+        client = httpx.Client(
+            timeout=15.0,
+            follow_redirects=True,
+        )
+        _thread_local.http_client = client
+        with _all_clients_lock:
+            _all_clients.append(client)
+    return client
+
+
+def shutdown_image_pool() -> None:
+    """Shutdown the shared image thread pool and close httpx clients. Call during app shutdown."""
+    _image_pool.shutdown(wait=True, cancel_futures=True)
+    # Close all thread-local httpx clients
+    with _all_clients_lock:
+        for client in _all_clients:
+            if not client.is_closed:
+                client.close()
+        _all_clients.clear()
 
 
 class LibraryStorage(ABC):
@@ -45,21 +80,37 @@ class LocalStorage(LibraryStorage):
 
     def write_file(self, rel_path: str, content: str) -> None:
         full = self._resolve(rel_path)
+        if full.exists():
+            return  # Preserve existing file (e.g. enriched by Tiny Media Manager)
         full.parent.mkdir(parents=True, exist_ok=True)
         full.write_text(content, encoding="utf-8")
 
     def download_image(self, rel_path: str, image_url: str) -> bool:
         full = self._resolve(rel_path)
+        if full.exists():
+            return True  # Preserve existing image (e.g. enriched by Tiny Media Manager)
         full.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with httpx.Client(timeout=15.0, follow_redirects=True) as client:
-                resp = client.get(image_url)
-                resp.raise_for_status()
-                full.write_bytes(resp.content)
+            self._download_sync(full, image_url)
             return True
         except Exception as e:
-            logger.debug(f"Failed to download image {image_url}: {e}")
+            logger.warning(f"Failed to download image {rel_path} from {image_url}: {e}")
             return False
+
+    @staticmethod
+    def _download_sync(full: Path, image_url: str) -> None:
+        client = _get_image_client()
+        resp = client.get(image_url)
+        resp.raise_for_status()
+        full.write_bytes(resp.content)
+
+    def submit_image_download(self, rel_path: str, image_url: str):
+        """Submit image download to thread pool (non-blocking). Returns Future."""
+        full = self._resolve(rel_path)
+        full.parent.mkdir(parents=True, exist_ok=True)
+        if full.exists():
+            return None  # Already exists (checked after mkdir to avoid race)
+        return _image_pool.submit(self._download_sync, full, image_url)
 
     def delete_file(self, rel_path: str) -> None:
         full = self._resolve(rel_path)

@@ -1,3 +1,4 @@
+import base64
 import logging
 import time
 
@@ -18,6 +19,21 @@ from app.models.schemas import (
 from app.services.xtream_service import xtream_service
 
 logger = logging.getLogger("plexhub.live")
+
+
+def _try_base64_decode(value: str) -> str:
+    """Decode base64 only if the result is valid readable UTF-8 text."""
+    if not value:
+        return value
+    try:
+        decoded = base64.b64decode(value, validate=True).decode("utf-8", errors="replace")
+        # Reject if decoded text contains control chars (likely not real text)
+        if any(ord(c) < 32 and c not in "\n\r\t" for c in decoded):
+            return value
+        return decoded
+    except Exception:
+        return value  # not base64, use as-is
+
 
 router = APIRouter(prefix="/live", tags=["live"])
 
@@ -42,7 +58,9 @@ async def list_channels(
     if category_id:
         query = query.where(LiveChannel.category_id == category_id)
     if search:
-        query = query.where(LiveChannel.name.ilike(f"%{search}%"))
+        # Escape LIKE wildcards to prevent pattern injection
+        safe_search = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        query = query.where(LiveChannel.name.ilike(f"%{safe_search}%", escape="\\"))
 
     # Count
     count_query = select(func.count()).select_from(query.subquery())
@@ -200,17 +218,10 @@ async def get_channel_epg(
 
         title = listing.get("title") or "Unknown"
         # Some providers base64 encode the title/description
-        import base64
-        try:
-            title = base64.b64decode(title).decode("utf-8", errors="replace")
-        except Exception:
-            pass  # not base64, use as-is
+        title = _try_base64_decode(title)
 
         description = listing.get("description") or ""
-        try:
-            description = base64.b64decode(description).decode("utf-8", errors="replace")
-        except Exception:
-            pass
+        description = _try_base64_decode(description)
 
         entry = EpgEntry(
             server_id=server_id,
@@ -227,10 +238,7 @@ async def get_channel_epg(
         new_entries.append(entry)
 
     if new_entries:
-        await db.commit()
-        # Refresh to get IDs
-        for e in new_entries:
-            await db.refresh(e)
+        await db.commit()  # Persist EPG entries (no per-entry refresh needed)
 
     return EpgListResponse(
         items=[EpgEntryResponse.model_validate(e) for e in new_entries],

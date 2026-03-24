@@ -16,7 +16,7 @@ def sanitize_for_filesystem(name: str) -> str:
     name = _INVALID_CHARS.sub(" ", name)
     name = re.sub(r"\s+", " ", name).strip()
     name = name.rstrip(".")
-    return name.strip()
+    return name.strip() or "Unknown"
 
 
 def _movie_folder(title: str, year: int | None) -> str:
@@ -68,6 +68,19 @@ def series_episode_path(
     season_str = f"Season {season:02d}"
     ep_str = f"{safe_title} S{season:02d}E{episode:02d}"
     return f"Series/{safe_title}/{season_str}/{ep_str}.strm"
+
+
+def series_episode_nfo_path(
+    series_title: str, season: int, episode: int,
+) -> str:
+    """Relative path for an episode .nfo file.
+
+    Example: Series/The Last of Us/Season 01/The Last of Us S01E01.nfo
+    """
+    safe_title = _series_folder(series_title)
+    season_str = f"Season {season:02d}"
+    ep_str = f"{safe_title} S{season:02d}E{episode:02d}"
+    return f"Series/{safe_title}/{season_str}/{ep_str}.nfo"
 
 
 def series_nfo_path(series_title: str) -> str:

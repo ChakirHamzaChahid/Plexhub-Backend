@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import time
 
 from sqlalchemy import select, update
 
@@ -8,15 +7,13 @@ from app.config import settings
 from app.db.database import async_session_factory
 from app.models.database import Media, EnrichmentQueue, XtreamAccount
 from app.services.tmdb_service import tmdb_service
+from app.utils.time import now_ms
 
 logger = logging.getLogger("plexhub.enrichment")
 
-BATCH_SIZE = 50  # Commit every N items
-CONCURRENCY = 5  # Parallel TMDB requests
-
-
-def now_ms() -> int:
-    return int(time.time() * 1000)
+BATCH_SIZE = 200  # Commit every N items
+CONCURRENCY = 8   # Parallel TMDB requests (free tier ~4 req/s, keep headroom)
+MAX_ATTEMPTS = 3  # Max enrichment attempts before permanently skipping
 
 
 async def _fetch_movie_data(item, semaphore):
@@ -58,7 +55,7 @@ async def _fetch_movie_data(item, semaphore):
 
             return item, None, None, 0
         except Exception as e:
-            logger.debug(f"Enrichment fetch failed for {item.rating_key}: {e}")
+            logger.warning(f"Enrichment fetch failed for {item.rating_key}: {e}", exc_info=True)
             return item, None, None, 0
 
 
@@ -94,7 +91,7 @@ async def _fetch_series_data(item, semaphore):
 
             return item, None, None, 0
         except Exception as e:
-            logger.debug(f"Enrichment fetch failed for series '{item.title}': {e}")
+            logger.warning(f"Enrichment fetch failed for series '{item.title}': {e}", exc_info=True)
             return item, None, None, 0
 
 
@@ -159,11 +156,16 @@ async def run():
     logger.info(f"Starting enrichment batch (daily limit: {daily_limit}, concurrency: {CONCURRENCY})")
 
     async with async_session_factory() as db:
-        # Phase 1: VOD movies
+        # Phase 1: VOD movies (pending + retryable skipped items)
+        from sqlalchemy import or_
         result = await db.execute(
             select(EnrichmentQueue)
             .where(
-                EnrichmentQueue.status == "pending",
+                or_(
+                    EnrichmentQueue.status == "pending",
+                    # Retry previously skipped items if under max attempts
+                    (EnrichmentQueue.status == "skipped") & (EnrichmentQueue.attempts < MAX_ATTEMPTS),
+                ),
                 EnrichmentQueue.media_type == "movie",
             )
             .order_by(EnrichmentQueue.created_at)
@@ -198,7 +200,10 @@ async def run():
             result = await db.execute(
                 select(EnrichmentQueue)
                 .where(
-                    EnrichmentQueue.status == "pending",
+                    or_(
+                        EnrichmentQueue.status == "pending",
+                        (EnrichmentQueue.status == "skipped") & (EnrichmentQueue.attempts < MAX_ATTEMPTS),
+                    ),
                     EnrichmentQueue.media_type == "show",
                 )
                 .order_by(EnrichmentQueue.created_at)

@@ -59,17 +59,26 @@ class MappingStore:
     def save(self) -> None:
         self._file.parent.mkdir(parents=True, exist_ok=True)
         tmp = self._file.with_suffix(".tmp")
-        content = json.dumps(
-            {k: v.to_dict() for k, v in self._data.items()},
-            indent=2,
-            ensure_ascii=False,
-        )
-        tmp.write_text(content, encoding="utf-8")
-        # Atomic rename (on Windows, need to remove target first)
-        if os.name == "nt" and self._file.exists():
-            self._file.unlink()
-        tmp.rename(self._file)
-        logger.info(f"Saved mapping with {len(self._data)} entries")
+        try:
+            # Stream JSON to file instead of building a huge string in memory
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write("{")
+                for i, (k, v) in enumerate(self._data.items()):
+                    if i > 0:
+                        f.write(",")
+                    json.dump(k, f, ensure_ascii=False)
+                    f.write(":")
+                    json.dump(v.to_dict(), f, ensure_ascii=False)
+                f.write("}")
+                f.flush()
+                os.fsync(f.fileno())  # Ensure data is on disk before rename
+            # Atomic rename — on POSIX this overwrites atomically (no unlink needed)
+            os.replace(str(tmp), str(self._file))
+            logger.info(f"Saved mapping with {len(self._data)} entries")
+        except Exception:
+            # Clean up temp file on failure, preserve existing mapping
+            tmp.unlink(missing_ok=True)
+            raise
 
     def get(self, source_id: str) -> MappingEntry | None:
         return self._data.get(source_id)
@@ -86,6 +95,15 @@ class MappingStore:
 
     def all_source_ids(self) -> set[str]:
         return set(self._data.keys())
+
+    def purge_stale(self, valid_source_ids: set[str]) -> int:
+        """Remove mapping entries not in the valid set. Returns count removed."""
+        stale = set(self._data.keys()) - valid_source_ids
+        for key in stale:
+            del self._data[key]
+        if stale:
+            logger.info(f"Purged {len(stale)} stale mapping entries")
+        return len(stale)
 
     def __len__(self) -> int:
         return len(self._data)

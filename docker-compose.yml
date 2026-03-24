@@ -15,14 +15,20 @@ services:
       - ENRICHMENT_DAILY_LIMIT=50000
       - HEALTH_CHECK_BATCH_SIZE=1000
       - PLEX_LIBRARY_DIR=/app/media
-      - TZ=Europe/Paris
+      - TZ=${TZ:-UTC}
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
-      - /mnt/raid0-3to:/app/media
+      - ${PLEX_MEDIA_HOST_PATH:-./media}:/app/media
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:${APP_PORT:-8000}/api/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     deploy:
       resources:
         limits:
-          memory: 512M
+          memory: 1G
           cpus: '1.0'

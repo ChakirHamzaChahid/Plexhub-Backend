@@ -51,13 +51,19 @@ file_handler = SafeRotatingFileHandler(
 file_handler.setLevel(logging.DEBUG)
 file_handler.setFormatter(logging.Formatter(log_format))
 
-# Apply to root logger
+# Apply to plexhub logger (not root — avoids flooding with SQLAlchemy/httpx DEBUG)
+plexhub_logger = logging.getLogger("plexhub")
+plexhub_logger.setLevel(logging.DEBUG)
+plexhub_logger.addHandler(console_handler)
+plexhub_logger.addHandler(file_handler)
+
+# Root logger only for WARNING+ (third-party libraries)
 root_logger = logging.getLogger()
-root_logger.setLevel(logging.DEBUG)  # Capture all DEBUG and above
+root_logger.setLevel(logging.WARNING)
 root_logger.addHandler(console_handler)
 root_logger.addHandler(file_handler)
 
-logger.info("Logging configured: Console=INFO, File=DEBUG")
+logger.info("Logging configured: plexhub=DEBUG, third-party=WARNING")
 
 
 async def _auto_generate_plex_library():
@@ -75,7 +81,6 @@ async def _auto_generate_plex_library():
     from app.plex_generator.storage import LocalStorage
 
     output = Path(settings.PLEX_LIBRARY_DIR)
-    storage = LocalStorage(output)
 
     async with async_session_factory() as db:
         result = await db.execute(
@@ -90,8 +95,10 @@ async def _auto_generate_plex_library():
     logger.info(f"Auto-generating Plex library for {len(account_ids)} account(s)")
     for aid in account_ids:
         try:
+            account_output = output / aid
+            account_storage = LocalStorage(account_output)
             source = DatabaseSource(aid)
-            gen = PlexLibraryGenerator(source, storage, output)
+            gen = PlexLibraryGenerator(source, account_storage, account_output)
             report = await gen.generate()
             logger.info(
                 f"Plex generation for account {aid}: "
@@ -160,12 +167,30 @@ async def _auto_provision_xtream_account():
         logger.info(f"Xtream account auto-provisioned from env: {account_id}")
 
 
+async def _cleanup_stale_epg():
+    """Delete EPG entries whose end_time is in the past (stale programs)."""
+    from sqlalchemy import delete
+    from app.db.database import async_session_factory
+    from app.models.database import EpgEntry
+
+    cutoff = int(time.time() * 1000)  # now in ms
+    async with async_session_factory() as db:
+        result = await db.execute(
+            delete(EpgEntry).where(EpgEntry.end_time < cutoff)
+        )
+        await db.commit()
+        logger.info(f"EPG cleanup: removed {result.rowcount} stale entries")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Master Worker election via lock file."""
+    """Master Worker election via file lock (fcntl.flock)."""
+    import fcntl
+
     lock_file = settings.DATA_DIR / "server_start.lock"
     is_master = False
     scheduler = None
+    lock_fd = None
 
     try:
         settings.DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -174,19 +199,19 @@ async def lifespan(app: FastAPI):
         await init_db()
         logger.info("Database initialized")
 
-        # Master election
+        # Master election — atomic via fcntl.flock (no race condition)
         try:
-            with open(lock_file, "x") as f:
-                f.write(str(os.getpid()))
+            lock_fd = open(lock_file, "w")
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lock_fd.write(str(os.getpid()))
+            lock_fd.flush()
             is_master = True
-        except FileExistsError:
-            if time.time() - lock_file.stat().st_mtime > 1200:
-                lock_file.unlink(missing_ok=True)
-                with open(lock_file, "x") as f:
-                    f.write(str(os.getpid()))
-                is_master = True
-            else:
-                is_master = False
+        except OSError:
+            # Another process holds the lock
+            if lock_fd:
+                lock_fd.close()
+                lock_fd = None
+            is_master = False
 
         # Auto-provision Xtream account from env vars
         if settings.has_xtream_env:
@@ -200,11 +225,14 @@ async def lifespan(app: FastAPI):
 
             async def scheduled_sync_enrich_generate():
                 """Periodic pipeline: sync -> enrichment -> Plex generation."""
-                await sync_worker.run_all_accounts()
-                logger.info("Scheduled sync done — starting enrichment")
-                await enrichment_worker.run()
-                logger.info("Scheduled enrichment done — starting Plex generation")
-                await _auto_generate_plex_library()
+                try:
+                    await sync_worker.run_all_accounts()
+                    logger.info("Scheduled sync done — starting enrichment")
+                    await enrichment_worker.run()
+                    logger.info("Scheduled enrichment done — starting Plex generation")
+                    await _auto_generate_plex_library()
+                except Exception as e:
+                    logger.error(f"Scheduled sync pipeline failed: {e}", exc_info=True)
 
             scheduler = AsyncIOScheduler()
             scheduler.add_job(
@@ -219,6 +247,12 @@ async def lifespan(app: FastAPI):
                 hour=2,
                 id="health_check",
             )
+            scheduler.add_job(
+                _cleanup_stale_epg,
+                "cron",
+                hour=3,
+                id="epg_cleanup",
+            )
             scheduler.start()
 
             # Non-blocking initial sync, then enrichment, then Plex generation
@@ -229,14 +263,21 @@ async def lifespan(app: FastAPI):
                 logger.info("Enrichment done — starting Plex library generation")
                 await _auto_generate_plex_library()
 
-            asyncio.create_task(initial_sync_then_enrich())
+            from app.utils.tasks import create_background_task
+            create_background_task(initial_sync_then_enrich(), name="initial_sync")
         else:
             logger.info(f"[Worker {os.getpid()}] Slave — Passive mode")
 
         yield
 
     finally:
+        # Cancel and await background tasks before shutting down
+        from app.utils.tasks import cancel_all_background_tasks
+        await cancel_all_background_tasks()
+
         if is_master:
+            if lock_fd:
+                lock_fd.close()  # Releasing fd also releases flock
             lock_file.unlink(missing_ok=True)
             if scheduler:
                 scheduler.shutdown(wait=False)
@@ -248,6 +289,10 @@ async def lifespan(app: FastAPI):
         await xtream_service.close()
         await tmdb_service.close()
 
+        # Shutdown image download thread pool
+        from app.plex_generator.storage import shutdown_image_pool
+        shutdown_image_pool()
+
 
 app = FastAPI(
     title="PlexHub Backend",
@@ -257,7 +302,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.CORS_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )

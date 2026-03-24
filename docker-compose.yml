@@ -15,11 +15,11 @@ services:
       - ENRICHMENT_DAILY_LIMIT=50000
       - HEALTH_CHECK_BATCH_SIZE=1000
       - PLEX_LIBRARY_DIR=/app/media
-      - TZ=Europe/Paris
+      - TZ=${TZ:-UTC}
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
-      - /mnt/raid0-3to:/app/media
+      - ${PLEX_MEDIA_HOST_PATH:-./media}:/app/media
     restart: unless-stopped
     deploy:
       resources:

@@ -161,12 +161,30 @@ async def _auto_provision_xtream_account():
         logger.info(f"Xtream account auto-provisioned from env: {account_id}")
 
 
+async def _cleanup_stale_epg():
+    """Delete EPG entries whose end_time is in the past (stale programs)."""
+    from sqlalchemy import delete
+    from app.db.database import async_session_factory
+    from app.models.database import EpgEntry
+
+    cutoff = int(time.time() * 1000)  # now in ms
+    async with async_session_factory() as db:
+        result = await db.execute(
+            delete(EpgEntry).where(EpgEntry.end_time < cutoff)
+        )
+        await db.commit()
+        logger.info(f"EPG cleanup: removed {result.rowcount} stale entries")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Master Worker election via lock file."""
+    """Master Worker election via file lock (fcntl.flock)."""
+    import fcntl
+
     lock_file = settings.DATA_DIR / "server_start.lock"
     is_master = False
     scheduler = None
+    lock_fd = None
 
     try:
         settings.DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -175,19 +193,19 @@ async def lifespan(app: FastAPI):
         await init_db()
         logger.info("Database initialized")
 
-        # Master election
+        # Master election — atomic via fcntl.flock (no race condition)
         try:
-            with open(lock_file, "x") as f:
-                f.write(str(os.getpid()))
+            lock_fd = open(lock_file, "w")
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lock_fd.write(str(os.getpid()))
+            lock_fd.flush()
             is_master = True
-        except FileExistsError:
-            if time.time() - lock_file.stat().st_mtime > 1200:
-                lock_file.unlink(missing_ok=True)
-                with open(lock_file, "x") as f:
-                    f.write(str(os.getpid()))
-                is_master = True
-            else:
-                is_master = False
+        except OSError:
+            # Another process holds the lock
+            if lock_fd:
+                lock_fd.close()
+                lock_fd = None
+            is_master = False
 
         # Auto-provision Xtream account from env vars
         if settings.has_xtream_env:
@@ -220,6 +238,12 @@ async def lifespan(app: FastAPI):
                 hour=2,
                 id="health_check",
             )
+            scheduler.add_job(
+                _cleanup_stale_epg,
+                "cron",
+                hour=3,
+                id="epg_cleanup",
+            )
             scheduler.start()
 
             # Non-blocking initial sync, then enrichment, then Plex generation
@@ -239,6 +263,8 @@ async def lifespan(app: FastAPI):
 
     finally:
         if is_master:
+            if lock_fd:
+                lock_fd.close()  # Releasing fd also releases flock
             lock_file.unlink(missing_ok=True)
             if scheduler:
                 scheduler.shutdown(wait=False)
@@ -259,7 +285,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.CORS_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )

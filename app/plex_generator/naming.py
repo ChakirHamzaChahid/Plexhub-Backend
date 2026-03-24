@@ -16,7 +16,7 @@ def sanitize_for_filesystem(name: str) -> str:
     name = _INVALID_CHARS.sub(" ", name)
     name = re.sub(r"\s+", " ", name).strip()
     name = name.rstrip(".")
-    return name.strip()
+    return name.strip() or "Unknown"
 
 
 def _movie_folder(title: str, year: int | None) -> str:

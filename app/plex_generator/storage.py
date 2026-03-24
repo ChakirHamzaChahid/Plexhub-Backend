@@ -56,14 +56,33 @@ class LocalStorage(LibraryStorage):
             return True  # Preserve existing image (e.g. enriched by Tiny Media Manager)
         full.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with httpx.Client(timeout=15.0, follow_redirects=True) as client:
-                resp = client.get(image_url)
-                resp.raise_for_status()
-                full.write_bytes(resp.content)
-            return True
+            # Run HTTP download in a thread to avoid blocking the async event loop.
+            # When called from sync context, this falls back to a regular sync call.
+            import asyncio
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop and loop.is_running():
+                # We're inside an async event loop — offload to thread pool
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(self._download_sync, full, image_url)
+                    return future.result(timeout=20.0)
+            else:
+                return self._download_sync(full, image_url)
         except Exception as e:
             logger.debug(f"Failed to download image {image_url}: {e}")
             return False
+
+    @staticmethod
+    def _download_sync(full: Path, image_url: str) -> bool:
+        with httpx.Client(timeout=15.0, follow_redirects=True) as client:
+            resp = client.get(image_url)
+            resp.raise_for_status()
+            full.write_bytes(resp.content)
+        return True
 
     def delete_file(self, rel_path: str) -> None:
         full = self._resolve(rel_path)

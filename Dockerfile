@@ -7,4 +7,4 @@ RUN mkdir -p /app/data /app/logs
 ENV PYTHONUNBUFFERED=1
 ENV APP_PORT=8000
 EXPOSE ${APP_PORT}
-CMD uvicorn app.main:app --host 0.0.0.0 --port ${APP_PORT}
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${APP_PORT}"]

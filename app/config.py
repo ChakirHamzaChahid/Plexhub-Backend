@@ -17,6 +17,10 @@ class Settings:
     ENRICHMENT_DAILY_LIMIT: int = int(os.getenv("ENRICHMENT_DAILY_LIMIT", "50000"))
     HEALTH_CHECK_BATCH_SIZE: int = int(os.getenv("HEALTH_CHECK_BATCH_SIZE", "1000"))
     PLEX_LIBRARY_DIR: str = os.getenv("PLEX_LIBRARY_DIR", "")
+    CORS_ORIGINS: list[str] = [
+        o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",") if o.strip()
+    ]
+    TMDB_LANGUAGE: str = os.getenv("TMDB_LANGUAGE", "fr-FR")
 
     # Xtream account auto-provisioning from env
     XTREAM_BASE_URL: str = os.getenv("XTREAM_BASE_URL", "")

@@ -64,7 +64,7 @@ class TMDBService:
         if not self.is_configured:
             return None
         client = await self._get_client()
-        params: dict = {"query": title, "language": "fr-FR"}
+        params: dict = {"query": title, "language": settings.TMDB_LANGUAGE}
         if year:
             params["year"] = year
         resp = await client.get(f"{self.BASE_URL}/search/movie", params=params)
@@ -78,7 +78,7 @@ class TMDBService:
         if not self.is_configured:
             return None
         client = await self._get_client()
-        params: dict = {"query": title, "language": "fr-FR"}
+        params: dict = {"query": title, "language": settings.TMDB_LANGUAGE}
         if year:
             params["first_air_date_year"] = year
         resp = await client.get(f"{self.BASE_URL}/search/tv", params=params)
@@ -91,7 +91,7 @@ class TMDBService:
         client = await self._get_client()
         resp = await client.get(
             f"{self.BASE_URL}/movie/{tmdb_id}",
-            params={"append_to_response": "credits,external_ids", "language": "fr-FR"},
+            params={"append_to_response": "credits,external_ids", "language": settings.TMDB_LANGUAGE},
         )
         resp.raise_for_status()
         data = resp.json()
@@ -102,7 +102,7 @@ class TMDBService:
         client = await self._get_client()
         resp = await client.get(
             f"{self.BASE_URL}/tv/{tmdb_id}",
-            params={"append_to_response": "credits,external_ids", "language": "fr-FR"},
+            params={"append_to_response": "credits,external_ids", "language": settings.TMDB_LANGUAGE},
         )
         resp.raise_for_status()
         data = resp.json()

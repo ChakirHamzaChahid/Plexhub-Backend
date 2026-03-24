@@ -23,8 +23,19 @@ from app.utils.time import now_ms
 
 logger = logging.getLogger("plexhub.sync")
 
-# In-memory sync job tracking
+# In-memory sync job tracking (capped to prevent unbounded growth)
+_MAX_SYNC_JOBS = 100
 _sync_jobs: dict[str, dict] = {}
+
+
+def _record_sync_job(job_id: str, data: dict) -> None:
+    """Record a sync job, evicting oldest entries if over the cap."""
+    _sync_jobs[job_id] = data
+    if len(_sync_jobs) > _MAX_SYNC_JOBS:
+        # Remove oldest entries (dict preserves insertion order in Python 3.7+)
+        excess = len(_sync_jobs) - _MAX_SYNC_JOBS
+        for key in list(_sync_jobs)[:excess]:
+            del _sync_jobs[key]
 
 
 def _safe_duration(value) -> int | None:
@@ -62,12 +73,12 @@ def map_vod_to_media(dto: dict, account_id: str, index: int, vod_info: dict | No
 
     # Debug logging (first 3 items only to avoid spam)
     if index < 3 and vod_info and isinstance(vod_info, dict):
-        logger.info(f"[DEBUG] Stream {stream_id} ({title}):")
-        logger.info(f"  vod_info keys: {list(vod_info.keys())}")
-        logger.info(f"  info keys: {list(info.keys())}")
-        logger.info(f"  info sample: plot={info.get('plot')[:50] if info.get('plot') else None}, "
-                   f"genre={info.get('genre')}, duration={info.get('duration')}, "
-                   f"duration_secs={info.get('duration_secs')}")
+        logger.debug(f"Stream {stream_id} ({title}):")
+        logger.debug(f"  vod_info keys: {list(vod_info.keys())}")
+        logger.debug(f"  info keys: {list(info.keys())}")
+        logger.debug(f"  info sample: plot={info.get('plot')[:50] if info.get('plot') else None}, "
+                     f"genre={info.get('genre')}, duration={info.get('duration')}, "
+                     f"duration_secs={info.get('duration_secs')}")
 
     # Prefer detailed info fields over basic stream fields
     if info:
@@ -695,7 +706,7 @@ async def _refresh_categories(db, account, account_id: str):
 async def sync_account(account_id: str):
     """Full sync for a single Xtream account."""
     job_id = f"sync_{account_id}_{now_ms()}"
-    _sync_jobs[job_id] = {"status": "processing", "progress": {}}
+    _record_sync_job(job_id, {"status": "processing", "progress": {}})
 
     try:
         async with async_session_factory() as db:
@@ -709,7 +720,7 @@ async def sync_account(account_id: str):
             account = result.scalars().first()
             if not account:
                 logger.warning(f"Account {account_id} not found or inactive")
-                _sync_jobs[job_id]["status"] = "failed"
+                _record_sync_job(job_id, {"status": "failed", "progress": {}})
                 return job_id
 
             server_id = f"xtream_{account_id}"
@@ -1035,17 +1046,17 @@ async def sync_account(account_id: str):
 
             await db.commit()
 
-            _sync_jobs[job_id] = {
+            _record_sync_job(job_id, {
                 "status": "completed",
                 "progress": {"total": total_synced, "synced": total_synced},
-            }
+            })
             logger.info(
                 f"Sync complete for account {account_id}: {total_synced} items"
             )
 
     except Exception as e:
         logger.error(f"Sync failed for account {account_id}: {e}", exc_info=True)
-        _sync_jobs[job_id] = {"status": "failed", "progress": {"error": str(e)}}
+        _record_sync_job(job_id, {"status": "failed", "progress": {"error": str(e)}})
 
     return job_id
 

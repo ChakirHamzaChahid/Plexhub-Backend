@@ -75,7 +75,6 @@ async def _auto_generate_plex_library():
     from app.plex_generator.storage import LocalStorage
 
     output = Path(settings.PLEX_LIBRARY_DIR)
-    storage = LocalStorage(output)
 
     async with async_session_factory() as db:
         result = await db.execute(
@@ -90,8 +89,10 @@ async def _auto_generate_plex_library():
     logger.info(f"Auto-generating Plex library for {len(account_ids)} account(s)")
     for aid in account_ids:
         try:
+            account_output = output / aid
+            account_storage = LocalStorage(account_output)
             source = DatabaseSource(aid)
-            gen = PlexLibraryGenerator(source, storage, output)
+            gen = PlexLibraryGenerator(source, account_storage, account_output)
             report = await gen.generate()
             logger.info(
                 f"Plex generation for account {aid}: "

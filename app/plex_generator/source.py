@@ -42,7 +42,7 @@ class DatabaseSource(MediaSource):
                 logger.error(f"Account {self.account_id} not found")
                 return []
 
-            result = await db.execute(
+            result = await db.stream(
                 select(Media).where(
                     Media.server_id == self.server_id,
                     Media.type == "movie",
@@ -51,7 +51,7 @@ class DatabaseSource(MediaSource):
             )
 
             movies = []
-            for row in result.scalars():
+            async for row in result.scalars():
                 url = build_stream_url(account, row.rating_key)
                 if not url:
                     continue
@@ -83,24 +83,24 @@ class DatabaseSource(MediaSource):
                 return []
 
             # Load all shows
-            show_result = await db.execute(
+            show_stream = await db.stream(
                 select(Media).where(
                     Media.server_id == self.server_id,
                     Media.type == "show",
                     Media.is_in_allowed_categories == True,
                 ).execution_options(yield_per=1000)
             )
-            shows = list(show_result.scalars())
+            shows = [s async for s in show_stream.scalars()]
 
             # Load all episodes and group by series in a single streaming pass
-            ep_result = await db.execute(
+            ep_stream = await db.stream(
                 select(Media).where(
                     Media.server_id == self.server_id,
                     Media.type == "episode",
                 ).execution_options(yield_per=1000)
             )
             episodes_by_series: dict[str, list[Media]] = {}
-            for ep in ep_result.scalars():
+            async for ep in ep_stream.scalars():
                 key = ep.grandparent_rating_key or ""
                 episodes_by_series.setdefault(key, []).append(ep)
 

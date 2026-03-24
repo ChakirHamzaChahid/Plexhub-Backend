@@ -28,6 +28,12 @@ def parse_rating_key(rating_key: str) -> dict:
         ep_id = parts[0]
         ext = parts[1] if len(parts) > 1 else None
         return {"type": "episode", "id": ep_id, "ext": ext}
+    elif rating_key.startswith("live_"):
+        remainder = rating_key[5:]
+        parts = remainder.rsplit(".", 1)
+        stream_id = parts[0]
+        ext = parts[1] if len(parts) > 1 else None
+        return {"type": "live", "id": stream_id, "ext": ext}
     elif rating_key.startswith("series_"):
         return {"type": "series", "id": rating_key[7:], "ext": None}
     elif rating_key.startswith("season_"):
@@ -53,6 +59,13 @@ def build_stream_url(account, rating_key: str) -> Optional[str]:
             account.base_url, account.port,
             account.username, account.password,
             parsed["id"], ext,
+        )
+    elif parsed["type"] == "live":
+        ext = parsed["ext"] or "ts"
+        return xtream_service.build_live_url(
+            account.base_url, account.port,
+            account.username, account.password,
+            int(parsed["id"]), ext,
         )
     else:
         logger.warning(f"Cannot build stream URL for type: {parsed['type']}")

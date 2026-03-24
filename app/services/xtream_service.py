@@ -153,6 +153,75 @@ class XtreamService:
         base = self._build_base_url(base_url, port)
         return f"{base}series/{username}/{password}/{episode_id}.{extension}"
 
+    # --- Live TV Methods ---
+
+    async def get_live_categories(self, account_or_url, port: int = None, username: str = None, password: str = None) -> list[dict]:
+        if hasattr(account_or_url, 'base_url'):
+            base_url, port, username, password = account_or_url.base_url, account_or_url.port, account_or_url.username, account_or_url.password
+        else:
+            base_url = account_or_url
+        data = await self._get(
+            base_url, port, username, password,
+            action="get_live_categories",
+        )
+        return data if isinstance(data, list) else []
+
+    async def get_live_streams(
+        self, account_or_url, port: int = None, username: str = None, password: str = None,
+        category_id: str | None = None,
+    ) -> list[dict]:
+        if hasattr(account_or_url, 'base_url'):
+            base_url, port, username, password = account_or_url.base_url, account_or_url.port, account_or_url.username, account_or_url.password
+        else:
+            base_url = account_or_url
+        kwargs = {}
+        if category_id:
+            kwargs["category_id"] = category_id
+        data = await self._get(
+            base_url, port, username, password,
+            action="get_live_streams",
+            **kwargs,
+        )
+        return data if isinstance(data, list) else []
+
+    async def get_short_epg(
+        self, account_or_url, port: int = None, username: str = None, password: str = None,
+        stream_id: int = None, limit: int | None = None,
+    ) -> dict:
+        if hasattr(account_or_url, 'base_url'):
+            base_url, port, username, password = account_or_url.base_url, account_or_url.port, account_or_url.username, account_or_url.password
+        else:
+            base_url = account_or_url
+        kwargs = {"stream_id": str(stream_id)}
+        if limit is not None:
+            kwargs["limit"] = str(limit)
+        data = await self._get(
+            base_url, port, username, password,
+            action="get_short_epg",
+            **kwargs,
+        )
+        return data if isinstance(data, dict) else {}
+
+    async def get_xmltv(self, account_or_url, port: int = None, username: str = None, password: str = None) -> str:
+        """Fetch the full XMLTV EPG as raw XML text."""
+        if hasattr(account_or_url, 'base_url'):
+            base_url, port, username, password = account_or_url.base_url, account_or_url.port, account_or_url.username, account_or_url.password
+        else:
+            base_url = account_or_url
+        client = await self._get_client()
+        base = self._build_base_url(base_url, port)
+        url = f"{base}xmltv.php"
+        resp = await client.get(url, params={"username": username, "password": password}, timeout=120.0)
+        resp.raise_for_status()
+        return resp.text
+
+    def build_live_url(
+        self, base_url: str, port: int, username: str, password: str,
+        stream_id: int, extension: str = "ts",
+    ) -> str:
+        base = self._build_base_url(base_url, port)
+        return f"{base}live/{username}/{password}/{stream_id}.{extension}"
+
 
 # Singleton
 xtream_service = XtreamService()

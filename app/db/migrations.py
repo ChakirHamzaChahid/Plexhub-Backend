@@ -22,6 +22,7 @@ async def run_migrations(engine: AsyncEngine) -> None:
     await _migration_003_add_media_category_visibility(engine)
     await _migration_004_add_enrichment_existing_ids(engine)
     await _migration_005_add_media_cast(engine)
+    await _migration_006_create_live_tables(engine)
 
     logger.info("All migrations completed successfully")
 
@@ -133,3 +134,76 @@ async def _migration_005_add_media_cast(engine: AsyncEngine) -> None:
             logger.info("Migration 005: cast column added")
         except Exception as e:
             logger.warning(f"Migration 005: Column may already exist: {e}")
+
+
+async def _migration_006_create_live_tables(engine: AsyncEngine) -> None:
+    """Create live_channels and epg_entries tables for Live IPTV support."""
+    logger.info("Migration 006: Creating live_channels and epg_entries tables")
+
+    async with engine.begin() as conn:
+        # --- live_channels ---
+        try:
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS live_channels (
+                    stream_id INTEGER NOT NULL,
+                    server_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    name_sortable TEXT NOT NULL DEFAULT '',
+                    stream_icon TEXT,
+                    epg_channel_id TEXT,
+                    category_id TEXT,
+                    container_extension TEXT DEFAULT 'ts',
+                    custom_sid TEXT,
+                    tv_archive INTEGER NOT NULL DEFAULT 0,
+                    tv_archive_duration INTEGER NOT NULL DEFAULT 0,
+                    is_adult INTEGER NOT NULL DEFAULT 0,
+                    is_active INTEGER NOT NULL DEFAULT 1,
+                    is_in_allowed_categories INTEGER NOT NULL DEFAULT 1,
+                    added_at INTEGER NOT NULL DEFAULT 0,
+                    updated_at INTEGER NOT NULL DEFAULT 0,
+                    dto_hash TEXT,
+                    PRIMARY KEY (stream_id, server_id)
+                )
+            """))
+
+            for idx_sql in [
+                "CREATE INDEX IF NOT EXISTS ix_live_channels_server ON live_channels(server_id)",
+                "CREATE INDEX IF NOT EXISTS ix_live_channels_category ON live_channels(category_id)",
+                "CREATE INDEX IF NOT EXISTS ix_live_channels_epg ON live_channels(epg_channel_id)",
+                "CREATE INDEX IF NOT EXISTS ix_live_channels_name ON live_channels(name_sortable)",
+                "CREATE INDEX IF NOT EXISTS ix_live_channels_visible ON live_channels(is_in_allowed_categories)",
+            ]:
+                await conn.execute(text(idx_sql))
+
+            logger.info("Migration 006: live_channels table created")
+        except Exception as e:
+            logger.warning(f"Migration 006: live_channels may already exist: {e}")
+
+        # --- epg_entries ---
+        try:
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS epg_entries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    server_id TEXT NOT NULL,
+                    epg_channel_id TEXT NOT NULL,
+                    stream_id INTEGER,
+                    title TEXT NOT NULL,
+                    description TEXT,
+                    start_time INTEGER NOT NULL,
+                    end_time INTEGER NOT NULL,
+                    lang TEXT,
+                    fetched_at INTEGER NOT NULL DEFAULT 0
+                )
+            """))
+
+            for idx_sql in [
+                "CREATE INDEX IF NOT EXISTS ix_epg_channel ON epg_entries(epg_channel_id)",
+                "CREATE INDEX IF NOT EXISTS ix_epg_server ON epg_entries(server_id)",
+                "CREATE INDEX IF NOT EXISTS ix_epg_time ON epg_entries(start_time, end_time)",
+                "CREATE INDEX IF NOT EXISTS ix_epg_stream ON epg_entries(stream_id)",
+            ]:
+                await conn.execute(text(idx_sql))
+
+            logger.info("Migration 006: epg_entries table created")
+        except Exception as e:
+            logger.warning(f"Migration 006: epg_entries may already exist: {e}")

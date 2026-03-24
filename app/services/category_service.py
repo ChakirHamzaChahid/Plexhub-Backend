@@ -6,7 +6,7 @@ import time
 from typing import List, Optional
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.models.database import XtreamCategory, XtreamAccount, Media
+from app.models.database import XtreamCategory, XtreamAccount, Media, LiveChannel
 
 logger = logging.getLogger(__name__)
 
@@ -274,8 +274,13 @@ async def update_media_category_visibility(
             .where(Media.server_id == server_id)
             .values(is_in_allowed_categories=True)
         )
+        await db.execute(
+            update(LiveChannel)
+            .where(LiveChannel.server_id == server_id)
+            .values(is_in_allowed_categories=True)
+        )
         await db.commit()
-        logger.info(f"Visibility update [{account_id}]: mode=all, all media set to visible")
+        logger.info(f"Visibility update [{account_id}]: mode=all, all media + live channels set to visible")
         return
 
     # Load category config
@@ -286,11 +291,14 @@ async def update_media_category_visibility(
 
     allowed_vod_ids = set()
     allowed_series_ids = set()
+    allowed_live_ids = set()
     for cat in categories:
         if cat.category_type == "vod" and cat.is_allowed:
             allowed_vod_ids.add(cat.category_id)
         elif cat.category_type == "series" and cat.is_allowed:
             allowed_series_ids.add(cat.category_id)
+        elif cat.category_type == "live" and cat.is_allowed:
+            allowed_live_ids.add(cat.category_id)
 
     # --- Movies: set all to False, then True for allowed category IDs ---
     await db.execute(
@@ -365,11 +373,32 @@ async def update_media_category_visibility(
                 .values(is_in_allowed_categories=True)
             )
 
+    # --- Live Channels: set all to False, then True for allowed category IDs ---
+    await db.execute(
+        update(LiveChannel)
+        .where(LiveChannel.server_id == server_id)
+        .values(is_in_allowed_categories=False)
+    )
+    if allowed_live_ids:
+        chunk_size = 500
+        live_list = list(allowed_live_ids)
+        for i in range(0, len(live_list), chunk_size):
+            chunk = live_list[i : i + chunk_size]
+            await db.execute(
+                update(LiveChannel)
+                .where(
+                    LiveChannel.server_id == server_id,
+                    LiveChannel.category_id.in_(chunk),
+                )
+                .values(is_in_allowed_categories=True)
+            )
+
     await db.commit()
 
     logger.info(
         f"Visibility update [{account_id}]: mode={filter_mode}, "
         f"VOD categories={len(allowed_vod_ids)}, "
         f"Series categories={len(allowed_series_ids)}, "
+        f"Live categories={len(allowed_live_ids)}, "
         f"visible series={len(visible_series_keys)}"
     )

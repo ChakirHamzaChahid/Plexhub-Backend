@@ -1,4 +1,5 @@
 import logging
+import threading
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -9,19 +10,25 @@ logger = logging.getLogger("plexhub.plex_generator.storage")
 
 # Shared thread pool for image downloads (avoids creating a pool per image)
 _image_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="img-dl")
-# Shared httpx client for image downloads (connection reuse across threads)
-_image_http_client: httpx.Client | None = None
+# Thread-local httpx clients (httpx.Client is NOT thread-safe)
+_thread_local = threading.local()
 
 
 def _get_image_client() -> httpx.Client:
-    global _image_http_client
-    if _image_http_client is None or _image_http_client.is_closed:
-        _image_http_client = httpx.Client(
+    """Return a per-thread httpx.Client (thread-safe by isolation)."""
+    client = getattr(_thread_local, "http_client", None)
+    if client is None or client.is_closed:
+        client = httpx.Client(
             timeout=15.0,
             follow_redirects=True,
-            limits=httpx.Limits(max_connections=12, max_keepalive_connections=8),
         )
-    return _image_http_client
+        _thread_local.http_client = client
+    return client
+
+
+def shutdown_image_pool() -> None:
+    """Shutdown the shared image thread pool. Call during app shutdown."""
+    _image_pool.shutdown(wait=True, cancel_futures=True)
 
 
 class LibraryStorage(ABC):

@@ -54,7 +54,7 @@ async def _fetch_movie_data(item, semaphore):
 
             return item, None, None, 0
         except Exception as e:
-            logger.debug(f"Enrichment fetch failed for {item.rating_key}: {e}")
+            logger.warning(f"Enrichment fetch failed for {item.rating_key}: {e}")
             return item, None, None, 0
 
 
@@ -90,7 +90,7 @@ async def _fetch_series_data(item, semaphore):
 
             return item, None, None, 0
         except Exception as e:
-            logger.debug(f"Enrichment fetch failed for series '{item.title}': {e}")
+            logger.warning(f"Enrichment fetch failed for series '{item.title}': {e}")
             return item, None, None, 0
 
 

@@ -219,11 +219,14 @@ async def lifespan(app: FastAPI):
 
             async def scheduled_sync_enrich_generate():
                 """Periodic pipeline: sync -> enrichment -> Plex generation."""
-                await sync_worker.run_all_accounts()
-                logger.info("Scheduled sync done — starting enrichment")
-                await enrichment_worker.run()
-                logger.info("Scheduled enrichment done — starting Plex generation")
-                await _auto_generate_plex_library()
+                try:
+                    await sync_worker.run_all_accounts()
+                    logger.info("Scheduled sync done — starting enrichment")
+                    await enrichment_worker.run()
+                    logger.info("Scheduled enrichment done — starting Plex generation")
+                    await _auto_generate_plex_library()
+                except Exception as e:
+                    logger.error(f"Scheduled sync pipeline failed: {e}", exc_info=True)
 
             scheduler = AsyncIOScheduler()
             scheduler.add_job(
@@ -262,6 +265,10 @@ async def lifespan(app: FastAPI):
         yield
 
     finally:
+        # Cancel and await background tasks before shutting down
+        from app.utils.tasks import cancel_all_background_tasks
+        await cancel_all_background_tasks()
+
         if is_master:
             if lock_fd:
                 lock_fd.close()  # Releasing fd also releases flock
@@ -275,6 +282,10 @@ async def lifespan(app: FastAPI):
 
         await xtream_service.close()
         await tmdb_service.close()
+
+        # Shutdown image download thread pool
+        from app.plex_generator.storage import shutdown_image_pool
+        shutdown_image_pool()
 
 
 app = FastAPI(

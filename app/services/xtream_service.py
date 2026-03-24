@@ -1,9 +1,13 @@
+import asyncio
 import logging
 from typing import Any, Optional
 
 import httpx
 
 logger = logging.getLogger("plexhub.xtream")
+
+_RETRY_DELAYS = (1, 2, 4)  # Exponential backoff: 1s, 2s, 4s
+_RETRYABLE = (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError)
 
 
 class XtreamService:
@@ -50,9 +54,25 @@ class XtreamService:
         params.update(extra_params)
 
         url = self._api_url(base_url, port)
-        resp = await client.get(url, params=params)
-        resp.raise_for_status()
-        return resp.json()
+        last_exc: Exception | None = None
+        for attempt, delay in enumerate((*_RETRY_DELAYS, None)):
+            try:
+                resp = await client.get(url, params=params)
+                resp.raise_for_status()
+                return resp.json()
+            except _RETRYABLE as e:
+                last_exc = e
+                if delay is not None:
+                    logger.warning(f"Xtream API {action} attempt {attempt+1} failed ({e}), retrying in {delay}s")
+                    await asyncio.sleep(delay)
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code in (429, 502, 503, 504) and delay is not None:
+                    last_exc = e
+                    logger.warning(f"Xtream API {action} got {e.response.status_code}, retrying in {delay}s")
+                    await asyncio.sleep(delay)
+                else:
+                    raise
+        raise last_exc  # type: ignore[misc]
 
     async def authenticate(self, account_or_url, port: int = None, username: str = None, password: str = None) -> dict[str, Any]:
         """Authenticate and get account info. Accepts account object or individual params."""

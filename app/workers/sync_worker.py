@@ -785,7 +785,7 @@ async def sync_account(account_id: str):
                         logger.error(f"Failed to process VOD item {index}: {e}", exc_info=True)
                         return None
 
-            # Process only changed items in batches
+            # Process only changed items in batches (with savepoints for resilience)
             vod_rows = []
             batch_size = 100
 
@@ -796,11 +796,17 @@ async def sync_account(account_id: str):
                 batch_fetch_start = now_ms()
                 tasks = [fetch_vod_info_safe(dto, idx, dh) for dto, idx, dh in batch]
                 batch_rows = [r for r in await asyncio.gather(*tasks) if r is not None]
-                vod_rows.extend(batch_rows)
                 batch_fetch_time = now_ms() - batch_fetch_start
 
-                await upsert_media_batch(db, batch_rows)
-                await db.commit()
+                try:
+                    async with db.begin_nested():  # SAVEPOINT
+                        await upsert_media_batch(db, batch_rows)
+                    vod_rows.extend(batch_rows)
+                    await db.commit()
+                except Exception as e:
+                    logger.error(f"VOD batch {batch_start}-{batch_end} failed, rolling back: {e}")
+                    await db.rollback()
+                    continue  # Skip this batch, continue with next
 
                 logger.info(f"VOD batch {batch_end}/{len(items_to_fetch)} synced "
                            f"({len(batch_rows)} items in {batch_fetch_time}ms)")
@@ -937,10 +943,15 @@ async def sync_account(account_id: str):
 
                 episode_batch = [ep for result in batch_results for ep in result]
                 if episode_batch:
-                    await upsert_media_batch(db, episode_batch)
-                    await db.commit()
-                    episode_count += len(episode_batch)
-                    logger.info(f"Synced {episode_count} episodes ({batch_end}/{len(changed_series_dtos)} changed series)")
+                    try:
+                        async with db.begin_nested():  # SAVEPOINT
+                            await upsert_media_batch(db, episode_batch)
+                        await db.commit()
+                        episode_count += len(episode_batch)
+                        logger.info(f"Synced {episode_count} episodes ({batch_end}/{len(changed_series_dtos)} changed series)")
+                    except Exception as e:
+                        logger.error(f"Episode batch {batch_start}-{batch_end} failed, rolling back: {e}")
+                        await db.rollback()
 
             total_synced += episode_count
             logger.info(f"Synced {episode_count} episodes")
@@ -1006,8 +1017,13 @@ async def sync_account(account_id: str):
                 batch_size = 200
                 for batch_start in range(0, len(live_rows), batch_size):
                     batch = live_rows[batch_start:batch_start + batch_size]
-                    await upsert_live_channels_batch(db, batch)
-                    await db.commit()
+                    try:
+                        async with db.begin_nested():
+                            await upsert_live_channels_batch(db, batch)
+                        await db.commit()
+                    except Exception as e:
+                        logger.error(f"Live batch {batch_start} failed, rolling back: {e}")
+                        await db.rollback()
 
             if filter_mode_live == "all" and all_live_ids:
                 await differential_cleanup_live(db, server_id, all_live_ids)

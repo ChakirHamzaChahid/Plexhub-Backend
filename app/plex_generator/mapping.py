@@ -59,21 +59,26 @@ class MappingStore:
     def save(self) -> None:
         self._file.parent.mkdir(parents=True, exist_ok=True)
         tmp = self._file.with_suffix(".tmp")
-        # Stream JSON to file instead of building a huge string in memory
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write("{")
-            for i, (k, v) in enumerate(self._data.items()):
-                if i > 0:
-                    f.write(",")
-                json.dump(k, f, ensure_ascii=False)
-                f.write(":")
-                json.dump(v.to_dict(), f, ensure_ascii=False)
-            f.write("}")
-        # Atomic rename (on Windows, need to remove target first)
-        if os.name == "nt" and self._file.exists():
-            self._file.unlink()
-        tmp.rename(self._file)
-        logger.info(f"Saved mapping with {len(self._data)} entries")
+        try:
+            # Stream JSON to file instead of building a huge string in memory
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write("{")
+                for i, (k, v) in enumerate(self._data.items()):
+                    if i > 0:
+                        f.write(",")
+                    json.dump(k, f, ensure_ascii=False)
+                    f.write(":")
+                    json.dump(v.to_dict(), f, ensure_ascii=False)
+                f.write("}")
+                f.flush()
+                os.fsync(f.fileno())  # Ensure data is on disk before rename
+            # Atomic rename — on POSIX this overwrites atomically (no unlink needed)
+            os.replace(str(tmp), str(self._file))
+            logger.info(f"Saved mapping with {len(self._data)} entries")
+        except Exception:
+            # Clean up temp file on failure, preserve existing mapping
+            tmp.unlink(missing_ok=True)
+            raise
 
     def get(self, source_id: str) -> MappingEntry | None:
         return self._data.get(source_id)

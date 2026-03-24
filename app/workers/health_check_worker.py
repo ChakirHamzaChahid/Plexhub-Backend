@@ -72,7 +72,8 @@ async def run():
                     is_broken = resp.status_code >= 400
                 except (httpx.TimeoutException, httpx.ConnectError):
                     is_broken = True
-                except Exception:
+                except Exception as e:
+                    logger.warning(f"Health check error for {item.rating_key}: {e}")
                     is_broken = True
 
                 await db.execute(

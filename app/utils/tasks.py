@@ -28,3 +28,18 @@ def _task_done(task: asyncio.Task) -> None:
             f"Background task failed: {task.get_name()}: {exc}",
             exc_info=exc,
         )
+
+
+async def cancel_all_background_tasks(timeout: float = 10.0) -> None:
+    """Cancel all background tasks and wait for them to finish (graceful shutdown)."""
+    if not _background_tasks:
+        return
+    logger.info(f"Cancelling {len(_background_tasks)} background tasks...")
+    for task in list(_background_tasks):
+        task.cancel()
+    results = await asyncio.gather(*list(_background_tasks), return_exceptions=True)
+    for r in results:
+        if isinstance(r, Exception) and not isinstance(r, asyncio.CancelledError):
+            logger.warning(f"Background task raised during shutdown: {r}")
+    _background_tasks.clear()
+    logger.info("All background tasks cancelled")

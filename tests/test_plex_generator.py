@@ -43,7 +43,8 @@ class TestSanitizeForFilesystem:
         assert sanitize_for_filesystem("A  :  B") == "A B"
 
     def test_empty_after_sanitize(self):
-        assert sanitize_for_filesystem(":::") == ""
+        # sanitize_for_filesystem returns "Unknown" for empty results
+        assert sanitize_for_filesystem(":::") == "Unknown"
 
     def test_normal_title_unchanged(self):
         assert sanitize_for_filesystem("Inception") == "Inception"

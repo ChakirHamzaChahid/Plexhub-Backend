@@ -67,6 +67,9 @@ class DatabaseSource(MediaSource):
                     imdb_id=row.imdb_id,
                     tmdb_id=int(row.tmdb_id) if row.tmdb_id and str(row.tmdb_id).isdigit() else None,
                     content_rating=row.content_rating,
+                    rating=row.display_rating if row.display_rating else row.scraped_rating,
+                    duration_ms=row.duration,
+                    cast=row.cast,
                 ))
 
             logger.info(f"Loaded {len(movies)} movies from database")
@@ -122,6 +125,8 @@ class DatabaseSource(MediaSource):
                         title=ep.title,
                         stream_url=url,
                         summary=ep.summary,
+                        duration_ms=ep.duration,
+                        thumb_url=ep.resolved_thumb_url or ep.thumb_url,
                     ))
 
                 if not plex_episodes:
@@ -137,6 +142,9 @@ class DatabaseSource(MediaSource):
                     summary=show.summary,
                     imdb_id=show.imdb_id,
                     tmdb_id=int(show.tmdb_id) if show.tmdb_id and str(show.tmdb_id).isdigit() else None,
+                    content_rating=show.content_rating,
+                    rating=show.display_rating if show.display_rating else show.scraped_rating,
+                    cast=show.cast,
                     episodes=plex_episodes,
                 ))
 

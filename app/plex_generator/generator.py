@@ -10,11 +10,12 @@ from app.plex_generator.naming import (
     movie_poster_path,
     movie_fanart_path,
     series_episode_path,
+    series_episode_nfo_path,
     series_nfo_path,
     series_poster_path,
     series_fanart_path,
 )
-from app.plex_generator.nfo_builder import build_movie_nfo, build_tvshow_nfo
+from app.plex_generator.nfo_builder import build_movie_nfo, build_tvshow_nfo, build_episode_nfo
 from app.plex_generator.source import MediaSource
 from app.plex_generator.storage import LibraryStorage
 
@@ -175,6 +176,8 @@ class PlexLibraryGenerator:
 
         if existing is None:
             self.storage.write_strm(expected_path, ep.stream_url)
+            if not self.strm_only:
+                self._write_episode_metadata(ep)
             self.mapping.set(ep.source_id, expected_path, ep.stream_url)
             report.created += 1
             logger.debug(f"Created: {expected_path}")
@@ -183,6 +186,8 @@ class PlexLibraryGenerator:
             self.storage.delete_file(existing.path)
             self.storage.cleanup_empty_dirs(existing.path)
             self.storage.write_strm(expected_path, ep.stream_url)
+            if not self.strm_only:
+                self._write_episode_metadata(ep)
             self.mapping.set(ep.source_id, expected_path, ep.stream_url)
             report.updated += 1
             logger.debug(f"Moved: {existing.path} -> {expected_path}")
@@ -195,6 +200,13 @@ class PlexLibraryGenerator:
 
         else:
             report.unchanged += 1
+
+    def _write_episode_metadata(self, ep) -> None:
+        nfo = build_episode_nfo(ep)
+        self.storage.write_file(
+            series_episode_nfo_path(ep.series_title, ep.season_num, ep.episode_num),
+            nfo,
+        )
 
     def _write_series_metadata(self, series: PlexSeries) -> None:
         nfo = build_tvshow_nfo(series)

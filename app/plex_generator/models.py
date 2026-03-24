@@ -13,6 +13,9 @@ class PlexMovie(BaseModel):
     imdb_id: str | None = None
     tmdb_id: int | None = None
     content_rating: str | None = None
+    rating: float | None = None
+    duration_ms: int | None = None
+    cast: str | None = None  # comma-separated actor names
 
 
 class PlexEpisode(BaseModel):
@@ -23,6 +26,8 @@ class PlexEpisode(BaseModel):
     title: str | None = None
     stream_url: str
     summary: str | None = None
+    duration_ms: int | None = None
+    thumb_url: str | None = None
 
 
 class PlexSeries(BaseModel):
@@ -35,6 +40,9 @@ class PlexSeries(BaseModel):
     summary: str | None = None
     imdb_id: str | None = None
     tmdb_id: int | None = None
+    content_rating: str | None = None
+    rating: float | None = None
+    cast: str | None = None  # comma-separated actor names
     episodes: list[PlexEpisode] = []
 
 

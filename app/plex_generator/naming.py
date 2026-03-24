@@ -70,6 +70,19 @@ def series_episode_path(
     return f"Series/{safe_title}/{season_str}/{ep_str}.strm"
 
 
+def series_episode_nfo_path(
+    series_title: str, season: int, episode: int,
+) -> str:
+    """Relative path for an episode .nfo file.
+
+    Example: Series/The Last of Us/Season 01/The Last of Us S01E01.nfo
+    """
+    safe_title = _series_folder(series_title)
+    season_str = f"Season {season:02d}"
+    ep_str = f"{safe_title} S{season:02d}E{episode:02d}"
+    return f"Series/{safe_title}/{season_str}/{ep_str}.nfo"
+
+
 def series_nfo_path(series_title: str) -> str:
     """Relative path for a series NFO file."""
     safe_title = _series_folder(series_title)

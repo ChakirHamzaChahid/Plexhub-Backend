@@ -123,20 +123,32 @@ class TMDBService:
         results = data.get("results", [])
         return self._best_match(results, title, year, title_key="name", date_key="first_air_date")
 
-    async def get_movie_details(self, tmdb_id: int) -> TMDBEnrichmentData:
+    async def get_movie_details(self, tmdb_id: int) -> TMDBEnrichmentData | None:
         """Fetch movie details + external_ids in a single API call."""
-        data = await self._request(
-            f"/movie/{tmdb_id}",
-            params={"append_to_response": "credits,external_ids", "language": settings.TMDB_LANGUAGE},
-        )
+        try:
+            data = await self._request(
+                f"/movie/{tmdb_id}",
+                params={"append_to_response": "credits,external_ids", "language": settings.TMDB_LANGUAGE},
+            )
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                logger.debug(f"TMDB movie {tmdb_id} not found (404)")
+                return None
+            raise
         return self._parse_details(data, tmdb_id, date_key="release_date")
 
-    async def get_tv_details(self, tmdb_id: int) -> TMDBEnrichmentData:
+    async def get_tv_details(self, tmdb_id: int) -> TMDBEnrichmentData | None:
         """Fetch TV details + external_ids in a single API call."""
-        data = await self._request(
-            f"/tv/{tmdb_id}",
-            params={"append_to_response": "credits,external_ids", "language": settings.TMDB_LANGUAGE},
-        )
+        try:
+            data = await self._request(
+                f"/tv/{tmdb_id}",
+                params={"append_to_response": "credits,external_ids", "language": settings.TMDB_LANGUAGE},
+            )
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                logger.debug(f"TMDB TV {tmdb_id} not found (404)")
+                return None
+            raise
         return self._parse_details(data, tmdb_id, date_key="first_air_date")
 
     def _parse_details(self, data: dict, tmdb_id: int, date_key: str) -> TMDBEnrichmentData:

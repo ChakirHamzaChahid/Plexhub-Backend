@@ -38,7 +38,9 @@ async def _fetch_movie_data(item, semaphore):
                 tmdb_id = int(existing_tmdb) if str(existing_tmdb).isdigit() else None
                 if tmdb_id:
                     details = await tmdb_service.get_movie_details(tmdb_id)
-                    return item, details, 1.0, 1
+                    if details:
+                        return item, details, 1.0, 1
+                    return item, None, None, 1
                 return item, None, None, 0
 
             # Scenario 3: IMDB present, TMDB absent — keep IMDB, skip search
@@ -50,7 +52,9 @@ async def _fetch_movie_data(item, semaphore):
                 match = await tmdb_service.search_movie(item.title, item.year)
                 if match and match.confidence >= 0.85:
                     details = await tmdb_service.get_movie_details(match.tmdb_id)
-                    return item, details, match.confidence, 2
+                    if details:
+                        return item, details, match.confidence, 2
+                    return item, None, None, 2
                 return item, None, None, 1  # search call used, no match
 
             return item, None, None, 0
@@ -74,7 +78,9 @@ async def _fetch_series_data(item, semaphore):
                 tmdb_id = int(existing_tmdb) if str(existing_tmdb).isdigit() else None
                 if tmdb_id:
                     details = await tmdb_service.get_tv_details(tmdb_id)
-                    return item, details, 1.0, 1
+                    if details:
+                        return item, details, 1.0, 1
+                    return item, None, None, 1
                 return item, None, None, 0
 
             # Scenario 3: IMDB present, TMDB absent — keep IMDB
@@ -86,7 +92,9 @@ async def _fetch_series_data(item, semaphore):
                 match = await tmdb_service.search_tv(item.title, item.year)
                 if match and match.confidence >= 0.85:
                     details = await tmdb_service.get_tv_details(match.tmdb_id)
-                    return item, details, match.confidence, 2
+                    if details:
+                        return item, details, match.confidence, 2
+                    return item, None, None, 2
                 return item, None, None, 1
 
             return item, None, None, 0

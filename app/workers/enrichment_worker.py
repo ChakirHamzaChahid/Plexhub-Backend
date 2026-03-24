@@ -11,8 +11,8 @@ from app.utils.time import now_ms
 
 logger = logging.getLogger("plexhub.enrichment")
 
-BATCH_SIZE = 50  # Commit every N items
-CONCURRENCY = 5  # Parallel TMDB requests
+BATCH_SIZE = 200  # Commit every N items
+CONCURRENCY = 30  # Parallel TMDB requests (~30 req/s)
 
 
 async def _fetch_movie_data(item, semaphore):

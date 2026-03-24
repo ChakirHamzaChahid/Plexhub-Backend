@@ -59,12 +59,16 @@ class MappingStore:
     def save(self) -> None:
         self._file.parent.mkdir(parents=True, exist_ok=True)
         tmp = self._file.with_suffix(".tmp")
-        content = json.dumps(
-            {k: v.to_dict() for k, v in self._data.items()},
-            indent=2,
-            ensure_ascii=False,
-        )
-        tmp.write_text(content, encoding="utf-8")
+        # Stream JSON to file instead of building a huge string in memory
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write("{")
+            for i, (k, v) in enumerate(self._data.items()):
+                if i > 0:
+                    f.write(",")
+                json.dump(k, f, ensure_ascii=False)
+                f.write(":")
+                json.dump(v.to_dict(), f, ensure_ascii=False)
+            f.write("}")
         # Atomic rename (on Windows, need to remove target first)
         if os.name == "nt" and self._file.exists():
             self._file.unlink()

@@ -357,19 +357,17 @@ def _compute_live_dto_hash(dto: dict) -> str:
 
 
 async def upsert_live_channels_batch(db, rows: list[dict]):
-    """Bulk upsert live channel rows."""
+    """Bulk upsert live channel rows using multi-row INSERT."""
     if not rows:
         return
-    for row in rows:
-        stmt = sqlite_upsert(LiveChannel).values(**row)
-        update_fields = {
-            k: v for k, v in row.items()
-            if k not in ("stream_id", "server_id")
-        }
+    update_keys = [k for k in rows[0] if k not in ("stream_id", "server_id")]
+    for i in range(0, len(rows), 200):
+        chunk = rows[i:i + 200]
+        stmt = sqlite_upsert(LiveChannel).values(chunk)
         stmt = stmt.on_conflict_do_update(
             index_elements=["stream_id", "server_id"],
-            set_=update_fields,
-            where=LiveChannel.dto_hash != row.get("dto_hash"),
+            set_={k: stmt.excluded[k] for k in update_keys},
+            where=LiveChannel.dto_hash != stmt.excluded.dto_hash,
         )
         await db.execute(stmt)
 
@@ -432,7 +430,11 @@ def _compute_content_hash(row: dict) -> str:
 
 
 async def upsert_media_batch(db, rows: list[dict]):
-    """Bulk upsert media rows, skipping UPDATE when content unchanged."""
+    """Bulk upsert media rows, skipping UPDATE when content unchanged.
+
+    Uses chunked multi-row INSERT..ON CONFLICT for much better throughput
+    than row-by-row execution.
+    """
     if not rows:
         return
 
@@ -441,11 +443,14 @@ async def upsert_media_batch(db, rows: list[dict]):
         row["content_hash"] = _compute_content_hash(row)
 
     logger.debug(f"Upserting {len(rows)} media items to database")
+
+    # Phase 1: Batch evict shifted pagination slots (one DELETE per chunk)
+    # Group by (server_id, library_section_id) to batch efficiently
+    from sqlalchemy import or_, and_, tuple_
+    eviction_conditions = []
     for row in rows:
-        # Evict any existing row occupying the same pagination slot
-        # but with a different rating_key (content shifted position)
-        await db.execute(
-            delete(Media).where(
+        eviction_conditions.append(
+            and_(
                 Media.server_id == row["server_id"],
                 Media.library_section_id == row["library_section_id"],
                 Media.filter == row["filter"],
@@ -454,56 +459,64 @@ async def upsert_media_batch(db, rows: list[dict]):
                 Media.rating_key != row["rating_key"],
             )
         )
-        stmt = sqlite_upsert(Media).values(**row)
-        update_fields = {
-            k: v for k, v in row.items()
-            if k not in ("rating_key", "server_id", "filter", "sort_order",
-                         "view_offset", "view_count", "last_viewed_at")
-        }
+    # Execute evictions in chunks to stay within SQLite limits
+    chunk_size = 50  # Each condition has ~6 bind vars → 50 × 6 = 300 < 999
+    for i in range(0, len(eviction_conditions), chunk_size):
+        chunk = eviction_conditions[i:i + chunk_size]
+        await db.execute(delete(Media).where(or_(*chunk)))
+
+    # Phase 2: Multi-row INSERT..ON CONFLICT in chunks
+    _SKIP_UPDATE_KEYS = frozenset((
+        "rating_key", "server_id", "filter", "sort_order",
+        "view_offset", "view_count", "last_viewed_at",
+    ))
+    # Build update_fields from first row's keys (all rows share the same schema)
+    update_keys = [k for k in rows[0] if k not in _SKIP_UPDATE_KEYS]
+
+    for i in range(0, len(rows), 100):
+        chunk = rows[i:i + 100]
+        stmt = sqlite_upsert(Media).values(chunk)
         stmt = stmt.on_conflict_do_update(
             index_elements=["rating_key", "server_id", "filter", "sort_order"],
-            set_=update_fields,
-            where=Media.content_hash != row["content_hash"],
+            set_={k: stmt.excluded[k] for k in update_keys},
+            where=Media.content_hash != stmt.excluded.content_hash,
         )
         await db.execute(stmt)
 
 
 async def enqueue_for_enrichment(db, rows: list[dict]):
-    """Insert items into enrichment_queue if either tmdb_id or imdb_id is missing.
-
-    Saves existing IDs to enable optimized enrichment that only fetches missing data.
-    """
+    """Bulk insert items into enrichment_queue if either tmdb_id or imdb_id is missing."""
+    ts = now_ms()
+    to_enqueue = []
     for row in rows:
         if row["type"] not in ("movie", "show"):
             continue
-        
-        # Get existing IDs
         existing_tmdb = row.get("tmdb_id")
         existing_imdb = row.get("imdb_id")
-        
-        # Skip only if BOTH IDs are present
         if existing_tmdb and existing_imdb:
             continue
-        
-        # Enqueue with existing IDs saved
-        stmt = sqlite_upsert(EnrichmentQueue).values(
-            rating_key=row["rating_key"],
-            server_id=row["server_id"],
-            media_type=row["type"],
-            title=row["title"],
-            year=row.get("year"),
-            status="pending",
-            attempts=0,
-            created_at=now_ms(),
-            existing_tmdb_id=existing_tmdb,
-            existing_imdb_id=existing_imdb,
-        )
+        to_enqueue.append({
+            "rating_key": row["rating_key"],
+            "server_id": row["server_id"],
+            "media_type": row["type"],
+            "title": row["title"],
+            "year": row.get("year"),
+            "status": "pending",
+            "attempts": 0,
+            "created_at": ts,
+            "existing_tmdb_id": existing_tmdb,
+            "existing_imdb_id": existing_imdb,
+        })
+
+    for i in range(0, len(to_enqueue), 200):
+        chunk = to_enqueue[i:i + 200]
+        stmt = sqlite_upsert(EnrichmentQueue).values(chunk)
         stmt = stmt.on_conflict_do_update(
             index_elements=["rating_key", "server_id"],
             set_={
-                "status": "pending",
-                "existing_tmdb_id": existing_tmdb,
-                "existing_imdb_id": existing_imdb,
+                "status": stmt.excluded.status,
+                "existing_tmdb_id": stmt.excluded.existing_tmdb_id,
+                "existing_imdb_id": stmt.excluded.existing_imdb_id,
             }
         )
         await db.execute(stmt)
@@ -630,73 +643,44 @@ async def _refresh_categories(db, account, account_id: str):
         return
 
     now = now_ms()
-    count = 0
 
-    for cat in live_cats:
-        if not isinstance(cat, dict):
-            continue
-        cat_id = str(cat.get("category_id", ""))
-        cat_name = cat.get("category_name", "Unknown")
-        if not cat_id:
-            continue
-        stmt = sqlite_upsert(XtreamCategory).values(
-            account_id=account_id,
-            category_id=cat_id,
-            category_type="live",
-            category_name=cat_name,
-            is_allowed=True,
-            last_fetched_at=now,
-        )
+    def _prepare_cat_rows(cats: list, cat_type: str) -> list[dict]:
+        rows = []
+        for cat in cats:
+            if not isinstance(cat, dict):
+                continue
+            cat_id = str(cat.get("category_id", ""))
+            cat_name = cat.get("category_name", "Unknown")
+            if not cat_id:
+                continue
+            rows.append({
+                "account_id": account_id,
+                "category_id": cat_id,
+                "category_type": cat_type,
+                "category_name": cat_name,
+                "is_allowed": True,
+                "last_fetched_at": now,
+            })
+        return rows
+
+    all_cat_rows = (
+        _prepare_cat_rows(live_cats, "live")
+        + _prepare_cat_rows(vod_cats, "vod")
+        + _prepare_cat_rows(series_cats, "series")
+    )
+    count = len(all_cat_rows)
+
+    for i in range(0, count, 200):
+        chunk = all_cat_rows[i:i + 200]
+        stmt = sqlite_upsert(XtreamCategory).values(chunk)
         stmt = stmt.on_conflict_do_update(
             index_elements=["account_id", "category_id", "category_type"],
-            set_={"category_name": cat_name, "last_fetched_at": now},
+            set_={
+                "category_name": stmt.excluded.category_name,
+                "last_fetched_at": stmt.excluded.last_fetched_at,
+            },
         )
         await db.execute(stmt)
-        count += 1
-
-    for cat in vod_cats:
-        if not isinstance(cat, dict):
-            continue
-        cat_id = str(cat.get("category_id", ""))
-        cat_name = cat.get("category_name", "Unknown")
-        if not cat_id:
-            continue
-        stmt = sqlite_upsert(XtreamCategory).values(
-            account_id=account_id,
-            category_id=cat_id,
-            category_type="vod",
-            category_name=cat_name,
-            is_allowed=True,
-            last_fetched_at=now,
-        )
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["account_id", "category_id", "category_type"],
-            set_={"category_name": cat_name, "last_fetched_at": now},
-        )
-        await db.execute(stmt)
-        count += 1
-
-    for cat in series_cats:
-        if not isinstance(cat, dict):
-            continue
-        cat_id = str(cat.get("category_id", ""))
-        cat_name = cat.get("category_name", "Unknown")
-        if not cat_id:
-            continue
-        stmt = sqlite_upsert(XtreamCategory).values(
-            account_id=account_id,
-            category_id=cat_id,
-            category_type="series",
-            category_name=cat_name,
-            is_allowed=True,
-            last_fetched_at=now,
-        )
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["account_id", "category_id", "category_type"],
-            set_={"category_name": cat_name, "last_fetched_at": now},
-        )
-        await db.execute(stmt)
-        count += 1
 
     await db.commit()
     logger.info(f"Refreshed {count} categories for account {account_id} "
@@ -781,8 +765,8 @@ async def sync_account(account_id: str):
             skipped_vod = len(all_vod_keys) - len(items_to_fetch)
             logger.info(f"VOD: {len(items_to_fetch)} new/changed, {skipped_vod} unchanged (skipping API calls)")
 
-            # Parallel fetch with semaphore
-            semaphore = asyncio.Semaphore(10)
+            # Parallel fetch with semaphore (25 concurrent Xtream requests)
+            semaphore = asyncio.Semaphore(25)
 
             async def fetch_vod_info_safe(dto, index, dto_hash):
                 """Fetch vod_info with concurrency control."""
@@ -791,7 +775,6 @@ async def sync_account(account_id: str):
                         vod_info = None
                         try:
                             vod_info = await xtream_service.get_vod_info(account, vod_id=dto["stream_id"])
-                            await asyncio.sleep(0.05)
                         except Exception as e:
                             logger.warning(f"Failed to fetch vod_info for stream {dto.get('stream_id')}: {e}")
                         row = map_vod_to_media(dto, account_id, index, vod_info)

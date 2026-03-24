@@ -46,12 +46,11 @@ class DatabaseSource(MediaSource):
                     Media.server_id == self.server_id,
                     Media.type == "movie",
                     Media.is_in_allowed_categories == True,
-                )
+                ).execution_options(yield_per=1000)
             )
-            rows = result.scalars().all()
 
             movies = []
-            for row in rows:
+            for row in result.scalars():
                 url = build_stream_url(account, row.rating_key)
                 if not url:
                     continue
@@ -88,22 +87,19 @@ class DatabaseSource(MediaSource):
                     Media.server_id == self.server_id,
                     Media.type == "show",
                     Media.is_in_allowed_categories == True,
-                )
+                ).execution_options(yield_per=1000)
             )
-            shows = show_result.scalars().all()
+            shows = list(show_result.scalars())
 
-            # Load all episodes for this server
+            # Load all episodes and group by series in a single streaming pass
             ep_result = await db.execute(
                 select(Media).where(
                     Media.server_id == self.server_id,
                     Media.type == "episode",
-                )
+                ).execution_options(yield_per=1000)
             )
-            all_episodes = ep_result.scalars().all()
-
-            # Group episodes by grandparent_rating_key (series)
             episodes_by_series: dict[str, list[Media]] = {}
-            for ep in all_episodes:
+            for ep in ep_result.scalars():
                 key = ep.grandparent_rating_key or ""
                 episodes_by_series.setdefault(key, []).append(ep)
 

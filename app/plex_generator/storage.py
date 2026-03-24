@@ -1,10 +1,27 @@
 import logging
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import httpx
 
 logger = logging.getLogger("plexhub.plex_generator.storage")
+
+# Shared thread pool for image downloads (avoids creating a pool per image)
+_image_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="img-dl")
+# Shared httpx client for image downloads (connection reuse across threads)
+_image_http_client: httpx.Client | None = None
+
+
+def _get_image_client() -> httpx.Client:
+    global _image_http_client
+    if _image_http_client is None or _image_http_client.is_closed:
+        _image_http_client = httpx.Client(
+            timeout=15.0,
+            follow_redirects=True,
+            limits=httpx.Limits(max_connections=12, max_keepalive_connections=8),
+        )
+    return _image_http_client
 
 
 class LibraryStorage(ABC):
@@ -56,32 +73,18 @@ class LocalStorage(LibraryStorage):
             return True  # Preserve existing image (e.g. enriched by Tiny Media Manager)
         full.parent.mkdir(parents=True, exist_ok=True)
         try:
-            # Run HTTP download in a thread to avoid blocking the async event loop.
-            # When called from sync context, this falls back to a regular sync call.
-            import asyncio
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
-
-            if loop and loop.is_running():
-                # We're inside an async event loop — offload to thread pool
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                    future = pool.submit(self._download_sync, full, image_url)
-                    return future.result(timeout=20.0)
-            else:
-                return self._download_sync(full, image_url)
+            future = _image_pool.submit(self._download_sync, full, image_url)
+            return future.result(timeout=20.0)
         except Exception as e:
             logger.debug(f"Failed to download image {image_url}: {e}")
             return False
 
     @staticmethod
     def _download_sync(full: Path, image_url: str) -> bool:
-        with httpx.Client(timeout=15.0, follow_redirects=True) as client:
-            resp = client.get(image_url)
-            resp.raise_for_status()
-            full.write_bytes(resp.content)
+        client = _get_image_client()
+        resp = client.get(image_url)
+        resp.raise_for_status()
+        full.write_bytes(resp.content)
         return True
 
     def delete_file(self, rel_path: str) -> None:

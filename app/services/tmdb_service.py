@@ -47,6 +47,11 @@ class TMDBService:
             self._client = httpx.AsyncClient(
                 timeout=10.0,
                 params={"api_key": settings.TMDB_API_KEY},
+                limits=httpx.Limits(
+                    max_connections=50,
+                    max_keepalive_connections=35,
+                    keepalive_expiry=30,
+                ),
             )
         return self._client
 

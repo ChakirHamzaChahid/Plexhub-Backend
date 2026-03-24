@@ -14,7 +14,14 @@ class XtreamService:
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=30.0)
+            self._client = httpx.AsyncClient(
+                timeout=30.0,
+                limits=httpx.Limits(
+                    max_connections=50,
+                    max_keepalive_connections=30,
+                    keepalive_expiry=30,
+                ),
+            )
         return self._client
 
     async def close(self):

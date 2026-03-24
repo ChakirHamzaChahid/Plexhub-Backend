@@ -41,6 +41,8 @@ async def init_db():
         await conn.execute(text("PRAGMA synchronous=NORMAL"))
         await conn.execute(text("PRAGMA cache_size=-64000"))  # 64MB cache
         await conn.execute(text("PRAGMA temp_store=MEMORY"))
+        await conn.execute(text("PRAGMA busy_timeout=5000"))  # Wait 5s on lock instead of failing
+        await conn.execute(text("PRAGMA mmap_size=268435456"))  # 256MB mmap for read perf
         await conn.run_sync(Base.metadata.create_all)
 
     # Run migrations after tables are created

@@ -140,6 +140,74 @@ class XtreamCategory(Base):
     )
 
 
+class LiveChannel(Base):
+    __tablename__ = "live_channels"
+
+    # Composite Primary Key
+    stream_id = Column(Integer, primary_key=True)
+    server_id = Column(Text, primary_key=True)  # "xtream_{account_id}"
+
+    # Core metadata
+    name = Column(Text, nullable=False)
+    name_sortable = Column(Text, nullable=False, default="")
+    stream_icon = Column(Text)  # channel logo URL
+    epg_channel_id = Column(Text)  # EPG mapping ID
+    category_id = Column(Text)  # Xtream category_id
+
+    # Stream info
+    container_extension = Column(Text, default="ts")  # ts, m3u8
+    custom_sid = Column(Text)  # custom service ID
+
+    # Catchup / TV Archive
+    tv_archive = Column(Boolean, nullable=False, default=False)
+    tv_archive_duration = Column(Integer, nullable=False, default=0)  # days
+
+    # Content flags
+    is_adult = Column(Boolean, nullable=False, default=False)
+
+    # Status
+    is_active = Column(Boolean, nullable=False, default=True)
+    is_in_allowed_categories = Column(Boolean, nullable=False, default=True)
+
+    # Sync tracking
+    added_at = Column(BigInteger, nullable=False, default=0)
+    updated_at = Column(BigInteger, nullable=False, default=0)
+    dto_hash = Column(Text)  # for incremental sync
+
+    __table_args__ = (
+        Index("ix_live_channels_server", "server_id"),
+        Index("ix_live_channels_category", "category_id"),
+        Index("ix_live_channels_epg", "epg_channel_id"),
+        Index("ix_live_channels_name", "name_sortable"),
+        Index("ix_live_channels_visible", "is_in_allowed_categories"),
+    )
+
+
+class EpgEntry(Base):
+    __tablename__ = "epg_entries"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    server_id = Column(Text, nullable=False)
+    epg_channel_id = Column(Text, nullable=False)  # maps to LiveChannel.epg_channel_id
+    stream_id = Column(Integer)  # maps to LiveChannel.stream_id
+
+    title = Column(Text, nullable=False)
+    description = Column(Text)
+    start_time = Column(BigInteger, nullable=False)  # epoch ms
+    end_time = Column(BigInteger, nullable=False)  # epoch ms
+    lang = Column(Text)
+
+    # Sync tracking
+    fetched_at = Column(BigInteger, nullable=False, default=0)
+
+    __table_args__ = (
+        Index("ix_epg_channel", "epg_channel_id"),
+        Index("ix_epg_server", "server_id"),
+        Index("ix_epg_time", "start_time", "end_time"),
+        Index("ix_epg_stream", "stream_id"),
+    )
+
+
 class EnrichmentQueue(Base):
     __tablename__ = "enrichment_queue"
 

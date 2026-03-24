@@ -8,7 +8,7 @@ from sqlalchemy import select, delete, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_upsert
 
 from app.db.database import async_session_factory
-from app.models.database import Media, XtreamAccount, EnrichmentQueue
+from app.models.database import Media, XtreamAccount, EnrichmentQueue, LiveChannel
 from app.services.xtream_service import xtream_service
 from app.utils.string_normalizer import (
     parse_title_and_year,
@@ -303,6 +303,88 @@ def map_episode_to_media(
     }
 
 
+def map_live_stream_to_channel(dto: dict, account_id: str) -> dict:
+    """Map Xtream live stream DTO to live_channels row dict."""
+    from app.utils.string_normalizer import normalize_for_sorting
+
+    stream_id = dto["stream_id"]
+    name = dto.get("name") or "Unknown"
+    server_id = f"xtream_{account_id}"
+
+    return {
+        "stream_id": stream_id,
+        "server_id": server_id,
+        "name": name,
+        "name_sortable": normalize_for_sorting(name).lower(),
+        "stream_icon": dto.get("stream_icon"),
+        "epg_channel_id": dto.get("epg_channel_id") or None,
+        "category_id": str(dto.get("category_id", "")),
+        "container_extension": (dto.get("container_extension") or "ts").strip() or "ts",
+        "custom_sid": dto.get("custom_sid") or None,
+        "tv_archive": bool(dto.get("tv_archive", 0)),
+        "tv_archive_duration": int(dto.get("tv_archive_duration") or 0),
+        "is_adult": bool(dto.get("is_adult", 0)),
+        "is_active": True,
+        "is_in_allowed_categories": True,
+        "added_at": int(dto.get("added") or 0) * 1000,
+        "updated_at": now_ms(),
+    }
+
+
+def _compute_live_dto_hash(dto: dict) -> str:
+    """Hash basic live stream DTO fields to detect changes."""
+    fields = {k: dto.get(k) for k in (
+        "name", "stream_icon", "epg_channel_id", "category_id",
+        "tv_archive", "tv_archive_duration", "is_adult",
+        "container_extension", "custom_sid",
+    )}
+    return hashlib.md5(json.dumps(fields, sort_keys=True, default=str).encode()).hexdigest()
+
+
+async def upsert_live_channels_batch(db, rows: list[dict]):
+    """Bulk upsert live channel rows."""
+    if not rows:
+        return
+    for row in rows:
+        stmt = sqlite_upsert(LiveChannel).values(**row)
+        update_fields = {
+            k: v for k, v in row.items()
+            if k not in ("stream_id", "server_id")
+        }
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["stream_id", "server_id"],
+            set_=update_fields,
+            where=LiveChannel.dto_hash != row.get("dto_hash"),
+        )
+        await db.execute(stmt)
+
+
+async def differential_cleanup_live(
+    db, server_id: str, api_stream_ids: set[int],
+):
+    """Remove DB live channels not present in the API response."""
+    result = await db.execute(
+        select(LiveChannel.stream_id).where(
+            LiveChannel.server_id == server_id,
+        )
+    )
+    existing_ids = {row[0] for row in result}
+    stale_ids = existing_ids - api_stream_ids
+
+    if stale_ids:
+        stale_list = list(stale_ids)
+        chunk_size = 500
+        for i in range(0, len(stale_list), chunk_size):
+            chunk = stale_list[i : i + chunk_size]
+            await db.execute(
+                delete(LiveChannel).where(
+                    LiveChannel.stream_id.in_(chunk),
+                    LiveChannel.server_id == server_id,
+                )
+            )
+        logger.info(f"Removed {len(stale_ids)} stale live channels from {server_id}")
+
+
 _HASH_EXCLUDE = {
     "rating_key", "server_id", "filter", "sort_order",
     "view_offset", "view_count", "last_viewed_at",
@@ -524,12 +606,35 @@ async def _refresh_categories(db, account, account_id: str):
     try:
         vod_cats = await xtream_service.get_vod_categories(account)
         series_cats = await xtream_service.get_series_categories(account)
+        live_cats = await xtream_service.get_live_categories(account)
     except Exception as e:
         logger.warning(f"Failed to fetch categories for account {account_id}: {e}")
         return
 
     now = now_ms()
     count = 0
+
+    for cat in live_cats:
+        if not isinstance(cat, dict):
+            continue
+        cat_id = str(cat.get("category_id", ""))
+        cat_name = cat.get("category_name", "Unknown")
+        if not cat_id:
+            continue
+        stmt = sqlite_upsert(XtreamCategory).values(
+            account_id=account_id,
+            category_id=cat_id,
+            category_type="live",
+            category_name=cat_name,
+            is_allowed=True,
+            last_fetched_at=now,
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["account_id", "category_id", "category_type"],
+            set_={"category_name": cat_name, "last_fetched_at": now},
+        )
+        await db.execute(stmt)
+        count += 1
 
     for cat in vod_cats:
         if not isinstance(cat, dict):
@@ -577,7 +682,7 @@ async def _refresh_categories(db, account, account_id: str):
 
     await db.commit()
     logger.info(f"Refreshed {count} categories for account {account_id} "
-                f"({len(vod_cats)} VOD, {len(series_cats)} Series)")
+                f"({len(live_cats)} Live, {len(vod_cats)} VOD, {len(series_cats)} Series)")
 
 
 async def sync_account(account_id: str):
@@ -835,6 +940,77 @@ async def sync_account(account_id: str):
 
             total_synced += episode_count
             logger.info(f"Synced {episode_count} episodes")
+
+            # --- Live Channels Sync (incremental) ---
+            logger.info(f"Syncing Live channels for account {account_id}")
+            try:
+                live_streams = await xtream_service.get_live_streams(account)
+            except Exception as e:
+                logger.error(f"Failed to fetch live streams: {e}")
+                live_streams = []
+
+            # Load category config for live
+            filter_mode_live, _, _ = await _load_category_config(db, account_id)
+            # Load live-specific allowed categories
+            from app.models.database import XtreamCategory
+            live_cat_result = await db.execute(
+                select(XtreamCategory).where(
+                    XtreamCategory.account_id == account_id,
+                    XtreamCategory.category_type == "live",
+                )
+            )
+            allowed_live = {
+                cat.category_id: cat.is_allowed
+                for cat in live_cat_result.scalars().all()
+            }
+
+            # Load existing live dto_hashes for incremental sync
+            hash_result = await db.execute(
+                select(LiveChannel.stream_id, LiveChannel.dto_hash).where(
+                    LiveChannel.server_id == server_id,
+                )
+            )
+            existing_live_hashes = {row[0]: row[1] for row in hash_result}
+
+            all_live_ids: set[int] = set()
+            live_rows = []
+            live_skipped = 0
+
+            for dto in live_streams:
+                if not isinstance(dto, dict):
+                    continue
+                stream_id = dto.get("stream_id")
+                if not stream_id:
+                    continue
+
+                category_id = str(dto.get("category_id", ""))
+                if not _should_sync_category(category_id, filter_mode_live, allowed_live):
+                    continue
+
+                all_live_ids.add(stream_id)
+
+                dto_hash = _compute_live_dto_hash(dto)
+                if existing_live_hashes.get(stream_id) == dto_hash:
+                    live_skipped += 1
+                    continue
+
+                row = map_live_stream_to_channel(dto, account_id)
+                row["dto_hash"] = dto_hash
+                live_rows.append(row)
+
+            if live_rows:
+                batch_size = 200
+                for batch_start in range(0, len(live_rows), batch_size):
+                    batch = live_rows[batch_start:batch_start + batch_size]
+                    await upsert_live_channels_batch(db, batch)
+                    await db.commit()
+
+            if filter_mode_live == "all" and all_live_ids:
+                await differential_cleanup_live(db, server_id, all_live_ids)
+
+            await db.commit()
+            total_synced += len(all_live_ids)
+            logger.info(f"Live sync: {len(live_rows)} updated, {live_skipped} unchanged, {len(all_live_ids)} total")
 
             # Recalculate visibility for ALL media based on category config
             from app.services.category_service import update_media_category_visibility

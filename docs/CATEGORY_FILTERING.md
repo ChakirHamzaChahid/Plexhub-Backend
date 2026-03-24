@@ -2,7 +2,7 @@
 
 ## Overview
 
-The PlexHub Backend now supports category-based filtering for Xtream IPTV content. This allows users to select which VOD and Series categories to sync, reducing database pollution and improving performance.
+The PlexHub Backend supports category-based filtering for Xtream IPTV content. This allows users to select which **VOD**, **Series**, and **Live TV** categories to sync, reducing database pollution and improving performance.
 
 ## Key Features
 
@@ -80,7 +80,7 @@ Fetches current categories from Xtream provider and updates the database.
 ### New Table: `xtream_categories`
 - `account_id`: Account identifier
 - `category_id`: Category ID from Xtream
-- `category_type`: "vod" or "series"
+- `category_type`: "vod", "series", or "live"
 - `category_name`: Human-readable name
 - `is_allowed`: Boolean flag for whitelist/blacklist
 - `last_fetched_at`: Timestamp of last fetch
@@ -92,6 +92,9 @@ Fetches current categories from Xtream provider and updates the database.
 
 **`media`**
 - Added `is_in_allowed_categories`: Boolean flag for visibility
+
+**`live_channels`** (new table)
+- `is_in_allowed_categories`: Boolean flag for visibility (same logic as media)
 
 **`enrichment_queue`**
 - Added `existing_tmdb_id`: TMDB ID present before enrichment
@@ -112,6 +115,14 @@ Fetches current categories from Xtream provider and updates the database.
 3. Skip series from disallowed categories
 4. Mark series and episodes as `is_in_allowed_categories=True`
 5. Episodes inherit parent series' category status
+
+### Live Channel Sync
+1. Load category configuration (mode + allowed live categories)
+2. Fetch live streams from Xtream (`get_live_streams`)
+3. Skip channels from disallowed categories
+4. Hash-based incremental sync (skip unchanged channels)
+5. Mark synced channels as `is_in_allowed_categories=True`
+6. Differential cleanup removes delisted channels (mode `all` only)
 
 ## Enrichment Optimization
 

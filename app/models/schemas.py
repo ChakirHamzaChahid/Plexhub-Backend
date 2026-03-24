@@ -206,6 +206,66 @@ class CategoryListResponse(BaseModel):
     filter_mode: str
 
 
+# --- Live Channel Schemas ---
+
+class LiveChannelResponse(BaseModel):
+    """Single live channel in camelCase for frontend consumption."""
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        from_attributes=True,
+    )
+
+    stream_id: int
+    server_id: str
+    name: str
+    name_sortable: str = ""
+    stream_icon: Optional[str] = None
+    epg_channel_id: Optional[str] = None
+    category_id: Optional[str] = None
+    container_extension: str = "ts"
+    custom_sid: Optional[str] = None
+    tv_archive: bool = False
+    tv_archive_duration: int = 0
+    is_adult: bool = False
+    is_active: bool = True
+    added_at: int = 0
+    updated_at: int = 0
+
+
+class LiveChannelListResponse(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    items: list[LiveChannelResponse]
+    total: int
+    has_more: bool
+
+
+class EpgEntryResponse(BaseModel):
+    """Single EPG entry in camelCase."""
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        from_attributes=True,
+    )
+
+    id: int
+    epg_channel_id: Optional[str] = None
+    stream_id: Optional[int] = None
+    title: str
+    description: Optional[str] = None
+    start_time: int
+    end_time: int
+    lang: Optional[str] = None
+
+
+class EpgListResponse(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    items: list[EpgEntryResponse]
+    total: int
+
+
 # --- Health Schemas ---
 
 class HealthResponse(BaseModel):

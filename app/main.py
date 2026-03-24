@@ -11,7 +11,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 
 from app.config import settings
 from app.db.database import init_db
-from app.api import accounts, categories, health, media, plex, stream, sync
+from app.api import accounts, categories, health, live, media, plex, stream, sync
 
 logger = logging.getLogger("plexhub")
 
@@ -267,6 +267,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.include_router(health.router, prefix="/api")
 app.include_router(accounts.router, prefix="/api")
 app.include_router(categories.router, prefix="/api")
+app.include_router(live.router, prefix="/api")
 app.include_router(media.router, prefix="/api")
 app.include_router(stream.router, prefix="/api")
 app.include_router(sync.router, prefix="/api")

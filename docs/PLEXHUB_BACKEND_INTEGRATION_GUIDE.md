@@ -18,7 +18,8 @@
 PlexHub Backend est un serveur **Python/FastAPI** qui :
 
 - Se connecte aux serveurs **Xtream Codes** (IPTV) via leurs API
-- Synchronise le catalogue complet (films, series, episodes) dans une base **SQLite** locale
+- Synchronise le catalogue complet (films, series, episodes, **chaines live**) dans une base **SQLite** locale
+- Gère le **guide de programmes** (EPG) avec cache et fetch on-demand
 - Enrichit les metadonnees via l'API **TMDB** (IDs IMDB, confiance du match)
 - Verifie periodiquement la sante des flux (streams casses)
 - Expose une **API REST** en camelCase consommable par l'app Android
@@ -45,7 +46,7 @@ PlexHub Backend est un serveur **Python/FastAPI** qui :
 
 | Composant | Role |
 |---|---|
-| `app/api/` | Endpoints REST (accounts, categories, media, stream, sync, health) |
+| `app/api/` | Endpoints REST (accounts, categories, live, media, stream, sync, health) |
 | `app/services/xtream_service.py` | Client HTTP vers les serveurs Xtream Codes |
 | `app/services/tmdb_service.py` | Client HTTP vers l'API TMDB + fuzzy matching |
 | `app/services/media_service.py` | Requetes SQLAlchemy pour lire les medias |
@@ -54,7 +55,7 @@ PlexHub Backend est un serveur **Python/FastAPI** qui :
 | `app/workers/sync_worker.py` | Synchronisation incrementale du catalogue avec filtrage par categories |
 | `app/workers/enrichment_worker.py` | Enrichissement TMDB optimise (parallele, IDs partiels) |
 | `app/workers/health_check_worker.py` | Verification des flux casses |
-| `app/models/database.py` | Schema SQLAlchemy (tables Media, XtreamAccount, XtreamCategory, EnrichmentQueue) |
+| `app/models/database.py` | Schema SQLAlchemy (tables Media, LiveChannel, EpgEntry, XtreamAccount, XtreamCategory, EnrichmentQueue) |
 | `app/models/schemas.py` | Modeles Pydantic (request/response en camelCase) |
 | `app/utils/string_normalizer.py` | Parsing titres IPTV, normalisation unicode, extraction annee |
 | `app/utils/unification.py` | Calcul des IDs d'unification cross-serveur |
@@ -100,6 +101,7 @@ Les variables sont chargees depuis un fichier `.env` a la racine du projet via `
 | Serie | `series_{series_id}` | `series_6581` |
 | Saison | `season_{series_id}_{season_num}` | `season_6581_1` |
 | Episode | `ep_{episode_id}.{ext}` | `ep_7890.mkv` |
+| Chaîne live | `live_{stream_id}.{ext}` | `live_12345.ts` |
 
 #### Convention de `server_id`
 
@@ -201,10 +203,53 @@ Stocke les categories Xtream par compte avec leur configuration de filtrage.
 | `id` | INT PK | Auto-increment |
 | `account_id` | TEXT | Reference vers `xtream_accounts.id` |
 | `category_id` | TEXT | ID de categorie Xtream (ex: `"1"`, `"42"`) |
-| `category_type` | TEXT | `"vod"` ou `"series"` |
+| `category_type` | TEXT | `"vod"`, `"series"`, ou `"live"` |
 | `category_name` | TEXT | Nom affiche de la categorie (ex: `"Action"`, `"Comedies FR"`) |
 | `is_allowed` | BOOL | Categorie autorisee au sync (defaut: `true`) |
 | `last_fetched_at` | BIGINT | Derniere recuperation depuis Xtream (timestamp ms) |
+
+### Table `live_channels` (nouveau)
+
+Stocke les chaines TV en direct synchronisees depuis les serveurs Xtream.
+
+**Cle primaire composite :** `(stream_id, server_id)`
+
+| Colonne | Type | Description |
+|---|---|---|
+| `stream_id` | INT PK | ID du stream Xtream |
+| `server_id` | TEXT PK | Identifiant du serveur (`xtream_{account_id}`) |
+| `name` | TEXT | Nom de la chaine |
+| `name_sortable` | TEXT | Nom normalise pour le tri |
+| `stream_icon` | TEXT | URL du logo de la chaine |
+| `epg_channel_id` | TEXT | ID EPG pour le mapping du guide programme |
+| `category_id` | TEXT | ID de categorie Xtream |
+| `container_extension` | TEXT | Format du flux (defaut: `"ts"`) |
+| `custom_sid` | TEXT | Service ID personnalise |
+| `tv_archive` | BOOL | Catchup/replay disponible (defaut: `false`) |
+| `tv_archive_duration` | INT | Duree de l'archive en jours (defaut: `0`) |
+| `is_adult` | BOOL | Contenu adulte (defaut: `false`) |
+| `is_active` | BOOL | Chaine active (defaut: `true`) |
+| `is_in_allowed_categories` | BOOL | Chaine dans une categorie autorisee (defaut: `true`) |
+| `added_at` | BIGINT | Date d'ajout (timestamp ms) |
+| `updated_at` | BIGINT | Derniere mise a jour (timestamp ms) |
+| `dto_hash` | TEXT | MD5 des champs DTO pour sync incrementale |
+
+### Table `epg_entries` (nouveau)
+
+Stocke les entrees du guide de programmes electronique (EPG).
+
+| Colonne | Type | Description |
+|---|---|---|
+| `id` | INT PK | Auto-increment |
+| `server_id` | TEXT | Identifiant du serveur |
+| `epg_channel_id` | TEXT | ID EPG (mapping vers `live_channels.epg_channel_id`) |
+| `stream_id` | INT | ID du stream (mapping vers `live_channels.stream_id`) |
+| `title` | TEXT | Titre du programme |
+| `description` | TEXT | Description du programme |
+| `start_time` | BIGINT | Debut du programme (timestamp ms) |
+| `end_time` | BIGINT | Fin du programme (timestamp ms) |
+| `lang` | TEXT | Langue du programme |
+| `fetched_at` | BIGINT | Date de recuperation depuis Xtream (timestamp ms) |
 
 ### Table `enrichment_queue`
 
@@ -233,7 +278,7 @@ Stocke les categories Xtream par compte avec leur configuration de filtrage.
 **Frequence :** Toutes les 6 heures (configurable) + au demarrage
 
 **Phase 0a : Auto-refresh des categories depuis Xtream**
-1. Appel `get_vod_categories()` et `get_series_categories()` sur le serveur Xtream
+1. Appel `get_live_categories()`, `get_vod_categories()` et `get_series_categories()` sur le serveur Xtream
 2. Upsert dans `xtream_categories` via `on_conflict_do_update` : met a jour `category_name` et `last_fetched_at`, **preserve `is_allowed`** existant
 3. Les nouvelles categories sont creees avec `is_allowed = true` par defaut
 
@@ -272,6 +317,14 @@ Stocke les categories Xtream par compte avec leur configuration de filtrage.
 1. Appel `get_series_info(series_id=series_id)` **uniquement pour les series detectees comme modifiees**
 2. Mapping des episodes avec hierarchie complete (episode → saison → serie)
 3. Upsert par batchs de 50 series
+
+**Phase 4 : Chaînes Live**
+1. Appel `get_live_streams(account)` → liste complete des chaines
+2. **Filtrage par categorie** identique aux phases precedentes (live categories)
+3. Calcul d'un `dto_hash` (MD5) par DTO sur les champs : `name`, `stream_icon`, `epg_channel_id`, `category_id`, `tv_archive`, `tv_archive_duration`, `is_adult`, `container_extension`, `custom_sid`
+4. Comparaison avec les `dto_hash` existants en BDD
+5. Upsert des chaines modifiees dans `live_channels` par batchs de 200
+6. Nettoyage differentiel : suppression des chaines retirees du catalogue Xtream — **uniquement en mode `all`**
 
 **Gestion defensive des reponses Xtream :**
 - Les reponses `vod_info` et `series_info` peuvent contenir des types inattendus (listes au lieu de dicts)
@@ -627,6 +680,7 @@ Obtient l'URL de streaming directe pour un media.
 |---|---|
 | Film | `http://{base}:{port}/movie/{username}/{password}/{stream_id}.{ext}` |
 | Episode | `http://{base}:{port}/series/{username}/{password}/{episode_id}.{ext}` |
+| Live | `http://{base}:{port}/live/{username}/{password}/{stream_id}.{ext}` |
 
 > **Note :** L'extension par defaut est `"ts"` si non specifiee dans le `rating_key`.
 
@@ -777,6 +831,119 @@ Force la recuperation des categories depuis le serveur Xtream. Preserve les conf
 
 ---
 
+### 6.7 Live TV
+
+Les endpoints Live TV permettent de naviguer dans les chaines en direct, obtenir les URLs de streaming live, et consulter le guide de programmes (EPG).
+
+#### `GET /api/live/channels`
+
+Liste paginee des chaines TV en direct.
+
+**Parametres query :**
+
+| Parametre | Type | Defaut | Description |
+|---|---|---|---|
+| `limit` | int | 500 | Items par page (1-5000) |
+| `offset` | int | 0 | Decalage de pagination |
+| `sort` | string | `"name_asc"` | Tri (voir options ci-dessous) |
+| `server_id` | string | null | Filtrer par serveur Xtream |
+| `category_id` | string | null | Filtrer par categorie |
+| `search` | string | null | Recherche par nom de chaine |
+
+**Options de tri :** `name_asc`, `name_desc`, `added_desc`, `added_asc`
+
+**Reponse 200 :**
+```json
+{
+  "items": [
+    {
+      "streamId": 12345,
+      "serverId": "xtream_05fd75e9",
+      "name": "TF1 HD",
+      "nameSortable": "tf1 hd",
+      "streamIcon": "http://logo.com/tf1.png",
+      "epgChannelId": "TF1.fr",
+      "categoryId": "2",
+      "containerExtension": "ts",
+      "customSid": null,
+      "tvArchive": true,
+      "tvArchiveDuration": 3,
+      "isAdult": false,
+      "isActive": true,
+      "addedAt": 1672531200000,
+      "updatedAt": 1772240521981
+    }
+  ],
+  "total": 8500,
+  "hasMore": true
+}
+```
+
+#### `GET /api/live/channels/{stream_id}?server_id={server_id}`
+
+Detail d'une chaine unique.
+
+**Reponse 200 :** `LiveChannelResponse` (un seul objet, meme structure que ci-dessus)
+
+**Erreurs :** `404` : Chaine non trouvee
+
+#### `GET /api/live/channels/{stream_id}/stream?server_id={server_id}`
+
+Obtient l'URL de streaming live pour une chaine.
+
+**Reponse 200 :**
+```json
+{
+  "url": "http://example.com:80/live/user123/pass456/12345.ts",
+  "expiresAt": null
+}
+```
+
+**Erreurs :**
+- `400` : Format `server_id` invalide
+- `404` : Compte ou chaine non trouve
+
+#### `GET /api/live/channels/{stream_id}/epg?server_id={server_id}`
+
+Guide de programmes pour une chaine specifique. Verifie d'abord le cache local (DB). Si vide, recupere le short EPG depuis l'API Xtream et le met en cache.
+
+**Reponse 200 :**
+```json
+{
+  "items": [
+    {
+      "id": 1,
+      "epgChannelId": "TF1.fr",
+      "streamId": 12345,
+      "title": "Journal de 20h",
+      "description": "Edition du soir presentee par...",
+      "startTime": 1772240400000,
+      "endTime": 1772242200000,
+      "lang": "fr"
+    }
+  ],
+  "total": 15
+}
+```
+
+> **Note :** Certains fournisseurs Xtream encodent les titres et descriptions en base64. Le backend les decode automatiquement.
+
+#### `GET /api/live/epg?server_id={server_id}`
+
+Programmes actuellement en cours sur toutes les chaines d'un serveur.
+
+**Parametres query :**
+
+| Parametre | Type | Defaut | Description |
+|---|---|---|---|
+| `server_id` | string | **Requis** | Filtrer par serveur Xtream |
+| `limit` | int | 500 | Items par page (1-5000) |
+| `offset` | int | 0 | Decalage de pagination |
+
+**Reponse 200 :** Meme structure que l'EPG par chaine, avec les programmes dont `startTime <= now <= endTime`.
+
+---
+
 ## 7. Guide d'Integration Android
 
 ### 7.1 Configuration du client HTTP
@@ -805,14 +972,29 @@ La compression GZip est active. Ajouter le header `Accept-Encoding: gzip` pour b
    → Ajouter un compte Xtream
    → Le backend synchronise automatiquement en arriere-plan
 
-4. GET /api/media/movies?limit=50&sort=added_desc
+4. GET /api/live/channels?limit=50&sort=name_asc
+   → Charger la premiere page de chaines live
+
+5. GET /api/media/movies?limit=50&sort=added_desc
    → Charger la premiere page de films (les plus recents)
 
-5. GET /api/media/shows?limit=50&sort=added_desc
+6. GET /api/media/shows?limit=50&sort=added_desc
    → Charger la premiere page de series
 ```
 
 ### 7.3 Navigation dans le catalogue
+
+#### Chaines Live
+
+```
+Listing :      GET /api/live/channels?limit=50&offset=0&sort=name_asc
+Recherche :    GET /api/live/channels?search=TF1&server_id={serverId}
+Par categorie: GET /api/live/channels?category_id=2&server_id={serverId}
+Detail :       GET /api/live/channels/{streamId}?server_id={serverId}
+Stream :       GET /api/live/channels/{streamId}/stream?server_id={serverId}
+EPG :          GET /api/live/channels/{streamId}/epg?server_id={serverId}
+Now playing :  GET /api/live/epg?server_id={serverId}
+```
 
 #### Films
 
@@ -976,12 +1158,54 @@ data class HealthResponse(
     val lastSyncAt: Long? = null
 )
 
+// --- Live TV ---
+
+data class LiveChannelItem(
+    val streamId: Int,
+    val serverId: String,
+    val name: String,
+    val nameSortable: String = "",
+    val streamIcon: String? = null,
+    val epgChannelId: String? = null,
+    val categoryId: String? = null,
+    val containerExtension: String = "ts",
+    val customSid: String? = null,
+    val tvArchive: Boolean = false,
+    val tvArchiveDuration: Int = 0,
+    val isAdult: Boolean = false,
+    val isActive: Boolean = true,
+    val addedAt: Long = 0,
+    val updatedAt: Long = 0
+)
+
+data class LiveChannelListResponse(
+    val items: List<LiveChannelItem>,
+    val total: Int,
+    val hasMore: Boolean
+)
+
+data class EpgEntryItem(
+    val id: Int,
+    val epgChannelId: String? = null,
+    val streamId: Int? = null,
+    val title: String,
+    val description: String? = null,
+    val startTime: Long,
+    val endTime: Long,
+    val lang: String? = null
+)
+
+data class EpgListResponse(
+    val items: List<EpgEntryItem>,
+    val total: Int
+)
+
 // --- Categories ---
 
 data class CategoryItem(
     val categoryId: String,
     val categoryName: String,
-    val categoryType: String,       // "vod" ou "series"
+    val categoryType: String,       // "vod", "series", ou "live"
     val isAllowed: Boolean,
     val lastFetchedAt: Long
 )
@@ -1080,6 +1304,42 @@ interface PlexHubApi {
         @Query("server_id") serverId: String
     ): StreamResponse
 
+    // Live TV
+    @GET("live/channels")
+    suspend fun getLiveChannels(
+        @Query("limit") limit: Int = 500,
+        @Query("offset") offset: Int = 0,
+        @Query("sort") sort: String = "name_asc",
+        @Query("server_id") serverId: String? = null,
+        @Query("category_id") categoryId: String? = null,
+        @Query("search") search: String? = null
+    ): LiveChannelListResponse
+
+    @GET("live/channels/{streamId}")
+    suspend fun getLiveChannel(
+        @Path("streamId") streamId: Int,
+        @Query("server_id") serverId: String
+    ): LiveChannelItem
+
+    @GET("live/channels/{streamId}/stream")
+    suspend fun getLiveStreamUrl(
+        @Path("streamId") streamId: Int,
+        @Query("server_id") serverId: String
+    ): StreamResponse
+
+    @GET("live/channels/{streamId}/epg")
+    suspend fun getChannelEpg(
+        @Path("streamId") streamId: Int,
+        @Query("server_id") serverId: String
+    ): EpgListResponse
+
+    @GET("live/epg")
+    suspend fun getLiveEpgNow(
+        @Query("server_id") serverId: String,
+        @Query("limit") limit: Int = 500,
+        @Query("offset") offset: Int = 0
+    ): EpgListResponse
+
     // Sync
     @POST("sync/xtream")
     suspend fun triggerSync(@Body request: SyncRequest): SyncJobResponse
@@ -1112,6 +1372,7 @@ interface PlexHubApi {
    - `vod_435071.mp4` → film, stream_id=435071, extension=mp4
    - `series_6581` → serie, series_id=6581
    - `ep_7890.mkv` → episode, episode_id=7890, extension=mkv
+   - `live_12345.ts` → chaine live, stream_id=12345, extension=ts
 
 9. **server_id obligatoire :** Pour les endpoints `GET /api/media/{ratingKey}` et `GET /api/stream/{ratingKey}`, le `server_id` est **obligatoire** en query param car le `ratingKey` n'est unique que dans le contexte d'un serveur.
 
@@ -1269,4 +1530,40 @@ Android                          Backend                         Xtream Server
    │                                │  [sync avec filtrage actif]    │
    │                                │  → skip categories bloquees    │
    │ <──── 202 {jobId}             │                                │
+```
+
+### 8.5 Navigation Live TV → EPG → Lecture
+
+```
+Android                          Backend                         Xtream Server
+   │                                │                                │
+   │ GET /api/live/channels         │                                │
+   │    ?limit=50&sort=name_asc     │                                │
+   │ ──────────────────────────────>│                                │
+   │ <──── channels list            │                                │
+   │                                │                                │
+   │  [user clique sur une chaine]  │                                │
+   │                                │                                │
+   │ GET /api/live/channels/12345/  │                                │
+   │    epg?server_id=xtream_05fd   │                                │
+   │ ──────────────────────────────>│                                │
+   │                                │  (cache vide ?)                │
+   │                                │  get_short_epg(stream_id=12345)│
+   │                                │ ──────────────────────────────>│
+   │                                │ <──── epg_listings[]           │
+   │                                │  INSERT epg_entries (cache)    │
+   │ <──── EpgListResponse          │                                │
+   │                                │                                │
+   │  [user lance la chaine]        │                                │
+   │                                │                                │
+   │ GET /api/live/channels/12345/  │                                │
+   │    stream?server_id=xtream_05fd│                                │
+   │ ──────────────────────────────>│                                │
+   │                                │  build URL avec credentials    │
+   │ <──── StreamResponse           │                                │
+   │  {url: "http://srv/live/       │                                │
+   │   user/pass/12345.ts"}         │                                │
+   │                                │                                │
+   │ ════ Lecture directe via ExoPlayer ═══════════════════════════> │
+   │ <════════════════════════════ Stream live ═══════════════════  │
 ```

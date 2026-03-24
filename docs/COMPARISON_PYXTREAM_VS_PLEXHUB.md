@@ -46,17 +46,17 @@
 | Endpoint Xtream | pyxtream | Plexhub-Backend |
 |---|:---:|:---:|
 | Authentification | ✅ | ✅ |
-| `get_live_categories` | ✅ | ❌ |
-| `get_live_streams` | ✅ | ❌ |
+| `get_live_categories` | ✅ | ✅ |
+| `get_live_streams` | ✅ | ✅ (incrémental, hash-based) |
 | `get_vod_categories` | ✅ | ✅ |
 | `get_vod_streams` | ✅ (tout d'un coup) | ✅ (par catégorie) |
 | `get_vod_info` | ✅ | ✅ (si hash changé) |
 | `get_series_categories` | ✅ | ✅ |
 | `get_series` | ✅ (tout d'un coup) | ✅ (par catégorie) |
 | `get_series_info` | ✅ (lazy) | ✅ |
-| EPG (short/full/XML) | ✅ | ❌ |
+| EPG (short/full/XML) | ✅ | ✅ (short EPG + XMLTV) |
 
-**Différence clé** : Plexhub ne gère pas le **live TV** ni l'**EPG**, car Plex n'en a pas besoin. pyxtream couvre les 3 types de contenu.
+**Différence clé** : Plexhub gère désormais le **live TV** (chaînes, catégories, EPG) en plus du VOD et des séries. Son implémentation est asynchrone et incrémentale, contrairement à pyxtream qui charge tout en mémoire d'un coup.
 
 ### Stratégie de chargement
 
@@ -97,6 +97,7 @@ Cache : fichiers JSON locaux
 FastAPI Application
 ├── API Layer (REST endpoints)
 │   ├── accounts, media, stream, categories
+│   ├── live (chaînes + EPG)
 │   ├── sync, plex, health
 │
 ├── Services Layer (logique métier)
@@ -116,7 +117,7 @@ FastAPI Application
 │   ├── naming, nfo_builder, mapping
 │
 └── Data Layer
-    ├── SQLAlchemy models (Media, Account, Category, EnrichmentQueue)
+    ├── SQLAlchemy models (Media, LiveChannel, EpgEntry, Account, Category, EnrichmentQueue)
     └── SQLite database
 ```
 
@@ -134,8 +135,10 @@ FastAPI Application
 
 ### Plexhub-Backend
 - `Media` : rating_key, title, year, type, thumb_url, summary, genres, duration, rating, guid, imdb_id, tmdb_id, unification_id, is_in_allowed_categories, is_broken…
+- `LiveChannel` : stream_id, name, stream_icon, epg_channel_id, category_id, tv_archive, is_adult, dto_hash…
+- `EpgEntry` : epg_channel_id, stream_id, title, description, start_time, end_time, lang
 - `XtreamAccount` : credentials, status, expiration, config
-- `XtreamCategory` : account_id, category_id, is_allowed
+- `XtreamCategory` : account_id, category_id, category_type ("vod"/"series"/"live"), is_allowed
 - `EnrichmentQueue` : status pipeline (pending → processing → done/failed)
 
 → Tout est **persisté en base** avec des index optimisés.
@@ -158,14 +161,14 @@ FastAPI Application
 ## 6. Fonctionnalités exclusives
 
 ### Uniquement dans pyxtream
-- **Live TV** (chaînes en direct)
-- **EPG** (guide de programmes électronique)
 - **Téléchargement vidéo** avec reprise
 - **Recherche regex** dans les flux
 - **Validation JSON Schema** des réponses API
 - **Filtrage adulte** intégré
 
 ### Uniquement dans Plexhub-Backend
+- **Live TV** avec sync incrémental, EPG on-demand, et filtrage par catégories
+- **EPG** (guide de programmes) avec cache DB et fetch short EPG + XMLTV
 - **Enrichissement TMDB** (métadonnées, posters, casting, notes)
 - **Génération Plex** (.strm, .nfo, poster.jpg, fanart.jpg)
 - **Filtrage par catégories** (whitelist/blacklist)
@@ -213,9 +216,7 @@ python-dotenv, typer
 7. **Petite communauté** (~113 téléchargements/semaine)
 
 ### Plexhub-Backend
-1. **Pas de live TV** — uniquement VOD et séries
-2. **Pas d'EPG** — pas pertinent pour Plex
-3. **Pas de téléchargement** — streaming uniquement (.strm)
+1. **Pas de téléchargement** — streaming uniquement (.strm)
 4. **SQLite uniquement** — pas de PostgreSQL/MySQL
 5. **Pas d'authentification API** — conçu pour usage local
 
@@ -236,5 +237,7 @@ python-dotenv, typer
 En résumé, pyxtream pourrait techniquement être utilisé *à la place* de `xtream_service.py`, mais Plexhub-Backend n'en a pas besoin car :
 - Il utilise `httpx` (async) vs `requests` (sync)
 - Il fait du sync incrémental (pyxtream recharge tout)
-- Il n'a besoin que de VOD/séries (pas de live/EPG)
+- Il couvre désormais **live TV + EPG** en plus du VOD/séries
 - Son service est intégré au reste de l'architecture (DB, workers, enrichissement)
+
+Le support Live IPTV a été ajouté en s'inspirant des fonctionnalités de pyxtream (endpoints Xtream live, modèle Channel, EPG), mais avec l'architecture asynchrone, le sync incrémental et le filtrage par catégories propres à Plexhub-Backend.

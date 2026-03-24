@@ -98,6 +98,11 @@ class Media(Base):
         Index("ix_media_broken", "is_broken"),
         Index("ix_media_updated", "updated_at"),
         Index("ix_media_category_visible", "is_in_allowed_categories"),
+        # Compound indexes for common query patterns
+        Index("ix_media_server_type", "server_id", "type"),
+        Index("ix_media_server_visible", "server_id", "is_in_allowed_categories"),
+        Index("ix_media_parent_visible", "parent_rating_key", "is_in_allowed_categories"),
+        Index("ix_media_grandparent", "grandparent_rating_key"),
     )
 
 
@@ -180,6 +185,8 @@ class LiveChannel(Base):
         Index("ix_live_channels_epg", "epg_channel_id"),
         Index("ix_live_channels_name", "name_sortable"),
         Index("ix_live_channels_visible", "is_in_allowed_categories"),
+        Index("ix_live_channels_server_visible", "server_id", "is_in_allowed_categories"),
+        Index("ix_live_channels_server_category", "server_id", "category_id"),
     )
 
 
@@ -205,6 +212,8 @@ class EpgEntry(Base):
         Index("ix_epg_server", "server_id"),
         Index("ix_epg_time", "start_time", "end_time"),
         Index("ix_epg_stream", "stream_id"),
+        Index("ix_epg_server_channel", "server_id", "epg_channel_id"),
+        Index("ix_epg_stream_time", "stream_id", "start_time", "end_time"),
     )
 
 
@@ -228,4 +237,5 @@ class EnrichmentQueue(Base):
     __table_args__ = (
         Index("ix_enrichment_status", "status"),
         Index("uix_enrichment_item", "rating_key", "server_id", unique=True),
+        Index("ix_enrichment_status_type", "status", "media_type"),
     )

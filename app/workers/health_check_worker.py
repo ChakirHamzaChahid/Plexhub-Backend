@@ -41,22 +41,18 @@ async def run():
             logger.info("No streams to check")
             return
 
-        # Cache accounts
-        accounts: dict[str, object] = {}
+        # Pre-load all needed accounts in one query
+        account_ids = {item.server_id.replace("xtream_", "") for item in items}
+        acc_result = await db.execute(
+            select(XtreamAccount).where(XtreamAccount.id.in_(list(account_ids)))
+        )
+        accounts = {acc.id: acc for acc in acc_result.scalars().all()}
         checked = 0
         broken_count = 0
 
         async with httpx.AsyncClient(timeout=5.0) as client:
             for item in items:
-                # Get account for this item
                 account_id = item.server_id.replace("xtream_", "")
-                if account_id not in accounts:
-                    acc_result = await db.execute(
-                        select(XtreamAccount).where(
-                            XtreamAccount.id == account_id
-                        )
-                    )
-                    accounts[account_id] = acc_result.scalars().first()
 
                 account = accounts.get(account_id)
                 if not account:

@@ -202,35 +202,28 @@ async def bulk_update_categories(
                 db, account_id, str(category_id), category_type, is_allowed
             )
 
-    # Set default for unlisted categories based on filter mode
+    # Set default for unlisted categories based on filter mode (single bulk UPDATE)
     if filter_mode in ("whitelist", "blacklist"):
         default_allowed = filter_mode == "blacklist"  # whitelist: False, blacklist: True
 
-        all_cats_result = await db.execute(
-            select(XtreamCategory).where(
-                XtreamCategory.account_id == account_id
-            )
+        # Build exclusion filter: skip categories that were explicitly listed
+        from sqlalchemy import tuple_
+        base_stmt = (
+            update(XtreamCategory)
+            .where(XtreamCategory.account_id == account_id)
+            .values(is_allowed=default_allowed)
         )
-        all_cats = all_cats_result.scalars().all()
-
-        unlisted_count = 0
-        for cat in all_cats:
-            if (cat.category_id, cat.category_type) not in listed_keys:
-                stmt = (
-                    update(XtreamCategory)
-                    .where(
-                        XtreamCategory.account_id == account_id,
-                        XtreamCategory.category_id == cat.category_id,
-                        XtreamCategory.category_type == cat.category_type,
-                    )
-                    .values(is_allowed=default_allowed)
+        if listed_keys:
+            # Exclude explicitly listed categories from bulk default
+            base_stmt = base_stmt.where(
+                ~tuple_(XtreamCategory.category_id, XtreamCategory.category_type).in_(
+                    list(listed_keys)
                 )
-                await db.execute(stmt)
-                unlisted_count += 1
-
+            )
+        result = await db.execute(base_stmt)
         await db.commit()
         logger.info(
-            f"Set {unlisted_count} unlisted categories to is_allowed={default_allowed} "
+            f"Set {result.rowcount} unlisted categories to is_allowed={default_allowed} "
             f"(filter_mode={filter_mode})"
         )
 

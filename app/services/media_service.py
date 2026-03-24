@@ -21,16 +21,27 @@ class MediaService:
         server_id: Optional[str] = None,
         parent_rating_key: Optional[str] = None,
         include_filtered: bool = False,
+        search: Optional[str] = None,
+        genre: Optional[str] = None,
+        year: Optional[int] = None,
     ) -> tuple[list[Media], int]:
         """Get paginated media list with total count."""
         logger.debug(f"get_media_list: type={media_type}, limit={limit}, offset={offset}, "
                     f"sort={sort}, server_id={server_id}, parent={parent_rating_key}, "
-                    f"include_filtered={include_filtered}")
+                    f"include_filtered={include_filtered}, search={search}")
 
         query = select(Media).where(Media.type == media_type)
 
         if server_id:
             query = query.where(Media.server_id == server_id)
+        if search:
+            safe_search = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            query = query.where(Media.title.ilike(f"%{safe_search}%", escape="\\"))
+        if genre:
+            safe_genre = genre.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            query = query.where(Media.genres.ilike(f"%{safe_genre}%", escape="\\"))
+        if year:
+            query = query.where(Media.year == year)
         if parent_rating_key:
             # Auto-detect series queries: if parent_rating_key starts with "series_",
             # filter by grandparent_rating_key (episodes belong to series via grandparent)
@@ -92,16 +103,12 @@ class MediaService:
         total = total_result.scalar() or 0
 
         enriched_result = await db.execute(
-            select(func.count()).select_from(
-                select(Media).where(Media.tmdb_id.isnot(None)).subquery()
-            )
+            select(func.count()).select_from(Media).where(Media.tmdb_id.isnot(None))
         )
         enriched = enriched_result.scalar() or 0
 
         broken_result = await db.execute(
-            select(func.count()).select_from(
-                select(Media).where(Media.is_broken == True).subquery()
-            )
+            select(func.count()).select_from(Media).where(Media.is_broken == True)
         )
         broken = broken_result.scalar() or 0
 

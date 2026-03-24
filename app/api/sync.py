@@ -32,7 +32,16 @@ async def trigger_sync_all():
 
 @router.get("/status/{job_id}", response_model=SyncStatusResponse)
 async def get_sync_status(job_id: str):
-    """Check sync job status."""
-    # Simple implementation - always return "unknown" for now
-    # A production implementation would track job state
-    return SyncStatusResponse(status="unknown")
+    """Check sync job status from in-memory tracker."""
+    from app.workers.sync_worker import get_sync_job
+    job = get_sync_job(job_id)
+    if not job:
+        return SyncStatusResponse(status="unknown")
+    return SyncStatusResponse(status=job.get("status", "unknown"))
+
+
+@router.get("/jobs")
+async def list_sync_jobs():
+    """List all recent sync jobs with their status."""
+    from app.workers.sync_worker import get_all_sync_jobs
+    return {"jobs": get_all_sync_jobs()}

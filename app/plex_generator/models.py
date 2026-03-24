@@ -51,5 +51,6 @@ class SyncReport(BaseModel):
     updated: int = 0
     deleted: int = 0
     unchanged: int = 0
+    image_failures: int = 0
     errors: list[str] = []
     duration_seconds: float = 0.0

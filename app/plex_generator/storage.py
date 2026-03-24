@@ -83,7 +83,7 @@ class LocalStorage(LibraryStorage):
             future = _image_pool.submit(self._download_sync, full, image_url)
             return future.result(timeout=20.0)
         except Exception as e:
-            logger.debug(f"Failed to download image {image_url}: {e}")
+            logger.warning(f"Failed to download image {rel_path} from {image_url}: {e}")
             return False
 
     @staticmethod

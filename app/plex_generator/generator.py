@@ -91,6 +91,7 @@ class PlexLibraryGenerator:
             f"Plex library sync complete: "
             f"{report.created} created, {report.updated} updated, "
             f"{report.deleted} deleted, {report.unchanged} unchanged, "
+            f"{report.image_failures} image failures, "
             f"{len(report.errors)} errors "
             f"({report.duration_seconds}s)"
         )
@@ -107,7 +108,7 @@ class PlexLibraryGenerator:
             # CREATE
             self.storage.write_strm(expected_path, movie.stream_url)
             if not self.strm_only:
-                self._write_movie_metadata(movie)
+                self._write_movie_metadata(movie, report)
             self.mapping.set(movie.source_id, expected_path, movie.stream_url)
             report.created += 1
             logger.debug(f"Created: {expected_path}")
@@ -118,7 +119,7 @@ class PlexLibraryGenerator:
             self.storage.cleanup_empty_dirs(existing.path)
             self.storage.write_strm(expected_path, movie.stream_url)
             if not self.strm_only:
-                self._write_movie_metadata(movie)
+                self._write_movie_metadata(movie, report)
             self.mapping.set(movie.source_id, expected_path, movie.stream_url)
             report.updated += 1
             logger.debug(f"Moved: {existing.path} -> {expected_path}")
@@ -133,25 +134,27 @@ class PlexLibraryGenerator:
         else:
             report.unchanged += 1
 
-    def _write_movie_metadata(self, movie: PlexMovie) -> None:
+    def _write_movie_metadata(self, movie: PlexMovie, report: SyncReport) -> None:
         nfo = build_movie_nfo(movie)
         self.storage.write_file(movie_nfo_path(movie.title, movie.year), nfo)
 
         if movie.poster_url:
-            self.storage.download_image(
+            if not self.storage.download_image(
                 movie_poster_path(movie.title, movie.year), movie.poster_url,
-            )
+            ):
+                report.image_failures += 1
         if movie.fanart_url:
-            self.storage.download_image(
+            if not self.storage.download_image(
                 movie_fanart_path(movie.title, movie.year), movie.fanart_url,
-            )
+            ):
+                report.image_failures += 1
 
     def _sync_series(
         self, series: PlexSeries, report: SyncReport, seen: set[str],
     ) -> None:
         # Write series-level metadata (NFO, poster, fanart) once
         if not self.strm_only:
-            self._write_series_metadata(series)
+            self._write_series_metadata(series, report)
 
         # Sync each episode
         for ep in series.episodes:
@@ -208,15 +211,17 @@ class PlexLibraryGenerator:
             nfo,
         )
 
-    def _write_series_metadata(self, series: PlexSeries) -> None:
+    def _write_series_metadata(self, series: PlexSeries, report: SyncReport) -> None:
         nfo = build_tvshow_nfo(series)
         self.storage.write_file(series_nfo_path(series.title), nfo)
 
         if series.poster_url:
-            self.storage.download_image(
+            if not self.storage.download_image(
                 series_poster_path(series.title), series.poster_url,
-            )
+            ):
+                report.image_failures += 1
         if series.fanart_url:
-            self.storage.download_image(
+            if not self.storage.download_image(
                 series_fanart_path(series.title), series.fanart_url,
-            )
+            ):
+                report.image_failures += 1

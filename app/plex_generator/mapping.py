@@ -96,5 +96,14 @@ class MappingStore:
     def all_source_ids(self) -> set[str]:
         return set(self._data.keys())
 
+    def purge_stale(self, valid_source_ids: set[str]) -> int:
+        """Remove mapping entries not in the valid set. Returns count removed."""
+        stale = set(self._data.keys()) - valid_source_ids
+        for key in stale:
+            del self._data[key]
+        if stale:
+            logger.info(f"Purged {len(stale)} stale mapping entries")
+        return len(stale)
+
     def __len__(self) -> int:
         return len(self._data)

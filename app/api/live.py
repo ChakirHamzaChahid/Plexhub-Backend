@@ -229,10 +229,7 @@ async def get_channel_epg(
         new_entries.append(entry)
 
     if new_entries:
-        await db.commit()
-        # Refresh to get IDs
-        for e in new_entries:
-            await db.refresh(e)
+        await db.flush()  # Assign IDs without N+1 refresh loop
 
     return EpgListResponse(
         items=[EpgEntryResponse.model_validate(e) for e in new_entries],

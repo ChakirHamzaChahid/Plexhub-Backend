@@ -96,10 +96,12 @@ class PlexLibraryGenerator:
                 from pathlib import PurePosixPath
                 p = PurePosixPath(entry.path)
                 parent = str(p.parent)
-                for suffix in (".nfo", "poster.jpg", "fanart.jpg",
-                               "movie.nfo", "tvshow.nfo"):
-                    candidate = f"{parent}/{suffix}" if suffix.startswith(("poster", "fanart", "movie", "tvshow")) else str(p.with_suffix(".nfo"))
-                    self.storage.delete_file(candidate)
+                stem = p.stem
+                # Delete NFO with same stem as the media file
+                self.storage.delete_file(str(p.with_suffix(".nfo")))
+                # Delete well-known metadata files in the same directory
+                for name in ("poster.jpg", "fanart.jpg", "movie.nfo", "tvshow.nfo"):
+                    self.storage.delete_file(f"{parent}/{name}")
                 self.storage.cleanup_empty_dirs(entry.path)
                 self.mapping.remove(source_id)
                 report.deleted += 1

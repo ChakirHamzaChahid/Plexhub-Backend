@@ -41,7 +41,7 @@ class TestParseDurationMs:
         assert _parse_duration_ms("invalid") is None
 
     def test_zero(self):
-        assert _parse_duration_ms(0) is None  # falsy, returns None
+        assert _parse_duration_ms(0) == 0
 
     def test_float_string(self):
         # "3600.5" can't be parsed by int(), but should not crash

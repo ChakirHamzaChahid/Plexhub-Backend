@@ -60,7 +60,7 @@ def _safe_duration(value) -> int | None:
 
 def _parse_duration_ms(value) -> int | None:
     """Parse duration from seconds (int/str) or HH:MM:SS format to milliseconds."""
-    if not value:
+    if value is None or value == "":
         return None
     try:
         return int(value) * 1000
@@ -611,7 +611,6 @@ async def enqueue_for_enrichment(db, rows: list[dict]):
         stmt = stmt.on_conflict_do_update(
             index_elements=["rating_key", "server_id"],
             set_={
-                "status": stmt.excluded.status,
                 "existing_tmdb_id": stmt.excluded.existing_tmdb_id,
                 "existing_imdb_id": stmt.excluded.existing_imdb_id,
             }

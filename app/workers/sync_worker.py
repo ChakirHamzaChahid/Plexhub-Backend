@@ -686,14 +686,17 @@ async def _load_category_config(db, account_id: str) -> tuple[str, dict, dict]:
     
     allowed_vod = {}
     allowed_series = {}
-    
+    allowed_live = {}
+
     for cat in categories:
         if cat.category_type == "vod":
             allowed_vod[cat.category_id] = cat.is_allowed
         elif cat.category_type == "series":
             allowed_series[cat.category_id] = cat.is_allowed
-    
-    return filter_mode, allowed_vod, allowed_series
+        elif cat.category_type == "live":
+            allowed_live[cat.category_id] = cat.is_allowed
+
+    return filter_mode, allowed_vod, allowed_series, allowed_live
 
 
 def _should_sync_category(
@@ -726,6 +729,67 @@ def _should_sync_category(
         return is_allowed is not False
     
     return True  # Default: sync
+
+
+def _get_allowed_category_ids(filter_mode: str, allowed_categories: dict) -> list[str] | None:
+    """
+    Return list of category IDs to fetch, or None if all should be fetched.
+
+    In whitelist mode, returns only explicitly allowed IDs so we can
+    make per-category API calls instead of fetching the entire catalogue.
+    """
+    if filter_mode != "whitelist":
+        return None  # fetch all, filter in memory
+    return [cat_id for cat_id, is_allowed in allowed_categories.items() if is_allowed]
+
+
+async def _fetch_streams_by_categories(
+    fetch_fn,
+    account,
+    category_ids: list[str],
+    content_type: str,
+    concurrency: int = 10,
+) -> list[dict]:
+    """
+    Fetch streams from Xtream API per-category with concurrency control.
+
+    Args:
+        fetch_fn: xtream_service method (get_vod_streams, get_series, get_live_streams)
+        account: Xtream account object
+        category_ids: List of category IDs to fetch
+        content_type: Label for logging ("VOD", "Series", "Live")
+        concurrency: Max concurrent API calls
+
+    Returns:
+        Merged list of all stream DTOs across requested categories.
+    """
+    sem = asyncio.Semaphore(concurrency)
+    all_streams: list[dict] = []
+    failed = 0
+
+    async def _fetch_one(cat_id: str) -> list[dict]:
+        nonlocal failed
+        try:
+            async with sem:
+                return await fetch_fn(account, category_id=cat_id)
+        except Exception as e:
+            failed += 1
+            logger.warning(f"Failed to fetch {content_type} category {cat_id}: {e}")
+            return []
+
+    tasks = [_fetch_one(cat_id) for cat_id in category_ids]
+    results = await asyncio.gather(*tasks)
+    for result in results:
+        all_streams.extend(result)
+
+    logger.info(
+        f"{content_type}: fetched {len(all_streams)} items from "
+        f"{len(category_ids)} allowed categories "
+        f"({failed} failed)"
+    )
+    return all_streams
+
+
 async def _refresh_categories(db, account, account_id: str):
     """Fetch categories from Xtream and upsert into xtream_categories table."""
     from app.models.database import XtreamCategory
@@ -817,18 +881,27 @@ async def sync_account(account_id: str):
                 await _refresh_categories(db, account, account_id)
 
                 # Load category configuration
-                filter_mode, allowed_vod, allowed_series = await _load_category_config(db, account_id)
+                filter_mode, allowed_vod, allowed_series, allowed_live = await _load_category_config(db, account_id)
                 vod_allowed_count = sum(1 for v in allowed_vod.values() if v)
                 series_allowed_count = sum(1 for v in allowed_series.values() if v)
+                live_allowed_count = sum(1 for v in allowed_live.values() if v)
                 logger.info(f"Category filter mode: {filter_mode} "
                            f"(VOD: {vod_allowed_count}/{len(allowed_vod)} allowed, "
-                           f"Series: {series_allowed_count}/{len(allowed_series)} allowed)")
+                           f"Series: {series_allowed_count}/{len(allowed_series)} allowed, "
+                           f"Live: {live_allowed_count}/{len(allowed_live)} allowed)")
 
 
                 # --- VOD Sync (incremental with detailed metadata) ---
                 logger.info(f"Syncing VOD for account {account_id}")
+                vod_cat_ids = _get_allowed_category_ids(filter_mode, allowed_vod)
                 try:
-                    vod_streams = await xtream_service.get_vod_streams(account)
+                    if vod_cat_ids is not None:
+                        logger.info(f"VOD: fetching {len(vod_cat_ids)} allowed categories (whitelist mode)")
+                        vod_streams = await _fetch_streams_by_categories(
+                            xtream_service.get_vod_streams, account, vod_cat_ids, "VOD"
+                        )
+                    else:
+                        vod_streams = await xtream_service.get_vod_streams(account)
                 except Exception as e:
                     logger.error(f"Failed to fetch VOD streams: {e}")
                     vod_streams = []
@@ -934,8 +1007,15 @@ async def sync_account(account_id: str):
 
                 # --- Series Sync (incremental) ---
                 logger.info(f"Syncing Series for account {account_id}")
+                series_cat_ids = _get_allowed_category_ids(filter_mode, allowed_series)
                 try:
-                    series_list = await xtream_service.get_series(account)
+                    if series_cat_ids is not None:
+                        logger.info(f"Series: fetching {len(series_cat_ids)} allowed categories (whitelist mode)")
+                        series_list = await _fetch_streams_by_categories(
+                            xtream_service.get_series, account, series_cat_ids, "Series"
+                        )
+                    else:
+                        series_list = await xtream_service.get_series(account)
                 except Exception as e:
                     logger.error(f"Failed to fetch series: {e}")
                     series_list = []
@@ -1081,26 +1161,18 @@ async def sync_account(account_id: str):
 
                 # --- Live Channels Sync (incremental) ---
                 logger.info(f"Syncing Live channels for account {account_id}")
+                live_cat_ids = _get_allowed_category_ids(filter_mode, allowed_live)
                 try:
-                    live_streams = await xtream_service.get_live_streams(account)
+                    if live_cat_ids is not None:
+                        logger.info(f"Live: fetching {len(live_cat_ids)} allowed categories (whitelist mode)")
+                        live_streams = await _fetch_streams_by_categories(
+                            xtream_service.get_live_streams, account, live_cat_ids, "Live"
+                        )
+                    else:
+                        live_streams = await xtream_service.get_live_streams(account)
                 except Exception as e:
                     logger.error(f"Failed to fetch live streams: {e}")
                     live_streams = []
-
-                # Load category config for live
-                filter_mode_live, _, _ = await _load_category_config(db, account_id)
-                # Load live-specific allowed categories
-                from app.models.database import XtreamCategory
-                live_cat_result = await db.execute(
-                    select(XtreamCategory).where(
-                        XtreamCategory.account_id == account_id,
-                        XtreamCategory.category_type == "live",
-                    )
-                )
-                allowed_live = {
-                    cat.category_id: cat.is_allowed
-                    for cat in live_cat_result.scalars().all()
-                }
 
                 # Load existing live dto_hashes for incremental sync
                 hash_result = await db.execute(
@@ -1122,7 +1194,7 @@ async def sync_account(account_id: str):
                         continue
 
                     category_id = str(dto.get("category_id", ""))
-                    if not _should_sync_category(category_id, filter_mode_live, allowed_live):
+                    if not _should_sync_category(category_id, filter_mode, allowed_live):
                         continue
 
                     all_live_ids.add(stream_id)
@@ -1149,7 +1221,7 @@ async def sync_account(account_id: str):
                             await db.rollback()
 
                 if all_live_ids:
-                    if filter_mode_live == "all":
+                    if filter_mode == "all":
                         await differential_cleanup_live(db, server_id, all_live_ids)
                     else:
                         synced_live_cat_ids = [k for k, v in allowed_live.items() if v]

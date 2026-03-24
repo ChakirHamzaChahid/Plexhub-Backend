@@ -214,6 +214,7 @@ class EpgEntry(Base):
         Index("ix_epg_stream", "stream_id"),
         Index("ix_epg_server_channel", "server_id", "epg_channel_id"),
         Index("ix_epg_stream_time", "stream_id", "start_time", "end_time"),
+        Index("uix_epg_dedup", "server_id", "stream_id", "start_time", unique=True),
     )
 
 

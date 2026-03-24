@@ -1,8 +1,8 @@
 import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from app.models.schemas import SyncRequest, SyncStatusResponse
-from app.utils.tasks import create_background_task
+from app.utils.tasks import create_background_task, cancel_task_by_name
 
 logger = logging.getLogger("plexhub.api.sync")
 router = APIRouter(prefix="/sync", tags=["sync"])
@@ -28,6 +28,24 @@ async def trigger_sync_all():
     task = create_background_task(run_all_accounts(), name="sync_all")
     job_id = f"sync_all_{id(task)}"
     return {"jobId": job_id}
+
+
+@router.delete("/cancel/{task_name}", status_code=200)
+async def cancel_sync(task_name: str):
+    """Cancel a running sync task by name (e.g., 'sync_abc123' or 'sync_all')."""
+    cancelled = cancel_task_by_name(task_name)
+    if not cancelled:
+        raise HTTPException(404, f"No running task named '{task_name}'")
+    return {"message": f"Task '{task_name}' cancelled"}
+
+
+@router.post("/enrichment", status_code=202)
+async def trigger_enrichment():
+    """Trigger TMDB enrichment manually."""
+    from app.workers.enrichment_worker import run
+
+    task = create_background_task(run(), name="enrichment_manual")
+    return {"jobId": f"enrichment_{id(task)}"}
 
 
 @router.get("/status/{job_id}", response_model=SyncStatusResponse)

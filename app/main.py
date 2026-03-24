@@ -51,13 +51,19 @@ file_handler = SafeRotatingFileHandler(
 file_handler.setLevel(logging.DEBUG)
 file_handler.setFormatter(logging.Formatter(log_format))
 
-# Apply to root logger
+# Apply to plexhub logger (not root — avoids flooding with SQLAlchemy/httpx DEBUG)
+plexhub_logger = logging.getLogger("plexhub")
+plexhub_logger.setLevel(logging.DEBUG)
+plexhub_logger.addHandler(console_handler)
+plexhub_logger.addHandler(file_handler)
+
+# Root logger only for WARNING+ (third-party libraries)
 root_logger = logging.getLogger()
-root_logger.setLevel(logging.DEBUG)  # Capture all DEBUG and above
+root_logger.setLevel(logging.WARNING)
 root_logger.addHandler(console_handler)
 root_logger.addHandler(file_handler)
 
-logger.info("Logging configured: Console=INFO, File=DEBUG")
+logger.info("Logging configured: plexhub=DEBUG, third-party=WARNING")
 
 
 async def _auto_generate_plex_library():

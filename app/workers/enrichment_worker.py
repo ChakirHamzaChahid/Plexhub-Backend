@@ -12,7 +12,8 @@ from app.utils.time import now_ms
 logger = logging.getLogger("plexhub.enrichment")
 
 BATCH_SIZE = 200  # Commit every N items
-CONCURRENCY = 30  # Parallel TMDB requests (~30 req/s)
+CONCURRENCY = 8   # Parallel TMDB requests (free tier ~4 req/s, keep headroom)
+MAX_ATTEMPTS = 3  # Max enrichment attempts before permanently skipping
 
 
 async def _fetch_movie_data(item, semaphore):
@@ -155,11 +156,16 @@ async def run():
     logger.info(f"Starting enrichment batch (daily limit: {daily_limit}, concurrency: {CONCURRENCY})")
 
     async with async_session_factory() as db:
-        # Phase 1: VOD movies
+        # Phase 1: VOD movies (pending + retryable skipped items)
+        from sqlalchemy import or_
         result = await db.execute(
             select(EnrichmentQueue)
             .where(
-                EnrichmentQueue.status == "pending",
+                or_(
+                    EnrichmentQueue.status == "pending",
+                    # Retry previously skipped items if under max attempts
+                    (EnrichmentQueue.status == "skipped") & (EnrichmentQueue.attempts < MAX_ATTEMPTS),
+                ),
                 EnrichmentQueue.media_type == "movie",
             )
             .order_by(EnrichmentQueue.created_at)
@@ -194,7 +200,10 @@ async def run():
             result = await db.execute(
                 select(EnrichmentQueue)
                 .where(
-                    EnrichmentQueue.status == "pending",
+                    or_(
+                        EnrichmentQueue.status == "pending",
+                        (EnrichmentQueue.status == "skipped") & (EnrichmentQueue.attempts < MAX_ATTEMPTS),
+                    ),
                     EnrichmentQueue.media_type == "show",
                 )
                 .order_by(EnrichmentQueue.created_at)

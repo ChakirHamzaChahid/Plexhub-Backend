@@ -12,13 +12,32 @@ from app.utils.time import now_ms
 
 logger = logging.getLogger("plexhub.health_check")
 
+CONCURRENCY = 20  # Parallel HEAD requests
+
+
+async def _check_one(client: httpx.AsyncClient, item, account, semaphore):
+    """Check a single stream URL. Returns (item, is_broken)."""
+    url = build_stream_url(account, item.rating_key)
+    if not url:
+        return item, None  # Skip
+
+    async with semaphore:
+        try:
+            resp = await client.head(url, follow_redirects=True)
+            return item, resp.status_code >= 400
+        except (httpx.TimeoutException, httpx.ConnectError):
+            return item, True
+        except Exception as e:
+            logger.warning(f"Health check error for {item.rating_key}: {e}")
+            return item, True
+
 
 async def run():
-    """Check a batch of stream URLs for availability."""
+    """Check a batch of stream URLs for availability (concurrent)."""
     batch_size = settings.HEALTH_CHECK_BATCH_SIZE
     cutoff = now_ms() - 7 * 24 * 3600 * 1000  # 7 days ago
 
-    logger.info(f"Starting health check (batch size: {batch_size})")
+    logger.info(f"Starting health check (batch size: {batch_size}, concurrency: {CONCURRENCY})")
 
     async with async_session_factory() as db:
         # Get random batch of streams not checked in 7 days
@@ -47,31 +66,28 @@ async def run():
             select(XtreamAccount).where(XtreamAccount.id.in_(list(account_ids)))
         )
         accounts = {acc.id: acc for acc in acc_result.scalars().all()}
+
+        semaphore = asyncio.Semaphore(CONCURRENCY)
         checked = 0
         broken_count = 0
 
         async with httpx.AsyncClient(timeout=5.0) as client:
+            # Build tasks for all items
+            tasks = []
             for item in items:
                 account_id = item.server_id.replace("xtream_", "")
-
                 account = accounts.get(account_id)
                 if not account:
                     continue
+                tasks.append(_check_one(client, item, account, semaphore))
 
-                url = build_stream_url(account, item.rating_key)
-                if not url:
+            # Run all health checks concurrently
+            results = await asyncio.gather(*tasks)
+
+            # Apply results to DB
+            for item, is_broken in results:
+                if is_broken is None:
                     continue
-
-                is_broken = False
-                try:
-                    resp = await client.head(url, follow_redirects=True)
-                    is_broken = resp.status_code >= 400
-                except (httpx.TimeoutException, httpx.ConnectError):
-                    is_broken = True
-                except Exception as e:
-                    logger.warning(f"Health check error for {item.rating_key}: {e}")
-                    is_broken = True
-
                 await db.execute(
                     update(Media)
                     .where(
@@ -86,12 +102,9 @@ async def run():
                         ),
                     )
                 )
-
                 checked += 1
                 if is_broken:
                     broken_count += 1
-
-                await asyncio.sleep(0.05)  # 50ms between probes
 
         await db.commit()
 

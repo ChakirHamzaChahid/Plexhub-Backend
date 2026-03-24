@@ -58,6 +58,28 @@ def _safe_duration(value) -> int | None:
         return None
 
 
+def _parse_duration_ms(value) -> int | None:
+    """Parse duration from seconds (int/str) or HH:MM:SS format to milliseconds."""
+    if not value:
+        return None
+    try:
+        return int(value) * 1000
+    except (ValueError, TypeError):
+        pass
+    if isinstance(value, str) and ":" in value:
+        parts = value.split(":")
+        try:
+            if len(parts) == 3:
+                h, m, s = int(parts[0]), int(parts[1]), int(parts[2])
+                return (h * 3600 + m * 60 + s) * 1000
+            elif len(parts) == 2:
+                m, s = int(parts[0]), int(parts[1])
+                return (m * 60 + s) * 1000
+        except (ValueError, TypeError):
+            pass
+    return None
+
+
 def map_vod_to_media(dto: dict, account_id: str, index: int, vod_info: dict | None = None) -> dict:
     """Map Xtream VOD stream DTO to media row dict."""
     title, year = parse_title_and_year(dto.get("name") or "Unknown")
@@ -309,9 +331,7 @@ def map_episode_to_media(
         "resolved_thumb_url": info.get("movie_image"),
         "year": None,
         "summary": info.get("plot"),
-        "duration": (int(info["duration_secs"]) * 1000)
-        if info.get("duration_secs")
-        else None,
+        "duration": _parse_duration_ms(info.get("duration_secs") or info.get("duration")),
         "parent_rating_key": f"season_{series_id}_{season_num}",
         "parent_title": f"Season {season_num}",
         "parent_index": season_num,
@@ -438,6 +458,7 @@ async def differential_cleanup_filtered(
                 delete(Media).where(
                     Media.rating_key.in_(chunk),
                     Media.server_id == server_id,
+                    Media.filter.in_(category_ids),  # Only delete within synced categories
                 )
             )
         logger.info(
@@ -468,6 +489,7 @@ async def differential_cleanup_live_filtered(
                 delete(LiveChannel).where(
                     LiveChannel.stream_id.in_(chunk),
                     LiveChannel.server_id == server_id,
+                    LiveChannel.category_id.in_(category_ids),  # Only delete within synced categories
                 )
             )
         logger.info(f"Removed {len(stale_ids)} stale live channels from {server_id} (filtered categories)")

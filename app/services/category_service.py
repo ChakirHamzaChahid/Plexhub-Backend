@@ -77,11 +77,9 @@ async def upsert_category(
     existing = result.scalar_one_or_none()
 
     if existing:
-        # Update existing
+        # Update existing (no commit — let caller manage transaction)
         existing.category_name = category_name
         existing.last_fetched_at = now
-        await db.commit()
-        await db.refresh(existing)
         return existing
     else:
         # Create new
@@ -94,8 +92,6 @@ async def upsert_category(
             last_fetched_at=now,
         )
         db.add(category)
-        await db.commit()
-        await db.refresh(category)
         return category
 
 
@@ -121,7 +117,7 @@ async def update_filter_mode(
         .values(category_filter_mode=filter_mode)
     )
     await db.execute(stmt)
-    await db.commit()
+    # No commit here — let caller manage transaction
     logger.info(f"Updated filter mode for account {account_id} to {filter_mode}")
 
 
@@ -152,7 +148,7 @@ async def update_category_allowed(
         .values(is_allowed=is_allowed)
     )
     result = await db.execute(stmt)
-    await db.commit()
+    # No commit here — let caller manage transaction
 
     if result.rowcount == 0:
         logger.warning(

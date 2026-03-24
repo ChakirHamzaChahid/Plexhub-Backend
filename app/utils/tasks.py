@@ -30,16 +30,33 @@ def _task_done(task: asyncio.Task) -> None:
         )
 
 
+def cancel_task_by_name(name: str) -> bool:
+    """Cancel a background task by its name. Returns True if found and cancelled."""
+    for task in list(_background_tasks):
+        if task.get_name() == name and not task.done():
+            task.cancel()
+            logger.info(f"Cancelled task: {name}")
+            return True
+    return False
+
+
 async def cancel_all_background_tasks(timeout: float = 10.0) -> None:
-    """Cancel all background tasks and wait for them to finish (graceful shutdown)."""
+    """Cancel all background tasks and wait up to timeout seconds for them to finish."""
     if not _background_tasks:
         return
-    logger.info(f"Cancelling {len(_background_tasks)} background tasks...")
-    for task in list(_background_tasks):
+    tasks = list(_background_tasks)
+    logger.info(f"Cancelling {len(tasks)} background tasks (timeout={timeout}s)...")
+    for task in tasks:
         task.cancel()
-    results = await asyncio.gather(*list(_background_tasks), return_exceptions=True)
-    for r in results:
-        if isinstance(r, Exception) and not isinstance(r, asyncio.CancelledError):
-            logger.warning(f"Background task raised during shutdown: {r}")
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(*tasks, return_exceptions=True),
+            timeout=timeout,
+        )
+        for r in results:
+            if isinstance(r, Exception) and not isinstance(r, asyncio.CancelledError):
+                logger.warning(f"Background task raised during shutdown: {r}")
+    except asyncio.TimeoutError:
+        logger.warning(f"Shutdown timeout ({timeout}s) — {len(_background_tasks)} tasks still running")
     _background_tasks.clear()
-    logger.info("All background tasks cancelled")
+    logger.info("Background tasks cleanup done")

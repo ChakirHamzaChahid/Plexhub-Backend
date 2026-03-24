@@ -1,3 +1,4 @@
+import base64
 import logging
 import time
 
@@ -42,7 +43,9 @@ async def list_channels(
     if category_id:
         query = query.where(LiveChannel.category_id == category_id)
     if search:
-        query = query.where(LiveChannel.name.ilike(f"%{search}%"))
+        # Escape LIKE wildcards to prevent pattern injection
+        safe_search = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        query = query.where(LiveChannel.name.ilike(f"%{safe_search}%", escape="\\"))
 
     # Count
     count_query = select(func.count()).select_from(query.subquery())
@@ -200,7 +203,6 @@ async def get_channel_epg(
 
         title = listing.get("title") or "Unknown"
         # Some providers base64 encode the title/description
-        import base64
         try:
             title = base64.b64decode(title).decode("utf-8", errors="replace")
         except Exception:

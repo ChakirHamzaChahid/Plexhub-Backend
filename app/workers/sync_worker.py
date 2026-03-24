@@ -2,7 +2,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import time
 
 from sqlalchemy import select, delete, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_upsert
@@ -20,6 +19,7 @@ from app.utils.unification import (
     calculate_history_group_key,
     calculate_display_rating,
 )
+from app.utils.time import now_ms
 
 logger = logging.getLogger("plexhub.sync")
 
@@ -27,8 +27,14 @@ logger = logging.getLogger("plexhub.sync")
 _sync_jobs: dict[str, dict] = {}
 
 
-def now_ms() -> int:
-    return int(time.time() * 1000)
+def _safe_duration(value) -> int | None:
+    """Convert episode_run_time (minutes) to milliseconds, or None on failure."""
+    if not value:
+        return None
+    try:
+        return int(value) * 60_000
+    except (ValueError, TypeError):
+        return None
 
 
 def map_vod_to_media(dto: dict, account_id: str, index: int, vod_info: dict | None = None) -> dict:
@@ -179,9 +185,7 @@ def map_series_to_media(dto: dict, account_id: str, index: int) -> dict:
         "year": year,
         "summary": dto.get("plot"),
         "genres": dto.get("genre"),
-        "duration": (int(dto["episode_run_time"]) * 60_000)
-        if dto.get("episode_run_time")
-        else None,
+        "duration": _safe_duration(dto.get("episode_run_time")),
         "rating": rating_val,
         "display_rating": rating_val or 0.0,
         "added_at": now_ms(),
@@ -499,13 +503,16 @@ async def differential_cleanup(
 ):
     """Remove DB items not present in the API response (delisted content).
 
-    Only compares within the same media_type to avoid deleting items
-    from categories that were filtered out by whitelist/blacklist.
+    When filter_val is "all", compares ALL items for this server_id/media_type
+    regardless of their individual filter (category_id) value.
+    Otherwise, only compares items with the specific filter value.
     """
     query = select(Media.rating_key).where(
         Media.server_id == server_id,
-        Media.filter == filter_val,
     )
+    # Only filter by category when not syncing all categories
+    if filter_val != "all":
+        query = query.where(Media.filter == filter_val)
     if media_type:
         query = query.where(Media.type == media_type)
 
@@ -908,7 +915,10 @@ async def sync_account(account_id: str):
                             return []
                         rows = []
                         for season_str, episodes in episodes_data.items():
-                            season_num = int(season_str)
+                            try:
+                                season_num = int(season_str)
+                            except (ValueError, TypeError):
+                                season_num = 0
                             for ep in episodes:
                                 if isinstance(ep, dict):
                                     ep_row = map_episode_to_media(

@@ -230,7 +230,8 @@ async def lifespan(app: FastAPI):
                 logger.info("Enrichment done — starting Plex library generation")
                 await _auto_generate_plex_library()
 
-            asyncio.create_task(initial_sync_then_enrich())
+            from app.utils.tasks import create_background_task
+            create_background_task(initial_sync_then_enrich(), name="initial_sync")
         else:
             logger.info(f"[Worker {os.getpid()}] Slave — Passive mode")
 

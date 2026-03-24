@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import time
 
 from sqlalchemy import select, update
 
@@ -8,15 +7,12 @@ from app.config import settings
 from app.db.database import async_session_factory
 from app.models.database import Media, EnrichmentQueue, XtreamAccount
 from app.services.tmdb_service import tmdb_service
+from app.utils.time import now_ms
 
 logger = logging.getLogger("plexhub.enrichment")
 
 BATCH_SIZE = 50  # Commit every N items
 CONCURRENCY = 5  # Parallel TMDB requests
-
-
-def now_ms() -> int:
-    return int(time.time() * 1000)
 
 
 async def _fetch_movie_data(item, semaphore):

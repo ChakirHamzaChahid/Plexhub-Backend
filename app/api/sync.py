@@ -1,11 +1,8 @@
-import asyncio
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.db.database import get_db
+from fastapi import APIRouter
 from app.models.schemas import SyncRequest, SyncStatusResponse
+from app.utils.tasks import create_background_task
 
 logger = logging.getLogger("plexhub.api.sync")
 router = APIRouter(prefix="/sync", tags=["sync"])
@@ -16,9 +13,9 @@ async def trigger_sync(body: SyncRequest):
     """Trigger sync for a specific account."""
     from app.workers.sync_worker import sync_account
 
-    task = asyncio.create_task(sync_account(body.account_id))
-
-    # Return a job ID (we'll use a simple approach)
+    task = create_background_task(
+        sync_account(body.account_id), name=f"sync_{body.account_id}"
+    )
     job_id = f"sync_{body.account_id}_{id(task)}"
     return {"jobId": job_id}
 
@@ -28,7 +25,7 @@ async def trigger_sync_all():
     """Trigger sync for all active accounts."""
     from app.workers.sync_worker import run_all_accounts
 
-    task = asyncio.create_task(run_all_accounts())
+    task = create_background_task(run_all_accounts(), name="sync_all")
     job_id = f"sync_all_{id(task)}"
     return {"jobId": job_id}
 

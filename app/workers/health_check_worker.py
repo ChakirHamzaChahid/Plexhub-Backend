@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import time
 
 import httpx
 from sqlalchemy import select, update, func, or_
@@ -9,12 +8,9 @@ from app.config import settings
 from app.db.database import async_session_factory
 from app.models.database import Media, XtreamAccount
 from app.services.stream_service import build_stream_url
+from app.utils.time import now_ms
 
 logger = logging.getLogger("plexhub.health_check")
-
-
-def now_ms() -> int:
-    return int(time.time() * 1000)
 
 
 async def run():
@@ -89,7 +85,7 @@ async def run():
                         is_broken=is_broken,
                         last_stream_check=now_ms(),
                         stream_error_count=(
-                            Media.stream_error_count + (1 if is_broken else 0)
+                            Media.stream_error_count + 1 if is_broken else 0
                         ),
                     )
                 )

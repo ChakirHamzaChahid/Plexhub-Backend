@@ -45,11 +45,15 @@ class LocalStorage(LibraryStorage):
 
     def write_file(self, rel_path: str, content: str) -> None:
         full = self._resolve(rel_path)
+        if full.exists():
+            return  # Preserve existing file (e.g. enriched by Tiny Media Manager)
         full.parent.mkdir(parents=True, exist_ok=True)
         full.write_text(content, encoding="utf-8")
 
     def download_image(self, rel_path: str, image_url: str) -> bool:
         full = self._resolve(rel_path)
+        if full.exists():
+            return True  # Preserve existing image (e.g. enriched by Tiny Media Manager)
         full.parent.mkdir(parents=True, exist_ok=True)
         try:
             with httpx.Client(timeout=15.0, follow_redirects=True) as client:

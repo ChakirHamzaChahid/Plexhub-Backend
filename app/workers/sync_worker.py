@@ -14,6 +14,7 @@ from app.utils.string_normalizer import (
     normalize_for_sorting,
     parse_rating,
 )
+from app.utils.server_id import build_server_id
 from app.utils.unification import (
     calculate_unification_id,
     calculate_history_group_key,
@@ -86,7 +87,7 @@ def map_vod_to_media(dto: dict, account_id: str, index: int, vod_info: dict | No
     ext = (dto.get("container_extension") or "").strip() or None
     stream_id = dto["stream_id"]
     rating_key = f"vod_{stream_id}.{ext}" if ext else f"vod_{stream_id}"
-    server_id = f"xtream_{account_id}"
+    server_id = build_server_id(account_id)
     rating_val = parse_rating(dto.get("rating"))
 
     # Extract detailed info if available (defensive: handle list responses)
@@ -206,7 +207,7 @@ def map_series_to_media(dto: dict, account_id: str, index: int) -> dict:
     title, year = parse_title_and_year(dto.get("name") or "Unknown")
     series_id = dto["series_id"]
     rating_key = f"series_{series_id}"
-    server_id = f"xtream_{account_id}"
+    server_id = build_server_id(account_id)
     rating_val = parse_rating(dto.get("rating"))
     backdrop = dto.get("backdrop_path")
 
@@ -311,7 +312,7 @@ def map_episode_to_media(
     ep_id = str(episode.get("id", ""))
     ext = (episode.get("container_extension") or "").strip() or None
     rating_key = f"ep_{ep_id}.{ext}" if ext else f"ep_{ep_id}"
-    server_id = f"xtream_{account_id}"
+    server_id = build_server_id(account_id)
     ep_num = episode.get("episode_num")
     info = episode.get("info") or {}
 
@@ -354,7 +355,7 @@ def map_live_stream_to_channel(dto: dict, account_id: str) -> dict:
 
     stream_id = dto["stream_id"]
     name = dto.get("name") or "Unknown"
-    server_id = f"xtream_{account_id}"
+    server_id = build_server_id(account_id)
 
     return {
         "stream_id": stream_id,
@@ -809,7 +810,7 @@ async def sync_account(account_id: str):
                     _record_sync_job(job_id, {"status": "failed", "progress": {}})
                     return job_id
 
-                server_id = f"xtream_{account_id}"
+                server_id = build_server_id(account_id)
                 total_synced = 0
 
                 # --- Fetch and store categories from Xtream ---

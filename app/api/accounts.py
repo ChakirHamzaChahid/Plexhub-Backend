@@ -6,6 +6,7 @@ from sqlalchemy import select, delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_db
+from app.utils.server_id import build_server_id
 from app.models.database import XtreamAccount
 from app.models.schemas import (
     AccountCreate,
@@ -135,7 +136,7 @@ async def delete_account(
         Media, EnrichmentQueue, XtreamCategory, LiveChannel, EpgEntry,
     )
 
-    server_id = f"xtream_{account_id}"
+    server_id = build_server_id(account_id)
     await db.execute(delete(Media).where(Media.server_id == server_id))
     await db.execute(
         delete(EnrichmentQueue).where(EnrichmentQueue.server_id == server_id)

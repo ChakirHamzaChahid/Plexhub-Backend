@@ -12,6 +12,9 @@ logger = logging.getLogger("plexhub.plex_generator.storage")
 _image_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="img-dl")
 # Thread-local httpx clients (httpx.Client is NOT thread-safe)
 _thread_local = threading.local()
+# Track all created clients so we can close them on shutdown
+_all_clients: list[httpx.Client] = []
+_all_clients_lock = threading.Lock()
 
 
 def _get_image_client() -> httpx.Client:
@@ -23,17 +26,20 @@ def _get_image_client() -> httpx.Client:
             follow_redirects=True,
         )
         _thread_local.http_client = client
+        with _all_clients_lock:
+            _all_clients.append(client)
     return client
 
 
 def shutdown_image_pool() -> None:
     """Shutdown the shared image thread pool and close httpx clients. Call during app shutdown."""
     _image_pool.shutdown(wait=True, cancel_futures=True)
-    # Close any thread-local httpx clients
-    client = getattr(_thread_local, "http_client", None)
-    if client and not client.is_closed:
-        client.close()
-        _thread_local.http_client = None
+    # Close all thread-local httpx clients
+    with _all_clients_lock:
+        for client in _all_clients:
+            if not client.is_closed:
+                client.close()
+        _all_clients.clear()
 
 
 class LibraryStorage(ABC):
@@ -101,9 +107,9 @@ class LocalStorage(LibraryStorage):
     def submit_image_download(self, rel_path: str, image_url: str):
         """Submit image download to thread pool (non-blocking). Returns Future."""
         full = self._resolve(rel_path)
-        if full.exists():
-            return None  # Already exists
         full.parent.mkdir(parents=True, exist_ok=True)
+        if full.exists():
+            return None  # Already exists (checked after mkdir to avoid race)
         return _image_pool.submit(self._download_sync, full, image_url)
 
     def delete_file(self, rel_path: str) -> None:

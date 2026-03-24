@@ -7,6 +7,7 @@ from typing import List, Optional
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.database import XtreamCategory, XtreamAccount, Media, LiveChannel
+from app.utils.server_id import build_server_id
 
 logger = logging.getLogger(__name__)
 
@@ -246,7 +247,7 @@ async def update_media_category_visibility(
 
     Episodes inherit visibility from their parent series (grandparent_rating_key).
     """
-    server_id = f"xtream_{account_id}"
+    server_id = build_server_id(account_id)
 
     # Load current config
     result = await db.execute(

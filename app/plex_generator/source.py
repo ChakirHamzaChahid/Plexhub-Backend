@@ -7,6 +7,7 @@ from app.db.database import async_session_factory
 from app.models.database import Media, XtreamAccount
 from app.plex_generator.models import PlexMovie, PlexEpisode, PlexSeries
 from app.services.stream_service import build_stream_url
+from app.utils.server_id import build_server_id
 
 logger = logging.getLogger("plexhub.plex_generator.source")
 
@@ -26,7 +27,7 @@ class DatabaseSource(MediaSource):
 
     def __init__(self, account_id: str):
         self.account_id = account_id
-        self.server_id = f"xtream_{account_id}"
+        self.server_id = build_server_id(account_id)
 
     async def _load_account(self, db) -> XtreamAccount | None:
         result = await db.execute(

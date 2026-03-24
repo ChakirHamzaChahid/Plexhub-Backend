@@ -26,7 +26,7 @@ def _try_base64_decode(value: str) -> str:
     if not value:
         return value
     try:
-        decoded = base64.b64decode(value, validate=True).decode("utf-8")
+        decoded = base64.b64decode(value, validate=True).decode("utf-8", errors="replace")
         # Reject if decoded text contains control chars (likely not real text)
         if any(ord(c) < 32 and c not in "\n\r\t" for c in decoded):
             return value

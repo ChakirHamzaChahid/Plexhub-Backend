@@ -219,63 +219,68 @@ async def run_pipeline_validation():
         accounts = {acc.id: acc for acc in acc_result.scalars().all()}
 
         semaphore = asyncio.Semaphore(concurrency)
+        commit_interval = 200  # Commit and log every N results
+        log_interval = 50  # Log progress every N results
 
-        # Process in batches to commit incrementally
-        batch_size = 500
         async with httpx.AsyncClient(timeout=timeout) as client:
-            for batch_start in range(0, len(items), batch_size):
-                batch_end = min(batch_start + batch_size, len(items))
-                batch_items = items[batch_start:batch_end]
+            # Build all tasks
+            tasks = []
+            for item in items:
+                account_id = item.server_id.replace("xtream_", "")
+                account = accounts.get(account_id)
+                if not account:
+                    continue
+                tasks.append(asyncio.ensure_future(
+                    _check_one(client, item, account, semaphore)
+                ))
 
-                tasks = []
-                for item in batch_items:
-                    account_id = item.server_id.replace("xtream_", "")
-                    account = accounts.get(account_id)
-                    if not account:
-                        continue
-                    tasks.append(_check_one(client, item, account, semaphore))
+            # Process results as they complete (real-time feedback)
+            pending_updates = 0
+            for coro in asyncio.as_completed(tasks):
+                item, is_broken = await coro
+                if is_broken is None:
+                    continue
 
-                results = await asyncio.gather(*tasks)
-
-                batch_checked = 0
-                batch_broken = 0
-                batch_recovered = 0
-                for item, is_broken in results:
-                    if is_broken is None:
-                        continue
-
-                    was_broken = item.is_broken
-                    new_error_count = (
-                        (item.stream_error_count or 0) + 1 if is_broken else 0
-                    )
-
-                    if was_broken and not is_broken:
-                        batch_recovered += 1
-
-                    await db.execute(
-                        update(Media)
-                        .where(
-                            Media.rating_key == item.rating_key,
-                            Media.server_id == item.server_id,
-                        )
-                        .values(
-                            is_broken=is_broken,
-                            last_stream_check=now_ms(),
-                            stream_error_count=new_error_count,
-                        )
-                    )
-                    batch_checked += 1
-                    if is_broken:
-                        batch_broken += 1
-
-                await db.commit()
-                total_checked += batch_checked
-                total_broken += batch_broken
-                total_recovered += batch_recovered
-                logger.info(
-                    f"Validation progress: {batch_end}/{len(items)} "
-                    f"({batch_broken} broken in this batch)"
+                was_broken = item.is_broken
+                new_error_count = (
+                    (item.stream_error_count or 0) + 1 if is_broken else 0
                 )
+
+                if was_broken and not is_broken:
+                    total_recovered += 1
+
+                await db.execute(
+                    update(Media)
+                    .where(
+                        Media.rating_key == item.rating_key,
+                        Media.server_id == item.server_id,
+                    )
+                    .values(
+                        is_broken=is_broken,
+                        last_stream_check=now_ms(),
+                        stream_error_count=new_error_count,
+                    )
+                )
+                total_checked += 1
+                if is_broken:
+                    total_broken += 1
+                pending_updates += 1
+
+                # Log progress frequently
+                if total_checked % log_interval == 0:
+                    logger.info(
+                        f"Validation progress: {total_checked}/{len(items)} "
+                        f"({total_broken} broken so far)"
+                    )
+
+                # Commit periodically to avoid huge transactions
+                if pending_updates >= commit_interval:
+                    await db.commit()
+                    pending_updates = 0
+
+            # Final commit for remaining updates
+            if pending_updates > 0:
+                await db.commit()
 
     logger.info(
         f"Pipeline validation complete: {total_checked} checked, "

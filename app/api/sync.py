@@ -48,6 +48,37 @@ async def trigger_enrichment():
     return {"jobId": f"enrichment_{id(task)}"}
 
 
+@router.post("/validate-streams", status_code=202)
+async def trigger_stream_validation():
+    """Trigger stream validation manually (checks unchecked/stale streams)."""
+    from app.workers.health_check_worker import run_pipeline_validation
+
+    task = create_background_task(run_pipeline_validation(), name="stream_validation")
+    return {"jobId": f"validation_{id(task)}"}
+
+
+@router.post("/full-pipeline", status_code=202)
+async def trigger_full_pipeline():
+    """Trigger the full pipeline: sync -> enrichment -> validation -> Plex generation."""
+    from app.workers.sync_worker import run_all_accounts
+    from app.workers.enrichment_worker import run as run_enrichment
+    from app.workers.health_check_worker import run_pipeline_validation
+
+    async def _full_pipeline():
+        await run_all_accounts()
+        logger.info("Full pipeline: sync done — starting enrichment")
+        await run_enrichment()
+        logger.info("Full pipeline: enrichment done — starting stream validation")
+        await run_pipeline_validation()
+        logger.info("Full pipeline: validation done — starting Plex generation")
+        from app.main import _auto_generate_plex_library
+        await _auto_generate_plex_library()
+        logger.info("Full pipeline: complete")
+
+    task = create_background_task(_full_pipeline(), name="full_pipeline")
+    return {"jobId": f"pipeline_{id(task)}"}
+
+
 @router.get("/status/{job_id}", response_model=SyncStatusResponse)
 async def get_sync_status(job_id: str):
     """Check sync job status from in-memory tracker."""

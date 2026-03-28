@@ -58,6 +58,23 @@ def _content_type_is_error(content_type: str) -> bool:
     return ct in ("text/html", "application/json", "text/plain", "text/xml")
 
 
+# Reasons that indicate a definitive failure — bypass STREAM_BROKEN_THRESHOLD
+# and mark broken immediately. Transient errors (timeout, connect_error, 503)
+# still require N consecutive failures before marking broken.
+_DEFINITIVE_PREFIXES = (
+    "head_404", "get_404",       # stream deleted on server
+    "head_403", "get_403",       # access revoked
+    "head_ct_error:", "get_ct_error:",  # error page (text/html, etc.)
+    "get_empty",                 # 200 OK but empty body = dead stream
+    "get_magic_fail:",           # bytes don't match any video format
+)
+
+
+def _is_definitive_failure(reason: str) -> bool:
+    """Check if a failure reason is definitive (not transient)."""
+    return any(reason.startswith(p) for p in _DEFINITIVE_PREFIXES)
+
+
 # Diagnostic counters (reset each run)
 _diag_reasons: dict[str, int] = {}
 
@@ -197,9 +214,10 @@ async def run():
                 new_error_count = (
                     (item.stream_error_count or 0) + 1 if is_broken else 0
                 )
+                definitive = is_broken and _is_definitive_failure(reason)
                 mark_broken = (
                     is_broken
-                    and new_error_count >= settings.STREAM_BROKEN_THRESHOLD
+                    and (definitive or new_error_count >= settings.STREAM_BROKEN_THRESHOLD)
                 )
 
                 await db.execute(
@@ -353,9 +371,10 @@ async def run_pipeline_validation():
                     new_error_count = (
                         (item.stream_error_count or 0) + 1 if is_broken else 0
                     )
+                    definitive = is_broken and _is_definitive_failure(reason)
                     mark_broken = (
                         is_broken
-                        and new_error_count >= settings.STREAM_BROKEN_THRESHOLD
+                        and (definitive or new_error_count >= settings.STREAM_BROKEN_THRESHOLD)
                     )
 
                     if was_broken and not is_broken:

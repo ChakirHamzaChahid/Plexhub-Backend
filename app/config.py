@@ -30,7 +30,7 @@ class Settings:
     # Stream Validation
     STREAM_VALIDATION_ENABLED: bool = os.getenv("STREAM_VALIDATION_ENABLED", "true").lower() in ("true", "1", "yes")
     STREAM_VALIDATION_CONCURRENCY: int = _safe_int("STREAM_VALIDATION_CONCURRENCY", 20)
-    STREAM_VALIDATION_TIMEOUT: int = _safe_int("STREAM_VALIDATION_TIMEOUT", 8)
+    STREAM_VALIDATION_TIMEOUT: int = _safe_int("STREAM_VALIDATION_TIMEOUT", 15)
     STREAM_BROKEN_THRESHOLD: int = _safe_int("STREAM_BROKEN_THRESHOLD", 3)
     STREAM_VALIDATION_RECHECK_HOURS: int = _safe_int("STREAM_VALIDATION_RECHECK_HOURS", 24)
     STREAM_FILTER_BROKEN: bool = os.getenv("STREAM_FILTER_BROKEN", "true").lower() in ("true", "1", "yes")

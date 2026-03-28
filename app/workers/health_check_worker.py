@@ -37,19 +37,57 @@ def _looks_like_video(data: bytes) -> bool:
     return False
 
 
-async def _check_one(client: httpx.AsyncClient, item, account, semaphore):
-    """Check a single stream URL using Range request with HEAD fallback.
+def _content_type_is_video(content_type: str) -> bool:
+    """Check if Content-Type header indicates a video/binary stream."""
+    if not content_type:
+        return False
+    ct = content_type.lower().split(";")[0].strip()
+    return ct in (
+        "video/mp2t", "video/mp4", "video/x-matroska", "video/webm",
+        "video/avi", "video/x-msvideo", "video/mpeg", "video/x-flv",
+        "video/3gpp", "video/quicktime", "video/ogg",
+        "application/octet-stream",
+    )
 
-    Returns (item, is_broken).
+
+def _content_type_is_error(content_type: str) -> bool:
+    """Check if Content-Type indicates a non-video error response."""
+    if not content_type:
+        return False
+    ct = content_type.lower().split(";")[0].strip()
+    return ct in ("text/html", "application/json", "text/plain", "text/xml")
+
+
+# Diagnostic counters (reset each run)
+_diag_reasons: dict[str, int] = {}
+
+
+async def _check_one(client: httpx.AsyncClient, item, account, semaphore):
+    """Check a single stream URL using HEAD first, then Range GET if needed.
+
+    Returns (item, is_broken, reason).
     """
     url = build_stream_url(account, item.rating_key)
     if not url:
-        return item, None  # Skip (no URL constructable)
+        return item, None, "no_url"
 
     async with semaphore:
         try:
-            # Use streaming GET with Range header to avoid downloading a full file
-            # if the server ignores the Range header
+            # Step 1: HEAD request — fast, checks if the resource exists
+            head_resp = await client.head(url, follow_redirects=True)
+
+            if head_resp.status_code >= 400:
+                return item, True, f"head_{head_resp.status_code}"
+
+            # If HEAD returns 200/206, check Content-Type
+            ct = head_resp.headers.get("content-type", "")
+            if _content_type_is_video(ct):
+                return item, False, "head_ct_video"
+
+            if _content_type_is_error(ct):
+                return item, True, f"head_ct_error:{ct.split(';')[0].strip()}"
+
+            # Step 2: Content-Type ambiguous — do Range GET to inspect bytes
             async with client.stream(
                 "GET",
                 url,
@@ -57,27 +95,36 @@ async def _check_one(client: httpx.AsyncClient, item, account, semaphore):
                 follow_redirects=True,
             ) as resp:
                 if resp.status_code in (200, 206):
-                    # Read only the first chunk (up to 8 KB)
+                    ct = resp.headers.get("content-type", "")
+                    if _content_type_is_video(ct):
+                        return item, False, "get_ct_video"
+                    if _content_type_is_error(ct):
+                        return item, True, f"get_ct_error:{ct.split(';')[0].strip()}"
+
+                    # Read first chunk and check magic bytes
                     content = b""
                     async for chunk in resp.aiter_bytes(8192):
                         content = chunk
-                        break  # Only read first chunk
+                        break
                     if len(content) > 0:
-                        return item, not _looks_like_video(content)
-                    return item, True  # Empty response = broken
+                        is_video = _looks_like_video(content)
+                        if is_video:
+                            return item, False, "get_magic_ok"
+                        return item, True, f"get_magic_fail:{len(content)}b"
+                    return item, True, "get_empty"
                 elif resp.status_code == 416:
-                    pass  # Fall through to HEAD fallback
+                    # Range not satisfiable but HEAD was OK — probably valid
+                    return item, False, "get_416_head_ok"
                 else:
-                    return item, resp.status_code >= 400
+                    return item, resp.status_code >= 400, f"get_{resp.status_code}"
 
-            # HEAD fallback (for 416 Range Not Satisfiable)
-            head_resp = await client.head(url, follow_redirects=True)
-            return item, head_resp.status_code >= 400
-        except (httpx.TimeoutException, httpx.ConnectError):
-            return item, True
+        except httpx.TimeoutException:
+            return item, True, "timeout"
+        except httpx.ConnectError:
+            return item, True, "connect_error"
         except Exception as e:
             logger.warning(f"Health check error for {item.rating_key}: {e}")
-            return item, True
+            return item, True, f"exception:{type(e).__name__}"
 
 
 async def run():
@@ -87,7 +134,7 @@ async def run():
     concurrency = settings.STREAM_VALIDATION_CONCURRENCY
     cutoff = now_ms() - 7 * 24 * 3600 * 1000  # 7 days ago
 
-    logger.info(f"Starting health check (batch size: {batch_size}, concurrency: {concurrency})")
+    logger.info(f"Starting health check (batch size: {batch_size}, concurrency: {concurrency}, timeout: {timeout}s)")
 
     async with async_session_factory() as db:
         # Get random batch of streams not checked in 7 days
@@ -121,7 +168,9 @@ async def run():
         checked = 0
         broken_count = 0
 
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout, connect=10.0),
+        ) as client:
             # Build tasks for all items
             tasks = []
             for item in items:
@@ -135,9 +184,11 @@ async def run():
             results = await asyncio.gather(*tasks)
 
             # Apply results to DB
-            for item, is_broken in results:
+            reasons: dict[str, int] = {}
+            for item, is_broken, reason in results:
                 if is_broken is None:
                     continue
+                reasons[reason] = reasons.get(reason, 0) + 1
                 await db.execute(
                     update(Media)
                     .where(
@@ -159,7 +210,8 @@ async def run():
         await db.commit()
 
     logger.info(
-        f"Health check complete: {checked} checked, {broken_count} broken"
+        f"Health check complete: {checked} checked, {broken_count} broken | "
+        f"reasons: {reasons}"
     )
 
 
@@ -187,6 +239,7 @@ async def run_pipeline_validation():
     total_checked = 0
     total_broken = 0
     total_recovered = 0
+    diag_reasons: dict[str, int] = {}
 
     async with async_session_factory() as db:
         # Find all unchecked or stale streams (movies + episodes only)
@@ -221,68 +274,129 @@ async def run_pipeline_validation():
         semaphore = asyncio.Semaphore(concurrency)
         commit_interval = 200  # Commit and log every N results
         log_interval = 50  # Log progress every N results
+        circuit_breaker_sample = 50  # Check failure rate after N results
+        circuit_breaker_threshold = 0.90  # Abort if > 90% broken
+        circuit_tripped = False
 
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            # Build all tasks
-            tasks = []
-            for item in items:
-                account_id = item.server_id.replace("xtream_", "")
+        # Group items by account for per-account circuit breaking
+        items_by_account: dict[str, list] = {}
+        for item in items:
+            account_id = item.server_id.replace("xtream_", "")
+            items_by_account.setdefault(account_id, []).append(item)
+
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout, connect=10.0),
+        ) as client:
+            for account_id, account_items in items_by_account.items():
                 account = accounts.get(account_id)
                 if not account:
                     continue
-                tasks.append(asyncio.ensure_future(
-                    _check_one(client, item, account, semaphore)
-                ))
 
-            # Process results as they complete (real-time feedback)
-            pending_updates = 0
-            for coro in asyncio.as_completed(tasks):
-                item, is_broken = await coro
-                if is_broken is None:
+                account_checked = 0
+                account_broken = 0
+                account_tripped = False
+
+                # Build tasks for this account
+                tasks = []
+                for item in account_items:
+                    tasks.append(asyncio.ensure_future(
+                        _check_one(client, item, account, semaphore)
+                    ))
+
+                pending_updates = 0
+                for coro in asyncio.as_completed(tasks):
+                    item, is_broken, reason = await coro
+                    if is_broken is None:
+                        continue
+
+                    diag_reasons[reason] = diag_reasons.get(reason, 0) + 1
+                    account_checked += 1
+
+                    # Circuit breaker: after N checks, if failure rate > threshold,
+                    # the server is likely down — abort this account
+                    if (
+                        account_checked == circuit_breaker_sample
+                        and account_checked > 0
+                    ):
+                        failure_rate = account_broken / account_checked
+                        if failure_rate >= circuit_breaker_threshold:
+                            logger.warning(
+                                f"CIRCUIT BREAKER: account {account_id} has "
+                                f"{failure_rate:.0%} failure rate after "
+                                f"{account_checked} checks — server likely down. "
+                                f"Skipping remaining {len(account_items) - account_checked} "
+                                f"streams. No streams will be marked as broken."
+                            )
+                            account_tripped = True
+                            # Rollback uncommitted changes for this account
+                            await db.rollback()
+                            pending_updates = 0
+                            # Cancel remaining tasks for this account
+                            for t in tasks:
+                                t.cancel()
+                            break
+
+                    was_broken = item.is_broken
+                    new_error_count = (
+                        (item.stream_error_count or 0) + 1 if is_broken else 0
+                    )
+
+                    if was_broken and not is_broken:
+                        total_recovered += 1
+
+                    await db.execute(
+                        update(Media)
+                        .where(
+                            Media.rating_key == item.rating_key,
+                            Media.server_id == item.server_id,
+                        )
+                        .values(
+                            is_broken=is_broken,
+                            last_stream_check=now_ms(),
+                            stream_error_count=new_error_count,
+                        )
+                    )
+                    total_checked += 1
+                    if is_broken:
+                        total_broken += 1
+                        account_broken += 1
+                    pending_updates += 1
+
+                    # Log progress frequently
+                    if total_checked % log_interval == 0:
+                        logger.info(
+                            f"Validation progress: {total_checked}/{len(items)} "
+                            f"({total_broken} broken so far) | "
+                            f"reasons: {diag_reasons}"
+                        )
+
+                    # Commit periodically to avoid huge transactions
+                    if pending_updates >= commit_interval:
+                        await db.commit()
+                        pending_updates = 0
+
+                if account_tripped:
+                    circuit_tripped = True
                     continue
 
-                was_broken = item.is_broken
-                new_error_count = (
-                    (item.stream_error_count or 0) + 1 if is_broken else 0
-                )
-
-                if was_broken and not is_broken:
-                    total_recovered += 1
-
-                await db.execute(
-                    update(Media)
-                    .where(
-                        Media.rating_key == item.rating_key,
-                        Media.server_id == item.server_id,
-                    )
-                    .values(
-                        is_broken=is_broken,
-                        last_stream_check=now_ms(),
-                        stream_error_count=new_error_count,
-                    )
-                )
-                total_checked += 1
-                if is_broken:
-                    total_broken += 1
-                pending_updates += 1
-
-                # Log progress frequently
-                if total_checked % log_interval == 0:
-                    logger.info(
-                        f"Validation progress: {total_checked}/{len(items)} "
-                        f"({total_broken} broken so far)"
-                    )
-
-                # Commit periodically to avoid huge transactions
-                if pending_updates >= commit_interval:
+                # Commit remaining for this account
+                if pending_updates > 0:
                     await db.commit()
                     pending_updates = 0
 
-            # Final commit for remaining updates
-            if pending_updates > 0:
-                await db.commit()
+                logger.info(
+                    f"Account {account_id}: {account_checked} checked, "
+                    f"{account_broken} broken"
+                )
+
+    if circuit_tripped:
+        logger.warning(
+            "Pipeline validation finished with circuit breaker tripped on "
+            "one or more accounts — those accounts were skipped entirely"
+        )
 
     logger.info(
         f"Pipeline validation complete: {total_checked} checked, "
-        f"{total_broken} broken, {total_recovered} recovered"
+        f"{total_broken} broken, {total_recovered} recovered | "
+        f"reasons: {diag_reasons}"
     )

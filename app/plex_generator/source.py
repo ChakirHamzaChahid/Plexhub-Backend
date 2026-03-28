@@ -3,6 +3,7 @@ from abc import ABC, abstractmethod
 
 from sqlalchemy import select
 
+from app.config import settings
 from app.db.database import async_session_factory
 from app.models.database import Media, XtreamAccount
 from app.plex_generator.models import PlexMovie, PlexEpisode, PlexSeries
@@ -42,12 +43,15 @@ class DatabaseSource(MediaSource):
                 logger.error(f"Account {self.account_id} not found")
                 return []
 
+            query = select(Media).where(
+                Media.server_id == self.server_id,
+                Media.type == "movie",
+                Media.is_in_allowed_categories == True,
+            )
+            if settings.STREAM_FILTER_BROKEN:
+                query = query.where(Media.is_broken == False)
             result = await db.stream(
-                select(Media).where(
-                    Media.server_id == self.server_id,
-                    Media.type == "movie",
-                    Media.is_in_allowed_categories == True,
-                ).execution_options(yield_per=1000)
+                query.execution_options(yield_per=1000)
             )
 
             movies = []
@@ -93,11 +97,14 @@ class DatabaseSource(MediaSource):
             shows = [s async for s in show_stream.scalars()]
 
             # Load all episodes and group by series in a single streaming pass
+            ep_query = select(Media).where(
+                Media.server_id == self.server_id,
+                Media.type == "episode",
+            )
+            if settings.STREAM_FILTER_BROKEN:
+                ep_query = ep_query.where(Media.is_broken == False)
             ep_stream = await db.stream(
-                select(Media).where(
-                    Media.server_id == self.server_id,
-                    Media.type == "episode",
-                ).execution_options(yield_per=1000)
+                ep_query.execution_options(yield_per=1000)
             )
             episodes_by_series: dict[str, list[Media]] = {}
             async for ep in ep_stream.scalars():

@@ -23,6 +23,7 @@ async def run_migrations(engine: AsyncEngine) -> None:
     await _migration_004_add_enrichment_existing_ids(engine)
     await _migration_005_add_media_cast(engine)
     await _migration_006_create_live_tables(engine)
+    await _migration_007_add_stream_validation_index(engine)
 
     logger.info("All migrations completed successfully")
 
@@ -207,3 +208,18 @@ async def _migration_006_create_live_tables(engine: AsyncEngine) -> None:
             logger.info("Migration 006: epg_entries table created")
         except Exception as e:
             logger.warning(f"Migration 006: epg_entries may already exist: {e}")
+
+
+async def _migration_007_add_stream_validation_index(engine: AsyncEngine) -> None:
+    """Add compound index for pipeline stream validation query performance."""
+    logger.info("Migration 007: Adding stream validation index")
+
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(text("""
+                CREATE INDEX IF NOT EXISTS ix_media_stream_validation
+                ON media(server_id, type, is_in_allowed_categories, last_stream_check)
+            """))
+            logger.info("Migration 007: stream validation index created")
+        except Exception as e:
+            logger.warning(f"Migration 007: Index may already exist: {e}")

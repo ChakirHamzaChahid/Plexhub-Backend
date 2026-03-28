@@ -224,12 +224,14 @@ async def lifespan(app: FastAPI):
             from app.workers import sync_worker, enrichment_worker, health_check_worker
 
             async def scheduled_sync_enrich_generate():
-                """Periodic pipeline: sync -> enrichment -> Plex generation."""
+                """Periodic pipeline: sync -> enrichment -> validation -> Plex generation."""
                 try:
                     await sync_worker.run_all_accounts()
                     logger.info("Scheduled sync done — starting enrichment")
                     await enrichment_worker.run()
-                    logger.info("Scheduled enrichment done — starting Plex generation")
+                    logger.info("Scheduled enrichment done — starting stream validation")
+                    await health_check_worker.run_pipeline_validation()
+                    logger.info("Scheduled validation done — starting Plex generation")
                     await _auto_generate_plex_library()
                 except Exception as e:
                     logger.error(f"Scheduled sync pipeline failed: {e}", exc_info=True)
@@ -260,7 +262,9 @@ async def lifespan(app: FastAPI):
                 await sync_worker.run_all_accounts()
                 logger.info("Initial sync done — starting enrichment")
                 await enrichment_worker.run()
-                logger.info("Enrichment done — starting Plex library generation")
+                logger.info("Enrichment done — starting stream validation")
+                await health_check_worker.run_pipeline_validation()
+                logger.info("Validation done — starting Plex library generation")
                 await _auto_generate_plex_library()
 
             from app.utils.tasks import create_background_task

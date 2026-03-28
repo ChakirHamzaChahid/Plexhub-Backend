@@ -56,6 +56,7 @@ plexhub_logger = logging.getLogger("plexhub")
 plexhub_logger.setLevel(logging.DEBUG)
 plexhub_logger.addHandler(console_handler)
 plexhub_logger.addHandler(file_handler)
+plexhub_logger.propagate = False  # Don't propagate to root (avoids duplicate logs)
 
 # Root logger only for WARNING+ (third-party libraries)
 root_logger = logging.getLogger()

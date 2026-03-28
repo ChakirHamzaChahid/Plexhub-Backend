@@ -342,9 +342,11 @@ async def run_pipeline_validation():
                             # Rollback uncommitted changes for this account
                             await db.rollback()
                             pending_updates = 0
-                            # Cancel remaining tasks for this account
+                            # Cancel remaining tasks and await them to
+                            # release httpx connections cleanly
                             for t in tasks:
                                 t.cancel()
+                            await asyncio.gather(*tasks, return_exceptions=True)
                             break
 
                     was_broken = item.is_broken

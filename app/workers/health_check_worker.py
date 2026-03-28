@@ -80,8 +80,12 @@ async def _check_one(client: httpx.AsyncClient, item, account, semaphore):
                 return item, True, f"head_{head_resp.status_code}"
 
             # If HEAD returns 200/206, check Content-Type
+            # Don't trust Content-Type when Content-Length is 0 — Xtream
+            # servers return 200 + application/octet-stream + empty body
+            # for dead streams. Fall through to Range GET for verification.
             ct = head_resp.headers.get("content-type", "")
-            if _content_type_is_video(ct):
+            content_length = head_resp.headers.get("content-length")
+            if _content_type_is_video(ct) and content_length != "0":
                 return item, False, "head_ct_video"
 
             if _content_type_is_error(ct):
@@ -189,6 +193,15 @@ async def run():
                 if is_broken is None:
                     continue
                 reasons[reason] = reasons.get(reason, 0) + 1
+
+                new_error_count = (
+                    (item.stream_error_count or 0) + 1 if is_broken else 0
+                )
+                mark_broken = (
+                    is_broken
+                    and new_error_count >= settings.STREAM_BROKEN_THRESHOLD
+                )
+
                 await db.execute(
                     update(Media)
                     .where(
@@ -196,15 +209,13 @@ async def run():
                         Media.server_id == item.server_id,
                     )
                     .values(
-                        is_broken=is_broken,
+                        is_broken=mark_broken,
                         last_stream_check=now_ms(),
-                        stream_error_count=(
-                            Media.stream_error_count + 1 if is_broken else 0
-                        ),
+                        stream_error_count=new_error_count,
                     )
                 )
                 checked += 1
-                if is_broken:
+                if mark_broken:
                     broken_count += 1
 
         await db.commit()
@@ -340,6 +351,10 @@ async def run_pipeline_validation():
                     new_error_count = (
                         (item.stream_error_count or 0) + 1 if is_broken else 0
                     )
+                    mark_broken = (
+                        is_broken
+                        and new_error_count >= settings.STREAM_BROKEN_THRESHOLD
+                    )
 
                     if was_broken and not is_broken:
                         total_recovered += 1
@@ -351,14 +366,15 @@ async def run_pipeline_validation():
                             Media.server_id == item.server_id,
                         )
                         .values(
-                            is_broken=is_broken,
+                            is_broken=mark_broken,
                             last_stream_check=now_ms(),
                             stream_error_count=new_error_count,
                         )
                     )
                     total_checked += 1
-                    if is_broken:
+                    if mark_broken:
                         total_broken += 1
+                    if is_broken:
                         account_broken += 1
                     pending_updates += 1
 

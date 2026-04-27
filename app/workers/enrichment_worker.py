@@ -8,6 +8,7 @@ from app.db.database import async_session_factory
 from app.models.database import Media, EnrichmentQueue, XtreamAccount
 from app.services.tmdb_service import tmdb_service
 from app.utils.time import now_ms
+from app.utils.db_retry import commit_with_retry
 
 logger = logging.getLogger("plexhub.enrichment")
 
@@ -189,7 +190,7 @@ async def run():
 
             batch_used = await _apply_enrichment_results(db, results)
             used += batch_used
-            await db.commit()
+            await commit_with_retry(db)
 
             logger.info(f"Enrichment VOD {batch_end}/{len(pending_vod)} "
                        f"({batch_used} API calls, {used} total)")
@@ -223,9 +224,20 @@ async def run():
 
                 batch_used = await _apply_enrichment_results(db, results)
                 used += batch_used
-                await db.commit()
+                await commit_with_retry(db)
 
                 logger.info(f"Enrichment Series {batch_end}/{len(pending_series)} "
                            f"({batch_used} API calls, {used} total)")
 
     logger.info(f"Enrichment batch complete: {used} TMDB API calls used")
+
+    # Update queue-size gauges so Prometheus reflects post-batch state.
+    from app.utils.metrics import enrichment_queue_size
+    from sqlalchemy import func as _sql_func
+    async with async_session_factory() as db:
+        rows = await db.execute(
+            select(EnrichmentQueue.status, _sql_func.count())
+            .group_by(EnrichmentQueue.status)
+        )
+        for status, count in rows.all():
+            enrichment_queue_size.labels(status=status).set(count)

@@ -1,10 +1,34 @@
 import logging
+import os
 import threading
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import httpx
+
+
+def _atomic_write_bytes(target: Path, payload: bytes) -> None:
+    """Atomic write via tempfile + os.replace (same-volume).
+
+    Prevents partial reads (e.g., Plex scanner picking up a half-written .strm)
+    and concurrent writers corrupting the file.
+    """
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    try:
+        with open(tmp, "wb") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(str(tmp), str(target))
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _atomic_write_text(target: Path, content: str, encoding: str = "utf-8") -> None:
+    _atomic_write_bytes(target, content.encode(encoding))
 
 logger = logging.getLogger("plexhub.plex_generator.storage")
 
@@ -75,15 +99,13 @@ class LocalStorage(LibraryStorage):
 
     def write_strm(self, rel_path: str, url: str) -> None:
         full = self._resolve(rel_path)
-        full.parent.mkdir(parents=True, exist_ok=True)
-        full.write_text(url.strip() + "\n", encoding="utf-8")
+        _atomic_write_text(full, url.strip() + "\n")
 
     def write_file(self, rel_path: str, content: str) -> None:
         full = self._resolve(rel_path)
         if full.exists():
             return  # Preserve existing file (e.g. enriched by Tiny Media Manager)
-        full.parent.mkdir(parents=True, exist_ok=True)
-        full.write_text(content, encoding="utf-8")
+        _atomic_write_text(full, content)
 
     def download_image(self, rel_path: str, image_url: str) -> bool:
         full = self._resolve(rel_path)
@@ -102,7 +124,7 @@ class LocalStorage(LibraryStorage):
         client = _get_image_client()
         resp = client.get(image_url)
         resp.raise_for_status()
-        full.write_bytes(resp.content)
+        _atomic_write_bytes(full, resp.content)
 
     def submit_image_download(self, rel_path: str, image_url: str):
         """Submit image download to thread pool (non-blocking). Returns Future."""

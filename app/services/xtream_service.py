@@ -68,8 +68,18 @@ class XtreamService:
             except httpx.HTTPStatusError as e:
                 if e.response.status_code in (429, 502, 503, 504) and delay is not None:
                     last_exc = e
-                    logger.warning(f"Xtream API {action} got {e.response.status_code}, retrying in {delay}s")
-                    await asyncio.sleep(delay)
+                    # Honor Retry-After (seconds form) when present, capped at 60s.
+                    retry_after = e.response.headers.get("Retry-After")
+                    wait = delay
+                    if retry_after:
+                        try:
+                            wait = min(60, max(delay, int(retry_after)))
+                        except (TypeError, ValueError):
+                            pass
+                    logger.warning(
+                        f"Xtream API {action} got {e.response.status_code}, retrying in {wait}s"
+                    )
+                    await asyncio.sleep(wait)
                 else:
                     raise
         raise last_exc  # type: ignore[misc]

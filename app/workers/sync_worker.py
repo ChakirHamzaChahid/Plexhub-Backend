@@ -21,6 +21,7 @@ from app.utils.unification import (
     calculate_display_rating,
 )
 from app.utils.time import now_ms
+from app.utils.db_retry import commit_with_retry
 
 logger = logging.getLogger("plexhub.sync")
 
@@ -317,6 +318,7 @@ def map_episode_to_media(
     info = episode.get("info") or {}
 
     rating_val = parse_rating(info.get("rating"))
+    series_title, _ = parse_title_and_year(series_dto.get("name") or "")
 
     return {
         "rating_key": rating_key,
@@ -337,7 +339,7 @@ def map_episode_to_media(
         "parent_title": f"Season {season_num}",
         "parent_index": season_num,
         "grandparent_rating_key": f"series_{series_id}",
-        "grandparent_title": series_dto.get("name"),
+        "grandparent_title": series_title,
         "index": ep_num,
         "rating": rating_val,
         "display_rating": rating_val or 0.0,
@@ -843,13 +845,16 @@ async def _refresh_categories(db, account, account_id: str):
         )
         await db.execute(stmt)
 
-    await db.commit()
+    await commit_with_retry(db)
     logger.info(f"Refreshed {count} categories for account {account_id} "
                 f"({len(live_cats)} Live, {len(vod_cats)} VOD, {len(series_cats)} Series)")
 
 
 async def sync_account(account_id: str):
     """Full sync for a single Xtream account."""
+    from app.utils.metrics import sync_duration_seconds
+    import time as _time
+
     lock = _get_account_lock(account_id)
     if lock.locked():
         logger.warning(f"Sync already running for account {account_id}, skipping")
@@ -858,6 +863,8 @@ async def sync_account(account_id: str):
     job_id = f"sync_{account_id}_{now_ms()}"
     _record_sync_job(job_id, {"status": "processing", "progress": {}})
 
+    sync_started = _time.monotonic()
+    sync_result = "error"
     async with lock:
         try:
             async with async_session_factory() as db:
@@ -979,7 +986,7 @@ async def sync_account(account_id: str):
                         async with db.begin_nested():  # SAVEPOINT
                             await upsert_media_batch(db, batch_rows)
                         vod_rows.extend(batch_rows)
-                        await db.commit()
+                        await commit_with_retry(db)
                     except Exception as e:
                         logger.error(f"VOD batch {batch_start}-{batch_end} failed, rolling back: {e}")
                         await db.rollback()
@@ -1001,7 +1008,7 @@ async def sync_account(account_id: str):
                         )
                 if vod_rows:
                     await enqueue_for_enrichment(db, vod_rows)
-                await db.commit()
+                await commit_with_retry(db)
                 total_synced += len(all_vod_keys)
                 logger.info(f"VOD sync: {len(vod_rows)} updated, {skipped_vod} unchanged, {len(all_vod_keys)} total")
 
@@ -1093,7 +1100,7 @@ async def sync_account(account_id: str):
                         await differential_cleanup_filtered(
                             db, server_id, synced_series_cat_ids, all_series_keys, media_type="show"
                         )
-                await db.commit()
+                await commit_with_retry(db)
                 total_synced += len(all_series_keys)
                 logger.info(f"Series sync: {len(series_rows)} updated, {unchanged_count} unchanged")
 
@@ -1149,7 +1156,7 @@ async def sync_account(account_id: str):
                         try:
                             async with db.begin_nested():  # SAVEPOINT
                                 await upsert_media_batch(db, episode_batch)
-                            await db.commit()
+                            await commit_with_retry(db)
                             episode_count += len(episode_batch)
                             logger.info(f"Synced {episode_count} episodes ({batch_end}/{len(changed_series_dtos)} changed series)")
                         except Exception as e:
@@ -1215,7 +1222,7 @@ async def sync_account(account_id: str):
                         try:
                             async with db.begin_nested():
                                 await upsert_live_channels_batch(db, batch)
-                            await db.commit()
+                            await commit_with_retry(db)
                         except Exception as e:
                             logger.error(f"Live batch {batch_start} failed, rolling back: {e}")
                             await db.rollback()
@@ -1229,7 +1236,7 @@ async def sync_account(account_id: str):
                             db, server_id, synced_live_cat_ids, all_live_ids
                         )
 
-                await db.commit()
+                await commit_with_retry(db)
                 total_synced += len(all_live_ids)
                 logger.info(f"Live sync: {len(live_rows)} updated, {live_skipped} unchanged, {len(all_live_ids)} total")
 
@@ -1244,7 +1251,7 @@ async def sync_account(account_id: str):
                     .values(last_synced_at=now_ms())
                 )
 
-                await db.commit()
+                await commit_with_retry(db)
 
                 _record_sync_job(job_id, {
                     "status": "completed",
@@ -1253,10 +1260,16 @@ async def sync_account(account_id: str):
                 logger.info(
                     f"Sync complete for account {account_id}: {total_synced} items"
                 )
+                sync_result = "success"
 
         except Exception as e:
             logger.error(f"Sync failed for account {account_id}: {e}", exc_info=True)
             _record_sync_job(job_id, {"status": "failed", "progress": {"error": str(e)}})
+            sync_result = "error"
+        finally:
+            sync_duration_seconds.labels(
+                account_id=account_id, result=sync_result,
+            ).observe(_time.monotonic() - sync_started)
 
     return job_id
 

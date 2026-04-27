@@ -12,6 +12,9 @@ from fastapi.middleware.gzip import GZipMiddleware
 from app.config import settings
 from app.db.database import init_db
 from app.api import accounts, categories, health, live, media, plex, stream, sync
+from app.utils.request_context import RequestIdLogFilter, RequestIdMiddleware
+
+APP_VERSION = "1.0.0"
 
 logger = logging.getLogger("plexhub")
 
@@ -33,12 +36,15 @@ class SafeRotatingFileHandler(_RotatingFileHandler):
 
 
 # Configure logging (console + rotating file)
-log_format = "%(asctime)s [%(name)s] %(levelname)s: %(message)s"
+# request_id is "-" outside an HTTP request; injected by RequestIdLogFilter.
+log_format = "%(asctime)s [%(request_id)s] [%(name)s] %(levelname)s: %(message)s"
+_request_id_filter = RequestIdLogFilter()
 
 # Console handler (INFO level - less verbose)
 console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.INFO)
 console_handler.setFormatter(logging.Formatter(log_format))
+console_handler.addFilter(_request_id_filter)
 
 # File handler with rotation (DEBUG level - detailed logs)
 settings.LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -50,6 +56,7 @@ file_handler = SafeRotatingFileHandler(
 )
 file_handler.setLevel(logging.DEBUG)
 file_handler.setFormatter(logging.Formatter(log_format))
+file_handler.addFilter(_request_id_filter)
 
 # Apply to plexhub logger (not root — avoids flooding with SQLAlchemy/httpx DEBUG)
 plexhub_logger = logging.getLogger("plexhub")
@@ -200,6 +207,19 @@ async def lifespan(app: FastAPI):
         await init_db()
         logger.info("Database initialized")
 
+        # Boot summary — version, route count, sanitized config (no secrets).
+        api_routes = sum(1 for r in app.routes if hasattr(r, "methods"))
+        logger.info(
+            f"PlexHub Backend v{APP_VERSION} starting — "
+            f"{api_routes} routes, "
+            f"sync_interval={settings.SYNC_INTERVAL_HOURS}h, "
+            f"enrichment_daily_limit={settings.ENRICHMENT_DAILY_LIMIT}, "
+            f"stream_validation={'on' if settings.STREAM_VALIDATION_ENABLED else 'off'} "
+            f"(concurrency={settings.STREAM_VALIDATION_CONCURRENCY}), "
+            f"plex_library_dir={'set' if settings.PLEX_LIBRARY_DIR else 'unset'}, "
+            f"tmdb={'configured' if settings.TMDB_API_KEY else 'unset'}"
+        )
+
         # Master election — atomic via fcntl.flock (no race condition)
         try:
             lock_fd = open(lock_file, "w")
@@ -238,24 +258,52 @@ async def lifespan(app: FastAPI):
                     logger.error(f"Scheduled sync pipeline failed: {e}", exc_info=True)
 
             scheduler = AsyncIOScheduler()
+            # max_instances=1 prevents pipeline overlap if a run exceeds the interval.
+            # coalesce=True collapses missed runs into a single one rather than queuing.
+            # misfire_grace_time=300 still fires if the scheduler was late by < 5 min.
             scheduler.add_job(
                 scheduled_sync_enrich_generate,
                 "interval",
                 hours=settings.SYNC_INTERVAL_HOURS,
                 id="sync_enrich_generate",
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=300,
             )
             scheduler.add_job(
                 health_check_worker.run,
                 "cron",
                 hour=2,
                 id="health_check",
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=3600,
             )
             scheduler.add_job(
                 _cleanup_stale_epg,
                 "cron",
                 hour=3,
                 id="epg_cleanup",
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=3600,
             )
+            if settings.BACKUP_ENABLED:
+                from app.scripts.backup_db import run_backup as _run_backup
+
+                async def _scheduled_backup():
+                    # sqlite3.Connection.backup is blocking — run in a thread to keep loop free.
+                    await asyncio.to_thread(_run_backup)
+
+                scheduler.add_job(
+                    _scheduled_backup,
+                    "cron",
+                    hour=settings.BACKUP_HOUR,
+                    id="db_backup",
+                    max_instances=1,
+                    coalesce=True,
+                    misfire_grace_time=3600,
+                )
             scheduler.start()
 
             # Non-blocking initial sync, then enrichment, then Plex generation
@@ -290,9 +338,11 @@ async def lifespan(app: FastAPI):
         # Close service clients
         from app.services.xtream_service import xtream_service
         from app.services.tmdb_service import tmdb_service
+        from app.workers import health_check_worker
 
         await xtream_service.close()
         await tmdb_service.close()
+        await health_check_worker.close()
 
         # Shutdown image download thread pool
         from app.plex_generator.storage import shutdown_image_pool
@@ -301,7 +351,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="PlexHub Backend",
-    version="1.0.0",
+    version=APP_VERSION,
     lifespan=lifespan,
 )
 
@@ -312,6 +362,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.add_middleware(GZipMiddleware, minimum_size=1000)
+# Added last so it wraps the others — request_id is set before any other middleware runs.
+app.add_middleware(RequestIdMiddleware)
 
 # Routes
 app.include_router(health.router, prefix="/api")
@@ -322,3 +374,7 @@ app.include_router(media.router, prefix="/api")
 app.include_router(stream.router, prefix="/api")
 app.include_router(sync.router, prefix="/api")
 app.include_router(plex.router, prefix="/api")
+
+# Prometheus /metrics + per-request HTTP metrics
+from app.utils.metrics import setup_instrumentator  # noqa: E402
+setup_instrumentator(app)

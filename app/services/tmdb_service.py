@@ -8,6 +8,7 @@ from rapidfuzz import fuzz
 
 from app.config import settings
 from app.utils.string_normalizer import normalize_for_sorting
+from app.utils.ttl_cache import TTLCache
 
 logger = logging.getLogger("plexhub.tmdb")
 
@@ -16,6 +17,13 @@ _RETRYABLE = (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolEr
 
 POSTER_BASE = "https://image.tmdb.org/t/p/w342"
 BACKDROP_BASE = "https://image.tmdb.org/t/p/w1280"
+
+# Search results rarely change within a day; bounded to keep memory predictable.
+_SEARCH_CACHE_SIZE = 5000
+_SEARCH_CACHE_TTL = 24 * 3600  # 24 h
+
+# Sentinel distinct from None (a real cached "no match" result).
+_MISSING = object()
 
 
 @dataclass
@@ -45,6 +53,9 @@ class TMDBService:
 
     def __init__(self):
         self._client: Optional[httpx.AsyncClient] = None
+        self._search_cache: TTLCache[tuple[str, str, int | None], TMDBMatch | None] = TTLCache(
+            max_size=_SEARCH_CACHE_SIZE, ttl_seconds=_SEARCH_CACHE_TTL,
+        )
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -67,16 +78,32 @@ class TMDBService:
     def is_configured(self) -> bool:
         return bool(settings.TMDB_API_KEY)
 
+    @staticmethod
+    def _metric_kind(path: str) -> str:
+        """Map a TMDB path to a coarse `kind` label for metrics."""
+        if path.startswith("/search/movie"):
+            return "search_movie"
+        if path.startswith("/search/tv"):
+            return "search_tv"
+        if path.startswith("/movie/") or path.startswith("/tv/"):
+            return "details"
+        return "other"
+
     async def _request(self, path: str, params: dict | None = None) -> dict:
         """GET with retry + exponential backoff + 429 rate-limit handling."""
+        from app.utils.metrics import tmdb_requests_total
+
         client = await self._get_client()
         url = f"{self.BASE_URL}{path}"
+        kind = self._metric_kind(path)
+        rate_limited = False
         last_exc: Exception | None = None
         for attempt, delay in enumerate((*_RETRY_DELAYS, None)):
             try:
                 resp = await client.get(url, params=params)
                 # Handle 429 rate limit with Retry-After header
                 if resp.status_code == 429:
+                    rate_limited = True
                     retry_after = int(resp.headers.get("Retry-After", delay or 4))
                     if delay is not None:
                         logger.warning(f"TMDB 429 rate limited, waiting {retry_after}s")
@@ -84,6 +111,10 @@ class TMDBService:
                         continue
                     resp.raise_for_status()  # last attempt: raise
                 resp.raise_for_status()
+                tmdb_requests_total.labels(
+                    kind=kind,
+                    result="rate_limited" if rate_limited else "ok",
+                ).inc()
                 return resp.json()
             except _RETRYABLE as e:
                 last_exc = e
@@ -96,7 +127,9 @@ class TMDBService:
                     logger.warning(f"TMDB {path} got {e.response.status_code}, retrying in {delay}s")
                     await asyncio.sleep(delay)
                 else:
+                    tmdb_requests_total.labels(kind=kind, result="error").inc()
                     raise
+        tmdb_requests_total.labels(kind=kind, result="error").inc()
         raise last_exc  # type: ignore[misc]
 
     async def search_movie(
@@ -104,24 +137,36 @@ class TMDBService:
     ) -> TMDBMatch | None:
         if not self.is_configured:
             return None
+        cache_key = ("movie", title, year)
+        cached = self._search_cache.get(cache_key, default=_MISSING)
+        if cached is not _MISSING:
+            return cached
         params: dict = {"query": title, "language": settings.TMDB_LANGUAGE}
         if year:
             params["year"] = year
         data = await self._request("/search/movie", params=params)
         results = data.get("results", [])
-        return self._best_match(results, title, year, title_key="title", date_key="release_date")
+        match = self._best_match(results, title, year, title_key="title", date_key="release_date")
+        self._search_cache.set(cache_key, match)
+        return match
 
     async def search_tv(
         self, title: str, year: int | None,
     ) -> TMDBMatch | None:
         if not self.is_configured:
             return None
+        cache_key = ("tv", title, year)
+        cached = self._search_cache.get(cache_key, default=_MISSING)
+        if cached is not _MISSING:
+            return cached
         params: dict = {"query": title, "language": settings.TMDB_LANGUAGE}
         if year:
             params["first_air_date_year"] = year
         data = await self._request("/search/tv", params=params)
         results = data.get("results", [])
-        return self._best_match(results, title, year, title_key="name", date_key="first_air_date")
+        match = self._best_match(results, title, year, title_key="name", date_key="first_air_date")
+        self._search_cache.set(cache_key, match)
+        return match
 
     async def get_movie_details(self, tmdb_id: int) -> TMDBEnrichmentData:
         """Fetch movie details + external_ids in a single API call."""

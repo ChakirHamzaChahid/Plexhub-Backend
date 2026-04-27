@@ -9,3 +9,5 @@ apscheduler>=3.10
 rapidfuzz>=3.6
 python-dotenv
 typer>=0.9.0
+prometheus-fastapi-instrumentator>=7.0
+prometheus-client>=0.20

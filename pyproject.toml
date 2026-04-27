@@ -1,0 +1,15 @@
+[tool.pytest.ini_options]
+# pytest-asyncio in auto mode: any `async def test_*` is treated as an async test
+# without needing a per-function decorator.
+asyncio_mode = "auto"
+
+# Avoid a deprecation warning on the loop scope of session/module fixtures.
+asyncio_default_fixture_loop_scope = "function"
+
+# Sane defaults for test discovery.
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+filterwarnings = [
+    # The pre-existing thread-pool teardown warning we already noted in the audit.
+    "ignore::pytest.PytestUnhandledThreadExceptionWarning",
+]

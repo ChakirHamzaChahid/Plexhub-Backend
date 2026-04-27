@@ -9,8 +9,36 @@ from app.db.database import async_session_factory
 from app.models.database import Media, XtreamAccount
 from app.services.stream_service import build_stream_url
 from app.utils.time import now_ms
+from app.utils.db_retry import commit_with_retry
 
 logger = logging.getLogger("plexhub.health_check")
+
+# Module-level singleton — avoids creating a fresh AsyncClient (and its connection
+# pool) on every run/run_pipeline_validation invocation.
+_client: httpx.AsyncClient | None = None
+_client_lock = asyncio.Lock()
+
+
+async def _get_client() -> httpx.AsyncClient:
+    global _client
+    if _client is None or _client.is_closed:
+        async with _client_lock:
+            if _client is None or _client.is_closed:
+                _client = httpx.AsyncClient(
+                    timeout=httpx.Timeout(settings.STREAM_VALIDATION_TIMEOUT, connect=10.0),
+                    limits=httpx.Limits(
+                        max_connections=max(50, settings.STREAM_VALIDATION_CONCURRENCY * 2),
+                        max_keepalive_connections=settings.STREAM_VALIDATION_CONCURRENCY,
+                    ),
+                )
+    return _client
+
+
+async def close() -> None:
+    global _client
+    if _client and not _client.is_closed:
+        await _client.aclose()
+    _client = None
 
 # Known video container magic bytes
 _MPEG_TS_SYNC = 0x47
@@ -189,54 +217,53 @@ async def run():
         checked = 0
         broken_count = 0
 
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(timeout, connect=10.0),
-        ) as client:
-            # Build tasks for all items
-            tasks = []
-            for item in items:
-                account_id = item.server_id.replace("xtream_", "")
-                account = accounts.get(account_id)
-                if not account:
-                    continue
-                tasks.append(_check_one(client, item, account, semaphore))
+        client = await _get_client()
 
-            # Run all health checks concurrently
-            results = await asyncio.gather(*tasks)
+        # Build tasks for all items
+        tasks = []
+        for item in items:
+            account_id = item.server_id.replace("xtream_", "")
+            account = accounts.get(account_id)
+            if not account:
+                continue
+            tasks.append(_check_one(client, item, account, semaphore))
 
-            # Apply results to DB
-            reasons: dict[str, int] = {}
-            for item, is_broken, reason in results:
-                if is_broken is None:
-                    continue
-                reasons[reason] = reasons.get(reason, 0) + 1
+        # Run all health checks concurrently
+        results = await asyncio.gather(*tasks)
 
-                new_error_count = (
-                    (item.stream_error_count or 0) + 1 if is_broken else 0
+        # Apply results to DB
+        reasons: dict[str, int] = {}
+        for item, is_broken, reason in results:
+            if is_broken is None:
+                continue
+            reasons[reason] = reasons.get(reason, 0) + 1
+
+            new_error_count = (
+                (item.stream_error_count or 0) + 1 if is_broken else 0
+            )
+            definitive = is_broken and _is_definitive_failure(reason)
+            mark_broken = (
+                is_broken
+                and (definitive or new_error_count >= settings.STREAM_BROKEN_THRESHOLD)
+            )
+
+            await db.execute(
+                update(Media)
+                .where(
+                    Media.rating_key == item.rating_key,
+                    Media.server_id == item.server_id,
                 )
-                definitive = is_broken and _is_definitive_failure(reason)
-                mark_broken = (
-                    is_broken
-                    and (definitive or new_error_count >= settings.STREAM_BROKEN_THRESHOLD)
+                .values(
+                    is_broken=mark_broken,
+                    last_stream_check=now_ms(),
+                    stream_error_count=new_error_count,
                 )
+            )
+            checked += 1
+            if mark_broken:
+                broken_count += 1
 
-                await db.execute(
-                    update(Media)
-                    .where(
-                        Media.rating_key == item.rating_key,
-                        Media.server_id == item.server_id,
-                    )
-                    .values(
-                        is_broken=mark_broken,
-                        last_stream_check=now_ms(),
-                        stream_error_count=new_error_count,
-                    )
-                )
-                checked += 1
-                if mark_broken:
-                    broken_count += 1
-
-        await db.commit()
+        await commit_with_retry(db)
 
     logger.info(
         f"Health check complete: {checked} checked, {broken_count} broken | "
@@ -313,117 +340,121 @@ async def run_pipeline_validation():
             account_id = item.server_id.replace("xtream_", "")
             items_by_account.setdefault(account_id, []).append(item)
 
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(timeout, connect=10.0),
-        ) as client:
-            for account_id, account_items in items_by_account.items():
-                account = accounts.get(account_id)
-                if not account:
+        client = await _get_client()
+        for account_id, account_items in items_by_account.items():
+            account = accounts.get(account_id)
+            if not account:
+                continue
+
+            account_checked = 0
+            account_broken = 0
+            account_tripped = False
+
+            # Build tasks for this account
+            tasks = []
+            for item in account_items:
+                tasks.append(asyncio.ensure_future(
+                    _check_one(client, item, account, semaphore)
+                ))
+
+            pending_updates = 0
+            for coro in asyncio.as_completed(tasks):
+                item, is_broken, reason = await coro
+                if is_broken is None:
                     continue
 
-                account_checked = 0
-                account_broken = 0
-                account_tripped = False
+                diag_reasons[reason] = diag_reasons.get(reason, 0) + 1
+                account_checked += 1
 
-                # Build tasks for this account
-                tasks = []
-                for item in account_items:
-                    tasks.append(asyncio.ensure_future(
-                        _check_one(client, item, account, semaphore)
-                    ))
-
-                pending_updates = 0
-                for coro in asyncio.as_completed(tasks):
-                    item, is_broken, reason = await coro
-                    if is_broken is None:
-                        continue
-
-                    diag_reasons[reason] = diag_reasons.get(reason, 0) + 1
-                    account_checked += 1
-
-                    # Circuit breaker: after N checks, if failure rate > threshold,
-                    # the server is likely down — abort this account
-                    if (
-                        account_checked == circuit_breaker_sample
-                        and account_checked > 0
-                    ):
-                        failure_rate = account_broken / account_checked
-                        if failure_rate >= circuit_breaker_threshold:
-                            logger.warning(
-                                f"CIRCUIT BREAKER: account {account_id} has "
-                                f"{failure_rate:.0%} failure rate after "
-                                f"{account_checked} checks — server likely down. "
-                                f"Skipping remaining {len(account_items) - account_checked} "
-                                f"streams. No streams will be marked as broken."
-                            )
-                            account_tripped = True
-                            # Rollback uncommitted changes for this account
-                            await db.rollback()
-                            pending_updates = 0
-                            # Cancel remaining tasks and await them to
-                            # release httpx connections cleanly
-                            for t in tasks:
-                                t.cancel()
-                            await asyncio.gather(*tasks, return_exceptions=True)
-                            break
-
-                    was_broken = item.is_broken
-                    new_error_count = (
-                        (item.stream_error_count or 0) + 1 if is_broken else 0
-                    )
-                    definitive = is_broken and _is_definitive_failure(reason)
-                    mark_broken = (
-                        is_broken
-                        and (definitive or new_error_count >= settings.STREAM_BROKEN_THRESHOLD)
-                    )
-
-                    if was_broken and not is_broken:
-                        total_recovered += 1
-
-                    await db.execute(
-                        update(Media)
-                        .where(
-                            Media.rating_key == item.rating_key,
-                            Media.server_id == item.server_id,
+                # Circuit breaker: after N checks, if failure rate > threshold,
+                # the server is likely down — abort this account
+                if (
+                    account_checked == circuit_breaker_sample
+                    and account_checked > 0
+                ):
+                    failure_rate = account_broken / account_checked
+                    if failure_rate >= circuit_breaker_threshold:
+                        logger.warning(
+                            f"CIRCUIT BREAKER: account {account_id} has "
+                            f"{failure_rate:.0%} failure rate after "
+                            f"{account_checked} checks — server likely down. "
+                            f"Skipping remaining {len(account_items) - account_checked} "
+                            f"streams. No streams will be marked as broken."
                         )
-                        .values(
-                            is_broken=mark_broken,
-                            last_stream_check=now_ms(),
-                            stream_error_count=new_error_count,
-                        )
-                    )
-                    total_checked += 1
-                    if mark_broken:
-                        total_broken += 1
-                    if is_broken:
-                        account_broken += 1
-                    pending_updates += 1
-
-                    # Log progress frequently
-                    if total_checked % log_interval == 0:
-                        logger.info(
-                            f"Validation progress: {total_checked}/{len(items)} "
-                            f"({total_broken} broken so far) | "
-                            f"reasons: {diag_reasons}"
-                        )
-
-                    # Commit periodically to avoid huge transactions
-                    if pending_updates >= commit_interval:
-                        await db.commit()
+                        account_tripped = True
+                        # Rollback uncommitted changes for this account
+                        await db.rollback()
                         pending_updates = 0
+                        # Cancel remaining tasks and await them to
+                        # release httpx connections cleanly
+                        for t in tasks:
+                            t.cancel()
+                        await asyncio.gather(*tasks, return_exceptions=True)
+                        break
 
-                if account_tripped:
-                    circuit_tripped = True
-                    continue
+                was_broken = item.is_broken
+                new_error_count = (
+                    (item.stream_error_count or 0) + 1 if is_broken else 0
+                )
+                definitive = is_broken and _is_definitive_failure(reason)
+                mark_broken = (
+                    is_broken
+                    and (definitive or new_error_count >= settings.STREAM_BROKEN_THRESHOLD)
+                )
 
-                # Commit remaining for this account
-                if pending_updates > 0:
-                    await db.commit()
+                if was_broken and not is_broken:
+                    total_recovered += 1
+
+                await db.execute(
+                    update(Media)
+                    .where(
+                        Media.rating_key == item.rating_key,
+                        Media.server_id == item.server_id,
+                    )
+                    .values(
+                        is_broken=mark_broken,
+                        last_stream_check=now_ms(),
+                        stream_error_count=new_error_count,
+                    )
+                )
+                total_checked += 1
+                if mark_broken:
+                    total_broken += 1
+                if is_broken:
+                    account_broken += 1
+                pending_updates += 1
+
+                # Log progress frequently
+                if total_checked % log_interval == 0:
+                    logger.info(
+                        f"Validation progress: {total_checked}/{len(items)} "
+                        f"({total_broken} broken so far) | "
+                        f"reasons: {diag_reasons}"
+                    )
+
+                # Commit periodically to avoid huge transactions
+                if pending_updates >= commit_interval:
+                    await commit_with_retry(db)
                     pending_updates = 0
 
-                logger.info(
-                    f"Account {account_id}: {account_checked} checked, "
-                    f"{account_broken} broken"
+            if account_tripped:
+                circuit_tripped = True
+                continue
+
+            # Commit remaining for this account
+            if pending_updates > 0:
+                await commit_with_retry(db)
+                pending_updates = 0
+
+            logger.info(
+                f"Account {account_id}: {account_checked} checked, "
+                f"{account_broken} broken"
+            )
+            # Update alive ratio gauge for this account (after commit so DB is consistent)
+            if not account_tripped and account_checked > 0:
+                from app.utils.metrics import streams_alive_ratio
+                streams_alive_ratio.labels(account_id=account_id).set(
+                    1.0 - (account_broken / account_checked)
                 )
 
     if circuit_tripped:

@@ -2,22 +2,59 @@ import re
 import unicodedata
 
 
+_LEADING_PIPE_RE = re.compile(r"^\|[^|]+\|\s*")
+_LEADING_BRACK_RE = re.compile(r"^\[[^\]]+\]\s*")
+# Country/language prefix: exactly 2 uppercase letters followed by " - " (FR, NF, SC, EN, ...)
+_COUNTRY_PREFIX_RE = re.compile(r"^[A-Z]{2}\s*-\s*")
+# Trailing brackets carry quality/audio info: "[FHD MULTi-SUBAR]", "[VOSTFR]", "[4K]", ...
+_TRAIL_BRACKET_RE = re.compile(r"\s*\[[^\]]*\]\s*$")
+# Trailing quality keyword as a separate word: " LQ", " HQ", " FHD", ...
+_TRAIL_QUALITY_RE = re.compile(
+    r"\s+(?:LQ|HQ|FHD|UHD|HD|SD|4K|VF|VFF|VFQ|VOSTFR|VOST|MULTI)\s*$",
+    re.IGNORECASE,
+)
+_YEAR_RE = re.compile(r"\((\d{4})\)\s*$")
+
+
+def _strip_trailing_junk(title: str) -> str:
+    """Strip trailing brackets and quality keywords until stable."""
+    prev = None
+    while prev != title:
+        prev = title
+        title = _TRAIL_BRACKET_RE.sub("", title).rstrip()
+        title = _TRAIL_QUALITY_RE.sub("", title).rstrip()
+    return title
+
+
 def parse_title_and_year(raw: str) -> tuple[str, int | None]:
     """
-    Parse IPTV title, stripping prefixes and extracting year.
+    Parse IPTV title, stripping prefixes/suffixes and extracting year.
 
-    Input:  "|VM| Le Monde apres nous (2023)"
-    Output: ("Le Monde apres nous", 2023)
+    Strips:
+      - Leading IPTV markers: "|VM|", "[XX]"
+      - Leading country/language prefix: "FR - ", "NF - ", "SC - "
+      - Trailing brackets:    "[FHD MULTi-SUBAR]", "[VOSTFR]", "[4K]"
+      - Trailing quality:     " LQ", " HQ", " FHD", " UHD"
+
+    Examples:
+      "|VM| Le Monde apres nous (2023)"          -> ("Le Monde apres nous", 2023)
+      "FR - Better Man (2024)"                    -> ("Better Man", 2024)
+      "FR - Aquaman (2023) LQ"                    -> ("Aquaman", 2023)
+      "Black Widow (2021) [FHD MULTi-SUBAR]"      -> ("Black Widow", 2021)
     """
-    # Strip IPTV prefixes: |XX|, |XX XX|, [XX], etc.
-    title = re.sub(r"^\|[^|]+\|\s*", "", raw)
-    title = re.sub(r"^\[[^\]]+\]\s*", "", title)
+    title = _LEADING_PIPE_RE.sub("", raw)
+    title = _LEADING_BRACK_RE.sub("", title)
+    title = _COUNTRY_PREFIX_RE.sub("", title)
 
-    # Extract year from (YYYY) at end of title
-    year_match = re.search(r"\((\d{4})\)\s*$", title)
+    # Trailing junk can sit before AND after the year, so strip both sides of it.
+    title = _strip_trailing_junk(title)
+
+    year_match = _YEAR_RE.search(title)
     year = int(year_match.group(1)) if year_match else None
     if year_match:
-        title = title[: year_match.start()].strip()
+        title = title[: year_match.start()].rstrip()
+
+    title = _strip_trailing_junk(title)
 
     return title.strip() or "Unknown", year
 

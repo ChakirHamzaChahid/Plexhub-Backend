@@ -82,7 +82,8 @@ class PlexLibraryGenerator:
             for future in self._image_futures:
                 try:
                     future.result(timeout=30.0)
-                except Exception:
+                except Exception as e:
+                    logger.warning(f"Image download future failed: {e}", exc_info=True)
                     report.image_failures += 1
             self._image_futures.clear()
 

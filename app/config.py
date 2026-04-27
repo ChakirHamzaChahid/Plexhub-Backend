@@ -36,6 +36,12 @@ class Settings:
     STREAM_FILTER_BROKEN: bool = os.getenv("STREAM_FILTER_BROKEN", "true").lower() in ("true", "1", "yes")
 
     PLEX_LIBRARY_DIR: str = os.getenv("PLEX_LIBRARY_DIR", "")
+
+    # DB backups (online sqlite .backup snapshots)
+    BACKUP_ENABLED: bool = os.getenv("BACKUP_ENABLED", "true").lower() in ("true", "1", "yes")
+    BACKUP_DIR: Path = Path(os.getenv("BACKUP_DIR", "./data/backups"))
+    BACKUP_RETENTION_DAYS: int = _safe_int("BACKUP_RETENTION_DAYS", 7)
+    BACKUP_HOUR: int = _safe_int("BACKUP_HOUR", 4)  # daily cron hour
     CORS_ORIGINS: list[str] = [
         o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",") if o.strip()
     ]

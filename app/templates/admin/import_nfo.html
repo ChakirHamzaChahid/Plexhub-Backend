@@ -1,0 +1,114 @@
+{% extends "admin/base.html" %}
+{% block title %}Import NFO — PlexHub Admin{% endblock %}
+
+{% block content %}
+<h2 class="text-xl font-semibold text-slate-800 mb-4">Importer les IDs depuis les .nfo (tinyMediaManager / Jellyfin)</h2>
+
+<form method="post" action="/admin/import-nfo"
+      class="bg-white p-4 rounded shadow-sm border border-slate-200 mb-6 flex flex-col gap-3">
+
+  <div>
+    <label class="text-xs uppercase text-slate-500" for="root">Racine de la bibliothèque NFO</label>
+    <input id="root" name="root" type="text"
+           value="{{ root or default_root or '' }}"
+           placeholder="\\192.168.0.175\raid0-3to\8fb2c0f3"
+           class="block w-full mt-1 border border-slate-300 rounded px-2 py-1 text-sm font-mono">
+    <p class="text-xs text-slate-500 mt-1">
+      Le scan attend <code>&lt;racine&gt;/Films/&lt;Titre (Année)&gt;/movie.nfo</code>
+      et <code>&lt;racine&gt;/Series/&lt;Titre&gt;/tvshow.nfo</code>.
+      Tu peux aussi définir <code>NFO_LIBRARY_DIR</code> dans <code>.env</code> pour pré-remplir.
+    </p>
+  </div>
+
+  <div class="flex flex-wrap gap-4 text-sm">
+    <label class="flex items-center gap-2">
+      <input type="checkbox" name="movies" value="true"
+             {% if 'movies' in kinds %}checked{% endif %}
+             class="h-4 w-4 rounded border-slate-300">
+      <span>Films</span>
+    </label>
+    <label class="flex items-center gap-2">
+      <input type="checkbox" name="shows" value="true"
+             {% if 'shows' in kinds %}checked{% endif %}
+             class="h-4 w-4 rounded border-slate-300">
+      <span>Séries</span>
+    </label>
+    <label class="flex items-center gap-2">
+      <input type="checkbox" name="overwrite" value="true"
+             {% if overwrite %}checked{% endif %}
+             class="h-4 w-4 rounded border-slate-300">
+      <span>Écraser les IDs déjà présents</span>
+    </label>
+    <label class="flex items-center gap-2">
+      <input type="checkbox" name="dry_run" value="true"
+             {% if dry_run %}checked{% endif %}
+             class="h-4 w-4 rounded border-slate-300">
+      <span>Simulation (sans écrire)</span>
+    </label>
+  </div>
+
+  <div>
+    <button type="submit"
+            class="px-3 py-1.5 text-sm rounded bg-slate-900 text-slate-100 hover:bg-slate-700">
+      Lancer l'import
+    </button>
+  </div>
+</form>
+
+{% if error %}
+  <div class="bg-rose-50 border border-rose-200 text-rose-700 rounded p-3 mb-4">{{ error }}</div>
+{% endif %}
+
+{% if report_groups %}
+  <h3 class="text-lg font-semibold text-slate-800 mb-2">Résultat</h3>
+  {% if dry_run %}
+  <p class="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded p-2 mb-4">
+    Mode <strong>simulation</strong> : aucune modification n'a été appliquée.
+  </p>
+  {% endif %}
+
+  {% for r in report_groups %}
+  <section class="bg-white border border-slate-200 rounded shadow-sm mb-6">
+    <header class="px-4 py-2 bg-slate-100 border-b border-slate-200 text-sm font-medium">
+      Type : <code>{{ r.media_type }}</code>
+      {% if r.overwrite %} · <span class="text-amber-700">overwrite ON</span>{% endif %}
+    </header>
+    <div class="p-4 grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+      <div><div class="text-xs uppercase text-slate-500">NFO scannés</div><div class="text-xl font-semibold">{{ r.scanned }}</div></div>
+      <div><div class="text-xs uppercase text-slate-500">Matchés</div><div class="text-xl font-semibold text-emerald-700">{{ r.matched }}</div></div>
+      <div><div class="text-xs uppercase text-slate-500">{{ "À écrire" if dry_run else "Écrits" }}</div><div class="text-xl font-semibold text-sky-700">{{ r.written }}</div></div>
+      <div><div class="text-xs uppercase text-slate-500">Sans correspondance</div><div class="text-xl font-semibold text-rose-700">{{ r.unmatched|length }}</div></div>
+      <div><div class="text-xs uppercase text-slate-500">Ambigus</div><div class="text-xl font-semibold text-amber-700">{{ r.ambiguous|length }}</div></div>
+      <div><div class="text-xs uppercase text-slate-500">IDs déjà OK</div><div class="text-xl font-semibold text-slate-500">{{ r.skipped_id_already_set }}</div></div>
+      <div><div class="text-xs uppercase text-slate-500">Pas de changement</div><div class="text-xl font-semibold text-slate-500">{{ r.skipped_no_change }}</div></div>
+      <div><div class="text-xs uppercase text-slate-500">Erreurs parse</div><div class="text-xl font-semibold text-rose-700">{{ r.parse_errors|length }}</div></div>
+    </div>
+
+    {% if r.unmatched %}
+    <details class="border-t border-slate-200">
+      <summary class="px-4 py-2 cursor-pointer text-sm text-slate-700">Sans correspondance ({{ r.unmatched|length }})</summary>
+      <ul class="px-4 pb-3 text-xs text-slate-600 list-disc pl-8 max-h-64 overflow-auto">
+        {% for u in r.unmatched %}<li>{{ u }}</li>{% endfor %}
+      </ul>
+    </details>
+    {% endif %}
+    {% if r.ambiguous %}
+    <details class="border-t border-slate-200">
+      <summary class="px-4 py-2 cursor-pointer text-sm text-slate-700">Ambigus ({{ r.ambiguous|length }})</summary>
+      <ul class="px-4 pb-3 text-xs text-slate-600 list-disc pl-8 max-h-64 overflow-auto">
+        {% for a in r.ambiguous %}<li>{{ a }}</li>{% endfor %}
+      </ul>
+    </details>
+    {% endif %}
+    {% if r.parse_errors %}
+    <details class="border-t border-slate-200">
+      <summary class="px-4 py-2 cursor-pointer text-sm text-slate-700">Erreurs de parsing</summary>
+      <ul class="px-4 pb-3 text-xs text-slate-600 list-disc pl-8 max-h-64 overflow-auto">
+        {% for e in r.parse_errors %}<li>{{ e }}</li>{% endfor %}
+      </ul>
+    </details>
+    {% endif %}
+  </section>
+  {% endfor %}
+{% endif %}
+{% endblock %}

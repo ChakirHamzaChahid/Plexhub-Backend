@@ -37,10 +37,6 @@ class Settings:
 
     PLEX_LIBRARY_DIR: str = os.getenv("PLEX_LIBRARY_DIR", "")
 
-    # tinyMediaManager / Jellyfin .nfo library root, e.g.
-    # \\192.168.0.175\raid0-3to\8fb2c0f3 — expected to contain Films/ and Series/
-    NFO_LIBRARY_DIR: str = os.getenv("NFO_LIBRARY_DIR", "")
-
     # DB backups (online sqlite .backup snapshots)
     BACKUP_ENABLED: bool = os.getenv("BACKUP_ENABLED", "true").lower() in ("true", "1", "yes")
     BACKUP_DIR: Path = Path(os.getenv("BACKUP_DIR", "./data/backups"))

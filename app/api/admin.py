@@ -211,10 +211,9 @@ async def admin_import_nfo_form(request: Request):
         request,
         "admin/import_nfo.html",
         {
-            "default_root": settings.NFO_LIBRARY_DIR,
+            "library_dir": settings.PLEX_LIBRARY_DIR,
             "report_groups": None,
             "submitted": False,
-            "root": settings.NFO_LIBRARY_DIR,
             "kinds": ["movies", "shows"],
             "overwrite": False,
             "dry_run": True,
@@ -226,7 +225,6 @@ async def admin_import_nfo_form(request: Request):
 @router.post("/import-nfo", response_class=HTMLResponse)
 async def admin_import_nfo_run(
     request: Request,
-    root: str = Form(...),
     movies: Optional[str] = Form(None),
     shows: Optional[str] = Form(None),
     overwrite: Optional[str] = Form(None),
@@ -234,6 +232,8 @@ async def admin_import_nfo_run(
     db: AsyncSession = Depends(get_db),
 ):
     from pathlib import Path
+
+    library_dir = settings.PLEX_LIBRARY_DIR
     selected_kinds: list[str] = []
     if movies:
         selected_kinds.append("movies")
@@ -242,14 +242,20 @@ async def admin_import_nfo_run(
 
     error: Optional[str] = None
     reports = None
-    if not selected_kinds:
+
+    if not library_dir:
+        error = (
+            "PLEX_LIBRARY_DIR n'est pas défini dans .env — "
+            "le backend ne sait pas où plexhub-backend stocke les .nfo."
+        )
+    elif not selected_kinds:
         error = "Sélectionne au moins un type (films ou séries)."
     else:
-        root_path = Path(root)
+        root_path = Path(library_dir)
         if not root_path.exists():
-            error = f"Le chemin n'existe pas : {root}"
+            error = f"PLEX_LIBRARY_DIR introuvable côté serveur : {library_dir}"
         elif not root_path.is_dir():
-            error = f"Le chemin n'est pas un dossier : {root}"
+            error = f"PLEX_LIBRARY_DIR n'est pas un dossier : {library_dir}"
         else:
             reports = await nfo_import_service.import_nfo(
                 db, root_path,
@@ -262,10 +268,9 @@ async def admin_import_nfo_run(
         request,
         "admin/import_nfo.html",
         {
-            "default_root": settings.NFO_LIBRARY_DIR,
+            "library_dir": library_dir,
             "report_groups": reports,
             "submitted": True,
-            "root": root,
             "kinds": selected_kinds or ["movies", "shows"],
             "overwrite": bool(overwrite),
             "dry_run": bool(dry_run),

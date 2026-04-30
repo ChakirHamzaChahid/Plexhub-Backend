@@ -8,16 +8,17 @@
       class="bg-white p-4 rounded shadow-sm border border-slate-200 mb-6 flex flex-col gap-3">
 
   <div>
-    <label class="text-xs uppercase text-slate-500" for="root">Racine parent (au-dessus des dossiers compte Xtream)</label>
-    <input id="root" name="root" type="text"
-           value="{{ root or default_root or '' }}"
-           placeholder="\\192.168.0.175\raid0-3to"
-           class="block w-full mt-1 border border-slate-300 rounded px-2 py-1 text-sm font-mono">
+    <div class="text-xs uppercase text-slate-500">Racine utilisée (= <code>PLEX_LIBRARY_DIR</code>)</div>
+    {% if library_dir %}
+      <code class="block mt-1 px-2 py-1 bg-slate-100 border border-slate-200 rounded text-sm">{{ library_dir }}</code>
+    {% else %}
+      <p class="mt-1 text-sm text-rose-700">Non défini. Renseigne <code>PLEX_LIBRARY_DIR</code> dans <code>.env</code> et redémarre le backend.</p>
+    {% endif %}
     <p class="text-xs text-slate-500 mt-1">
-      Le scan parcourt, pour chaque compte Xtream actif :
-      <code>&lt;racine&gt;/&lt;account_id&gt;/Films/&lt;Titre (Année)&gt;/movie.nfo</code>
-      et <code>&lt;racine&gt;/&lt;account_id&gt;/Series/&lt;Titre&gt;/tvshow.nfo</code>.
-      Tu peux pré-remplir via <code>NFO_LIBRARY_DIR</code> dans <code>.env</code>.
+      C'est l'arborescence que plexhub-backend génère lui-même
+      (<code>&lt;racine&gt;/&lt;account_id&gt;/Films|Series/...</code>) et que tinyMediaManager enrichit
+      ensuite en plaçant <code>movie.nfo</code> / <code>tvshow.nfo</code> à côté des <code>.strm</code>.
+      Le matching est restreint à chaque <code>server_id</code> donc il n'y a pas de fuite cross-compte.
     </p>
   </div>
 

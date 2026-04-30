@@ -6,6 +6,7 @@ from typing import Optional
 
 
 _IMDB_ID_RE = re.compile(r"^tt\d{7,10}$")
+_TMDB_ID_RE = re.compile(r"^\d{1,9}$")
 
 
 # --- Media Schemas ---
@@ -90,10 +91,11 @@ class MediaListResponse(BaseModel):
 
 
 class MediaUpdate(BaseModel):
-    """Partial update for a media item. Currently only `imdb_id` is editable."""
+    """Partial update for a media item. Editable fields: imdb_id, tmdb_id."""
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
     imdb_id: Optional[str] = None
+    tmdb_id: Optional[str] = None
 
     @field_validator("imdb_id", mode="before")
     @classmethod
@@ -109,12 +111,27 @@ class MediaUpdate(BaseModel):
             raise ValueError("imdb_id must match ^tt\\d{7,10}$ (e.g. tt0133093)")
         return v
 
+    @field_validator("tmdb_id", mode="before")
+    @classmethod
+    def _validate_tmdb_id(cls, v):
+        if v is None:
+            return None
+        if not isinstance(v, str):
+            v = str(v)
+        v = v.strip()
+        if v == "":
+            return None
+        if not _TMDB_ID_RE.match(v):
+            raise ValueError("tmdb_id must be a positive integer (1-9 digits)")
+        return v
+
 
 class MediaStatsResponse(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
     total: int
     missing_imdb: int
+    missing_tmdb: int
 
 
 # --- Stream Schemas ---

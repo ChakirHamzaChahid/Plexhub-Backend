@@ -27,6 +27,7 @@ async def _load_movies_page(
     db: AsyncSession,
     *,
     missing_imdb: bool,
+    missing_tmdb: bool,
     search: Optional[str],
     sort: str,
     page: int,
@@ -41,6 +42,7 @@ async def _load_movies_page(
         sort=sort,
         search=search or None,
         missing_imdb=missing_imdb,
+        missing_tmdb=missing_tmdb,
     )
     return items, total, offset
 
@@ -50,6 +52,7 @@ async def _load_movies_page(
 async def admin_index(
     request: Request,
     missing_imdb: bool = Query(True),
+    missing_tmdb: bool = Query(False),
     search: Optional[str] = Query(None),
     sort: str = Query("added_desc"),
     page: int = Query(1, ge=1),
@@ -57,25 +60,28 @@ async def admin_index(
     db: AsyncSession = Depends(get_db),
 ):
     items, total, offset = await _load_movies_page(
-        db, missing_imdb=missing_imdb, search=search,
-        sort=sort, page=page, page_size=page_size,
+        db, missing_imdb=missing_imdb, missing_tmdb=missing_tmdb,
+        search=search, sort=sort, page=page, page_size=page_size,
     )
-    total_movies, missing_count = await media_service.count_movies_missing_imdb(db)
+    total_movies, missing_imdb_count, missing_tmdb_count = (
+        await media_service.count_movies_missing_external(db)
+    )
     return templates.TemplateResponse(
         request,
         "admin/index.html",
         {
-            "request": request,
             "items": items,
             "total": total,
             "offset": offset,
             "page": page,
             "page_size": page_size,
             "missing_imdb": missing_imdb,
+            "missing_tmdb": missing_tmdb,
             "search": search or "",
             "sort": sort,
             "total_movies": total_movies,
-            "missing_count": missing_count,
+            "missing_imdb_count": missing_imdb_count,
+            "missing_tmdb_count": missing_tmdb_count,
         },
     )
 
@@ -84,6 +90,7 @@ async def admin_index(
 async def admin_movies_fragment(
     request: Request,
     missing_imdb: bool = Query(True),
+    missing_tmdb: bool = Query(False),
     search: Optional[str] = Query(None),
     sort: str = Query("added_desc"),
     page: int = Query(1, ge=1),
@@ -91,20 +98,20 @@ async def admin_movies_fragment(
     db: AsyncSession = Depends(get_db),
 ):
     items, total, offset = await _load_movies_page(
-        db, missing_imdb=missing_imdb, search=search,
-        sort=sort, page=page, page_size=page_size,
+        db, missing_imdb=missing_imdb, missing_tmdb=missing_tmdb,
+        search=search, sort=sort, page=page, page_size=page_size,
     )
     return templates.TemplateResponse(
         request,
         "admin/_movies_table.html",
         {
-            "request": request,
             "items": items,
             "total": total,
             "offset": offset,
             "page": page,
             "page_size": page_size,
             "missing_imdb": missing_imdb,
+            "missing_tmdb": missing_tmdb,
             "search": search or "",
             "sort": sort,
         },
@@ -115,24 +122,39 @@ async def admin_movies_fragment(
 async def admin_stats_fragment(
     request: Request, db: AsyncSession = Depends(get_db),
 ):
-    total, missing = await media_service.count_movies_missing_imdb(db)
+    total, missing_imdb, missing_tmdb = (
+        await media_service.count_movies_missing_external(db)
+    )
     return templates.TemplateResponse(
         request,
         "admin/_stats.html",
-        {"total_movies": total, "missing_count": missing},
+        {
+            "total_movies": total,
+            "missing_imdb_count": missing_imdb,
+            "missing_tmdb_count": missing_tmdb,
+        },
     )
 
 
-@router.post("/movies/{rating_key}/imdb", response_class=HTMLResponse)
-async def admin_update_imdb(
+@router.post("/movies/{rating_key}/ids", response_class=HTMLResponse)
+async def admin_update_ids(
     rating_key: str,
     request: Request,
     server_id: str = Form(...),
-    imdb_id: str = Form(""),
+    imdb_id: Optional[str] = Form(None),
+    tmdb_id: Optional[str] = Form(None),
     db: AsyncSession = Depends(get_db),
 ):
+    """Update one or both external IDs from a row form. Fields not submitted
+    (i.e. None) are left untouched; empty string clears them."""
+    payload_data: dict = {}
+    if imdb_id is not None:
+        payload_data["imdb_id"] = imdb_id
+    if tmdb_id is not None:
+        payload_data["tmdb_id"] = tmdb_id
+
     try:
-        payload = MediaUpdate(imdb_id=imdb_id)
+        payload = MediaUpdate(**payload_data)
     except ValueError as exc:
         item = await media_service.get_media_by_key(db, rating_key, server_id)
         if not item:
@@ -144,8 +166,12 @@ async def admin_update_imdb(
             status_code=422,
         )
 
-    updated = await media_service.update_imdb_id(
-        db, rating_key, server_id, payload.imdb_id,
+    fields = {
+        k: v for k, v in payload.model_dump(exclude_unset=True).items()
+        if k in ("imdb_id", "tmdb_id")
+    }
+    updated = await media_service.update_external_ids(
+        db, rating_key, server_id, fields=fields,
     )
     if not updated:
         raise HTTPException(404, "Media not found")

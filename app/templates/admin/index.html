@@ -18,7 +18,14 @@
     <input type="checkbox" name="missing_imdb" value="true"
            {% if missing_imdb %}checked{% endif %}
            class="h-4 w-4 rounded border-slate-300">
-    <span>Non scrapés uniquement</span>
+    <span>Sans IMDb</span>
+  </label>
+
+  <label class="flex items-center gap-2 text-sm">
+    <input type="checkbox" name="missing_tmdb" value="true"
+           {% if missing_tmdb %}checked{% endif %}
+           class="h-4 w-4 rounded border-slate-300">
+    <span>Sans TMDB</span>
   </label>
 
   <div class="flex flex-col">

@@ -26,12 +26,18 @@ class MediaService:
         genre: Optional[str] = None,
         year: Optional[int] = None,
         missing_imdb: bool = False,
+        missing_tmdb: bool = False,
     ) -> tuple[list[Media], int]:
-        """Get paginated media list with total count."""
+        """Get paginated media list with total count.
+
+        When both missing_imdb and missing_tmdb are True, the filter is OR (rows
+        with imdb_id missing OR tmdb_id missing). When only one is True, only
+        that condition applies.
+        """
         logger.debug(f"get_media_list: type={media_type}, limit={limit}, offset={offset}, "
                     f"sort={sort}, server_id={server_id}, parent={parent_rating_key}, "
                     f"include_filtered={include_filtered}, search={search}, "
-                    f"missing_imdb={missing_imdb}")
+                    f"missing_imdb={missing_imdb}, missing_tmdb={missing_tmdb}")
 
         query = select(Media).where(Media.type == media_type)
 
@@ -45,8 +51,14 @@ class MediaService:
             query = query.where(Media.genres.ilike(f"%{safe_genre}%", escape="\\"))
         if year:
             query = query.where(Media.year == year)
-        if missing_imdb:
-            query = query.where(or_(Media.imdb_id.is_(None), Media.imdb_id == ""))
+        imdb_missing = or_(Media.imdb_id.is_(None), Media.imdb_id == "")
+        tmdb_missing = or_(Media.tmdb_id.is_(None), Media.tmdb_id == "")
+        if missing_imdb and missing_tmdb:
+            query = query.where(or_(imdb_missing, tmdb_missing))
+        elif missing_imdb:
+            query = query.where(imdb_missing)
+        elif missing_tmdb:
+            query = query.where(tmdb_missing)
         if parent_rating_key:
             # Auto-detect series queries: if parent_rating_key starts with "series_",
             # filter by grandparent_rating_key (episodes belong to series via grandparent)
@@ -102,35 +114,44 @@ class MediaService:
         )
         return result.scalars().first()
 
-    async def count_movies_missing_imdb(self, db: AsyncSession) -> tuple[int, int]:
-        """Return (total_movies, movies_missing_imdb).
-
-        In production data each (rating_key, server_id) is unique for movies — there
-        are no pagination duplicates to dedupe against, so we count rows directly.
-        """
+    async def count_movies_missing_external(
+        self, db: AsyncSession,
+    ) -> tuple[int, int, int]:
+        """Return (total_movies, missing_imdb, missing_tmdb)."""
         base = select(func.count()).select_from(Media).where(Media.type == "movie")
         total = (await db.execute(base)).scalar() or 0
-        missing = (await db.execute(
+        missing_imdb = (await db.execute(
             base.where(or_(Media.imdb_id.is_(None), Media.imdb_id == ""))
         )).scalar() or 0
-        return total, missing
+        missing_tmdb = (await db.execute(
+            base.where(or_(Media.tmdb_id.is_(None), Media.tmdb_id == ""))
+        )).scalar() or 0
+        return total, missing_imdb, missing_tmdb
 
-    async def update_imdb_id(
+    async def update_external_ids(
         self,
         db: AsyncSession,
         rating_key: str,
         server_id: str,
-        imdb_id: Optional[str],
+        *,
+        fields: dict,
     ) -> Optional[Media]:
-        """Set imdb_id on every (filter, sort_order) variant for this (rating_key, server_id).
+        """Patch a media item with the given fields (imdb_id and/or tmdb_id).
 
-        Returns the canonical row after update, or None if no row was matched.
-        Caller is responsible for committing (handled by Depends(get_db)).
+        `fields` only contains keys the caller wants to update — empty dict is a
+        no-op that returns the current row. Update applies to every (filter,
+        sort_order) variant under (rating_key, server_id). Caller commits via
+        Depends(get_db).
         """
+        if not fields:
+            return await self.get_media_by_key(db, rating_key, server_id)
+
+        values = dict(fields)
+        values["updated_at"] = now_ms()
         result = await db.execute(
             update(Media)
             .where(Media.rating_key == rating_key, Media.server_id == server_id)
-            .values(imdb_id=imdb_id, updated_at=now_ms())
+            .values(**values)
         )
         if result.rowcount == 0:
             return None

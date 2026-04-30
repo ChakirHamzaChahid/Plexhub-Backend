@@ -25,7 +25,7 @@ async def test_admin_movies_missing_imdb_returns_200(
 async def test_admin_index_renders_with_seeded_movie(
     monkeypatch, api_client, db_factory,
 ):
-    """`GET /admin` lists a seeded movie and counts it as missing IMDb."""
+    """`GET /admin` lists a seeded movie and shows IMDb + TMDB counters."""
     monkeypatch.setattr(db_module, "async_session_factory", db_factory)
 
     async with db_factory() as session:
@@ -42,3 +42,14 @@ async def test_admin_index_renders_with_seeded_movie(
     assert resp.status_code == 200
     assert "Inception" in resp.text
     assert "Sans IMDb" in resp.text
+    assert "Sans TMDB" in resp.text
+
+
+async def test_admin_movies_missing_tmdb_returns_200(
+    monkeypatch, api_client, db_factory,
+):
+    """`GET /admin/movies?missing_tmdb=true` serves HTML."""
+    monkeypatch.setattr(db_module, "async_session_factory", db_factory)
+    resp = await api_client.get("/admin/movies?missing_tmdb=true")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/html")

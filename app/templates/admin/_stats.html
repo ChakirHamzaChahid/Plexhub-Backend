@@ -8,13 +8,20 @@
   </div>
   <div>
     <span class="text-xs uppercase text-slate-500">Sans IMDb</span>
-    <span class="text-2xl font-semibold {{ 'text-amber-600' if missing_count else 'text-emerald-600' }} ml-2">
-      {{ missing_count }}
+    <span class="text-2xl font-semibold {{ 'text-amber-600' if missing_imdb_count else 'text-emerald-600' }} ml-2">
+      {{ missing_imdb_count }}
+    </span>
+  </div>
+  <div>
+    <span class="text-xs uppercase text-slate-500">Sans TMDB</span>
+    <span class="text-2xl font-semibold {{ 'text-amber-600' if missing_tmdb_count else 'text-emerald-600' }} ml-2">
+      {{ missing_tmdb_count }}
     </span>
   </div>
   {% if total_movies %}
   <div class="text-xs text-slate-500">
-    {{ ((total_movies - missing_count) * 100 // total_movies) }}% scrapés
+    IMDb : {{ ((total_movies - missing_imdb_count) * 100 // total_movies) }}% scrapés
+    · TMDB : {{ ((total_movies - missing_tmdb_count) * 100 // total_movies) }}% scrapés
   </div>
   {% endif %}
 </div>

@@ -26,24 +26,15 @@ class MediaService:
         genre: Optional[str] = None,
         year: Optional[int] = None,
         missing_imdb: bool = False,
-        canonical_only: bool = False,
     ) -> tuple[list[Media], int]:
-        """Get paginated media list with total count.
-
-        canonical_only=True restricts to (filter='all', sort_order='default'), the
-        single canonical row per (rating_key, server_id) — used by the admin UI to
-        avoid showing the same movie multiple times across pre-computed pagination
-        variants.
-        """
+        """Get paginated media list with total count."""
         logger.debug(f"get_media_list: type={media_type}, limit={limit}, offset={offset}, "
                     f"sort={sort}, server_id={server_id}, parent={parent_rating_key}, "
                     f"include_filtered={include_filtered}, search={search}, "
-                    f"missing_imdb={missing_imdb}, canonical_only={canonical_only}")
+                    f"missing_imdb={missing_imdb}")
 
         query = select(Media).where(Media.type == media_type)
 
-        if canonical_only:
-            query = query.where(Media.filter == "all", Media.sort_order == "default")
         if server_id:
             query = query.where(Media.server_id == server_id)
         if search:
@@ -112,16 +103,12 @@ class MediaService:
         return result.scalars().first()
 
     async def count_movies_missing_imdb(self, db: AsyncSession) -> tuple[int, int]:
-        """Return (total_movies, movies_missing_imdb) over canonical rows only.
+        """Return (total_movies, movies_missing_imdb).
 
-        Counts only canonical (filter='all', sort_order='default') rows so the same
-        movie isn't double-counted across pagination variants.
+        In production data each (rating_key, server_id) is unique for movies — there
+        are no pagination duplicates to dedupe against, so we count rows directly.
         """
-        base = select(func.count()).select_from(Media).where(
-            Media.type == "movie",
-            Media.filter == "all",
-            Media.sort_order == "default",
-        )
+        base = select(func.count()).select_from(Media).where(Media.type == "movie")
         total = (await db.execute(base)).scalar() or 0
         missing = (await db.execute(
             base.where(or_(Media.imdb_id.is_(None), Media.imdb_id == ""))

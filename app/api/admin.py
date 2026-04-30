@@ -41,7 +41,6 @@ async def _load_movies_page(
         sort=sort,
         search=search or None,
         missing_imdb=missing_imdb,
-        canonical_only=True,
     )
     return items, total, offset
 

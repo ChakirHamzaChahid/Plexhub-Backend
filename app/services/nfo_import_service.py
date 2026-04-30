@@ -1,22 +1,25 @@
 """Import IMDb / TMDB IDs from tinyMediaManager .nfo files into the media table.
 
-Expected layout under the library root::
+Reconciliation is fully deterministic — no fuzzy matching, no title comparison.
 
-    <root>/<xtream_account_id>/Films/<Title> (<Year>)/movie.nfo
-    <root>/<xtream_account_id>/Series/<Title>/tvshow.nfo
+For each active Xtream account we read the per-account mapping that
+plex_generator already maintains (`<root>/<account_id>/.plex_mapping.json`).
+That JSON is keyed by `rating_key` and stores the relative path of every
+generated `.strm`. The companion `movie.nfo` lives in the same folder, so we
+join on `rating_key` directly:
 
-The per-account directory layer is what plexhub-backend itself generates, so
-the same `<account_id>` exposes both the NFO tree and the matching server_id
-(`xtream_<account_id>`) in the media table. We use it to scope each scan and
-match to a single account, eliminating cross-account homonym ambiguities.
+    movies: Films/<folder>/<folder>.strm
+            -> Films/<folder>/movie.nfo
+            -> UPDATE media WHERE rating_key=<key> AND server_id=<server_id>
 
-Matching: for each NFO we try several (title, year) candidates against an
-in-memory index of the account's media rows, keyed by
-(normalized_title_for_sorting, year). The first candidate yielding a single
-match wins; multi-row hits are reported as ambiguous and left untouched.
+For shows the mapping only contains episodes, but `tvshow.nfo` is a single
+file at the series root. We iterate `Media WHERE type='show'` for the account
+and compute the expected NFO path with the same `series_nfo_path()` helper
+the generator uses. If the file exists we read it and update the row.
 
-Only `imdb_id` and `tmdb_id` are written. Default is fill-missing-only; set
-`overwrite=True` to replace existing values.
+Only `imdb_id` and `tmdb_id` are written. By default we only fill missing
+values (`overwrite=True` to replace existing ones). Caller commits via
+Depends(get_db); when dry_run=True nothing is written.
 """
 from __future__ import annotations
 
@@ -31,8 +34,9 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.database import Media, XtreamAccount
+from app.plex_generator.mapping import MappingStore
+from app.plex_generator.naming import series_nfo_path
 from app.utils.server_id import build_server_id
-from app.utils.string_normalizer import parse_title_and_year, normalize_for_sorting
 from app.utils.time import now_ms
 
 
@@ -44,12 +48,9 @@ _TMDB_ID_RE = re.compile(r"^\d{1,9}$")
 
 @dataclass
 class NfoEntry:
-    """One parsed .nfo file ready to be matched against the DB."""
     path: Path
     folder_name: str
     media_type: str  # "movie" or "show"
-    nfo_title: Optional[str] = None
-    nfo_originaltitle: Optional[str] = None
     nfo_year: Optional[int] = None
     imdb_id: Optional[str] = None
     tmdb_id: Optional[str] = None
@@ -60,16 +61,16 @@ class ImportReport:
     account_id: str
     media_type: str
     scanned: int = 0
-    parsed: int = 0
-    parse_errors: list[str] = field(default_factory=list)
     matched: int = 0
     written: int = 0
     skipped_no_change: int = 0
     skipped_id_already_set: int = 0
     unmatched: list[str] = field(default_factory=list)
-    ambiguous: list[str] = field(default_factory=list)
+    parse_errors: list[str] = field(default_factory=list)
     dry_run: bool = False
     overwrite: bool = False
+    # Kept for template compatibility; deterministic matching never produces ambiguous hits.
+    ambiguous: list[str] = field(default_factory=list)
 
 
 def _first_text(root: ET.Element, *tags: str) -> Optional[str]:
@@ -102,7 +103,7 @@ def _validate_tmdb(value: Optional[str]) -> Optional[str]:
 
 
 def parse_nfo_file(path: Path, media_type: str) -> Optional[NfoEntry]:
-    """Parse a movie.nfo or tvshow.nfo. Returns None on hard failure."""
+    """Parse a movie.nfo / tvshow.nfo. Returns None on hard failure."""
     try:
         tree = ET.parse(path)
         root = tree.getroot()
@@ -134,91 +135,198 @@ def parse_nfo_file(path: Path, media_type: str) -> Optional[NfoEntry]:
         path=path,
         folder_name=path.parent.name,
         media_type=media_type,
-        nfo_title=_first_text(root, "title"),
-        nfo_originaltitle=_first_text(root, "originaltitle"),
         nfo_year=nfo_year,
         imdb_id=imdb,
         tmdb_id=tmdb,
     )
 
 
-def scan_account_directory(account_root: Path, kind: str) -> list[NfoEntry]:
-    """Scan one sub-tree under a single account's directory.
+def _compute_updates(row: Media, parsed: NfoEntry, overwrite: bool) -> dict:
+    updates: dict[str, str] = {}
+    if parsed.imdb_id and (overwrite or not row.imdb_id):
+        if parsed.imdb_id != row.imdb_id:
+            updates["imdb_id"] = parsed.imdb_id
+    if parsed.tmdb_id and (overwrite or not row.tmdb_id):
+        if parsed.tmdb_id != row.tmdb_id:
+            updates["tmdb_id"] = parsed.tmdb_id
+    return updates
 
-    kind="movies" -> account_root/Films/<Title (Year)>/movie.nfo
-    kind="shows"  -> account_root/Series/<Title>/tvshow.nfo
-    """
-    if kind == "movies":
-        sub, nfo_name, media_type = "Films", "movie.nfo", "movie"
-    elif kind == "shows":
-        sub, nfo_name, media_type = "Series", "tvshow.nfo", "show"
+
+def _classify_no_update(
+    row: Media, parsed: NfoEntry, overwrite: bool, report: ImportReport,
+) -> None:
+    if (parsed.imdb_id and row.imdb_id and not overwrite) or (
+        parsed.tmdb_id and row.tmdb_id and not overwrite
+    ):
+        report.skipped_id_already_set += 1
     else:
-        raise ValueError(f"Unknown kind: {kind}")
-
-    base = account_root / sub
-    if not base.exists():
-        logger.info("NFO subdir not present: %s", base)
-        return []
-
-    out: list[NfoEntry] = []
-    for nfo in base.glob(f"*/{nfo_name}"):
-        entry = parse_nfo_file(nfo, media_type)
-        if entry is not None:
-            out.append(entry)
-    return out
+        report.skipped_no_change += 1
 
 
-def _candidate_keys(entry: NfoEntry) -> list[tuple[str, Optional[int]]]:
-    """Yield (normalized_title, year) candidates to look up in the DB index.
-
-    Order matters: try the most reliable candidate first.
-    """
-    candidates: list[tuple[str, Optional[int]]] = []
-    seen: set[tuple[str, Optional[int]]] = set()
-
-    def push(raw: Optional[str], year_hint: Optional[int]) -> None:
-        if not raw:
-            return
-        title, year_in_str = parse_title_and_year(raw)
-        year = year_in_str or year_hint
-        norm = normalize_for_sorting(title).strip().lower()
-        if not norm:
-            return
-        key = (norm, year)
-        if key not in seen:
-            seen.add(key)
-            candidates.append(key)
-
-    push(entry.folder_name, entry.nfo_year)
-    push(entry.nfo_originaltitle, entry.nfo_year)
-    push(entry.nfo_title, entry.nfo_year)
-    return candidates
-
-
-async def _build_db_index(
-    db: AsyncSession, media_type: str, server_id: str,
-) -> dict[tuple[str, Optional[int]], list[Media]]:
-    """Index media rows of `media_type` for a single server_id.
-
-    Scoping by server_id keeps the index small and avoids cross-account
-    homonym collisions (the same title can exist in different Xtream
-    libraries).
-    """
-    result = await db.execute(
-        select(Media).where(
-            Media.type == media_type, Media.server_id == server_id,
-        )
+async def _import_movies_for_account(
+    db: AsyncSession,
+    account: XtreamAccount,
+    account_root: Path,
+    server_id: str,
+    overwrite: bool,
+    dry_run: bool,
+) -> ImportReport:
+    report = ImportReport(
+        account_id=account.id, media_type="movie",
+        overwrite=overwrite, dry_run=dry_run,
     )
-    rows = list(result.scalars().all())
-    index: dict[tuple[str, Optional[int]], list[Media]] = {}
-    for row in rows:
-        title, year_in_str = parse_title_and_year(row.title)
-        year = year_in_str or row.year
-        norm = normalize_for_sorting(title).strip().lower()
-        if not norm:
+
+    mapping = MappingStore(account_root)
+    mapping.load()
+    # MappingStore exposes no public iteration; access internal dict directly.
+    movie_entries = [
+        (rk, entry) for rk, entry in mapping._data.items()
+        if entry.path.startswith("Films/")
+    ]
+    logger.info(
+        "NFO movies account=%s: %d film entries in mapping",
+        account.id, len(movie_entries),
+    )
+
+    for rating_key, entry in movie_entries:
+        strm_full = account_root / entry.path
+        nfo_path = strm_full.parent / "movie.nfo"
+        folder_name = strm_full.parent.name
+
+        if not nfo_path.exists():
+            report.unmatched.append(f"{folder_name}: missing movie.nfo")
             continue
-        index.setdefault((norm, year), []).append(row)
-    return index
+        report.scanned += 1
+
+        parsed = parse_nfo_file(nfo_path, "movie")
+        if parsed is None:
+            report.parse_errors.append(folder_name)
+            continue
+        if not parsed.imdb_id and not parsed.tmdb_id:
+            report.unmatched.append(f"{folder_name}: NFO has no imdb/tmdb")
+            continue
+
+        row = (await db.execute(
+            select(Media).where(
+                Media.rating_key == rating_key,
+                Media.server_id == server_id,
+                Media.type == "movie",
+            ).limit(1)
+        )).scalars().first()
+        if row is None:
+            report.unmatched.append(
+                f"{folder_name}: no DB row for rating_key={rating_key}"
+            )
+            continue
+
+        report.matched += 1
+        updates = _compute_updates(row, parsed, overwrite)
+        if not updates:
+            _classify_no_update(row, parsed, overwrite, report)
+            continue
+        if dry_run:
+            report.written += 1
+            continue
+
+        await db.execute(
+            update(Media)
+            .where(
+                Media.rating_key == row.rating_key,
+                Media.server_id == row.server_id,
+            )
+            .values(**updates, updated_at=now_ms())
+        )
+        report.written += 1
+
+    if not dry_run and report.written:
+        await db.flush()
+    logger.info(
+        "NFO movies account=%s done: matched=%d written=%d unmatched=%d "
+        "skipped_already=%d skipped_nochange=%d",
+        account.id, report.matched, report.written,
+        len(report.unmatched),
+        report.skipped_id_already_set, report.skipped_no_change,
+    )
+    return report
+
+
+async def _import_shows_for_account(
+    db: AsyncSession,
+    account: XtreamAccount,
+    account_root: Path,
+    server_id: str,
+    overwrite: bool,
+    dry_run: bool,
+) -> ImportReport:
+    report = ImportReport(
+        account_id=account.id, media_type="show",
+        overwrite=overwrite, dry_run=dry_run,
+    )
+
+    shows = list((await db.execute(
+        select(Media).where(
+            Media.type == "show", Media.server_id == server_id,
+        )
+    )).scalars().all())
+    # The same show can appear under several (filter, sort_order) variants —
+    # de-dupe on rating_key so we don't process / log the NFO multiple times.
+    seen: set[str] = set()
+    unique_shows: list[Media] = []
+    for show in shows:
+        if show.rating_key in seen:
+            continue
+        seen.add(show.rating_key)
+        unique_shows.append(show)
+    logger.info(
+        "NFO shows account=%s: %d unique shows in DB",
+        account.id, len(unique_shows),
+    )
+
+    for show in unique_shows:
+        nfo_rel = series_nfo_path(show.title)  # "Series/<safe_title>/tvshow.nfo"
+        nfo_path = account_root / nfo_rel
+        if not nfo_path.exists():
+            report.unmatched.append(f"{show.title}: {nfo_rel} not found")
+            continue
+        report.scanned += 1
+
+        parsed = parse_nfo_file(nfo_path, "show")
+        if parsed is None:
+            report.parse_errors.append(show.title)
+            continue
+        if not parsed.imdb_id and not parsed.tmdb_id:
+            report.unmatched.append(f"{show.title}: NFO has no imdb/tmdb")
+            continue
+
+        report.matched += 1
+        updates = _compute_updates(show, parsed, overwrite)
+        if not updates:
+            _classify_no_update(show, parsed, overwrite, report)
+            continue
+        if dry_run:
+            report.written += 1
+            continue
+
+        await db.execute(
+            update(Media)
+            .where(
+                Media.rating_key == show.rating_key,
+                Media.server_id == show.server_id,
+            )
+            .values(**updates, updated_at=now_ms())
+        )
+        report.written += 1
+
+    if not dry_run and report.written:
+        await db.flush()
+    logger.info(
+        "NFO shows account=%s done: matched=%d written=%d unmatched=%d "
+        "skipped_already=%d skipped_nochange=%d",
+        account.id, report.matched, report.written,
+        len(report.unmatched),
+        report.skipped_id_already_set, report.skipped_no_change,
+    )
+    return report
 
 
 async def import_nfo(
@@ -230,12 +338,9 @@ async def import_nfo(
     dry_run: bool = False,
     account_ids: Optional[tuple[str, ...]] = None,
 ) -> list[ImportReport]:
-    """Run scan+match+write for every active Xtream account.
+    """Run a deterministic NFO import for every active Xtream account.
 
-    `<root>/<account_id>/{Films,Series}/...` is scanned per account; matching
-    is restricted to that account's `server_id`. One report per
-    (account, kind). When dry_run=True nothing is written. Caller commits via
-    Depends(get_db).
+    Returns one ImportReport per (account, kind).
     """
     logger.info(
         "NFO import start: root=%s kinds=%s overwrite=%s dry_run=%s account_filter=%s",
@@ -249,7 +354,7 @@ async def import_nfo(
     if account_ids is not None:
         wanted = set(account_ids)
         accounts = [a for a in accounts if a.id in wanted]
-    logger.info("NFO import: %d active account(s) to scan", len(accounts))
+    logger.info("NFO import: %d active account(s)", len(accounts))
 
     reports: list[ImportReport] = []
     for account in accounts:
@@ -261,101 +366,14 @@ async def import_nfo(
             continue
         server_id = build_server_id(account.id)
 
-        for kind in kinds:
-            media_type = "movie" if kind == "movies" else "show"
-            report = ImportReport(
-                account_id=account.id,
-                media_type=media_type,
-                dry_run=dry_run,
-                overwrite=overwrite,
-            )
-
-            entries = scan_account_directory(account_root, kind)
-            report.scanned = len(entries)
-            report.parsed = len(entries)
-            logger.info(
-                "NFO scan account=%s kind=%s: %d files",
-                account.id, kind, len(entries),
-            )
-
-            if not entries:
-                reports.append(report)
-                continue
-
-            index = await _build_db_index(db, media_type, server_id)
-            logger.info(
-                "NFO db index account=%s type=%s: %d distinct keys",
-                account.id, media_type, len(index),
-            )
-
-            for entry in entries:
-                if not entry.imdb_id and not entry.tmdb_id:
-                    report.unmatched.append(
-                        f"{entry.path.name} ({entry.folder_name}): NFO has no imdb/tmdb"
-                    )
-                    continue
-
-                matched_rows: list[Media] = []
-                for key in _candidate_keys(entry):
-                    hits = index.get(key, [])
-                    if len(hits) == 1:
-                        matched_rows = hits
-                        break
-                    if len(hits) > 1:
-                        matched_rows = hits  # keep going in case a later key is unique
-                if not matched_rows:
-                    report.unmatched.append(entry.folder_name)
-                    continue
-                if len(matched_rows) > 1:
-                    report.ambiguous.append(
-                        f"{entry.folder_name} → {len(matched_rows)} candidats"
-                    )
-                    continue
-
-                report.matched += 1
-                row = matched_rows[0]
-
-                updates: dict[str, str] = {}
-                if entry.imdb_id and (overwrite or not row.imdb_id):
-                    if entry.imdb_id != row.imdb_id:
-                        updates["imdb_id"] = entry.imdb_id
-                if entry.tmdb_id and (overwrite or not row.tmdb_id):
-                    if entry.tmdb_id != row.tmdb_id:
-                        updates["tmdb_id"] = entry.tmdb_id
-
-                if not updates:
-                    if (entry.imdb_id and row.imdb_id and not overwrite) or (
-                        entry.tmdb_id and row.tmdb_id and not overwrite
-                    ):
-                        report.skipped_id_already_set += 1
-                    else:
-                        report.skipped_no_change += 1
-                    continue
-
-                if dry_run:
-                    report.written += 1
-                    continue
-
-                await db.execute(
-                    update(Media)
-                    .where(
-                        Media.rating_key == row.rating_key,
-                        Media.server_id == row.server_id,
-                    )
-                    .values(**updates, updated_at=now_ms())
-                )
-                report.written += 1
-
-            if not dry_run and report.written:
-                await db.flush()
-            logger.info(
-                "NFO import account=%s kind=%s done: matched=%d written=%d "
-                "unmatched=%d ambiguous=%d skipped_already=%d skipped_nochange=%d",
-                account.id, kind, report.matched, report.written,
-                len(report.unmatched), len(report.ambiguous),
-                report.skipped_id_already_set, report.skipped_no_change,
-            )
-            reports.append(report)
+        if "movies" in kinds:
+            reports.append(await _import_movies_for_account(
+                db, account, account_root, server_id, overwrite, dry_run,
+            ))
+        if "shows" in kinds:
+            reports.append(await _import_shows_for_account(
+                db, account, account_root, server_id, overwrite, dry_run,
+            ))
 
     logger.info("NFO import end: %d report(s)", len(reports))
     return reports

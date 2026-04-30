@@ -87,11 +87,10 @@
       {% if r.overwrite %} · <span class="text-amber-700">overwrite ON</span>{% endif %}
     </header>
     <div class="p-4 grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-      <div><div class="text-xs uppercase text-slate-500">NFO scannés</div><div class="text-xl font-semibold">{{ r.scanned }}</div></div>
-      <div><div class="text-xs uppercase text-slate-500">Matchés</div><div class="text-xl font-semibold text-emerald-700">{{ r.matched }}</div></div>
+      <div><div class="text-xs uppercase text-slate-500">NFO trouvés</div><div class="text-xl font-semibold">{{ r.scanned }}</div></div>
+      <div><div class="text-xs uppercase text-slate-500">Matchés en base</div><div class="text-xl font-semibold text-emerald-700">{{ r.matched }}</div></div>
       <div><div class="text-xs uppercase text-slate-500">{{ "À écrire" if dry_run else "Écrits" }}</div><div class="text-xl font-semibold text-sky-700">{{ r.written }}</div></div>
       <div><div class="text-xs uppercase text-slate-500">Sans correspondance</div><div class="text-xl font-semibold text-rose-700">{{ r.unmatched|length }}</div></div>
-      <div><div class="text-xs uppercase text-slate-500">Ambigus</div><div class="text-xl font-semibold text-amber-700">{{ r.ambiguous|length }}</div></div>
       <div><div class="text-xs uppercase text-slate-500">IDs déjà OK</div><div class="text-xl font-semibold text-slate-500">{{ r.skipped_id_already_set }}</div></div>
       <div><div class="text-xs uppercase text-slate-500">Pas de changement</div><div class="text-xl font-semibold text-slate-500">{{ r.skipped_no_change }}</div></div>
       <div><div class="text-xs uppercase text-slate-500">Erreurs parse</div><div class="text-xl font-semibold text-rose-700">{{ r.parse_errors|length }}</div></div>
@@ -102,14 +101,6 @@
       <summary class="px-4 py-2 cursor-pointer text-sm text-slate-700">Sans correspondance ({{ r.unmatched|length }})</summary>
       <ul class="px-4 pb-3 text-xs text-slate-600 list-disc pl-8 max-h-64 overflow-auto">
         {% for u in r.unmatched %}<li>{{ u }}</li>{% endfor %}
-      </ul>
-    </details>
-    {% endif %}
-    {% if r.ambiguous %}
-    <details class="border-t border-slate-200">
-      <summary class="px-4 py-2 cursor-pointer text-sm text-slate-700">Ambigus ({{ r.ambiguous|length }})</summary>
-      <ul class="px-4 pb-3 text-xs text-slate-600 list-disc pl-8 max-h-64 overflow-auto">
-        {% for a in r.ambiguous %}<li>{{ a }}</li>{% endfor %}
       </ul>
     </details>
     {% endif %}

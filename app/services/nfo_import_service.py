@@ -2,16 +2,21 @@
 
 Expected layout under the library root::
 
-    <root>/Films/<Title> (<Year>)/movie.nfo
-    <root>/Series/<Title>/tvshow.nfo
+    <root>/<xtream_account_id>/Films/<Title> (<Year>)/movie.nfo
+    <root>/<xtream_account_id>/Series/<Title>/tvshow.nfo
 
-Matching strategy: for each NFO we try several (title, year) candidates against
-an in-memory index of movies/shows in the DB, keyed by
+The per-account directory layer is what plexhub-backend itself generates, so
+the same `<account_id>` exposes both the NFO tree and the matching server_id
+(`xtream_<account_id>`) in the media table. We use it to scope each scan and
+match to a single account, eliminating cross-account homonym ambiguities.
+
+Matching: for each NFO we try several (title, year) candidates against an
+in-memory index of the account's media rows, keyed by
 (normalized_title_for_sorting, year). The first candidate yielding a single
-match wins; ambiguous (multiple) or empty matches are reported as 'unmatched'.
+match wins; multi-row hits are reported as ambiguous and left untouched.
 
-Only `imdb_id` and `tmdb_id` are written. By default we only fill missing
-values; pass `overwrite=True` to replace existing ones.
+Only `imdb_id` and `tmdb_id` are written. Default is fill-missing-only; set
+`overwrite=True` to replace existing values.
 """
 from __future__ import annotations
 
@@ -25,7 +30,8 @@ from xml.etree import ElementTree as ET
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.database import Media
+from app.models.database import Media, XtreamAccount
+from app.utils.server_id import build_server_id
 from app.utils.string_normalizer import parse_title_and_year, normalize_for_sorting
 from app.utils.time import now_ms
 
@@ -51,6 +57,7 @@ class NfoEntry:
 
 @dataclass
 class ImportReport:
+    account_id: str
     media_type: str
     scanned: int = 0
     parsed: int = 0
@@ -135,11 +142,11 @@ def parse_nfo_file(path: Path, media_type: str) -> Optional[NfoEntry]:
     )
 
 
-def scan_directory(root: Path, kind: str) -> list[NfoEntry]:
-    """Scan one of the expected sub-trees.
+def scan_account_directory(account_root: Path, kind: str) -> list[NfoEntry]:
+    """Scan one sub-tree under a single account's directory.
 
-    kind="movies" -> root/Films/<Title (Year)>/movie.nfo
-    kind="shows"  -> root/Series/<Title>/tvshow.nfo
+    kind="movies" -> account_root/Films/<Title (Year)>/movie.nfo
+    kind="shows"  -> account_root/Series/<Title>/tvshow.nfo
     """
     if kind == "movies":
         sub, nfo_name, media_type = "Films", "movie.nfo", "movie"
@@ -148,7 +155,7 @@ def scan_directory(root: Path, kind: str) -> list[NfoEntry]:
     else:
         raise ValueError(f"Unknown kind: {kind}")
 
-    base = root / sub
+    base = account_root / sub
     if not base.exists():
         logger.info("NFO subdir not present: %s", base)
         return []
@@ -189,14 +196,19 @@ def _candidate_keys(entry: NfoEntry) -> list[tuple[str, Optional[int]]]:
 
 
 async def _build_db_index(
-    db: AsyncSession, media_type: str,
+    db: AsyncSession, media_type: str, server_id: str,
 ) -> dict[tuple[str, Optional[int]], list[Media]]:
-    """Index every media row of `media_type` by (normalized_title, year).
+    """Index media rows of `media_type` for a single server_id.
 
-    The same key may map to several rows in case of homonyms; callers should
-    treat multi-hits as ambiguous.
+    Scoping by server_id keeps the index small and avoids cross-account
+    homonym collisions (the same title can exist in different Xtream
+    libraries).
     """
-    result = await db.execute(select(Media).where(Media.type == media_type))
+    result = await db.execute(
+        select(Media).where(
+            Media.type == media_type, Media.server_id == server_id,
+        )
+    )
     rows = list(result.scalars().all())
     index: dict[tuple[str, Optional[int]], list[Media]] = {}
     for row in rows:
@@ -216,91 +228,110 @@ async def import_nfo(
     kinds: tuple[str, ...] = ("movies", "shows"),
     overwrite: bool = False,
     dry_run: bool = False,
+    account_ids: Optional[tuple[str, ...]] = None,
 ) -> list[ImportReport]:
-    """Run a scan+match+write cycle. Returns one ImportReport per kind.
+    """Run scan+match+write for every active Xtream account.
 
-    Caller commits via Depends(get_db); when dry_run=True nothing is updated.
+    `<root>/<account_id>/{Films,Series}/...` is scanned per account; matching
+    is restricted to that account's `server_id`. One report per
+    (account, kind). When dry_run=True nothing is written. Caller commits via
+    Depends(get_db).
     """
+    accounts_q = await db.execute(
+        select(XtreamAccount).where(XtreamAccount.is_active == True)  # noqa: E712
+    )
+    accounts: list[XtreamAccount] = list(accounts_q.scalars().all())
+    if account_ids is not None:
+        wanted = set(account_ids)
+        accounts = [a for a in accounts if a.id in wanted]
+
     reports: list[ImportReport] = []
-    for kind in kinds:
-        media_type = "movie" if kind == "movies" else "show"
-        report = ImportReport(
-            media_type=media_type, dry_run=dry_run, overwrite=overwrite,
-        )
-
-        entries = scan_directory(root, kind)
-        report.scanned = len(entries)
-        report.parsed = len(entries)
-
-        if not entries:
-            reports.append(report)
+    for account in accounts:
+        account_root = root / account.id
+        if not account_root.exists():
+            logger.info("NFO account dir missing: %s", account_root)
             continue
+        server_id = build_server_id(account.id)
 
-        index = await _build_db_index(db, media_type)
-
-        # Group writes per (rating_key, server_id) — within one batch a row may
-        # be touched multiple times by overlapping NFO matches (collections),
-        # but the imdb/tmdb values are stable so last-write-wins is fine.
-        for entry in entries:
-            if not entry.imdb_id and not entry.tmdb_id:
-                report.unmatched.append(
-                    f"{entry.path.name} ({entry.folder_name}): NFO has no imdb/tmdb"
-                )
-                continue
-
-            matched_rows: list[Media] = []
-            for key in _candidate_keys(entry):
-                hits = index.get(key, [])
-                if len(hits) == 1:
-                    matched_rows = hits
-                    break
-                if len(hits) > 1:
-                    matched_rows = hits  # ambiguous — keep going to maybe find unique
-            if not matched_rows:
-                report.unmatched.append(entry.folder_name)
-                continue
-            if len(matched_rows) > 1:
-                report.ambiguous.append(
-                    f"{entry.folder_name} → {len(matched_rows)} candidats"
-                )
-                continue
-
-            report.matched += 1
-            row = matched_rows[0]
-
-            updates: dict[str, str] = {}
-            if entry.imdb_id and (overwrite or not row.imdb_id):
-                if entry.imdb_id != row.imdb_id:
-                    updates["imdb_id"] = entry.imdb_id
-            if entry.tmdb_id and (overwrite or not row.tmdb_id):
-                if entry.tmdb_id != row.tmdb_id:
-                    updates["tmdb_id"] = entry.tmdb_id
-
-            if not updates:
-                if (entry.imdb_id and row.imdb_id and not overwrite) or (
-                    entry.tmdb_id and row.tmdb_id and not overwrite
-                ):
-                    report.skipped_id_already_set += 1
-                else:
-                    report.skipped_no_change += 1
-                continue
-
-            if dry_run:
-                report.written += 1
-                continue
-
-            await db.execute(
-                update(Media)
-                .where(
-                    Media.rating_key == row.rating_key,
-                    Media.server_id == row.server_id,
-                )
-                .values(**updates, updated_at=now_ms())
+        for kind in kinds:
+            media_type = "movie" if kind == "movies" else "show"
+            report = ImportReport(
+                account_id=account.id,
+                media_type=media_type,
+                dry_run=dry_run,
+                overwrite=overwrite,
             )
-            report.written += 1
 
-        if not dry_run and report.written:
-            await db.flush()
-        reports.append(report)
+            entries = scan_account_directory(account_root, kind)
+            report.scanned = len(entries)
+            report.parsed = len(entries)
+
+            if not entries:
+                reports.append(report)
+                continue
+
+            index = await _build_db_index(db, media_type, server_id)
+
+            for entry in entries:
+                if not entry.imdb_id and not entry.tmdb_id:
+                    report.unmatched.append(
+                        f"{entry.path.name} ({entry.folder_name}): NFO has no imdb/tmdb"
+                    )
+                    continue
+
+                matched_rows: list[Media] = []
+                for key in _candidate_keys(entry):
+                    hits = index.get(key, [])
+                    if len(hits) == 1:
+                        matched_rows = hits
+                        break
+                    if len(hits) > 1:
+                        matched_rows = hits  # keep going in case a later key is unique
+                if not matched_rows:
+                    report.unmatched.append(entry.folder_name)
+                    continue
+                if len(matched_rows) > 1:
+                    report.ambiguous.append(
+                        f"{entry.folder_name} → {len(matched_rows)} candidats"
+                    )
+                    continue
+
+                report.matched += 1
+                row = matched_rows[0]
+
+                updates: dict[str, str] = {}
+                if entry.imdb_id and (overwrite or not row.imdb_id):
+                    if entry.imdb_id != row.imdb_id:
+                        updates["imdb_id"] = entry.imdb_id
+                if entry.tmdb_id and (overwrite or not row.tmdb_id):
+                    if entry.tmdb_id != row.tmdb_id:
+                        updates["tmdb_id"] = entry.tmdb_id
+
+                if not updates:
+                    if (entry.imdb_id and row.imdb_id and not overwrite) or (
+                        entry.tmdb_id and row.tmdb_id and not overwrite
+                    ):
+                        report.skipped_id_already_set += 1
+                    else:
+                        report.skipped_no_change += 1
+                    continue
+
+                if dry_run:
+                    report.written += 1
+                    continue
+
+                await db.execute(
+                    update(Media)
+                    .where(
+                        Media.rating_key == row.rating_key,
+                        Media.server_id == row.server_id,
+                    )
+                    .values(**updates, updated_at=now_ms())
+                )
+                report.written += 1
+
+            if not dry_run and report.written:
+                await db.flush()
+            reports.append(report)
 
     return reports

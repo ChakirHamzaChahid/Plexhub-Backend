@@ -8,15 +8,16 @@
       class="bg-white p-4 rounded shadow-sm border border-slate-200 mb-6 flex flex-col gap-3">
 
   <div>
-    <label class="text-xs uppercase text-slate-500" for="root">Racine de la bibliothèque NFO</label>
+    <label class="text-xs uppercase text-slate-500" for="root">Racine parent (au-dessus des dossiers compte Xtream)</label>
     <input id="root" name="root" type="text"
            value="{{ root or default_root or '' }}"
-           placeholder="\\192.168.0.175\raid0-3to\8fb2c0f3"
+           placeholder="\\192.168.0.175\raid0-3to"
            class="block w-full mt-1 border border-slate-300 rounded px-2 py-1 text-sm font-mono">
     <p class="text-xs text-slate-500 mt-1">
-      Le scan attend <code>&lt;racine&gt;/Films/&lt;Titre (Année)&gt;/movie.nfo</code>
-      et <code>&lt;racine&gt;/Series/&lt;Titre&gt;/tvshow.nfo</code>.
-      Tu peux aussi définir <code>NFO_LIBRARY_DIR</code> dans <code>.env</code> pour pré-remplir.
+      Le scan parcourt, pour chaque compte Xtream actif :
+      <code>&lt;racine&gt;/&lt;account_id&gt;/Films/&lt;Titre (Année)&gt;/movie.nfo</code>
+      et <code>&lt;racine&gt;/&lt;account_id&gt;/Series/&lt;Titre&gt;/tvshow.nfo</code>.
+      Tu peux pré-remplir via <code>NFO_LIBRARY_DIR</code> dans <code>.env</code>.
     </p>
   </div>
 
@@ -70,7 +71,7 @@
   {% for r in report_groups %}
   <section class="bg-white border border-slate-200 rounded shadow-sm mb-6">
     <header class="px-4 py-2 bg-slate-100 border-b border-slate-200 text-sm font-medium">
-      Type : <code>{{ r.media_type }}</code>
+      Compte : <code>{{ r.account_id }}</code> · Type : <code>{{ r.media_type }}</code>
       {% if r.overwrite %} · <span class="text-amber-700">overwrite ON</span>{% endif %}
     </header>
     <div class="p-4 grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">

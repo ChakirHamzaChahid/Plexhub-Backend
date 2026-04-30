@@ -1,0 +1,49 @@
+{% set page_count = ((total - 1) // page_size) + 1 if total else 1 %}
+<div class="overflow-x-auto">
+<table class="min-w-full text-sm">
+  <thead class="bg-slate-100 text-slate-600 text-xs uppercase">
+    <tr>
+      <th class="text-left px-3 py-2 w-2/5">Titre</th>
+      <th class="text-left px-3 py-2 w-20">Année</th>
+      <th class="text-left px-3 py-2 w-20">Server</th>
+      <th class="text-left px-3 py-2 w-56">IMDb ID</th>
+      <th class="text-left px-3 py-2 w-40">Actions</th>
+    </tr>
+  </thead>
+  <tbody class="divide-y divide-slate-100">
+    {% if items %}
+      {% for item in items %}
+        {% include "admin/_movie_row.html" %}
+      {% endfor %}
+    {% else %}
+      <tr><td colspan="5" class="px-3 py-8 text-center text-slate-500 italic">Aucun résultat.</td></tr>
+    {% endif %}
+  </tbody>
+</table>
+</div>
+
+<nav class="flex items-center justify-between px-3 py-2 bg-slate-50 border-t border-slate-200 text-xs text-slate-600">
+  <span>{{ total }} résultat(s) · page {{ page }} / {{ page_count }}</span>
+  <span class="flex gap-2">
+    {% if page > 1 %}
+    <button type="button"
+            hx-get="/admin/movies"
+            hx-target="#movies-table"
+            hx-include="#filters"
+            hx-vals='{"page": {{ page - 1 }} }'
+            class="px-2 py-1 rounded border border-slate-300 bg-white hover:bg-slate-100">← Précédent</button>
+    {% else %}
+    <span class="px-2 py-1 rounded border border-slate-200 text-slate-300">← Précédent</span>
+    {% endif %}
+    {% if page < page_count %}
+    <button type="button"
+            hx-get="/admin/movies"
+            hx-target="#movies-table"
+            hx-include="#filters"
+            hx-vals='{"page": {{ page + 1 }} }'
+            class="px-2 py-1 rounded border border-slate-300 bg-white hover:bg-slate-100">Suivant →</button>
+    {% else %}
+    <span class="px-2 py-1 rounded border border-slate-200 text-slate-300">Suivant →</span>
+    {% endif %}
+  </span>
+</nav>

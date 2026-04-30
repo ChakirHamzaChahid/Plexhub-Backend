@@ -1,0 +1,53 @@
+{% extends "admin/base.html" %}
+
+{% block content %}
+<section id="stats" class="mb-4">
+  {% include "admin/_stats.html" %}
+</section>
+
+<form id="filters"
+      class="flex flex-wrap items-end gap-3 bg-white p-3 rounded shadow-sm border border-slate-200 mb-4"
+      hx-get="/admin/movies"
+      hx-target="#movies-table"
+      hx-swap="innerHTML"
+      hx-trigger="change from:#filters input[type=checkbox], change from:#filters select, keyup changed delay:300ms from:#filters input[name=search], submit"
+      hx-include="#filters"
+      hx-push-url="false">
+
+  <label class="flex items-center gap-2 text-sm">
+    <input type="checkbox" name="missing_imdb" value="true"
+           {% if missing_imdb %}checked{% endif %}
+           class="h-4 w-4 rounded border-slate-300">
+    <span>Non scrapés uniquement</span>
+  </label>
+
+  <div class="flex flex-col">
+    <label class="text-xs text-slate-500" for="search">Recherche</label>
+    <input id="search" name="search" type="search"
+           value="{{ search }}"
+           placeholder="titre…"
+           class="border border-slate-300 rounded px-2 py-1 text-sm w-64">
+  </div>
+
+  <div class="flex flex-col">
+    <label class="text-xs text-slate-500" for="sort">Tri</label>
+    <select id="sort" name="sort"
+            class="border border-slate-300 rounded px-2 py-1 text-sm">
+      <option value="added_desc" {% if sort == 'added_desc' %}selected{% endif %}>Date d'ajout (récent)</option>
+      <option value="added_asc"  {% if sort == 'added_asc' %}selected{% endif %}>Date d'ajout (ancien)</option>
+      <option value="title_asc"  {% if sort == 'title_asc' %}selected{% endif %}>Titre A→Z</option>
+      <option value="title_desc" {% if sort == 'title_desc' %}selected{% endif %}>Titre Z→A</option>
+      <option value="year_desc"  {% if sort == 'year_desc' %}selected{% endif %}>Année (récent)</option>
+    </select>
+  </div>
+
+  <input type="hidden" name="page" value="1">
+  <input type="hidden" name="page_size" value="{{ page_size }}">
+
+  <span class="htmx-indicator text-xs text-slate-500 self-center">⏳ chargement…</span>
+</form>
+
+<div id="movies-table" class="bg-white rounded shadow-sm border border-slate-200 overflow-hidden">
+  {% include "admin/_movies_table.html" %}
+</div>
+{% endblock %}

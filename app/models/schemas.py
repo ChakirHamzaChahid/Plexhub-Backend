@@ -1,6 +1,11 @@
-from pydantic import BaseModel, ConfigDict, Field
+import re
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.alias_generators import to_camel
 from typing import Optional
+
+
+_IMDB_ID_RE = re.compile(r"^tt\d{7,10}$")
 
 
 # --- Media Schemas ---
@@ -82,6 +87,34 @@ class MediaListResponse(BaseModel):
     items: list[MediaResponse]
     total: int
     has_more: bool
+
+
+class MediaUpdate(BaseModel):
+    """Partial update for a media item. Currently only `imdb_id` is editable."""
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    imdb_id: Optional[str] = None
+
+    @field_validator("imdb_id", mode="before")
+    @classmethod
+    def _validate_imdb_id(cls, v):
+        if v is None:
+            return None
+        if not isinstance(v, str):
+            raise ValueError("imdb_id must be a string")
+        v = v.strip()
+        if v == "":
+            return None
+        if not _IMDB_ID_RE.match(v):
+            raise ValueError("imdb_id must match ^tt\\d{7,10}$ (e.g. tt0133093)")
+        return v
+
+
+class MediaStatsResponse(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    total: int
+    missing_imdb: int
 
 
 # --- Stream Schemas ---

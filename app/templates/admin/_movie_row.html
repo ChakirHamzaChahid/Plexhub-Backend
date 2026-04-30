@@ -1,0 +1,53 @@
+{% set row_id = "row-" ~ item.server_id ~ "-" ~ item.rating_key %}
+<tr id="{{ row_id }}" class="hover:bg-slate-50 align-middle
+    {% if saved %}bg-emerald-50{% elif rescraped %}bg-sky-50{% elif error %}bg-rose-50{% endif %}">
+  <td class="px-3 py-2">
+    <div class="font-medium text-slate-900">{{ item.title }}</div>
+    {% if item.summary %}<div class="text-xs text-slate-500 line-clamp-1">{{ item.summary[:120] }}</div>{% endif %}
+  </td>
+  <td class="px-3 py-2 text-slate-700">{{ item.year or "—" }}</td>
+  <td class="px-3 py-2 text-slate-500 text-xs font-mono">{{ item.server_id }}</td>
+  <td class="px-3 py-2">
+    <form hx-post="/admin/movies/{{ item.rating_key }}/imdb"
+          hx-target="#{{ row_id }}"
+          hx-swap="outerHTML"
+          class="flex items-center gap-2">
+      <input type="hidden" name="server_id" value="{{ item.server_id }}">
+      <input name="imdb_id"
+             type="text"
+             value="{{ item.imdb_id or '' }}"
+             placeholder="ttXXXXXXX"
+             pattern="^tt\d{7,10}$"
+             class="border border-slate-300 rounded px-2 py-1 text-sm font-mono w-36
+                    focus:outline-none focus:ring-2 focus:ring-slate-400">
+      <button type="submit"
+              class="px-2 py-1 text-xs rounded bg-slate-900 text-slate-100 hover:bg-slate-700">
+        Sauver
+      </button>
+    </form>
+    {% if error %}<div class="text-xs text-rose-600 mt-1">{{ error }}</div>{% endif %}
+  </td>
+  <td class="px-3 py-2">
+    <div class="flex items-center gap-2">
+      {% if item.imdb_id %}
+      <a href="https://www.imdb.com/title/{{ item.imdb_id }}/"
+         target="_blank" rel="noopener"
+         class="px-2 py-1 text-xs rounded border border-amber-400 text-amber-700 bg-amber-50 hover:bg-amber-100">
+        IMDb ↗
+      </a>
+      {% endif %}
+      <form hx-post="/admin/movies/{{ item.rating_key }}/rescrape"
+            hx-target="#{{ row_id }}"
+            hx-swap="outerHTML"
+            hx-confirm="Relancer le scrape pour « {{ item.title|e }} » ?">
+        <input type="hidden" name="server_id" value="{{ item.server_id }}">
+        <button type="submit"
+                class="px-2 py-1 text-xs rounded border border-sky-400 text-sky-700 bg-sky-50 hover:bg-sky-100">
+          Re-scrape
+        </button>
+      </form>
+    </div>
+    {% if saved %}<span class="text-xs text-emerald-700">✓ enregistré</span>{% endif %}
+    {% if rescraped %}<span class="text-xs text-sky-700">⏱ en file d'attente</span>{% endif %}
+  </td>
+</tr>

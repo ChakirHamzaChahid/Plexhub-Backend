@@ -237,6 +237,11 @@ async def import_nfo(
     (account, kind). When dry_run=True nothing is written. Caller commits via
     Depends(get_db).
     """
+    logger.info(
+        "NFO import start: root=%s kinds=%s overwrite=%s dry_run=%s account_filter=%s",
+        root, kinds, overwrite, dry_run, account_ids,
+    )
+
     accounts_q = await db.execute(
         select(XtreamAccount).where(XtreamAccount.is_active == True)  # noqa: E712
     )
@@ -244,12 +249,15 @@ async def import_nfo(
     if account_ids is not None:
         wanted = set(account_ids)
         accounts = [a for a in accounts if a.id in wanted]
+    logger.info("NFO import: %d active account(s) to scan", len(accounts))
 
     reports: list[ImportReport] = []
     for account in accounts:
         account_root = root / account.id
         if not account_root.exists():
-            logger.info("NFO account dir missing: %s", account_root)
+            logger.warning(
+                "NFO account dir missing: %s (account=%s)", account_root, account.id,
+            )
             continue
         server_id = build_server_id(account.id)
 
@@ -265,12 +273,20 @@ async def import_nfo(
             entries = scan_account_directory(account_root, kind)
             report.scanned = len(entries)
             report.parsed = len(entries)
+            logger.info(
+                "NFO scan account=%s kind=%s: %d files",
+                account.id, kind, len(entries),
+            )
 
             if not entries:
                 reports.append(report)
                 continue
 
             index = await _build_db_index(db, media_type, server_id)
+            logger.info(
+                "NFO db index account=%s type=%s: %d distinct keys",
+                account.id, media_type, len(index),
+            )
 
             for entry in entries:
                 if not entry.imdb_id and not entry.tmdb_id:
@@ -332,6 +348,14 @@ async def import_nfo(
 
             if not dry_run and report.written:
                 await db.flush()
+            logger.info(
+                "NFO import account=%s kind=%s done: matched=%d written=%d "
+                "unmatched=%d ambiguous=%d skipped_already=%d skipped_nochange=%d",
+                account.id, kind, report.matched, report.written,
+                len(report.unmatched), len(report.ambiguous),
+                report.skipped_id_already_set, report.skipped_no_change,
+            )
             reports.append(report)
 
+    logger.info("NFO import end: %d report(s)", len(reports))
     return reports

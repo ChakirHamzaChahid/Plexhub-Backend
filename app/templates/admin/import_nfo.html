@@ -61,6 +61,17 @@
   <div class="bg-rose-50 border border-rose-200 text-rose-700 rounded p-3 mb-4">{{ error }}</div>
 {% endif %}
 
+{% if submitted and not error and not report_groups %}
+  <div class="bg-amber-50 border border-amber-200 text-amber-800 rounded p-3 mb-4 text-sm">
+    Aucun rapport généré. Probablement parce que :
+    <ul class="list-disc pl-5 mt-1">
+      <li>aucun <code>XtreamAccount</code> actif en base, ou</li>
+      <li>aucun sous-dossier <code>{{ library_dir or '&lt;PLEX_LIBRARY_DIR&gt;' }}/&lt;account_id&gt;</code> n'existe côté serveur.</li>
+    </ul>
+    Regarde les logs <code>plexhub-backend</code> pour voir ce que le scanner a trouvé.
+  </div>
+{% endif %}
+
 {% if report_groups %}
   <h3 class="text-lg font-semibold text-slate-800 mb-2">Résultat</h3>
   {% if dry_run %}

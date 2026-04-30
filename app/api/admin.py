@@ -4,6 +4,7 @@ Mounted at `/admin`, separate from the JSON API (`/api/...`). Routes here render
 HTML fragments rather than JSON; they call the same `media_service` functions
 the API uses, so business logic isn't duplicated.
 """
+import logging
 from pathlib import Path
 from typing import Optional
 
@@ -11,6 +12,9 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.ext.asyncio import AsyncSession
+
+
+logger = logging.getLogger("plexhub.api.admin")
 
 from app.config import settings
 from app.db.database import get_db
@@ -239,6 +243,11 @@ async def admin_import_nfo_run(
         selected_kinds.append("movies")
     if shows:
         selected_kinds.append("shows")
+
+    logger.info(
+        "POST /admin/import-nfo: library_dir=%r kinds=%s overwrite=%s dry_run=%s",
+        library_dir, selected_kinds, bool(overwrite), bool(dry_run),
+    )
 
     error: Optional[str] = None
     reports = None

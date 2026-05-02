@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Optional
 from xml.etree import ElementTree as ET
 
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.database import Media, XtreamAccount
@@ -44,6 +44,29 @@ logger = logging.getLogger("plexhub.nfo_import")
 
 _IMDB_ID_RE = re.compile(r"^tt\d{7,10}$")
 _TMDB_ID_RE = re.compile(r"^\d{1,9}$")
+
+# Commit frequency for bulk UPDATEs. Smaller = releases the SQLite writer lock
+# more often (good when the health_check_worker is also writing concurrently),
+# larger = fewer fsync round-trips. 50 is a reasonable middle ground.
+_COMMIT_BATCH_SIZE = 50
+
+# How long to wait for the SQLite writer lock before giving up. The default
+# (5 s, set in init_db) is too short when sync_worker / health_check_worker
+# hold the writer for several seconds during a bulk run.
+_BUSY_TIMEOUT_MS = 30_000
+
+
+async def _prepare_db_for_bulk_writes(db: AsyncSession) -> None:
+    """Local PRAGMA tweak: tolerate longer writer-lock contention during import.
+
+    `PRAGMA busy_timeout` is per-connection and aiosqlite reuses one connection
+    per session, so this only affects the import session — production paths
+    keep the global 5 s default.
+    """
+    try:
+        await db.execute(text(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}"))
+    except Exception as exc:
+        logger.warning("Could not raise busy_timeout: %s", exc)
 
 
 @dataclass
@@ -315,6 +338,7 @@ async def _import_movies_for_account(
         account.id, len(movie_entries),
     )
 
+    pending_writes = 0
     for rating_key, entry in movie_entries:
         strm_full = account_root / entry.path
         nfo_path = strm_full.parent / "movie.nfo"
@@ -364,9 +388,13 @@ async def _import_movies_for_account(
             .values(**updates, updated_at=now_ms())
         )
         report.written += 1
+        pending_writes += 1
+        if pending_writes >= _COMMIT_BATCH_SIZE:
+            await db.commit()
+            pending_writes = 0
 
-    if not dry_run and report.written:
-        await db.flush()
+    if not dry_run and pending_writes:
+        await db.commit()
     logger.info(
         "NFO movies account=%s done: matched=%d written=%d unmatched=%d "
         "skipped_already=%d skipped_nochange=%d",
@@ -409,6 +437,7 @@ async def _import_shows_for_account(
         account.id, len(unique_shows),
     )
 
+    pending_writes = 0
     for show in unique_shows:
         nfo_rel = series_nfo_path(show.title)  # "Series/<safe_title>/tvshow.nfo"
         nfo_path = account_root / nfo_rel
@@ -443,9 +472,13 @@ async def _import_shows_for_account(
             .values(**updates, updated_at=now_ms())
         )
         report.written += 1
+        pending_writes += 1
+        if pending_writes >= _COMMIT_BATCH_SIZE:
+            await db.commit()
+            pending_writes = 0
 
-    if not dry_run and report.written:
-        await db.flush()
+    if not dry_run and pending_writes:
+        await db.commit()
     logger.info(
         "NFO shows account=%s done: matched=%d written=%d unmatched=%d "
         "skipped_already=%d skipped_nochange=%d",
@@ -473,6 +506,9 @@ async def import_nfo(
         "NFO import start: root=%s kinds=%s overwrite=%s dry_run=%s account_filter=%s",
         root, kinds, overwrite, dry_run, account_ids,
     )
+
+    if not dry_run:
+        await _prepare_db_for_bulk_writes(db)
 
     accounts_q = await db.execute(
         select(XtreamAccount).where(XtreamAccount.is_active == True)  # noqa: E712

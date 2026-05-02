@@ -325,6 +325,43 @@ async def test_show_import_writes_missing_ids(tmp_path, db_session):
     assert refreshed.tmdb_id == "85940"
 
 
+async def test_execute_with_lock_retry_recovers_after_transient_lock(monkeypatch):
+    """The helper retries OperationalError 'database is locked' and eventually succeeds."""
+    from sqlalchemy.exc import OperationalError
+
+    calls = {"n": 0}
+
+    class FakeSession:
+        async def execute(self, statement):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise OperationalError(
+                    "fake stmt", {}, Exception("database is locked"),
+                )
+            return "ok"
+
+    # Neutralise the backoff sleep inside the helper so the test is instant.
+    async def _no_sleep(*_a, **_kw):
+        return None
+    monkeypatch.setattr(nfo_import_service.asyncio, "sleep", _no_sleep)
+
+    result = await nfo_import_service._execute_with_lock_retry(FakeSession(), "stmt")
+    assert result == "ok"
+    assert calls["n"] == 3
+
+
+async def test_execute_with_lock_retry_propagates_other_errors(monkeypatch):
+    """OperationalError NOT about a lock is raised immediately."""
+    from sqlalchemy.exc import OperationalError
+
+    class FakeSession:
+        async def execute(self, statement):
+            raise OperationalError("stmt", {}, Exception("syntax error near WHATEVER"))
+
+    with pytest.raises(OperationalError):
+        await nfo_import_service._execute_with_lock_retry(FakeSession(), "stmt")
+
+
 async def test_show_import_unmatched_when_nfo_missing(tmp_path, db_session):
     await _seed_account(db_session)
     # account dir exists but no Series/<title>/tvshow.nfo

@@ -23,14 +23,16 @@ Depends(get_db); when dry_run=True nothing is written.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 from xml.etree import ElementTree as ET
 
 from sqlalchemy import select, text, update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.database import Media, XtreamAccount
@@ -67,6 +69,61 @@ async def _prepare_db_for_bulk_writes(db: AsyncSession) -> None:
         await db.execute(text(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}"))
     except Exception as exc:
         logger.warning("Could not raise busy_timeout: %s", exc)
+
+
+# Retry budget for SQLite "database is locked" errors. With the
+# health_check_worker writing continuously, a single UPDATE can lose the race
+# many times in a row before catching a free slot.
+_LOCK_RETRY_MAX_ATTEMPTS = 12
+_LOCK_RETRY_INITIAL_DELAY = 0.25  # seconds
+_LOCK_RETRY_MAX_DELAY = 5.0
+
+
+def _is_locked_error(exc: Exception) -> bool:
+    return "database is locked" in str(exc).lower()
+
+
+async def _execute_with_lock_retry(
+    db: AsyncSession, statement: Any,
+) -> Any:
+    """Run db.execute(...) with exponential backoff on 'database is locked'.
+
+    Other operational errors are re-raised immediately.
+    """
+    delay = _LOCK_RETRY_INITIAL_DELAY
+    for attempt in range(1, _LOCK_RETRY_MAX_ATTEMPTS + 1):
+        try:
+            return await db.execute(statement)
+        except OperationalError as exc:
+            if not _is_locked_error(exc):
+                raise
+            if attempt == _LOCK_RETRY_MAX_ATTEMPTS:
+                logger.warning(
+                    "DB lock retry exhausted after %d attempts (last delay=%.2fs)",
+                    _LOCK_RETRY_MAX_ATTEMPTS, delay,
+                )
+                raise
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, _LOCK_RETRY_MAX_DELAY)
+
+
+async def _commit_with_lock_retry(db: AsyncSession) -> None:
+    """Commit with the same backoff strategy as _execute_with_lock_retry."""
+    delay = _LOCK_RETRY_INITIAL_DELAY
+    for attempt in range(1, _LOCK_RETRY_MAX_ATTEMPTS + 1):
+        try:
+            await db.commit()
+            return
+        except OperationalError as exc:
+            if not _is_locked_error(exc):
+                raise
+            if attempt == _LOCK_RETRY_MAX_ATTEMPTS:
+                logger.warning(
+                    "DB commit lock retry exhausted after %d attempts", _LOCK_RETRY_MAX_ATTEMPTS,
+                )
+                raise
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, _LOCK_RETRY_MAX_DELAY)
 
 
 @dataclass
@@ -357,12 +414,13 @@ async def _import_movies_for_account(
             report.unmatched.append(f"{folder_name}: NFO empty")
             continue
 
-        row = (await db.execute(
+        row = (await _execute_with_lock_retry(
+            db,
             select(Media).where(
                 Media.rating_key == rating_key,
                 Media.server_id == server_id,
                 Media.type == "movie",
-            ).limit(1)
+            ).limit(1),
         )).scalars().first()
         if row is None:
             report.unmatched.append(
@@ -379,22 +437,23 @@ async def _import_movies_for_account(
             report.written += 1
             continue
 
-        await db.execute(
+        await _execute_with_lock_retry(
+            db,
             update(Media)
             .where(
                 Media.rating_key == row.rating_key,
                 Media.server_id == row.server_id,
             )
-            .values(**updates, updated_at=now_ms())
+            .values(**updates, updated_at=now_ms()),
         )
         report.written += 1
         pending_writes += 1
         if pending_writes >= _COMMIT_BATCH_SIZE:
-            await db.commit()
+            await _commit_with_lock_retry(db)
             pending_writes = 0
 
     if not dry_run and pending_writes:
-        await db.commit()
+        await _commit_with_lock_retry(db)
     logger.info(
         "NFO movies account=%s done: matched=%d written=%d unmatched=%d "
         "skipped_already=%d skipped_nochange=%d",
@@ -418,10 +477,11 @@ async def _import_shows_for_account(
         overwrite=overwrite, dry_run=dry_run,
     )
 
-    shows = list((await db.execute(
+    shows = list((await _execute_with_lock_retry(
+        db,
         select(Media).where(
             Media.type == "show", Media.server_id == server_id,
-        )
+        ),
     )).scalars().all())
     # The same show can appear under several (filter, sort_order) variants —
     # de-dupe on rating_key so we don't process / log the NFO multiple times.
@@ -510,8 +570,9 @@ async def import_nfo(
     if not dry_run:
         await _prepare_db_for_bulk_writes(db)
 
-    accounts_q = await db.execute(
-        select(XtreamAccount).where(XtreamAccount.is_active == True)  # noqa: E712
+    accounts_q = await _execute_with_lock_retry(
+        db,
+        select(XtreamAccount).where(XtreamAccount.is_active == True),  # noqa: E712
     )
     accounts: list[XtreamAccount] = list(accounts_q.scalars().all())
     if account_ids is not None:

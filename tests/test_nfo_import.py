@@ -20,10 +20,18 @@ _MOVIE_NFO = """<?xml version="1.0" encoding="utf-8" standalone="yes"?>
 <movie>
   <title>FR - Die Hard 4 : Retour en enfer</title>
   <originaltitle>Live Free or Die Hard</originaltitle>
+  <plot>Pour sa quatrième aventure, l'inspecteur John McClane se trouve confronté...</plot>
   <year>2007</year>
+  <runtime>128</runtime>
+  <mpaa>FR-TP</mpaa>
+  <rating>6.6</rating>
+  <genre>Action</genre>
+  <genre>Thriller</genre>
   <imdbid>tt0337978</imdbid>
   <tmdbid>1571</tmdbid>
   <uniqueid type="tmdb" default="true">1571</uniqueid>
+  <actor><name>Bruce Willis</name><role>John McClane</role></actor>
+  <actor><name>Timothy Olyphant</name><role>Thomas Gabriel</role></actor>
 </movie>
 """
 
@@ -31,9 +39,20 @@ _TVSHOW_NFO = """<?xml version="1.0" encoding="utf-8" standalone="yes"?>
 <tvshow>
   <title>7SEEDS</title>
   <originaltitle>7SEEDS</originaltitle>
+  <plot>À son réveil, la timide Natsu découvre qu'elle fait partie...</plot>
   <year>2019</year>
+  <runtime>24</runtime>
+  <mpaa>TV-MA</mpaa>
+  <genre>Animation</genre>
+  <genre>Drame</genre>
   <imdb_id>tt9348718</imdb_id>
   <tmdbid>85940</tmdbid>
+  <ratings>
+    <rating default="true" max="10" name="imdb"><value>6.3</value></rating>
+    <rating default="false" max="10" name="themoviedb"><value>7.7</value></rating>
+    <rating default="false" max="10" name="default"><value>8.0</value></rating>
+    <rating default="false" max="10" name="trakt"><value>6.5</value></rating>
+  </ratings>
 </tvshow>
 """
 
@@ -88,7 +107,7 @@ def _seed_show_on_disk(
 
 # ---------- parser ----------
 
-def test_parse_movie_nfo_extracts_ids_and_year(tmp_path):
+def test_parse_movie_nfo_extracts_all_fields(tmp_path):
     nfo = tmp_path / "movie.nfo"
     nfo.write_text(_MOVIE_NFO, encoding="utf-8")
     entry = nfo_import_service.parse_nfo_file(nfo, "movie")
@@ -96,15 +115,27 @@ def test_parse_movie_nfo_extracts_ids_and_year(tmp_path):
     assert entry.imdb_id == "tt0337978"
     assert entry.tmdb_id == "1571"
     assert entry.nfo_year == 2007
+    assert entry.summary and entry.summary.startswith("Pour sa quatrième")
+    assert entry.duration_ms == 128 * 60 * 1000
+    assert entry.content_rating == "FR-TP"
+    assert entry.genres_csv == "Action, Thriller"
+    assert entry.cast_csv == "Bruce Willis, Timothy Olyphant"
+    # No <ratings> block, falls back to top-level <rating>
+    assert entry.rating == 6.6
 
 
-def test_parse_tvshow_nfo_handles_imdb_id_underscore_variant(tmp_path):
+def test_parse_tvshow_nfo_picks_imdb_rating_in_priority(tmp_path):
+    """When <ratings> contains imdb/tmdb/trakt/default, IMDb wins."""
     nfo = tmp_path / "tvshow.nfo"
     nfo.write_text(_TVSHOW_NFO, encoding="utf-8")
     entry = nfo_import_service.parse_nfo_file(nfo, "show")
     assert entry is not None
     assert entry.imdb_id == "tt9348718"
     assert entry.tmdb_id == "85940"
+    assert entry.rating == 6.3  # imdb, not 7.7 (tmdb) or 8.0 (default)
+    assert entry.duration_ms == 24 * 60 * 1000
+    assert entry.content_rating == "TV-MA"
+    assert entry.genres_csv == "Animation, Drame"
 
 
 # ---------- movie import (mapping-driven) ----------
@@ -141,6 +172,14 @@ async def test_movie_import_writes_missing_ids_and_skips_existing(
     )
     assert refreshed.imdb_id == "tt0337978"
     assert refreshed.tmdb_id == "1571"
+    # All other extracted NFO fields should also be filled.
+    assert refreshed.summary and "John McClane" in refreshed.summary
+    assert refreshed.year == 2007
+    assert refreshed.duration == 128 * 60 * 1000
+    assert refreshed.content_rating == "FR-TP"
+    assert refreshed.genres == "Action, Thriller"
+    assert refreshed.cast == "Bruce Willis, Timothy Olyphant"
+    assert refreshed.scraped_rating == 6.6
 
     # Second run must be a no-op for already-set IDs (overwrite=False).
     [report2] = await nfo_import_service.import_nfo(
@@ -151,6 +190,42 @@ async def test_movie_import_writes_missing_ids_and_skips_existing(
     assert (
         report2.skipped_id_already_set + report2.skipped_no_change == 1
     )
+
+
+async def test_movie_import_overwrite_replaces_existing(tmp_path, db_session):
+    """With overwrite=True, NFO values replace existing ones."""
+    await _seed_account(db_session)
+    rating_key = "vod_18661.mkv"
+    _seed_movie_on_disk(tmp_path, rating_key, "Die Hard 4", 2007)
+
+    db_session.add(Media(
+        rating_key=rating_key, server_id=_SERVER_ID,
+        filter="all", sort_order="default",
+        library_section_id="lib-1", title="Die Hard 4",
+        type="movie", year=2007,
+        imdb_id="tt9999999", tmdb_id="9999",
+        summary="old summary",
+        genres="Old",
+        scraped_rating=1.0,
+        added_at=1, updated_at=1,
+    ))
+    await db_session.commit()
+
+    [report] = await nfo_import_service.import_nfo(
+        db_session, tmp_path, kinds=("movies",), overwrite=True, dry_run=False,
+    )
+    await db_session.commit()
+    assert report.written == 1
+
+    refreshed = await db_session.get(
+        Media, {"rating_key": rating_key, "server_id": _SERVER_ID,
+                "filter": "all", "sort_order": "default"}
+    )
+    assert refreshed.imdb_id == "tt0337978"
+    assert refreshed.tmdb_id == "1571"
+    assert "John McClane" in refreshed.summary
+    assert refreshed.genres == "Action, Thriller"
+    assert refreshed.scraped_rating == 6.6
 
 
 async def test_movie_import_dry_run_does_not_write(tmp_path, db_session):

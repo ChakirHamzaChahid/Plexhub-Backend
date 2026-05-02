@@ -57,6 +57,32 @@
   </div>
 </form>
 
+<details class="mb-6 bg-white border border-slate-200 rounded shadow-sm">
+  <summary class="px-4 py-2 cursor-pointer text-sm font-medium text-slate-700">Champs lus dans le NFO et colonne BDD cible</summary>
+  <div class="px-4 pb-4">
+    <table class="w-full text-xs text-left">
+      <thead class="text-slate-500 uppercase">
+        <tr><th class="py-1 pr-2">Tag NFO</th><th class="py-1 pr-2">Colonne BDD</th><th class="py-1">Note</th></tr>
+      </thead>
+      <tbody class="divide-y divide-slate-100">
+        <tr><td class="py-1 pr-2 font-mono"><code>&lt;uniqueid type="imdb"&gt;</code> · <code>&lt;imdbid&gt;</code> · <code>&lt;imdb_id&gt;</code></td><td class="py-1 pr-2"><code>imdb_id</code></td><td class="py-1">regex <code>tt\d{7,10}</code></td></tr>
+        <tr><td class="py-1 pr-2 font-mono"><code>&lt;uniqueid type="tmdb"&gt;</code> · <code>&lt;tmdbid&gt;</code> · <code>&lt;tmdb_id&gt;</code></td><td class="py-1 pr-2"><code>tmdb_id</code></td><td class="py-1">regex <code>\d{1,9}</code></td></tr>
+        <tr><td class="py-1 pr-2 font-mono"><code>&lt;plot&gt;</code> · <code>&lt;outline&gt;</code></td><td class="py-1 pr-2"><code>summary</code></td><td class="py-1">premier non vide</td></tr>
+        <tr><td class="py-1 pr-2 font-mono"><code>&lt;year&gt;</code></td><td class="py-1 pr-2"><code>year</code></td><td class="py-1">int</td></tr>
+        <tr><td class="py-1 pr-2 font-mono"><code>&lt;runtime&gt;</code></td><td class="py-1 pr-2"><code>duration</code></td><td class="py-1">minutes → ms (× 60 000)</td></tr>
+        <tr><td class="py-1 pr-2 font-mono"><code>&lt;mpaa&gt;</code> · <code>&lt;certification&gt;</code></td><td class="py-1 pr-2"><code>content_rating</code></td><td class="py-1">premier non vide</td></tr>
+        <tr><td class="py-1 pr-2 font-mono"><code>&lt;genre&gt;</code> (multiple)</td><td class="py-1 pr-2"><code>genres</code></td><td class="py-1">joints par <code>,&nbsp;</code></td></tr>
+        <tr><td class="py-1 pr-2 font-mono"><code>&lt;actor&gt;&lt;name&gt;</code> (multiple)</td><td class="py-1 pr-2"><code>cast</code></td><td class="py-1">joints par <code>,&nbsp;</code></td></tr>
+        <tr><td class="py-1 pr-2 font-mono"><code>&lt;ratings&gt;&lt;rating name="..."&gt;&lt;value&gt;</code></td><td class="py-1 pr-2"><code>scraped_rating</code></td><td class="py-1">priorité <strong>imdb</strong> &gt; tmdb &gt; trakt &gt; default, fallback <code>&lt;rating&gt;</code></td></tr>
+      </tbody>
+    </table>
+    <p class="text-xs text-slate-500 mt-3">
+      Sans « écraser » coché : seuls les champs <strong>vides</strong> en BDD sont remplis. Avec : la valeur du NFO remplace toujours.
+      <br>Le titre <code>media.title</code> n'est jamais touché (c'est lui qui sert de clé de génération Plex).
+    </p>
+  </div>
+</details>
+
 {% if error %}
   <div class="bg-rose-50 border border-rose-200 text-rose-700 rounded p-3 mb-4">{{ error }}</div>
 {% endif %}

@@ -51,9 +51,21 @@ class NfoEntry:
     path: Path
     folder_name: str
     media_type: str  # "movie" or "show"
-    nfo_year: Optional[int] = None
+    # IDs
     imdb_id: Optional[str] = None
     tmdb_id: Optional[str] = None
+    # Metadata
+    nfo_year: Optional[int] = None
+    summary: Optional[str] = None
+    duration_ms: Optional[int] = None  # <runtime> is in minutes; we store ms
+    content_rating: Optional[str] = None  # <mpaa> / <certification>
+    genres_csv: Optional[str] = None      # join of <genre>...</genre>
+    cast_csv: Optional[str] = None        # join of <actor><name>
+    rating: Optional[float] = None        # IMDb-priority pick from <ratings>
+
+
+# Ratings preference order — first hit wins.
+_RATING_PREFERENCE = ("imdb", "themoviedb", "tmdb", "trakt", "default")
 
 
 @dataclass
@@ -102,6 +114,74 @@ def _validate_tmdb(value: Optional[str]) -> Optional[str]:
     return value if _TMDB_ID_RE.match(value) else None
 
 
+def _join_multi(root: ET.Element, tag: str, sep: str = ", ") -> Optional[str]:
+    """Join non-empty text content of every <tag> child. Dedupe preserving order."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for el in root.findall(tag):
+        if el.text and el.text.strip():
+            v = el.text.strip()
+            if v not in seen:
+                seen.add(v)
+                out.append(v)
+    return sep.join(out) if out else None
+
+
+def _extract_cast(root: ET.Element) -> Optional[str]:
+    """Concatenate <actor><name> in declaration order, deduplicated."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for actor in root.findall("actor"):
+        name_el = actor.find("name")
+        if name_el is not None and name_el.text and name_el.text.strip():
+            v = name_el.text.strip()
+            if v not in seen:
+                seen.add(v)
+                out.append(v)
+    return ", ".join(out) if out else None
+
+
+def _extract_runtime_ms(root: ET.Element) -> Optional[int]:
+    raw = _first_text(root, "runtime")
+    if not raw:
+        return None
+    try:
+        minutes = int(raw)
+    except ValueError:
+        return None
+    if minutes <= 0:
+        return None
+    return minutes * 60 * 1000
+
+
+def _extract_best_rating(root: ET.Element) -> Optional[float]:
+    """Pick a single rating with IMDb > TMDB > Trakt > default > top-level <rating>."""
+    ratings: dict[str, float] = {}
+    for el in root.findall("ratings/rating"):
+        name = (el.get("name") or "").strip().lower()
+        if not name:
+            continue
+        value_el = el.find("value")
+        if value_el is None or not value_el.text:
+            continue
+        try:
+            ratings[name] = float(value_el.text)
+        except ValueError:
+            continue
+    for key in _RATING_PREFERENCE:
+        if key in ratings and ratings[key] > 0:
+            return ratings[key]
+    # Fallback: top-level <rating> (e.g. tinyMM movie.nfo doesn't always emit <ratings>)
+    raw = _first_text(root, "rating")
+    if raw:
+        try:
+            v = float(raw)
+            return v if v > 0 else None
+        except ValueError:
+            return None
+    return None
+
+
 def parse_nfo_file(path: Path, media_type: str) -> Optional[NfoEntry]:
     """Parse a movie.nfo / tvshow.nfo. Returns None on hard failure."""
     try:
@@ -135,32 +215,79 @@ def parse_nfo_file(path: Path, media_type: str) -> Optional[NfoEntry]:
         path=path,
         folder_name=path.parent.name,
         media_type=media_type,
-        nfo_year=nfo_year,
         imdb_id=imdb,
         tmdb_id=tmdb,
+        nfo_year=nfo_year,
+        summary=_first_text(root, "plot", "outline"),
+        duration_ms=_extract_runtime_ms(root),
+        content_rating=_first_text(root, "mpaa", "certification"),
+        genres_csv=_join_multi(root, "genre"),
+        cast_csv=_extract_cast(root),
+        rating=_extract_best_rating(root),
     )
 
 
+# (column, source attr on NfoEntry, "missing" predicate on current value)
+# - For text columns "missing" means falsy (None / "")
+# - For numeric columns "missing" means falsy AND <= 0 (year/duration default to 0)
+def _is_text_missing(v) -> bool:
+    return v is None or v == ""
+
+
+def _is_numeric_missing(v) -> bool:
+    return v is None or (isinstance(v, (int, float)) and v <= 0)
+
+
+_FIELD_MAP: tuple[tuple[str, str, callable], ...] = (
+    ("imdb_id",        "imdb_id",       _is_text_missing),
+    ("tmdb_id",        "tmdb_id",       _is_text_missing),
+    ("summary",        "summary",       _is_text_missing),
+    ("year",           "nfo_year",      _is_numeric_missing),
+    ("duration",       "duration_ms",   _is_numeric_missing),
+    ("content_rating", "content_rating", _is_text_missing),
+    ("genres",         "genres_csv",    _is_text_missing),
+    ("cast",           "cast_csv",      _is_text_missing),
+    ("scraped_rating", "rating",        _is_numeric_missing),
+)
+
+
+def _nfo_has_any_data(parsed: NfoEntry) -> bool:
+    """True if the NFO supplies at least one writable field."""
+    return any(getattr(parsed, attr) is not None for _col, attr, _ in _FIELD_MAP)
+
+
 def _compute_updates(row: Media, parsed: NfoEntry, overwrite: bool) -> dict:
-    updates: dict[str, str] = {}
-    if parsed.imdb_id and (overwrite or not row.imdb_id):
-        if parsed.imdb_id != row.imdb_id:
-            updates["imdb_id"] = parsed.imdb_id
-    if parsed.tmdb_id and (overwrite or not row.tmdb_id):
-        if parsed.tmdb_id != row.tmdb_id:
-            updates["tmdb_id"] = parsed.tmdb_id
+    """Build the SQL UPDATE values dict, respecting fill-missing-only by default."""
+    updates: dict = {}
+    for col, attr, is_missing in _FIELD_MAP:
+        new_val = getattr(parsed, attr)
+        if new_val is None:
+            continue
+        current = getattr(row, col, None)
+        if not overwrite and not is_missing(current):
+            continue  # already set, don't touch
+        if current == new_val:
+            continue  # already up-to-date
+        updates[col] = new_val
     return updates
 
 
 def _classify_no_update(
     row: Media, parsed: NfoEntry, overwrite: bool, report: ImportReport,
 ) -> None:
-    if (parsed.imdb_id and row.imdb_id and not overwrite) or (
-        parsed.tmdb_id and row.tmdb_id and not overwrite
-    ):
-        report.skipped_id_already_set += 1
-    else:
+    """Distinguish 'NFO had data we'd write but column already filled' from
+    'BDD already matches NFO exactly'."""
+    if overwrite:
         report.skipped_no_change += 1
+        return
+    for col, attr, is_missing in _FIELD_MAP:
+        nfo_val = getattr(parsed, attr)
+        if nfo_val is None:
+            continue
+        if not is_missing(getattr(row, col, None)):
+            report.skipped_id_already_set += 1
+            return
+    report.skipped_no_change += 1
 
 
 async def _import_movies_for_account(
@@ -202,8 +329,8 @@ async def _import_movies_for_account(
         if parsed is None:
             report.parse_errors.append(folder_name)
             continue
-        if not parsed.imdb_id and not parsed.tmdb_id:
-            report.unmatched.append(f"{folder_name}: NFO has no imdb/tmdb")
+        if not _nfo_has_any_data(parsed):
+            report.unmatched.append(f"{folder_name}: NFO empty")
             continue
 
         row = (await db.execute(

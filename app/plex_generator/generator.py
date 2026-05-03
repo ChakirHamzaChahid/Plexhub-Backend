@@ -2,6 +2,8 @@ import logging
 import time
 from pathlib import Path
 
+import httpx
+
 from app.plex_generator.mapping import MappingStore
 from app.plex_generator.models import PlexMovie, PlexSeries, SyncReport
 from app.plex_generator.naming import (
@@ -20,6 +22,25 @@ from app.plex_generator.source import MediaSource
 from app.plex_generator.storage import LibraryStorage
 
 logger = logging.getLogger("plexhub.plex_generator")
+
+
+def _classify_image_error(exc: BaseException) -> str:
+    """Bucket an image-download exception so we can aggregate counts.
+
+    Buckets:
+      - "http_4xx" / "http_5xx": server returned an HTTP error (mostly 404).
+      - "connect_error":         DNS, refused, SSL handshake — network reachability.
+      - "timeout":               request didn't complete within the client timeout.
+      - "other":                 unexpected — caller logs full traceback.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        code = exc.response.status_code
+        return "http_4xx" if 400 <= code < 500 else "http_5xx"
+    if isinstance(exc, httpx.ConnectError):
+        return "connect_error"
+    if isinstance(exc, httpx.TimeoutException):
+        return "timeout"
+    return "other"
 
 
 class PlexLibraryGenerator:
@@ -83,8 +104,17 @@ class PlexLibraryGenerator:
                 try:
                     future.result(timeout=30.0)
                 except Exception as e:
-                    logger.warning(f"Image download future failed: {e}", exc_info=True)
+                    reason = _classify_image_error(e)
                     report.image_failures += 1
+                    report.image_failure_reasons[reason] = (
+                        report.image_failure_reasons.get(reason, 0) + 1
+                    )
+                    # Per-image detail at DEBUG to keep INFO logs readable.
+                    # Only the "other" bucket gets a full traceback (real bugs).
+                    logger.debug(
+                        "Image download failed (%s): %s", reason, e,
+                        exc_info=(reason == "other"),
+                    )
             self._image_futures.clear()
 
         # --- Delete stale entries (including associated NFO/images) ---
@@ -119,6 +149,16 @@ class PlexLibraryGenerator:
             f"{len(report.errors)} errors "
             f"({report.duration_seconds}s)"
         )
+        if report.image_failures:
+            # Single aggregated WARNING — keeps the INFO log readable but still
+            # surfaces the breakdown so flapping hosts / TMDB stale paths are visible.
+            reasons_str = ", ".join(
+                f"{k}={v}" for k, v in sorted(report.image_failure_reasons.items())
+            )
+            logger.warning(
+                "Plex generation: %d image downloads failed (%s)",
+                report.image_failures, reasons_str,
+            )
         return report
 
     def _sync_movie(

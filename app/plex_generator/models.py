@@ -52,5 +52,6 @@ class SyncReport(BaseModel):
     deleted: int = 0
     unchanged: int = 0
     image_failures: int = 0
+    image_failure_reasons: dict[str, int] = {}
     errors: list[str] = []
     duration_seconds: float = 0.0

@@ -364,3 +364,40 @@ class TestGenerator:
         assert r2.updated == 1
         assert not (tmp_path / "Films" / "Old Title (2023)").exists()
         assert (tmp_path / "Films" / "New Title (2023)" / "New Title (2023).strm").exists()
+
+
+class TestImageErrorClassification:
+    def test_classifies_http_4xx(self):
+        import httpx
+        from app.plex_generator.generator import _classify_image_error
+
+        req = httpx.Request("GET", "http://x/")
+        resp = httpx.Response(404, request=req)
+        exc = httpx.HTTPStatusError("not found", request=req, response=resp)
+        assert _classify_image_error(exc) == "http_4xx"
+
+    def test_classifies_http_5xx(self):
+        import httpx
+        from app.plex_generator.generator import _classify_image_error
+
+        req = httpx.Request("GET", "http://x/")
+        resp = httpx.Response(503, request=req)
+        exc = httpx.HTTPStatusError("server error", request=req, response=resp)
+        assert _classify_image_error(exc) == "http_5xx"
+
+    def test_classifies_connect_error(self):
+        import httpx
+        from app.plex_generator.generator import _classify_image_error
+
+        assert _classify_image_error(httpx.ConnectError("dns fail")) == "connect_error"
+
+    def test_classifies_timeout(self):
+        import httpx
+        from app.plex_generator.generator import _classify_image_error
+
+        assert _classify_image_error(httpx.ConnectTimeout("slow")) == "timeout"
+
+    def test_classifies_other(self):
+        from app.plex_generator.generator import _classify_image_error
+
+        assert _classify_image_error(ValueError("anything else")) == "other"

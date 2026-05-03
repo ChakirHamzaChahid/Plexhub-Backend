@@ -9,8 +9,10 @@ _COUNTRY_PREFIX_RE = re.compile(r"^[A-Z]{2}\s*-\s*")
 # Trailing brackets carry quality/audio info: "[FHD MULTi-SUBAR]", "[VOSTFR]", "[4K]", ...
 _TRAIL_BRACKET_RE = re.compile(r"\s*\[[^\]]*\]\s*$")
 # Trailing quality keyword as a separate word: " LQ", " HQ", " FHD", ...
+# VFR/VFI/VFB cover French restored / Internet / Belgian dubs that the older
+# IPTV providers add as a trailing tag.
 _TRAIL_QUALITY_RE = re.compile(
-    r"\s+(?:LQ|HQ|FHD|UHD|HD|SD|4K|VF|VFF|VFQ|VOSTFR|VOST|MULTI)\s*$",
+    r"\s+(?:LQ|HQ|FHD|UHD|HD|SD|4K|VF|VFF|VFQ|VFR|VFI|VFB|VOSTFR|VOST|MULTI)\s*$",
     re.IGNORECASE,
 )
 _YEAR_RE = re.compile(r"\((\d{4})\)\s*$")
@@ -111,8 +113,18 @@ def parse_title_year_and_suffix(raw: str) -> tuple[str, int | None, str | None]:
 
     title = _strip_trailing_junk(title)
     title = re.sub(r"\s+", " ", title).strip()
+
+    if not title:
+        # The source title was nothing but year and/or qualifier(s) — preserve
+        # it intact rather than collapsing to "Unknown" which loses info AND
+        # collisions with every other empty-after-strip title.
+        fallback = (raw or "").strip()
+        if fallback:
+            return (fallback, None, None)
+        return ("Unknown", None, None)
+
     suffix = " ".join(suffixes) if suffixes else None
-    return (title or "Unknown", year, suffix)
+    return (title, year, suffix)
 
 
 def normalize_for_sorting(title: str) -> str:

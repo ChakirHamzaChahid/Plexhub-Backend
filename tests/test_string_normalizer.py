@@ -174,3 +174,35 @@ class TestParseTitleYearAndSuffix:
 
     def test_empty(self):
         assert self._p("") == ("Unknown", None, None)
+
+
+class TestParseTitleYearAndSuffixEdgeCases:
+    """Cases discovered while auditing real Xtream catalog data."""
+
+    def _p(self, raw):
+        from app.utils.string_normalizer import parse_title_year_and_suffix
+        return parse_title_year_and_suffix(raw)
+
+    def test_vfr_quality_stripped(self):
+        # "VFR" is a French restored-version tag some IPTV providers append.
+        assert self._p("6ixtynin9 La série VFR") == ("6ixtynin9 La série", None, None)
+
+    def test_vfi_quality_stripped(self):
+        assert self._p("Foo VFI") == ("Foo", None, None)
+
+    def test_vfb_quality_stripped(self):
+        assert self._p("Foo VFB") == ("Foo", None, None)
+
+    def test_empty_after_strip_keeps_raw_title(self):
+        # Pathological Xtream entry: title is literally just year + qualifier.
+        # We must NOT collapse to "Unknown" — that would collide with every
+        # other empty-after-strip entry.
+        assert self._p("(2021) (US)") == ("(2021) (US)", None, None)
+
+    def test_only_qualifier_keeps_raw(self):
+        # Even with no year, an empty post-strip title falls back to raw.
+        assert self._p("(US)") == ("(US)", None, None)
+
+    def test_truly_empty_returns_unknown(self):
+        assert self._p("") == ("Unknown", None, None)
+        assert self._p("   ") == ("Unknown", None, None)

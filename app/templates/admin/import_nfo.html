@@ -35,11 +35,19 @@
              class="h-4 w-4 rounded border-slate-300">
       <span>Séries</span>
     </label>
-    <label class="flex items-center gap-2">
+    <label class="flex items-start gap-2">
       <input type="checkbox" name="overwrite" value="true"
              {% if overwrite %}checked{% endif %}
-             class="h-4 w-4 rounded border-slate-300">
-      <span>Écraser les IDs déjà présents</span>
+             class="h-4 w-4 rounded border-slate-300 mt-0.5">
+      <span class="flex flex-col leading-tight">
+        <span>Écraser TOUS les champs déjà renseignés</span>
+        <span class="text-xs text-slate-500">
+          Sans cette case : on ne complète que les champs vides.
+          Avec : on remplace même <code>imdb_id</code> / <code>tmdb_id</code> /
+          <code>summary</code> / <code>year</code> / <code>genres</code> /
+          <code>cast</code> / <code>scraped_rating</code>… par la valeur du NFO.
+        </span>
+      </span>
     </label>
     <label class="flex items-center gap-2">
       <input type="checkbox" name="dry_run" value="true"

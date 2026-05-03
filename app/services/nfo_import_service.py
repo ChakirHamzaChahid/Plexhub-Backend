@@ -464,6 +464,52 @@ async def _import_movies_for_account(
     return report
 
 
+async def _apply_show_nfo(
+    db: AsyncSession, show: Media, nfo_path: Path,
+    label: str, overwrite: bool, dry_run: bool,
+    report: ImportReport, pending_writes: int,
+) -> int:
+    """Read tvshow.nfo at `nfo_path`, apply updates to the show row.
+    Returns the new pending_writes counter (commits every _COMMIT_BATCH_SIZE)."""
+    if not nfo_path.exists():
+        report.unmatched.append(f"{label}: {nfo_path.relative_to(nfo_path.anchor)} not found")
+        return pending_writes
+    report.scanned += 1
+
+    parsed = parse_nfo_file(nfo_path, "show")
+    if parsed is None:
+        report.parse_errors.append(label)
+        return pending_writes
+    if not _nfo_has_any_data(parsed):
+        report.unmatched.append(f"{label}: NFO empty")
+        return pending_writes
+
+    report.matched += 1
+    updates = _compute_updates(show, parsed, overwrite)
+    if not updates:
+        _classify_no_update(show, parsed, overwrite, report)
+        return pending_writes
+    if dry_run:
+        report.written += 1
+        return pending_writes
+
+    await _execute_with_lock_retry(
+        db,
+        update(Media)
+        .where(
+            Media.rating_key == show.rating_key,
+            Media.server_id == show.server_id,
+        )
+        .values(**updates, updated_at=now_ms()),
+    )
+    report.written += 1
+    pending_writes += 1
+    if pending_writes >= _COMMIT_BATCH_SIZE:
+        await _commit_with_lock_retry(db)
+        pending_writes = 0
+    return pending_writes
+
+
 async def _import_shows_for_account(
     db: AsyncSession,
     account: XtreamAccount,
@@ -472,73 +518,117 @@ async def _import_shows_for_account(
     overwrite: bool,
     dry_run: bool,
 ) -> ImportReport:
+    """Mapping-driven import for shows.
+
+    The mapping JSON contains episode entries (per-stream), so we walk it to
+    derive the actual on-disk show folder for every series and read the
+    tvshow.nfo there. Shows with no episode in the mapping fall back to a
+    DB-driven path computed from `series_nfo_path(title, year=show.year)`.
+    """
     report = ImportReport(
         account_id=account.id, media_type="show",
         overwrite=overwrite, dry_run=dry_run,
     )
 
-    shows = list((await _execute_with_lock_retry(
+    # Load all shows once (de-duped on rating_key — multi-(filter, sort_order)).
+    shows_q = await _execute_with_lock_retry(
         db,
         select(Media).where(
             Media.type == "show", Media.server_id == server_id,
         ),
-    )).scalars().all())
-    # The same show can appear under several (filter, sort_order) variants —
-    # de-dupe on rating_key so we don't process / log the NFO multiple times.
-    seen: set[str] = set()
-    unique_shows: list[Media] = []
-    for show in shows:
-        if show.rating_key in seen:
-            continue
-        seen.add(show.rating_key)
-        unique_shows.append(show)
+    )
+    shows_by_rk: dict[str, Media] = {}
+    for show in shows_q.scalars().all():
+        if show.rating_key not in shows_by_rk:
+            shows_by_rk[show.rating_key] = show
     logger.info(
         "NFO shows account=%s: %d unique shows in DB",
-        account.id, len(unique_shows),
+        account.id, len(shows_by_rk),
     )
 
-    pending_writes = 0
-    for show in unique_shows:
-        nfo_rel = series_nfo_path(show.title)  # "Series/<safe_title>/tvshow.nfo"
-        nfo_path = account_root / nfo_rel
-        if not nfo_path.exists():
-            report.unmatched.append(f"{show.title}: {nfo_rel} not found")
+    # ---------- Pass 1: mapping-driven ----------
+    # mapping.path looks like "Series/<show_folder>/Season XX/<ep>.strm"
+    # → show_folder is parts[1]; tvshow.nfo lives at <root>/Series/<show_folder>/tvshow.nfo.
+    mapping = MappingStore(account_root)
+    mapping.load()
+    show_folder_to_episode_rks: dict[str, list[str]] = {}
+    for source_id, entry in mapping._data.items():
+        if not entry.path.startswith("Series/"):
             continue
-        report.scanned += 1
+        parts = Path(entry.path).parts
+        if len(parts) < 2:
+            continue
+        show_folder_to_episode_rks.setdefault(parts[1], []).append(source_id)
+    logger.info(
+        "NFO shows account=%s: %d distinct show folders in mapping",
+        account.id, len(show_folder_to_episode_rks),
+    )
 
-        parsed = parse_nfo_file(nfo_path, "show")
-        if parsed is None:
-            report.parse_errors.append(show.title)
-            continue
-        if not parsed.imdb_id and not parsed.tmdb_id:
-            report.unmatched.append(f"{show.title}: NFO has no imdb/tmdb")
-            continue
-
-        report.matched += 1
-        updates = _compute_updates(show, parsed, overwrite)
-        if not updates:
-            _classify_no_update(show, parsed, overwrite, report)
-            continue
-        if dry_run:
-            report.written += 1
-            continue
-
-        await db.execute(
-            update(Media)
+    # Resolve episode rating_keys → show rating_key (= grandparent_rating_key).
+    # One batched SELECT per chunk of 500 keys to stay polite with SQLite.
+    sample_eps: list[str] = [eps[0] for eps in show_folder_to_episode_rks.values()]
+    ep_to_show_rk: dict[str, str] = {}
+    chunk = 500
+    for i in range(0, len(sample_eps), chunk):
+        rks = sample_eps[i:i + chunk]
+        result = await _execute_with_lock_retry(
+            db,
+            select(Media.rating_key, Media.grandparent_rating_key)
             .where(
-                Media.rating_key == show.rating_key,
-                Media.server_id == show.server_id,
-            )
-            .values(**updates, updated_at=now_ms())
+                Media.server_id == server_id,
+                Media.type == "episode",
+                Media.rating_key.in_(rks),
+            ),
         )
-        report.written += 1
-        pending_writes += 1
-        if pending_writes >= _COMMIT_BATCH_SIZE:
-            await db.commit()
-            pending_writes = 0
+        for ep_rk, gp_rk in result.all():
+            if gp_rk:
+                ep_to_show_rk[ep_rk] = gp_rk
+
+    pending_writes = 0
+    handled_show_rks: set[str] = set()
+    for show_folder, ep_rks in show_folder_to_episode_rks.items():
+        # Pick the first episode whose grandparent we managed to resolve.
+        show_rk = next(
+            (ep_to_show_rk[ep_rk] for ep_rk in ep_rks if ep_rk in ep_to_show_rk),
+            None,
+        )
+        if show_rk is None or show_rk not in shows_by_rk:
+            # Episode points at a show that no longer exists in DB — skip.
+            continue
+        if show_rk in handled_show_rks:
+            continue
+        handled_show_rks.add(show_rk)
+        show = shows_by_rk[show_rk]
+        nfo_path = account_root / "Series" / show_folder / "tvshow.nfo"
+        pending_writes = await _apply_show_nfo(
+            db, show, nfo_path, label=show.title or show_folder,
+            overwrite=overwrite, dry_run=dry_run,
+            report=report, pending_writes=pending_writes,
+        )
+
+    # ---------- Pass 2: fallback DB-driven for shows not in mapping ----------
+    # Some shows have no episodes mapped (recently added, or episodes deleted).
+    # Compute the path the generator WOULD use, including year if present.
+    fallback_count = 0
+    for show_rk, show in shows_by_rk.items():
+        if show_rk in handled_show_rks:
+            continue
+        nfo_rel = series_nfo_path(show.title or "", year=show.year)
+        nfo_path = account_root / nfo_rel
+        fallback_count += 1
+        pending_writes = await _apply_show_nfo(
+            db, show, nfo_path, label=show.title or show_rk,
+            overwrite=overwrite, dry_run=dry_run,
+            report=report, pending_writes=pending_writes,
+        )
+    if fallback_count:
+        logger.info(
+            "NFO shows account=%s: %d shows tried via fallback path (no episodes in mapping)",
+            account.id, fallback_count,
+        )
 
     if not dry_run and pending_writes:
-        await db.commit()
+        await _commit_with_lock_retry(db)
     logger.info(
         "NFO shows account=%s done: matched=%d written=%d unmatched=%d "
         "skipped_already=%d skipped_nochange=%d",

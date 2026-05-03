@@ -96,12 +96,38 @@ def _seed_show_on_disk(
     title: str,
     nfo_content: str = _TVSHOW_NFO,
     account_id: str = _ACCOUNT_ID,
+    *,
+    year: int | None = None,
+    folder_override: str | None = None,
+    with_episode: tuple[str, str] | None = None,
 ) -> Path:
+    """Drop a tvshow.nfo on disk, optionally with an episode entry in the
+    mapping JSON so the importer's mapping-driven path can pick it up.
+
+    with_episode = (episode_rating_key, _show_rating_key_unused) — when set,
+    creates a fake .strm and adds it to .plex_mapping.json so the show
+    folder is discoverable via the mapping (matches production layout).
+    """
     account_root = tmp_path / account_id
-    nfo_rel = series_nfo_path(title)  # "Series/<safe_title>/tvshow.nfo"
+    if folder_override:
+        nfo_rel = f"Series/{folder_override}/tvshow.nfo"
+    else:
+        nfo_rel = series_nfo_path(title, year=year)
     nfo_full = account_root / nfo_rel
     nfo_full.parent.mkdir(parents=True, exist_ok=True)
     nfo_full.write_text(nfo_content, encoding="utf-8")
+
+    if with_episode:
+        ep_rk, _ = with_episode
+        show_folder = nfo_full.parent.name
+        ep_rel = f"Series/{show_folder}/Season 01/{show_folder} S01E01.strm"
+        ep_full = account_root / ep_rel
+        ep_full.parent.mkdir(parents=True, exist_ok=True)
+        ep_full.write_text("http://example/ep1\n", encoding="utf-8")
+        mapping = MappingStore(account_root)
+        mapping.load()
+        mapping.set(ep_rk, ep_rel, "http://example/ep1")
+        mapping.save()
     return nfo_full
 
 
@@ -294,17 +320,39 @@ async def test_movie_import_skips_other_account(tmp_path, db_session):
     assert report.unmatched
 
 
-# ---------- show import (DB-driven via series_nfo_path) ----------
+# ---------- show import ----------
+# Two paths are exercised:
+# 1. Mapping-driven: an episode of the show is in .plex_mapping.json, and we
+#    derive the show folder from its path. Production: 99% of shows.
+# 2. DB-driven fallback: no episode in mapping, so we compute
+#    `series_nfo_path(title, year=show.year)` and look it up.
 
-async def test_show_import_writes_missing_ids(tmp_path, db_session):
+async def test_show_import_writes_missing_ids_via_mapping(tmp_path, db_session):
+    """Mapping-driven path: episode in .plex_mapping.json → derive show folder."""
     await _seed_account(db_session)
-    _seed_show_on_disk(tmp_path, "7SEEDS")
+    show_rk = "series_42"
+    ep_rk = "ep_99.mkv"
+    # Folder ON DISK has the year (matches generator output now that show.year is known).
+    _seed_show_on_disk(
+        tmp_path, "7SEEDS", year=2019, with_episode=(ep_rk, show_rk),
+    )
 
     db_session.add(Media(
-        rating_key="series_42", server_id=_SERVER_ID,
+        rating_key=show_rk, server_id=_SERVER_ID,
         filter="all", sort_order="default",
         library_section_id="lib-1", title="7SEEDS",
         type="show", year=2019,
+        page_offset=0,
+        added_at=1, updated_at=1,
+    ))
+    db_session.add(Media(
+        rating_key=ep_rk, server_id=_SERVER_ID,
+        filter="all", sort_order="default",
+        library_section_id="lib-1", title="Episode 1",
+        type="episode", year=None,
+        grandparent_rating_key=show_rk,
+        parent_index=1, index=1,
+        page_offset=1,
         added_at=1, updated_at=1,
     ))
     await db_session.commit()
@@ -318,11 +366,63 @@ async def test_show_import_writes_missing_ids(tmp_path, db_session):
     assert report.written == 1
 
     refreshed = await db_session.get(
-        Media, {"rating_key": "series_42", "server_id": _SERVER_ID,
+        Media, {"rating_key": show_rk, "server_id": _SERVER_ID,
                 "filter": "all", "sort_order": "default"}
     )
     assert refreshed.imdb_id == "tt9348718"
     assert refreshed.tmdb_id == "85940"
+
+
+async def test_show_import_fallback_when_no_episode_in_mapping(tmp_path, db_session):
+    """DB-driven fallback: no episode in mapping → compute series_nfo_path
+    from (title, year). Folder on disk includes the year because year is set."""
+    await _seed_account(db_session)
+    show_rk = "series_99"
+    # No episode seeded; fallback path must use title+year.
+    _seed_show_on_disk(tmp_path, "Lonely Show", year=2020)
+
+    db_session.add(Media(
+        rating_key=show_rk, server_id=_SERVER_ID,
+        filter="all", sort_order="default",
+        library_section_id="lib-1", title="Lonely Show",
+        type="show", year=2020,
+        added_at=1, updated_at=1,
+    ))
+    await db_session.commit()
+
+    [report] = await nfo_import_service.import_nfo(
+        db_session, tmp_path, kinds=("shows",), overwrite=False, dry_run=False,
+    )
+    await db_session.commit()
+
+    assert report.matched == 1
+    assert report.written == 1
+
+
+async def test_show_import_unmatched_when_disk_folder_missing_year(tmp_path, db_session):
+    """Regression: production bug where the importer used `series_nfo_path(title)`
+    without passing year, so it looked at `Series/<title>/tvshow.nfo` while the
+    real folder was `Series/<title> (<year>)/tvshow.nfo`. Now that we pass year,
+    the lookup must succeed."""
+    await _seed_account(db_session)
+    show_rk = "series_with_year"
+    # Disk folder has year:
+    _seed_show_on_disk(tmp_path, "Boruto Naruto Next Generations", year=2017)
+
+    db_session.add(Media(
+        rating_key=show_rk, server_id=_SERVER_ID,
+        filter="all", sort_order="default",
+        library_section_id="lib-1", title="Boruto Naruto Next Generations",
+        type="show", year=2017,
+        added_at=1, updated_at=1,
+    ))
+    await db_session.commit()
+
+    [report] = await nfo_import_service.import_nfo(
+        db_session, tmp_path, kinds=("shows",), overwrite=False, dry_run=True,
+    )
+    assert report.matched == 1
+    assert not report.unmatched
 
 
 async def test_execute_with_lock_retry_recovers_after_transient_lock(monkeypatch):

@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import logging
+from types import SimpleNamespace
 
 from sqlalchemy import select, delete, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_upsert
@@ -881,6 +882,18 @@ async def sync_account(account_id: str):
                     _record_sync_job(job_id, {"status": "failed", "progress": {}})
                     return job_id
 
+                # Detached snapshot used by parallel coroutines (asyncio.gather
+                # over fetch_vod_info_safe / fetch_series_episodes). Touching
+                # the ORM `account` from concurrent tasks can race on lazy
+                # refresh and trigger 'greenlet_spawn has not been called'.
+                # The snapshot is plain Python attrs — no SQLAlchemy ever runs.
+                account_snapshot = SimpleNamespace(
+                    base_url=account.base_url,
+                    port=account.port,
+                    username=account.username,
+                    password=account.password,
+                )
+
                 server_id = build_server_id(account_id)
                 total_synced = 0
 
@@ -905,10 +918,10 @@ async def sync_account(account_id: str):
                     if vod_cat_ids is not None:
                         logger.info(f"VOD: fetching {len(vod_cat_ids)} allowed categories (whitelist mode)")
                         vod_streams = await _fetch_streams_by_categories(
-                            xtream_service.get_vod_streams, account, vod_cat_ids, "VOD"
+                            xtream_service.get_vod_streams, account_snapshot, vod_cat_ids, "VOD"
                         )
                     else:
-                        vod_streams = await xtream_service.get_vod_streams(account)
+                        vod_streams = await xtream_service.get_vod_streams(account_snapshot)
                 except Exception as e:
                     logger.error(f"Failed to fetch VOD streams: {e}")
                     vod_streams = []
@@ -957,7 +970,7 @@ async def sync_account(account_id: str):
                         vod_info = None
                         async with semaphore:  # Only hold semaphore during API call
                             try:
-                                vod_info = await xtream_service.get_vod_info(account, vod_id=dto["stream_id"])
+                                vod_info = await xtream_service.get_vod_info(account_snapshot, vod_id=dto["stream_id"])
                             except Exception as e:
                                 logger.warning(f"Failed to fetch vod_info for stream {dto.get('stream_id')}: {e}")
                         # Mapping happens outside semaphore — frees a slot sooner
@@ -1019,10 +1032,10 @@ async def sync_account(account_id: str):
                     if series_cat_ids is not None:
                         logger.info(f"Series: fetching {len(series_cat_ids)} allowed categories (whitelist mode)")
                         series_list = await _fetch_streams_by_categories(
-                            xtream_service.get_series, account, series_cat_ids, "Series"
+                            xtream_service.get_series, account_snapshot, series_cat_ids, "Series"
                         )
                     else:
-                        series_list = await xtream_service.get_series(account)
+                        series_list = await xtream_service.get_series(account_snapshot)
                 except Exception as e:
                     logger.error(f"Failed to fetch series: {e}")
                     series_list = []
@@ -1116,7 +1129,7 @@ async def sync_account(account_id: str):
                             return []
                         async with semaphore:  # Only hold semaphore during API call
                             series_info = await xtream_service.get_series_info(
-                                account, series_id=series_dto["series_id"]
+                                account_snapshot, series_id=series_dto["series_id"]
                             )
                         # Mapping happens outside semaphore
                         episodes_data = series_info.get("episodes") or {} if isinstance(series_info, dict) else {}
@@ -1173,10 +1186,10 @@ async def sync_account(account_id: str):
                     if live_cat_ids is not None:
                         logger.info(f"Live: fetching {len(live_cat_ids)} allowed categories (whitelist mode)")
                         live_streams = await _fetch_streams_by_categories(
-                            xtream_service.get_live_streams, account, live_cat_ids, "Live"
+                            xtream_service.get_live_streams, account_snapshot, live_cat_ids, "Live"
                         )
                     else:
-                        live_streams = await xtream_service.get_live_streams(account)
+                        live_streams = await xtream_service.get_live_streams(account_snapshot)
                 except Exception as e:
                     logger.error(f"Failed to fetch live streams: {e}")
                     live_streams = []

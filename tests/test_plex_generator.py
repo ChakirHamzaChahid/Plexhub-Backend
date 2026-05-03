@@ -401,3 +401,86 @@ class TestImageErrorClassification:
         from app.plex_generator.generator import _classify_image_error
 
         assert _classify_image_error(ValueError("anything else")) == "other"
+
+
+class TestNamingWithSuffix:
+    def test_movie_folder_with_suffix(self):
+        from app.plex_generator.naming import _movie_folder
+        assert _movie_folder("Les Experts", 2000, suffix="HD") == "Les Experts (2000) (HD)"
+
+    def test_movie_folder_with_fallback(self):
+        from app.plex_generator.naming import _movie_folder
+        assert _movie_folder("Foo", 2020, fallback_id="vod_42") == "Foo (2020) [vod_42]"
+
+    def test_series_folder_canonical(self):
+        from app.plex_generator.naming import _series_folder
+        assert _series_folder("Les Experts", year=2000) == "Les Experts (2000)"
+
+    def test_series_folder_with_suffix(self):
+        from app.plex_generator.naming import _series_folder
+        assert _series_folder("Les Experts", year=2000, suffix="US") == \
+            "Les Experts (2000) (US)"
+
+    def test_movie_path_with_suffix(self):
+        from app.plex_generator.naming import movie_path
+        assert movie_path("Les Experts", 2000, suffix="HD") == \
+            "Films/Les Experts (2000) (HD)/Les Experts (2000) (HD).strm"
+
+    def test_series_episode_path_with_suffix(self):
+        from app.plex_generator.naming import series_episode_path
+        assert series_episode_path("Les Experts", 1, 1, year=2000, suffix="US") == (
+            "Series/Les Experts (2000) (US)/Season 01/"
+            "Les Experts (2000) (US) S01E01.strm"
+        )
+
+
+class TestResolveCollisions:
+    def _make_movie(self, source_id, title, year=None):
+        # Lazy local import keeps the test file's top imports unchanged.
+        from app.plex_generator.models import PlexMovie
+        return PlexMovie(
+            source_id=source_id, title=title, year=year, stream_url="http://x/",
+        )
+
+    def test_singleton_drops_suffix(self):
+        from app.plex_generator.generator import _resolve_movie_names
+        m = self._make_movie("vod_1", "Les Experts (2000) (US)")
+        res = _resolve_movie_names([m])
+        r = res["vod_1"]
+        assert r.clean_title == "Les Experts"
+        assert r.year == 2000
+        assert r.suffix is None  # singleton -> Jellyfin clean
+        assert r.fallback_id is None
+
+    def test_two_with_distinct_suffix_keeps_both(self):
+        from app.plex_generator.generator import _resolve_movie_names
+        a = self._make_movie("vod_a", "Les Experts (2000) (US)")
+        b = self._make_movie("vod_b", "Les Experts (2000) (HD)")
+        res = _resolve_movie_names([a, b])
+        assert res["vod_a"].suffix == "US"
+        assert res["vod_a"].fallback_id is None
+        assert res["vod_b"].suffix == "HD"
+        assert res["vod_b"].fallback_id is None
+
+    def test_collision_without_suffix_uses_fallback(self):
+        from app.plex_generator.generator import _resolve_movie_names
+        a = self._make_movie("vod_1.mkv", "Les Experts (2000)")
+        b = self._make_movie("vod_2.mkv", "Les Experts (2000)")
+        res = _resolve_movie_names([a, b])
+        assert res["vod_1.mkv"].fallback_id == "vod_1"
+        assert res["vod_2.mkv"].fallback_id == "vod_2"
+
+    def test_three_same_suffix_breaks_tie_with_fallback(self):
+        from app.plex_generator.generator import _resolve_movie_names
+        a = self._make_movie("vod_a.mkv", "Les Experts (2000) (US)")
+        b = self._make_movie("vod_b.mkv", "Les Experts (2000) (US)")
+        c = self._make_movie("vod_c.mkv", "Les Experts (2000) (HD)")
+        res = _resolve_movie_names([a, b, c])
+        # a and b share suffix US -> need fallback
+        assert res["vod_a.mkv"].suffix == "US"
+        assert res["vod_a.mkv"].fallback_id == "vod_a"
+        assert res["vod_b.mkv"].suffix == "US"
+        assert res["vod_b.mkv"].fallback_id == "vod_b"
+        # c is the only HD -> just suffix
+        assert res["vod_c.mkv"].suffix == "HD"
+        assert res["vod_c.mkv"].fallback_id is None

@@ -326,3 +326,51 @@ class TestRunMigrationForAccount:
         mapping = MappingStore(base)
         mapping.load()
         assert "FR - " in mapping._data["vod_111.mp4"].path
+
+
+class TestResolveDisambiguators:
+    def test_singleton_no_decoration(self):
+        from app.scripts.strip_titles_pollution import _resolve_disambiguators
+        result = _resolve_disambiguators([("vod_1", "Les Experts (2000)", 2000)])
+        assert result["vod_1"] == (None, None)
+
+    def test_us_vs_hd_keep_distinct(self):
+        from app.scripts.strip_titles_pollution import _resolve_disambiguators
+        result = _resolve_disambiguators([
+            ("vod_a", "Les Experts (2000) (US)", 2000),
+            ("vod_b", "Les Experts (2000) (HD)", 2000),
+        ])
+        assert result["vod_a"] == ("US", None)
+        assert result["vod_b"] == ("HD", None)
+
+    def test_collision_no_suffix_uses_fallback(self):
+        from app.scripts.strip_titles_pollution import _resolve_disambiguators
+        result = _resolve_disambiguators([
+            ("vod_1.mkv", "Les Experts (2000)", 2000),
+            ("vod_2.mkv", "Les Experts (2000)", 2000),
+        ])
+        assert result["vod_1.mkv"] == (None, "vod_1")
+        assert result["vod_2.mkv"] == (None, "vod_2")
+
+
+class TestMigrationWithSuffix:
+    def test_les_experts_us_singleton_strips_suffix(self):
+        """When only one 'Les Experts (2000) (US)' exists, drop the (US)."""
+        from app.scripts.strip_titles_pollution import _build_movie_rename
+        r = _build_movie_rename(
+            "vod_1", "xtream_x", "Les Experts (2000) (US)", 2000,
+            suffix=None, fallback_id=None,
+        )
+        assert r is not None
+        assert r.old_folder == "Les Experts (2000) (US) (2000)"  # naive concat of original
+        assert r.new_folder == "Les Experts (2000)"
+
+    def test_les_experts_us_collision_keeps_suffix(self):
+        """When the resolver decides to keep (US), the new folder retains it."""
+        from app.scripts.strip_titles_pollution import _build_movie_rename
+        r = _build_movie_rename(
+            "vod_1", "xtream_x", "Les Experts (2000) (US)", 2000,
+            suffix="US", fallback_id=None,
+        )
+        assert r is not None
+        assert r.new_folder == "Les Experts (2000) (US)"

@@ -24,8 +24,21 @@ from app.models.database import EnrichmentQueue, Media, XtreamAccount
 from app.plex_generator.mapping import MappingStore
 from app.plex_generator.naming import _movie_folder, _series_folder
 from app.utils.server_id import build_server_id
-from app.utils.string_normalizer import normalize_for_sorting, parse_title_and_year
+from app.utils.string_normalizer import (
+    normalize_for_sorting, parse_title_and_year, parse_title_year_and_suffix,
+)
 from app.utils.time import now_ms
+
+
+def _short_id(rating_key: str, length: int = 6) -> str:
+    """Match generator._short_id so migration produces the same disambiguator
+    as fresh runs would."""
+    safe = rating_key or ""
+    for ext in (".mkv", ".mp4", ".avi", ".ts"):
+        if safe.endswith(ext):
+            safe = safe[: -len(ext)]
+            break
+    return safe[:length] or "x"
 
 logger = logging.getLogger("plexhub.scripts.strip_titles")
 
@@ -66,13 +79,16 @@ class MigrationReport:
 
 def _build_movie_rename(
     rating_key: str, server_id: str, old_title: str, db_year: int | None,
+    suffix: str | None = None, fallback_id: str | None = None,
 ) -> FolderRename | None:
-    new_title, parsed_year = parse_title_and_year(old_title or "")
-    if new_title == "Unknown" or new_title == (old_title or ""):
+    new_title, parsed_year, parsed_suffix = parse_title_year_and_suffix(old_title or "")
+    if new_title == "Unknown":
         return None
     effective_year = db_year if db_year is not None else parsed_year
+    # Caller may pre-decide suffix/fallback after collision resolution; otherwise
+    # default to None (singleton = canonical Jellyfin name).
     old_folder = _movie_folder(old_title, db_year)
-    new_folder = _movie_folder(new_title, effective_year)
+    new_folder = _movie_folder(new_title, effective_year, suffix, fallback_id)
     if old_folder == new_folder:
         return None
     return FolderRename(
@@ -85,20 +101,57 @@ def _build_movie_rename(
 
 def _build_series_rename(
     rating_key: str, server_id: str, old_title: str,
+    db_year: int | None = None,
+    suffix: str | None = None, fallback_id: str | None = None,
 ) -> FolderRename | None:
-    new_title, _ = parse_title_and_year(old_title or "")
-    if new_title == "Unknown" or new_title == (old_title or ""):
+    new_title, parsed_year, parsed_suffix = parse_title_year_and_suffix(old_title or "")
+    if new_title == "Unknown":
         return None
+    effective_year = db_year if db_year is not None else parsed_year
     old_folder = _series_folder(old_title)
-    new_folder = _series_folder(new_title)
+    new_folder = _series_folder(new_title, effective_year, suffix, fallback_id)
     if old_folder == new_folder:
         return None
     return FolderRename(
         rating_key=rating_key, server_id=server_id, media_type="show",
-        old_title=old_title, new_title=new_title, new_year=None,
+        old_title=old_title, new_title=new_title, new_year=effective_year,
         old_folder=old_folder, new_folder=new_folder,
         old_rel_dir=f"Series/{old_folder}", new_rel_dir=f"Series/{new_folder}",
     )
+
+
+def _resolve_disambiguators(
+    items: list[tuple[str, str, int | None]],
+) -> dict[str, tuple[str | None, str | None]]:
+    """Decide suffix / fallback_id per rating_key based on (clean, year) collisions.
+
+    `items` = list of (rating_key, raw_title, db_year). Returns
+    {rating_key: (suffix, fallback_id)}.
+    """
+    parsed: dict[str, tuple[str, int | None, str | None]] = {}
+    groups: dict[tuple[str, int | None], list[str]] = {}
+    for rating_key, raw_title, db_year in items:
+        clean, parsed_year, suffix = parse_title_year_and_suffix(raw_title or "")
+        year = db_year if db_year is not None else parsed_year
+        parsed[rating_key] = (clean, year, suffix)
+        groups.setdefault((clean, year), []).append(rating_key)
+
+    decisions: dict[str, tuple[str | None, str | None]] = {}
+    for (_clean, _year), keys in groups.items():
+        if len(keys) == 1:
+            decisions[keys[0]] = (None, None)
+            continue
+        suffix_buckets: dict[str | None, list[str]] = {}
+        for rk in keys:
+            _, _, suffix = parsed[rk]
+            suffix_buckets.setdefault(suffix, []).append(rk)
+        for suffix, sids in suffix_buckets.items():
+            if len(sids) == 1:
+                decisions[sids[0]] = (suffix, None)
+            else:
+                for sid in sids:
+                    decisions[sid] = (suffix, _short_id(sid))
+    return decisions
 
 
 def _rename_path(src: Path, dst: Path) -> None:
@@ -206,23 +259,36 @@ async def _collect_renames_for_account(db, account_id: str) -> list[FolderRename
     server_id = build_server_id(account_id)
     renames: list[FolderRename] = []
 
+    # Movies — resolve collisions globally first, then plan each rename with
+    # its decided suffix/fallback.
     result = await db.execute(
         select(Media.rating_key, Media.title, Media.year)
         .where(Media.server_id == server_id)
         .where(Media.type == "movie")
     )
-    for rating_key, title, year in result.all():
-        r = _build_movie_rename(rating_key, server_id, title, year)
+    movie_rows = list(result.all())
+    movie_decisions = _resolve_disambiguators(
+        [(rk, title, year) for rk, title, year in movie_rows]
+    )
+    for rating_key, title, year in movie_rows:
+        suffix, fallback = movie_decisions.get(rating_key, (None, None))
+        r = _build_movie_rename(rating_key, server_id, title, year, suffix, fallback)
         if r:
             renames.append(r)
 
+    # Series — same global pass.
     result = await db.execute(
-        select(Media.rating_key, Media.title)
+        select(Media.rating_key, Media.title, Media.year)
         .where(Media.server_id == server_id)
         .where(Media.type == "show")
     )
-    for rating_key, title in result.all():
-        r = _build_series_rename(rating_key, server_id, title)
+    show_rows = list(result.all())
+    show_decisions = _resolve_disambiguators(
+        [(rk, title, year) for rk, title, year in show_rows]
+    )
+    for rating_key, title, year in show_rows:
+        suffix, fallback = show_decisions.get(rating_key, (None, None))
+        r = _build_series_rename(rating_key, server_id, title, year, suffix, fallback)
         if r:
             renames.append(r)
 
@@ -241,8 +307,11 @@ async def _update_db_for_account(
         .where(Media.server_id == server_id)
         .where(Media.type.in_(("movie", "show")))
     )
+    # Use the suffix-aware parser so we strip "(US)", "(HD)" etc. from the
+    # stored title — they remain encoded on disk via the folder name when
+    # needed for collision disambiguation.
     for rating_key, title, year, mtype in result.all():
-        new_title, parsed_year = parse_title_and_year(title or "")
+        new_title, parsed_year, _suffix = parse_title_year_and_suffix(title or "")
         if new_title == "Unknown" or new_title == (title or ""):
             continue
         new_year = year if year is not None else parsed_year
@@ -271,7 +340,7 @@ async def _update_db_for_account(
     for rating_key, gp_title in result.all():
         if not gp_title:
             continue
-        new_gp, _ = parse_title_and_year(gp_title)
+        new_gp, _, _ = parse_title_year_and_suffix(gp_title)
         if new_gp == "Unknown" or new_gp == gp_title:
             continue
         if dry_run:

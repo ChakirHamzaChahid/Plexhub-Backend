@@ -133,3 +133,44 @@ class TestNormalizeForSorting:
 
     def test_removes_diacritics(self):
         assert normalize_for_sorting("Amélie") == "Amelie"
+
+
+class TestParseTitleYearAndSuffix:
+    """Suffix-aware parser used by the Jellyfin-style folder naming."""
+
+    def _p(self, raw):
+        from app.utils.string_normalizer import parse_title_year_and_suffix
+        return parse_title_year_and_suffix(raw)
+
+    def test_canonical(self):
+        assert self._p("Les Experts (2000)") == ("Les Experts", 2000, None)
+
+    def test_us_suffix(self):
+        assert self._p("Les Experts (2000) (US)") == ("Les Experts", 2000, "US")
+
+    def test_hd_suffix(self):
+        assert self._p("Les Experts (2000) (HD)") == ("Les Experts", 2000, "HD")
+
+    def test_country_prefix_then_year_then_suffix(self):
+        assert self._p("FR - Les Experts (2000) (US)") == ("Les Experts", 2000, "US")
+
+    def test_year_anywhere(self):
+        # Year may appear before the qualifier; result must still pull both.
+        assert self._p("Foo (2020) (HD)") == ("Foo", 2020, "HD")
+
+    def test_qualifier_only_no_year(self):
+        assert self._p("Foo (US)") == ("Foo", None, "US")
+
+    def test_multiple_qualifiers_concatenated(self):
+        assert self._p("Foo (2020) (US) (HD)") == ("Foo", 2020, "US HD")
+
+    def test_quality_brackets_stripped(self):
+        # [FHD] is trailing junk handled before paren extraction.
+        assert self._p("Better Man (2024) [FHD]") == ("Better Man", 2024, None)
+
+    def test_qualifier_before_year(self):
+        # Less common but possible; both still recovered.
+        assert self._p("Foo (US) (2020)") == ("Foo", 2020, "US")
+
+    def test_empty(self):
+        assert self._p("") == ("Unknown", None, None)

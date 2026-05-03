@@ -332,24 +332,58 @@ async def _update_db_for_account(
         report.db_rows_updated += 1
 
     # Episodes: fix grandparent_title
+    # Episodes: clean title, parent_title (season label) and grandparent_title.
+    # Some IPTV providers prefix every episode title with "FR - " too — leaving
+    # these polluted hides the dirt in Plex/Jellyfin even after the show folder
+    # is renamed.
     result = await db.execute(
-        select(Media.rating_key, Media.grandparent_title)
+        select(
+            Media.rating_key, Media.title, Media.parent_title,
+            Media.grandparent_title,
+        )
         .where(Media.server_id == server_id)
         .where(Media.type == "episode")
     )
-    for rating_key, gp_title in result.all():
-        if not gp_title:
+
+    def _clean(value: str | None) -> str | None:
+        """Return cleaned value if it actually changed, else None."""
+        if not value:
+            return None
+        new, _, _ = parse_title_year_and_suffix(value)
+        if new == "Unknown" or new == value:
+            return None
+        return new
+
+    for rating_key, title, parent_title, gp_title in result.all():
+        new_title = _clean(title)
+        new_parent = _clean(parent_title)
+        new_gp = _clean(gp_title)
+        if not (new_title or new_parent or new_gp):
             continue
-        new_gp, _, _ = parse_title_year_and_suffix(gp_title)
-        if new_gp == "Unknown" or new_gp == gp_title:
-            continue
+
         if dry_run:
-            logger.info(f"[DRY-RUN] DB episode {rating_key}: gp '{gp_title}' -> '{new_gp}'")
+            if new_title:
+                logger.info(f"[DRY-RUN] DB episode {rating_key}: title '{title}' -> '{new_title}'")
+            if new_parent:
+                logger.info(f"[DRY-RUN] DB episode {rating_key}: parent '{parent_title}' -> '{new_parent}'")
+            if new_gp:
+                logger.info(f"[DRY-RUN] DB episode {rating_key}: gp '{gp_title}' -> '{new_gp}'")
             continue
+
+        values: dict = {"updated_at": now_ms()}
+        if new_title:
+            values["title"] = new_title
+            # title_sortable is also indexed; keep it consistent with title.
+            values["title_sortable"] = normalize_for_sorting(new_title).lower()
+        if new_parent:
+            values["parent_title"] = new_parent
+        if new_gp:
+            values["grandparent_title"] = new_gp
+
         await db.execute(
             update(Media)
             .where(Media.rating_key == rating_key, Media.server_id == server_id)
-            .values(grandparent_title=new_gp, updated_at=now_ms())
+            .values(**values)
         )
         report.db_rows_updated += 1
 

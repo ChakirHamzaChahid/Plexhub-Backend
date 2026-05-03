@@ -374,3 +374,57 @@ class TestMigrationWithSuffix:
         )
         assert r is not None
         assert r.new_folder == "Les Experts (2000) (US)"
+
+
+class TestEpisodeTitleCleanup:
+    """Episodes can have FR- pollution on title, parent_title and grandparent_title.
+    All three must be cleaned, not just grandparent_title (regression #ep-pollution)."""
+
+    def test_episode_title_and_parent_cleaned(self, db_factory, tmp_path):
+        from app.models.database import Media, XtreamAccount
+        from app.scripts.strip_titles_pollution import run_migration_for_account
+        from app.utils.server_id import build_server_id
+
+        aid = "epacc"
+        server_id = build_server_id(aid)
+
+        async def _seed():
+            async with db_factory() as session:
+                session.add(XtreamAccount(
+                    id=aid, label="t", base_url="http://x", port=80,
+                    username="u", password="p", is_active=True, created_at=0,
+                ))
+                # Show + 1 polluted episode
+                session.add(Media(
+                    rating_key="series_1", server_id=server_id,
+                    library_section_id="lib", title="Foo", title_sortable="foo",
+                    type="show", page_offset=0,
+                ))
+                session.add(Media(
+                    rating_key="ep_1", server_id=server_id,
+                    library_section_id="lib",
+                    title="FR - Episode 1",
+                    title_sortable="fr - episode 1",
+                    type="episode",
+                    parent_title="FR - Season 1",
+                    grandparent_title="FR - Foo",
+                    grandparent_rating_key="series_1",
+                    parent_index=1, index=1, page_offset=1,
+                ))
+                await session.commit()
+
+        asyncio.run(_seed())
+        # Account dir doesn't even need to exist on disk for this DB-only check.
+        asyncio.run(run_migration_for_account(aid, tmp_path, dry_run=False))
+
+        async def _check():
+            async with db_factory() as session:
+                result = await session.execute(select(
+                    Media.title, Media.parent_title, Media.grandparent_title,
+                ).where(Media.rating_key == "ep_1", Media.server_id == server_id))
+                return result.first()
+
+        title, parent_title, gp_title = asyncio.run(_check())
+        assert title == "Episode 1"
+        assert parent_title == "Season 1"
+        assert gp_title == "Foo"

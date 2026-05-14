@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Optional
+from typing import Literal, Optional
 
 import httpx
 from rapidfuzz import fuzz
@@ -55,6 +55,11 @@ class TMDBService:
         self._client: Optional[httpx.AsyncClient] = None
         self._search_cache: TTLCache[tuple[str, str, int | None], TMDBMatch | None] = TTLCache(
             max_size=_SEARCH_CACHE_SIZE, ttl_seconds=_SEARCH_CACHE_TTL,
+        )
+        # imdb_id -> tmdb_id mapping is stable; cache 7 days. Bounded to keep RAM
+        # predictable. Negative results (None) are also cached.
+        self._imdb_find_cache: TTLCache[tuple[str, str], int | None] = TTLCache(
+            max_size=5000, ttl_seconds=7 * 24 * 3600,
         )
 
     async def _get_client(self) -> httpx.AsyncClient:
@@ -183,6 +188,54 @@ class TMDBService:
             params={"append_to_response": "credits,external_ids", "language": settings.TMDB_LANGUAGE},
         )
         return self._parse_details(data, tmdb_id, date_key="first_air_date")
+
+    async def find_by_imdb_id(
+        self,
+        imdb_id: str,
+        media_type: Literal["movie", "tv"],
+    ) -> int | None:
+        """Resolve an imdb_id (e.g. 'tt0111161') to tmdb_id via TMDB /find endpoint.
+
+        Returns None when the id resolves to an episode/season/person, is unknown,
+        or when TMDB is unconfigured / unreachable. Mapping is stable so the
+        result (including negatives) is cached 7 days. media_type must be
+        'movie' or 'tv' — anything else returns None.
+        """
+        if media_type not in ("movie", "tv"):
+            return None
+        if not imdb_id:
+            return None
+        if not self.is_configured:
+            return None
+
+        cache_key = (imdb_id, media_type)
+        cached = self._imdb_find_cache.get(cache_key, default=_MISSING)
+        if cached is not _MISSING:
+            return cached
+
+        try:
+            data = await self._request(
+                f"/find/{imdb_id}",
+                params={"external_source": "imdb_id", "language": settings.TMDB_LANGUAGE},
+            )
+        except Exception as exc:
+            logger.warning("TMDB find_by_imdb_id failed for %s (%s): %s", imdb_id, media_type, exc)
+            return None
+
+        # Defensively ignore tv_episode_results, tv_season_results, person_results.
+        if media_type == "movie":
+            results = data.get("movie_results") or []
+        else:
+            results = data.get("tv_results") or []
+        tmdb_id: int | None = None
+        if results:
+            raw_id = results[0].get("id")
+            if isinstance(raw_id, int):
+                tmdb_id = raw_id
+
+        # Cache positives and negatives alike.
+        self._imdb_find_cache.set(cache_key, tmdb_id)
+        return tmdb_id
 
     def _parse_details(self, data: dict, tmdb_id: int, date_key: str) -> TMDBEnrichmentData:
         """Parse TMDB detail response into TMDBEnrichmentData."""

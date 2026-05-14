@@ -11,7 +11,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 
 from app.config import settings
 from app.db.database import init_db
-from app.api import accounts, admin, categories, health, live, media, plex, stream, sync
+from app.api import accounts, admin, ai, categories, health, live, media, plex, stream, sync
 from app.utils.request_context import RequestIdLogFilter, RequestIdMiddleware
 
 APP_VERSION = "1.0.0"
@@ -377,6 +377,10 @@ app.include_router(plex.router, prefix="/api")
 
 # Admin web UI (HTML / HTMX) — no /api prefix
 app.include_router(admin.router)
+
+# AI recommendation API — router defines its own /api/ai prefix.
+# Must be appended after all existing /api routers (no prefix here).
+app.include_router(ai.router)
 
 # Prometheus /metrics + per-request HTTP metrics
 from app.utils.metrics import setup_instrumentator  # noqa: E402

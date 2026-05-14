@@ -16,6 +16,44 @@ async_session_factory = async_sessionmaker(
 )
 
 
+# Module-level state recording whether sqlite-vec was successfully loaded on
+# the most recent connect. Consumed by J3b's verify_api_key dependency to
+# short-circuit AI endpoints with HTTP 503 when the extension is unavailable.
+_VEC_LOADED: dict[str, object] = {"ok": False, "error": ""}
+
+
+def register_sqlite_vec_listener(engine) -> None:
+    """Attach a SQLAlchemy 'connect' event listener that loads the sqlite-vec
+    extension on every raw aiosqlite connection. Defensive: never raises;
+    failures are recorded in _VEC_LOADED for verify_api_key (J3b) to return 503.
+
+    The aiosqlite driver runs the underlying sqlite3 connection in a worker
+    thread, so the listener dispatches the load through ``run_async`` to
+    execute on that thread.
+    """
+    from sqlalchemy import event
+    import logging
+    logger = logging.getLogger("plexhub.ai")
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _load_sqlite_vec(dbapi_conn, _record):
+        try:
+            import sqlite_vec
+
+            async def _do_load(aiosqlite_conn):
+                await aiosqlite_conn.enable_load_extension(True)
+                await aiosqlite_conn._execute(sqlite_vec.load, aiosqlite_conn._conn)
+                await aiosqlite_conn.enable_load_extension(False)
+
+            dbapi_conn.run_async(_do_load)
+            _VEC_LOADED["ok"] = True
+            _VEC_LOADED["error"] = ""
+        except Exception as exc:
+            _VEC_LOADED["ok"] = False
+            _VEC_LOADED["error"] = str(exc)
+            logger.warning("sqlite-vec load failed: %s — AI endpoints will return 503", exc)
+
+
 async def get_db() -> AsyncSession:
     """FastAPI dependency for DB sessions."""
     async with async_session_factory() as session:
@@ -35,6 +73,8 @@ async def init_db():
     from app.db.migrations import run_migrations
 
     logger = logging.getLogger("plexhub.db")
+
+    register_sqlite_vec_listener(engine)
 
     async with engine.begin() as conn:
         await conn.execute(text("PRAGMA journal_mode=WAL"))

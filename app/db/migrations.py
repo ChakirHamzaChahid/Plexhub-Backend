@@ -25,6 +25,9 @@ async def run_migrations(engine: AsyncEngine) -> None:
     await _migration_006_create_live_tables(engine)
     await _migration_007_add_stream_validation_index(engine)
 
+    async with engine.begin() as conn:
+        await _migration_008_ai_embeddings(conn)
+
     logger.info("All migrations completed successfully")
 
 
@@ -223,3 +226,40 @@ async def _migration_007_add_stream_validation_index(engine: AsyncEngine) -> Non
             logger.info("Migration 007: stream validation index created")
         except Exception as e:
             logger.warning(f"Migration 007: Index may already exist: {e}")
+
+
+async def _migration_008_ai_embeddings(conn) -> None:
+    """Create ai_embeddings (sqlite-vec virtual table) and ai_tmdb_cache.
+
+    Operates on a connection (not engine) so it can be reused by isolated
+    test fixtures. Idempotent: every DDL uses IF NOT EXISTS.
+    """
+    logger.info("Migration 008: Creating AI embeddings tables")
+
+    statements = [
+        """
+        CREATE VIRTUAL TABLE IF NOT EXISTS ai_embeddings USING vec0(
+            tmdb_id INTEGER PRIMARY KEY,
+            embedding FLOAT[384]
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS ai_tmdb_cache (
+            tmdb_id INTEGER PRIMARY KEY,
+            imdb_id TEXT,
+            media_type TEXT NOT NULL CHECK(media_type IN ('movie','tv')),
+            title TEXT,
+            overview TEXT,
+            genres TEXT,
+            fetched_at INTEGER NOT NULL,
+            embedded_at INTEGER
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS ix_ai_tmdb_cache_imdb_id ON ai_tmdb_cache(imdb_id)",
+        "CREATE INDEX IF NOT EXISTS ix_ai_tmdb_cache_embedded_at ON ai_tmdb_cache(embedded_at)",
+    ]
+
+    for stmt in statements:
+        await conn.execute(text(stmt))
+
+    logger.info("Migration 008: AI embeddings tables created")

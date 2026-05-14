@@ -73,12 +73,8 @@ async def test_embed_passage_dim_and_norm(monkeypatch):
     assert abs(norm - 1.0) < 1e-4
 
 
-async def test_query_prefix_distinct_from_passage(monkeypatch):
-    """Query and passage embeddings must differ because the prefix differs.
-
-    Our fake returns a vector based on input INDEX (not content), so to
-    distinguish we instead verify the prefix path is taken (different code path).
-    """
+async def test_embed_passes_raw_text_no_prefix(monkeypatch):
+    """MiniLM does not require E5-style prefixes; texts are embedded as-is."""
     captured: list[str] = []
 
     class _Fake:
@@ -95,8 +91,8 @@ async def test_query_prefix_distinct_from_passage(monkeypatch):
     )
     await embed_passages(["foo"])
     await embed_query("bar")
-    assert any(t.startswith("passage: ") for t in captured)
-    assert any(t.startswith("query: ") for t in captured)
+    assert captured == ["foo", "bar"]
+    assert not any(t.startswith("passage:") or t.startswith("query:") for t in captured)
 
 
 async def test_singleton_under_lock(monkeypatch):

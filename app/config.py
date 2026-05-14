@@ -22,6 +22,7 @@ class Settings:
     TMDB_API_KEY: str = os.getenv("TMDB_API_KEY", "")
     AI_API_KEY: str = os.getenv("AI_API_KEY", "")
     AI_EMBED_CACHE_DIR: str = os.getenv("AI_EMBED_CACHE_DIR", "")
+    AI_EMBED_MODEL: str = os.getenv("AI_EMBED_MODEL", "")
     DATA_DIR: Path = Path(os.getenv("DATA_DIR", "./data"))
     LOG_DIR: Path = Path(os.getenv("LOG_DIR", "./logs"))
     DB_PATH: Path

@@ -12,8 +12,10 @@ under this router inherit the same guard.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Literal
 
+import psutil
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.alias_generators import to_camel
@@ -119,6 +121,20 @@ class JobStatusResponse(BaseModel):
     last_error: str | None
     started_at: int
     finished_at: int | None
+
+
+class EmbedStatus(BaseModel):
+    model_config = _CAMEL_CONFIG
+    total_embeddings: int
+    total_cache_entries: int
+    pending_embed: int
+    last_indexed_at: int | None
+    rss_mb: int                # C6: int, pas float
+    model_loaded: bool
+    model_name: str
+    embedding_dim: int
+    vec_loaded: bool
+    vec_error: str
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -355,4 +371,53 @@ async def embed_job_status(job_id: str) -> JobStatusResponse:
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
     return JobStatusResponse(job_id=job_id, **job)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# GET /api/ai/embed/status
+# ──────────────────────────────────────────────────────────────────────────────
+
+@router.get(
+    "/embed/status",
+    response_model=EmbedStatus,
+    response_model_by_alias=True,
+)
+async def embed_status(db: AsyncSession = Depends(get_db)) -> EmbedStatus:
+    """Diagnostic snapshot of the AI subsystem.
+
+    Returns counts (embeddings, cache rows, pending), the most recent embedded_at,
+    process RSS, and load state of the fastembed model and sqlite-vec extension.
+    """
+    from sqlalchemy import text
+    from app.services import embedding_service
+    from app.db.database import _VEC_LOADED
+
+    total_embeddings = (
+        await db.execute(text("SELECT COUNT(*) FROM ai_embeddings"))
+    ).scalar() or 0
+    total_cache_entries = (
+        await db.execute(text("SELECT COUNT(*) FROM ai_tmdb_cache"))
+    ).scalar() or 0
+    pending_embed = (
+        await db.execute(text("SELECT COUNT(*) FROM ai_tmdb_cache WHERE embedded_at IS NULL"))
+    ).scalar() or 0
+    last_indexed_at = (
+        await db.execute(text("SELECT MAX(embedded_at) FROM ai_tmdb_cache"))
+    ).scalar()
+
+    rss_bytes = psutil.Process(os.getpid()).memory_info().rss
+    rss_mb = int(rss_bytes // (1024 * 1024))
+
+    return EmbedStatus(
+        total_embeddings=int(total_embeddings),
+        total_cache_entries=int(total_cache_entries),
+        pending_embed=int(pending_embed),
+        last_indexed_at=int(last_indexed_at) if last_indexed_at is not None else None,
+        rss_mb=rss_mb,
+        model_loaded=embedding_service._model is not None,
+        model_name=embedding_service.MODEL_NAME,
+        embedding_dim=embedding_service.EMBEDDING_DIM,
+        vec_loaded=bool(_VEC_LOADED.get("ok")),
+        vec_error=str(_VEC_LOADED.get("error") or ""),
+    )
 

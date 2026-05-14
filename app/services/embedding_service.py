@@ -27,8 +27,16 @@ class EmbeddingUnavailableError(RuntimeError):
 
 
 def _load_model_blocking() -> Any:
-    """Synchronous model factory. Called inside asyncio.to_thread."""
+    """Synchronous model factory. Called inside asyncio.to_thread.
+
+    Honors settings.AI_EMBED_CACHE_DIR when set; otherwise fastembed picks its
+    default (~/.cache/fastembed) which is ephemeral inside a container.
+    """
     from fastembed import TextEmbedding  # local import: defer fastembed cost to first call
+    from app.config import settings
+
+    if settings.AI_EMBED_CACHE_DIR:
+        return TextEmbedding(model_name=MODEL_NAME, cache_dir=settings.AI_EMBED_CACHE_DIR)
     return TextEmbedding(model_name=MODEL_NAME)
 
 

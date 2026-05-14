@@ -28,6 +28,7 @@ from app.services.recommendation_service import (
     load_cached_vectors,
 )
 from app.services.tmdb_service import tmdb_service
+from app.workers.embedding_worker import enqueue_rebuild, get_job
 
 logger = logging.getLogger("plexhub.ai.api")
 
@@ -102,6 +103,22 @@ class RankResponse(BaseModel):
     cache_misses: int
     cache_misses_dropped: int
     resolution_failed: int
+
+
+class RebuildResponse(BaseModel):
+    model_config = _CAMEL_CONFIG
+    job_id: str
+
+
+class JobStatusResponse(BaseModel):
+    model_config = _CAMEL_CONFIG
+    job_id: str
+    status: Literal["pending", "running", "done", "failed"]
+    processed: int
+    errors: int
+    last_error: str | None
+    started_at: int
+    finished_at: int | None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -306,3 +323,36 @@ async def rank_multi(
         cache_misses_dropped=stats.dropped,
         resolution_failed=resolution_failed,
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# POST /api/ai/embed/rebuild  +  GET /api/ai/embed/jobs/{job_id}
+# ──────────────────────────────────────────────────────────────────────────────
+
+@router.post(
+    "/embed/rebuild",
+    response_model=RebuildResponse,
+    response_model_by_alias=True,
+    status_code=202,
+)
+async def embed_rebuild() -> RebuildResponse:
+    """Trigger a background re-embedding of all ai_tmdb_cache rows pending an embed.
+
+    Returns immediately with 202 + jobId. Poll GET /embed/jobs/{jobId} for progress.
+    Never auto-runs at boot — only via this endpoint (R5).
+    """
+    job_id = await enqueue_rebuild()
+    return RebuildResponse(job_id=job_id)
+
+
+@router.get(
+    "/embed/jobs/{job_id}",
+    response_model=JobStatusResponse,
+    response_model_by_alias=True,
+)
+async def embed_job_status(job_id: str) -> JobStatusResponse:
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    return JobStatusResponse(job_id=job_id, **job)
+

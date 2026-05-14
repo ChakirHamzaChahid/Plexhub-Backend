@@ -1,11 +1,13 @@
 """AI recommendation API.
 
-Currently exposes :
-    POST /api/ai/rank    Rank candidate media by cosine similarity to a single ref.
+Exposes :
+    POST /api/ai/rank          Rank candidates by cosine sim to a single ref.
+    POST /api/ai/rank-multi    Rank candidates by cosine sim to a weighted
+                               centroid of N refs (J4).
 
 The router has a module-level dependency on verify_api_key — every endpoint
-mounted here is auth-protected. Future J4 endpoints (/rank-multi) and J5/J6
-endpoints (/embed/*) appended under this router inherit the same guard.
+mounted here is auth-protected. Future J5/J6 endpoints (/embed/*) appended
+under this router inherit the same guard.
 """
 from __future__ import annotations
 
@@ -19,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import verify_api_key
 from app.db.database import async_session_factory, get_db
-from app.services.embedding_service import EmbeddingUnavailableError
+from app.services.embedding_service import EmbeddingUnavailableError, weighted_centroid
 from app.services.recommendation_service import (
     cosine_rank,
     hydrate_misses,
@@ -65,6 +67,23 @@ class RankRequest(BaseModel):
     candidates: list[MediaRef]
     limit: int = Field(default=20, ge=1, le=200)
     media_type: Literal["movie", "tv"] = "movie"
+
+
+class RankMultiRequest(BaseModel):
+    """Request body for POST /api/ai/rank-multi.
+
+    refs / candidates: lists of MediaRef (tmdb_id or imdb_id).
+    exclude_refs (default True): when True, any tmdb_id present in refs is
+        removed from candidates BEFORE ranking so `limit` stays coherent.
+    """
+
+    model_config = _CAMEL_CONFIG
+
+    refs: list[MediaRef]
+    candidates: list[MediaRef]
+    limit: int = Field(default=20, ge=1, le=200)
+    media_type: Literal["movie", "tv"] = "movie"
+    exclude_refs: bool = True
 
 
 class RankedItem(BaseModel):
@@ -194,5 +213,96 @@ async def rank(
         cache_hits=cache_hits,
         cache_misses=cache_misses,
         cache_misses_dropped=cache_misses_dropped,
+        resolution_failed=resolution_failed,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# POST /api/ai/rank-multi
+# ──────────────────────────────────────────────────────────────────────────────
+
+@router.post("/rank-multi", response_model=RankResponse, response_model_by_alias=True)
+async def rank_multi(
+    payload: RankMultiRequest,
+    db: AsyncSession = Depends(get_db),
+) -> RankResponse:
+    """Rank candidates by cosine similarity to the L2-normalized weighted
+    centroid of refs.
+
+    Weights decay 1.0, 0.9, 0.8, ..., clamped to min 0.1 (so the 10th+ ref still
+    contributes). When exclude_refs is True (default), tmdb_ids in refs are
+    removed from candidates BEFORE ranking (so limit stays coherent).
+    """
+    # 1. Resolve refs
+    if not payload.refs:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="refs cannot be empty",
+        )
+
+    ref_ids, _ref_mapping, ref_failed = await _resolve_refs(payload.refs, payload.media_type)
+    if not ref_ids:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="no refs resolved",
+        )
+
+    cand_ids_raw, cand_mapping, cand_failed = await _resolve_refs(
+        payload.candidates, payload.media_type
+    )
+    resolution_failed = ref_failed + cand_failed
+
+    # 2. exclude_refs : drop refs from candidates BEFORE the ranking
+    if payload.exclude_refs:
+        ref_set = set(ref_ids)
+        cand_ids = [tid for tid in cand_ids_raw if tid not in ref_set]
+    else:
+        cand_ids = cand_ids_raw
+
+    # 3. Cache lookup union (refs + remaining candidates)
+    all_ids = list({*ref_ids, *cand_ids})
+    cached = await load_cached_vectors(db, all_ids)
+    cache_hits = len(cached)
+    miss_ids = [tid for tid in all_ids if tid not in cached]
+
+    # 4. Hydrate
+    try:
+        hydrated, stats = await hydrate_misses(
+            miss_ids, payload.media_type, async_session_factory
+        )
+    except EmbeddingUnavailableError as exc:
+        logger.warning("embedding unavailable during /rank-multi: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI model unavailable",
+        ) from exc
+
+    vectors = {**cached, **hydrated}
+
+    # 5. Build the weighted centroid (decay 1.0, 0.9, ..., min 0.1)
+    available_ref_ids = [tid for tid in ref_ids if tid in vectors]
+    if not available_ref_ids:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="no ref embeddings available",
+        )
+    ref_vecs = [vectors[tid] for tid in available_ref_ids]
+    weights = [max(0.1, 1.0 - 0.1 * i) for i in range(len(ref_vecs))]
+    query_vec = weighted_centroid(ref_vecs, weights)
+
+    # 6. Rank candidates
+    cand_set = set(cand_ids)
+    cand_vecs = {tid: vec for tid, vec in vectors.items() if tid in cand_set}
+    ranked_pairs = cosine_rank(query_vec, cand_vecs, payload.limit)
+
+    ranked_items = [
+        RankedItem(tmdb_id=tid, imdb_id=cand_mapping.get(tid), score=score)
+        for tid, score in ranked_pairs
+    ]
+    return RankResponse(
+        ranked=ranked_items,
+        cache_hits=cache_hits,
+        cache_misses=stats.hydrated,
+        cache_misses_dropped=stats.dropped,
         resolution_failed=resolution_failed,
     )

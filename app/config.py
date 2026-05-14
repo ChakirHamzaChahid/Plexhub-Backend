@@ -20,6 +20,7 @@ def _safe_int(env_var: str, default: int) -> int:
 
 class Settings:
     TMDB_API_KEY: str = os.getenv("TMDB_API_KEY", "")
+    AI_API_KEY: str = os.getenv("AI_API_KEY", "")
     DATA_DIR: Path = Path(os.getenv("DATA_DIR", "./data"))
     LOG_DIR: Path = Path(os.getenv("LOG_DIR", "./logs"))
     DB_PATH: Path

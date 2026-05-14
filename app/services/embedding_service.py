@@ -1,6 +1,6 @@
 """Lazy singleton wrapper around fastembed TextEmbedding.
 
-Model: sentence-transformers/paraphrase-multilingual-MiniLM-L6-v2 (384 dim,
+Model: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2 (384 dim,
 multilingual, Apache-2.0). fastembed >= 0.7 dropped native support for
 intfloat/multilingual-e5-small; this MiniLM model is the official 384-dim
 multilingual substitute and does NOT require E5-style "passage:"/"query:"
@@ -23,7 +23,7 @@ import numpy as np
 
 logger = logging.getLogger("plexhub.ai.embedding")
 
-DEFAULT_MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L6-v2"
+DEFAULT_MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 EMBEDDING_DIM = 384
 
 

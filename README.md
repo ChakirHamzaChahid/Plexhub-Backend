@@ -32,7 +32,7 @@ The backend exposes a stateless ranking API over media identifiers (`tmdb_id` an
 
 ### Operational notes
 
-- **Cold start ~30 s on first `/rank`**: fastembed downloads ~120 MB of ONNX weights (`sentence-transformers/paraphrase-multilingual-MiniLM-L6-v2`, 384 dim, 100 languages). Subsequent calls are fast. Override via `AI_EMBED_MODEL` env var if you bring a custom model.
+- **Cold start ~30 s on first `/rank`**: fastembed downloads ~120 MB of ONNX weights (`sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`, 384 dim, 50+ languages). Subsequent calls are fast. Override via `AI_EMBED_MODEL` env var if you bring a custom model.
 - **The rebuild never auto-runs at boot**. It only executes via `POST /api/ai/embed/rebuild` (R5).
 - **Container memory**: bumped from 1 G to 2 G to fit the model + ONNX runtime.
 - **Episodes are not supported (C.4)**: the service ranks at the show level (`tv`) or movie level (`movie`) only. IMDb ids that resolve to episodes, seasons, or persons are counted in `resolutionFailed` and dropped. The Android app must rank at the parent show and play episodes locally via `parentRatingKey`/`grandparentRatingKey`.

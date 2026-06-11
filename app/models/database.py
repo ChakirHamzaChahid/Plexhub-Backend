@@ -218,6 +218,38 @@ class EpgEntry(Base):
     )
 
 
+class TvAuthSession(Base):
+    """Device-flow TV pairing session (Mission 18).
+
+    Lifecycle: pending -> approved -> completed (or -> expired).
+    - device_code: long opaque secret known only by the TV (poll credential).
+    - user_code: short human code displayed on the TV, validated on mobile/web.
+    - payload_encrypted: Fernet token (config/token Plex) — encrypted at rest,
+      delivered to the TV exactly once, scrubbed at completion.
+    """
+
+    __tablename__ = "tv_auth_sessions"
+
+    id = Column(Text, primary_key=True)  # uuid4 hex
+    device_code = Column(Text, nullable=False)  # secrets.token_urlsafe(32)
+    user_code = Column(Text, nullable=False)  # 8 chars, unambiguous alphabet
+    status = Column(Text, nullable=False, default="pending")  # pending/approved/completed/expired
+    payload_encrypted = Column(Text)  # Fernet token, null until approved
+    payload_delivered = Column(Boolean, nullable=False, default=False)  # one-shot delivery
+    device_name = Column(Text)  # optional, e.g. "Mi Box S (salon)"
+    created_at = Column(BigInteger, nullable=False)  # epoch ms
+    expires_at = Column(BigInteger, nullable=False)  # epoch ms (created_at + TTL 15 min)
+    approved_at = Column(BigInteger)
+    completed_at = Column(BigInteger)
+
+    __table_args__ = (
+        Index("uix_tv_auth_device_code", "device_code", unique=True),
+        Index("uix_tv_auth_user_code", "user_code", unique=True),
+        Index("ix_tv_auth_expires", "expires_at"),
+        Index("ix_tv_auth_status", "status"),
+    )
+
+
 class EnrichmentQueue(Base):
     __tablename__ = "enrichment_queue"
 

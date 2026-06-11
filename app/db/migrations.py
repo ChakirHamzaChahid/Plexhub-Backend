@@ -28,6 +28,8 @@ async def run_migrations(engine: AsyncEngine) -> None:
     async with engine.begin() as conn:
         await _migration_008_ai_embeddings(conn)
 
+    await _migration_009_create_tv_auth_sessions(engine)
+
     logger.info("All migrations completed successfully")
 
 
@@ -226,6 +228,45 @@ async def _migration_007_add_stream_validation_index(engine: AsyncEngine) -> Non
             logger.info("Migration 007: stream validation index created")
         except Exception as e:
             logger.warning(f"Migration 007: Index may already exist: {e}")
+
+
+async def _migration_009_create_tv_auth_sessions(engine: AsyncEngine) -> None:
+    """Create tv_auth_sessions table for device-flow TV pairing (Mission 18).
+
+    Sessions are short-lived (TTL 15 min), single-use, and the sensitive
+    payload is encrypted at rest (Fernet). Idempotent: IF NOT EXISTS everywhere.
+    """
+    logger.info("Migration 009: Creating tv_auth_sessions table")
+
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS tv_auth_sessions (
+                    id TEXT PRIMARY KEY,
+                    device_code TEXT NOT NULL,
+                    user_code TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    payload_encrypted TEXT,
+                    payload_delivered INTEGER NOT NULL DEFAULT 0,
+                    device_name TEXT,
+                    created_at INTEGER NOT NULL,
+                    expires_at INTEGER NOT NULL,
+                    approved_at INTEGER,
+                    completed_at INTEGER
+                )
+            """))
+
+            for idx_sql in [
+                "CREATE UNIQUE INDEX IF NOT EXISTS uix_tv_auth_device_code ON tv_auth_sessions(device_code)",
+                "CREATE UNIQUE INDEX IF NOT EXISTS uix_tv_auth_user_code ON tv_auth_sessions(user_code)",
+                "CREATE INDEX IF NOT EXISTS ix_tv_auth_expires ON tv_auth_sessions(expires_at)",
+                "CREATE INDEX IF NOT EXISTS ix_tv_auth_status ON tv_auth_sessions(status)",
+            ]:
+                await conn.execute(text(idx_sql))
+
+            logger.info("Migration 009: tv_auth_sessions table created")
+        except Exception as e:
+            logger.warning(f"Migration 009: Table may already exist: {e}")
 
 
 async def _migration_008_ai_embeddings(conn) -> None:

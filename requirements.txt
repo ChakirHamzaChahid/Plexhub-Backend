@@ -18,3 +18,4 @@ onnxruntime>=1.20,<2.0
 sqlite-vec>=0.1,<0.2
 numpy>=1.26,<3.0
 psutil>=6.0,<7.0
+cryptography>=42,<46

@@ -4,19 +4,22 @@ Exposes :
     POST /api/ai/rank          Rank candidates by cosine sim to a single ref.
     POST /api/ai/rank-multi    Rank candidates by cosine sim to a weighted
                                centroid of N refs (J4).
+    POST /api/ai/describe      Generate a recommendation blurb via Ollama/gemma4.
+    POST /api/ai/chat          Free-form LLM chat about a media item.
+    GET  /api/ai/llm/status    Health check for the Ollama backend.
 
 The router has a module-level dependency on verify_api_key — every endpoint
-mounted here is auth-protected. Future J5/J6 endpoints (/embed/*) appended
-under this router inherit the same guard.
+mounted here is auth-protected.
 """
 from __future__ import annotations
 
 import logging
 import os
-from typing import Literal
+from typing import AsyncIterator, Literal
 
 import psutil
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.alias_generators import to_camel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -419,5 +422,131 @@ async def embed_status(db: AsyncSession = Depends(get_db)) -> EmbedStatus:
         embedding_dim=embedding_service.EMBEDDING_DIM,
         vec_loaded=bool(_VEC_LOADED.get("ok")),
         vec_error=str(_VEC_LOADED.get("error") or ""),
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# LLM endpoints (Ollama / gemma4)
+# ──────────────────────────────────────────────────────────────────────────────
+
+from app.services import ollama_service  # noqa: E402 — import after router definition
+from app.config import settings as _settings  # noqa: E402
+
+
+class DescribeRequest(BaseModel):
+    """Generate a short recommendation blurb for a media item."""
+
+    model_config = _CAMEL_CONFIG
+
+    title: str
+    overview: str | None = None
+    genres: list[str] = Field(default_factory=list)
+    year: int | None = None
+    language: Literal["fr", "en"] = "fr"
+
+
+class DescribeResponse(BaseModel):
+    model_config = _CAMEL_CONFIG
+
+    recommendation: str
+    model: str
+
+
+class ChatMessage(BaseModel):
+    model_config = _CAMEL_CONFIG
+
+    role: Literal["user", "assistant", "system"]
+    content: str
+
+
+class ChatRequest(BaseModel):
+    model_config = _CAMEL_CONFIG
+
+    messages: list[ChatMessage]
+    stream: bool = False
+
+
+class ChatResponse(BaseModel):
+    model_config = _CAMEL_CONFIG
+
+    reply: str
+    model: str
+
+
+class LlmStatus(BaseModel):
+    model_config = _CAMEL_CONFIG
+
+    healthy: bool
+    model: str
+    ollama_url: str
+    detail: str
+
+
+def _ollama_503(exc: Exception) -> HTTPException:
+    logger.warning("Ollama unavailable: %s", exc)
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="LLM unavailable — Ollama unreachable or model not loaded",
+    )
+
+
+@router.post("/describe", response_model=DescribeResponse, response_model_by_alias=True)
+async def describe(payload: DescribeRequest) -> DescribeResponse:
+    """Generate a short personalized recommendation for a media item via gemma4."""
+    lang = "en français" if payload.language == "fr" else "in English"
+    genres_str = ", ".join(payload.genres) if payload.genres else "N/A"
+    year_str = f" ({payload.year})" if payload.year else ""
+
+    prompt = (
+        f"Tu es un expert en recommandations cinéma et séries TV. "
+        f"Rédige {lang} une courte présentation enthousiaste (2-3 phrases max) "
+        f"pour convaincre quelqu'un de regarder ce titre :\n\n"
+        f"Titre : {payload.title}{year_str}\n"
+        f"Genres : {genres_str}\n"
+        f"Synopsis : {payload.overview or 'Non disponible'}\n\n"
+        f"Sois percutant, sans spoiler, et sans répéter le titre en début de phrase."
+    )
+    try:
+        text = await ollama_service.generate(prompt)
+        return DescribeResponse(recommendation=text.strip(), model=_settings.OLLAMA_MODEL)
+    except Exception as exc:
+        raise _ollama_503(exc) from exc
+
+
+@router.post("/chat", response_model_by_alias=True)
+async def chat(payload: ChatRequest):
+    """Free-form chat with gemma4. Supports streaming (stream=true → SSE)."""
+    messages = [{"role": m.role, "content": m.content} for m in payload.messages]
+
+    if payload.stream:
+        async def _sse() -> AsyncIterator[str]:
+            try:
+                async for chunk in ollama_service.stream_generate(
+                    messages[-1]["content"] if messages else ""
+                ):
+                    yield f"data: {chunk}\n\n"
+                yield "data: [DONE]\n\n"
+            except Exception as exc:
+                logger.warning("Ollama stream error: %s", exc)
+                yield "data: [ERROR]\n\n"
+
+        return StreamingResponse(_sse(), media_type="text/event-stream")
+
+    try:
+        reply = await ollama_service.chat(messages)
+        return ChatResponse(reply=reply.strip(), model=_settings.OLLAMA_MODEL)
+    except Exception as exc:
+        raise _ollama_503(exc) from exc
+
+
+@router.get("/llm/status", response_model=LlmStatus, response_model_by_alias=True)
+async def llm_status() -> LlmStatus:
+    """Health check for the Ollama LLM backend."""
+    ok, detail = await ollama_service.is_healthy()
+    return LlmStatus(
+        healthy=ok,
+        model=_settings.OLLAMA_MODEL,
+        ollama_url=_settings.OLLAMA_URL,
+        detail=detail,
     )
 

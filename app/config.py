@@ -57,6 +57,10 @@ class Settings:
     ]
     TMDB_LANGUAGE: str = os.getenv("TMDB_LANGUAGE", "fr-FR")
 
+    # Ollama LLM (gemma4 via khoj-ollama)
+    OLLAMA_URL: str = os.getenv("OLLAMA_URL", "http://khoj-ollama:11434")
+    OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "gemma4:e4b")
+
     # Xtream account auto-provisioning from env
     XTREAM_BASE_URL: str = os.getenv("XTREAM_BASE_URL", "")
     XTREAM_PORT: int = _safe_int("XTREAM_PORT", 80)
@@ -76,6 +80,8 @@ class Settings:
             logger.info(f"TMDB API Key loaded: {self.TMDB_API_KEY[:4]}****")
         else:
             logger.warning("TMDB_API_KEY not set — enrichment will be disabled")
+
+        logger.info(f"Ollama LLM: {self.OLLAMA_URL} / model={self.OLLAMA_MODEL}")
 
 
 settings = Settings()

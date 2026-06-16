@@ -278,6 +278,58 @@ async def semantic_search(
     return results[:limit]
 
 
+async def semantic_search_with_overview(
+    db: AsyncSession,
+    query_vec: list[float],
+    media_type: str | None,
+    limit: int,
+) -> list[tuple[int, str | None, str, float, str | None]]:
+    """Like semantic_search but also returns the overview column from ai_tmdb_cache.
+
+    Returns a list of (tmdb_id, title, media_type, score, overview) tuples,
+    sorted by score descending.  overview may be None when not yet fetched.
+    """
+    vec_blob = _serialize_vec(query_vec)
+
+    if media_type is not None:
+        knn_k = min(limit * 4, 200)
+    else:
+        knn_k = limit
+
+    knn_sql = text(
+        "SELECT tmdb_id, distance "
+        "FROM ai_embeddings "
+        "WHERE embedding MATCH :vec AND k = :k "
+        "ORDER BY distance"
+    )
+    knn_rows = (await db.execute(knn_sql, {"vec": vec_blob, "k": knn_k})).fetchall()
+    if not knn_rows:
+        return []
+
+    knn_ids = [row[0] for row in knn_rows]
+    dist_by_id = {row[0]: row[1] for row in knn_rows}
+
+    placeholders = ",".join(f":id{i}" for i in range(len(knn_ids)))
+    params: dict = {f"id{i}": tid for i, tid in enumerate(knn_ids)}
+    cache_sql = text(
+        f"SELECT tmdb_id, title, media_type, overview "
+        f"FROM ai_tmdb_cache "
+        f"WHERE tmdb_id IN ({placeholders})"
+    )
+    cache_rows = (await db.execute(cache_sql, params)).fetchall()
+
+    results: list[tuple[int, str | None, str, float, str | None]] = []
+    for tmdb_id, title, row_media_type, overview in cache_rows:
+        if media_type is not None and row_media_type != media_type:
+            continue
+        dist = dist_by_id[tmdb_id]
+        score = round(1.0 - (dist ** 2) / 2.0, 6)
+        results.append((tmdb_id, title, row_media_type, score, overview))
+
+    results.sort(key=lambda x: x[3], reverse=True)
+    return results[:limit]
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Cosine ranking
 # ──────────────────────────────────────────────────────────────────────────────

@@ -41,6 +41,7 @@ from app.services.recommendation_service import (
     hydrate_misses,
     load_cached_vectors,
     semantic_search,
+    semantic_search_with_overview,
 )
 from app.services.tmdb_service import tmdb_service
 from app.workers.embedding_worker import enqueue_rebuild, get_job
@@ -465,6 +466,136 @@ async def search(
         results=results,
         query_used=query_used,
         model=DEFAULT_MODEL_NAME,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# POST /api/ai/assistant  (F4 — catalog RAG assistant)
+# ──────────────────────────────────────────────────────────────────────────────
+
+_OVERVIEW_TRUNCATE = 300  # chars per title fed to the LLM context window
+
+
+class AssistantMessage(BaseModel):
+    """One turn in the optional conversation history."""
+
+    model_config = _CAMEL_CONFIG
+
+    role: str
+    content: str
+
+
+class AssistantRequest(BaseModel):
+    model_config = _CAMEL_CONFIG
+
+    message: str = Field(min_length=1)
+    media_type: Literal["movie", "tv"] | None = None
+    history: list[AssistantMessage] = Field(default_factory=list)
+    limit: int = Field(default=5, ge=1, le=10)
+
+
+class AssistantSource(BaseModel):
+    model_config = _CAMEL_CONFIG
+
+    tmdb_id: int
+    title: str | None = None
+    media_type: str
+
+
+class AssistantResponse(BaseModel):
+    model_config = _CAMEL_CONFIG
+
+    reply: str
+    sources: list[AssistantSource]
+    model: str
+
+
+@router.post("/assistant", response_model=AssistantResponse, response_model_by_alias=True)
+async def assistant(
+    payload: AssistantRequest,
+    db: AsyncSession = Depends(get_db),
+) -> AssistantResponse:
+    """Catalog RAG assistant: answer the user question grounded in real titles.
+
+    Pipeline:
+      1. Embed the user message (EmbeddingUnavailableError -> 503).
+      2. Retrieve top-`limit` titles + overviews from ai_embeddings / ai_tmdb_cache.
+      3. Build an Ollama /api/chat messages list:
+           - system instruction (French, grounding rule: cite only listed titles)
+           - catalog context block (title + truncated overview per retrieved item)
+           - optional prior conversation history
+           - the user message
+      4. Call ollama_service.chat. Ollama failure -> 503.
+      5. Return reply, sources (grounding titles), model name.
+    """
+    from app.services import ollama_service as _ollama
+    from app.services.embedding_service import (
+        EmbeddingUnavailableError as _EmbUnavail,
+        embed_query as _embed_query,
+        DEFAULT_MODEL_NAME,
+    )
+
+    # 1. Embed user message — propagates EmbeddingUnavailableError -> 503.
+    try:
+        query_vec = await _embed_query(payload.message)
+    except _EmbUnavail as exc:
+        logger.warning("embedding unavailable during /assistant: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI model unavailable",
+        ) from exc
+
+    # 2. KNN retrieval with overview column.
+    rows = await semantic_search_with_overview(
+        db=db,
+        query_vec=query_vec,
+        media_type=payload.media_type,
+        limit=payload.limit,
+    )
+
+    # 3. Build the chat messages list for Ollama.
+    #    a. System instruction: answer ONLY using the listed titles, in French.
+    catalog_lines: list[str] = []
+    sources: list[AssistantSource] = []
+    for tmdb_id, title, row_media_type, _score, overview in rows:
+        sources.append(AssistantSource(tmdb_id=tmdb_id, title=title, media_type=row_media_type))
+        label = title or f"tmdb:{tmdb_id}"
+        short_overview = (overview or "")[:_OVERVIEW_TRUNCATE].strip()
+        line = f"- {label}"
+        if short_overview:
+            line += f" : {short_overview}"
+        catalog_lines.append(line)
+
+    catalog_block = "\n".join(catalog_lines) if catalog_lines else "(aucun titre disponible)"
+
+    system_content = (
+        "Tu es un assistant cinéma et séries TV intégré au catalogue PlexHub. "
+        "Réponds UNIQUEMENT en t'appuyant sur les titres du catalogue fourni ci-dessous. "
+        "Ne mentionne et n'invente aucun titre absent de cette liste. "
+        "Cite les titres par leur nom exact. Réponds en français.\n\n"
+        f"Catalogue disponible :\n{catalog_block}"
+    )
+
+    messages: list[dict[str, str]] = [{"role": "system", "content": system_content}]
+
+    #    b. Prior conversation history (mapped as-is — roles are user/assistant/system).
+    for turn in payload.history:
+        messages.append({"role": turn.role, "content": turn.content})
+
+    #    c. Current user message.
+    messages.append({"role": "user", "content": payload.message})
+
+    # 4. Call Ollama /api/chat — LLM is essential here, so failure -> 503.
+    try:
+        reply = await ollama_service.chat(messages)
+    except Exception as exc:
+        raise _ollama_503(exc) from exc
+
+    # 5. Return structured response.
+    return AssistantResponse(
+        reply=reply.strip(),
+        sources=sources,
+        model=_settings.OLLAMA_MODEL,
     )
 
 

@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.config import settings
 from app.db.database import _VEC_LOADED, register_sqlite_vec_listener
 from app.db.migrations import _migration_008_ai_embeddings
+from app.services.embedding_service import DEFAULT_MODEL_NAME
 
 
 pytestmark = pytest.mark.asyncio
@@ -110,7 +111,7 @@ async def test_status_shape(status_client):
     )
 
     assert isinstance(data["rssMb"], int)
-    assert data["modelName"] == "intfloat/multilingual-e5-small"
+    assert data["modelName"] == DEFAULT_MODEL_NAME
     assert data["embeddingDim"] == 384
     assert isinstance(data["vecLoaded"], bool)
     assert isinstance(data["vecError"], str)

@@ -22,7 +22,7 @@ import time
 from typing import AsyncIterator, Literal
 
 import psutil
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.alias_generators import to_camel
@@ -32,12 +32,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import verify_api_key
 from app.db.database import async_session_factory, get_db
-from app.models.database import AiSubtitleCache
+from app.models.database import AiMediaBlurb, AiSubtitleCache
 from app.utils.db_retry import commit_with_retry
 from app.utils.time import now_ms
 from app.services.embedding_service import EmbeddingUnavailableError, weighted_centroid
 from app.services.recommendation_service import (
     cosine_rank,
+    generate_blurb,
     hydrate_misses,
     load_cached_vectors,
     semantic_search,
@@ -1044,5 +1045,184 @@ async def translate_subtitle(
         cached=False,
         model=result.model,
         duration_seconds=duration,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# F3 — POST /api/ai/blurb  +  GET /api/ai/blurb/{tmdb_id}
+# ──────────────────────────────────────────────────────────────────────────────
+
+import json as _json  # noqa: E402 — after router definition, mirrors subtitle pattern
+
+
+class BlurbRequest(BaseModel):
+    """Generate (or retrieve cached) French synopsis + mood tags for a title."""
+
+    model_config = _CAMEL_CONFIG
+
+    tmdb_id: int
+    media_type: Literal["movie", "tv"]
+    lang: str = "fr"
+    title: str | None = None
+    overview: str | None = None
+    genres: str | None = None
+    force: bool = False
+
+
+class BlurbResponse(BaseModel):
+    model_config = _CAMEL_CONFIG
+
+    tmdb_id: int
+    media_type: Literal["movie", "tv"]
+    lang: str
+    summary: str
+    tags: list[str]
+    cached: bool
+    model: str
+
+
+@router.post("/blurb", response_model=BlurbResponse, response_model_by_alias=True)
+async def blurb_generate(
+    payload: BlurbRequest,
+    db: AsyncSession = Depends(get_db),
+) -> BlurbResponse:
+    """Generate a French synopsis + mood/genre tags for a title via gemma4.
+
+    On cache hit (force=False) returns the persisted blurb immediately.
+    On miss (or force=True): resolves title/overview/genres from the request,
+    falling back to ai_tmdb_cache; calls generate_blurb, persists, returns.
+    Ollama failure → 503 (_ollama_503).
+    """
+    from sqlalchemy import text as _text
+
+    # 1. Cache lookup (skip when force=True)
+    if not payload.force:
+        cached_row = (
+            await db.execute(
+                select(AiMediaBlurb).where(
+                    AiMediaBlurb.tmdb_id == payload.tmdb_id,
+                    AiMediaBlurb.media_type == payload.media_type,
+                    AiMediaBlurb.lang == payload.lang,
+                )
+            )
+        ).scalar_one_or_none()
+        if cached_row is not None:
+            return BlurbResponse(
+                tmdb_id=cached_row.tmdb_id,
+                media_type=cached_row.media_type,  # type: ignore[arg-type]
+                lang=cached_row.lang,
+                summary=cached_row.summary,
+                tags=_json.loads(cached_row.tags),
+                cached=True,
+                model=cached_row.model,
+            )
+
+    # 2. Resolve source text: prefer request fields, fall back to ai_tmdb_cache
+    title = payload.title or ""
+    overview = payload.overview or ""
+    genres = payload.genres or ""
+
+    if not title or not overview:
+        cache_row = (
+            await db.execute(
+                _text(
+                    "SELECT title, overview, genres FROM ai_tmdb_cache "
+                    "WHERE tmdb_id = :tid"
+                ),
+                {"tid": payload.tmdb_id},
+            )
+        ).fetchone()
+        if cache_row is not None:
+            title = title or (cache_row[0] or "")
+            overview = overview or (cache_row[1] or "")
+            genres = genres or (cache_row[2] or "")
+
+    if not title and not overview:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="No source text available: provide title/overview or ensure tmdb_id is in ai_tmdb_cache",
+        )
+
+    # 3. Generate via Ollama
+    try:
+        result = await generate_blurb(
+            tmdb_id=payload.tmdb_id,
+            media_type=payload.media_type,
+            title=title,
+            overview=overview,
+            genres=genres,
+            lang=payload.lang,
+        )
+    except Exception as exc:
+        raise _ollama_503(exc) from exc
+
+    # 4. Persist (INSERT OR REPLACE semantics via delete+add)
+    tags_json = _json.dumps(result["tags"], ensure_ascii=False)
+    try:
+        await db.execute(
+            _text(
+                "DELETE FROM ai_media_blurb "
+                "WHERE tmdb_id = :tid AND media_type = :mt AND lang = :lang"
+            ),
+            {"tid": payload.tmdb_id, "mt": payload.media_type, "lang": payload.lang},
+        )
+        db.add(
+            AiMediaBlurb(
+                tmdb_id=payload.tmdb_id,
+                media_type=payload.media_type,
+                lang=payload.lang,
+                summary=result["summary"],
+                tags=tags_json,
+                model=_settings.OLLAMA_MODEL,
+                created_at=now_ms(),
+            )
+        )
+        await commit_with_retry(db)
+    except Exception:
+        await db.rollback()
+
+    # 5. Return fresh result
+    return BlurbResponse(
+        tmdb_id=payload.tmdb_id,
+        media_type=payload.media_type,
+        lang=payload.lang,
+        summary=result["summary"],
+        tags=result["tags"],
+        cached=False,
+        model=_settings.OLLAMA_MODEL,
+    )
+
+
+@router.get(
+    "/blurb/{tmdb_id}",
+    response_model=BlurbResponse,
+    response_model_by_alias=True,
+)
+async def blurb_get(
+    tmdb_id: int,
+    media_type: Literal["movie", "tv"] = Query(..., alias="mediaType"),
+    lang: str = Query(default="fr"),
+    db: AsyncSession = Depends(get_db),
+) -> BlurbResponse:
+    """Return a previously generated blurb, or 404 if not yet generated."""
+    row = (
+        await db.execute(
+            select(AiMediaBlurb).where(
+                AiMediaBlurb.tmdb_id == tmdb_id,
+                AiMediaBlurb.media_type == media_type,
+                AiMediaBlurb.lang == lang,
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="blurb not found")
+    return BlurbResponse(
+        tmdb_id=row.tmdb_id,
+        media_type=row.media_type,  # type: ignore[arg-type]
+        lang=row.lang,
+        summary=row.summary,
+        tags=_json.loads(row.tags),
+        cached=True,
+        model=row.model,
     )
 

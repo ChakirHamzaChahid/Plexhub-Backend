@@ -30,6 +30,7 @@ async def run_migrations(engine: AsyncEngine) -> None:
 
     await _migration_009_create_tv_auth_sessions(engine)
     await _migration_010_create_subtitle_cache(engine)
+    await _migration_011_create_media_blurb(engine)
 
     logger.info("All migrations completed successfully")
 
@@ -302,6 +303,41 @@ async def _migration_010_create_subtitle_cache(engine: AsyncEngine) -> None:
             logger.info("Migration 010: ai_subtitle_cache table created")
         except Exception as e:
             logger.warning(f"Migration 010: Table may already exist: {e}")
+
+
+async def _migration_011_create_media_blurb(engine: AsyncEngine) -> None:
+    """Create ai_media_blurb table for AI-generated French synopsis + mood tags (F3).
+
+    Keyed on (tmdb_id, media_type, lang) so the same title can have blurbs for
+    multiple languages.  tags is stored as a JSON array string.
+    Idempotent: every DDL uses IF NOT EXISTS.
+    """
+    logger.info("Migration 011: Creating ai_media_blurb table")
+
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS ai_media_blurb (
+                    tmdb_id    INTEGER NOT NULL,
+                    media_type TEXT    NOT NULL,
+                    lang       TEXT    NOT NULL,
+                    summary    TEXT    NOT NULL,
+                    tags       TEXT    NOT NULL,
+                    model      TEXT    NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    PRIMARY KEY (tmdb_id, media_type, lang)
+                )
+            """))
+
+            for idx_sql in [
+                "CREATE INDEX IF NOT EXISTS ix_media_blurb_tmdb ON ai_media_blurb(tmdb_id)",
+                "CREATE INDEX IF NOT EXISTS ix_media_blurb_lang ON ai_media_blurb(lang)",
+            ]:
+                await conn.execute(text(idx_sql))
+
+            logger.info("Migration 011: ai_media_blurb table created")
+        except Exception as e:
+            logger.warning(f"Migration 011: Table may already exist: {e}")
 
 
 async def _migration_008_ai_embeddings(conn) -> None:

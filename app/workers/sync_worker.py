@@ -11,7 +11,7 @@ from app.db.database import async_session_factory
 from app.models.database import Media, XtreamAccount, EnrichmentQueue, LiveChannel
 from app.services.xtream_service import xtream_service
 from app.utils.string_normalizer import (
-    parse_title_and_year,
+    clean_title,
     normalize_for_sorting,
     parse_rating,
 )
@@ -85,7 +85,7 @@ def _parse_duration_ms(value) -> int | None:
 
 def map_vod_to_media(dto: dict, account_id: str, index: int, vod_info: dict | None = None) -> dict:
     """Map Xtream VOD stream DTO to media row dict."""
-    title, year = parse_title_and_year(dto.get("name") or "Unknown")
+    title, year = clean_title(dto.get("name") or "Unknown")
     ext = (dto.get("container_extension") or "").strip() or None
     stream_id = dto["stream_id"]
     rating_key = f"vod_{stream_id}.{ext}" if ext else f"vod_{stream_id}"
@@ -206,7 +206,7 @@ def map_vod_to_media(dto: dict, account_id: str, index: int, vod_info: dict | No
 
 def map_series_to_media(dto: dict, account_id: str, index: int) -> dict:
     """Map Xtream series DTO to media row dict."""
-    title, year = parse_title_and_year(dto.get("name") or "Unknown")
+    title, year = clean_title(dto.get("name") or "Unknown")
     series_id = dto["series_id"]
     rating_key = f"series_{series_id}"
     server_id = build_server_id(account_id)
@@ -319,7 +319,7 @@ def map_episode_to_media(
     info = episode.get("info") or {}
 
     rating_val = parse_rating(info.get("rating"))
-    series_title, _ = parse_title_and_year(series_dto.get("name") or "")
+    series_title, _ = clean_title(series_dto.get("name") or "")
 
     return {
         "rating_key": rating_key,
@@ -607,6 +607,7 @@ async def enqueue_for_enrichment(db, rows: list[dict]):
             "created_at": ts,
             "existing_tmdb_id": existing_tmdb,
             "existing_imdb_id": existing_imdb,
+            "existing_summary": row.get("summary"),
         })
 
     for i in range(0, len(to_enqueue), 200):
@@ -617,6 +618,7 @@ async def enqueue_for_enrichment(db, rows: list[dict]):
             set_={
                 "existing_tmdb_id": stmt.excluded.existing_tmdb_id,
                 "existing_imdb_id": stmt.excluded.existing_imdb_id,
+                "existing_summary": stmt.excluded.existing_summary,
             }
         )
         await db.execute(stmt)

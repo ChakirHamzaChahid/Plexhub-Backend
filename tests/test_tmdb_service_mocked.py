@@ -1,7 +1,4 @@
-"""Demo: mock TMDB HTTP via respx, test the service end-to-end.
-
-Pattern for future worker tests (sync_worker, enrichment_worker).
-"""
+"""Mock TMDB HTTP via respx; test search scoring (ScraperMatcher-style) + tie-break."""
 from __future__ import annotations
 
 import pytest
@@ -27,37 +24,27 @@ async def configured_tmdb(monkeypatch):
         await svc.close()
 
 
+def _movie(id_, title, date="", overview="", vote=0, original=None):
+    r = {"id": id_, "title": title, "release_date": date, "vote_count": vote, "overview": overview}
+    if original is not None:
+        r["original_title"] = original
+    return r
+
+
 async def test_search_movie_returns_match(configured_tmdb, tmdb_mock):
     tmdb_mock.get("/3/search/movie").respond(
-        200,
-        json={
-            "results": [
-                {
-                    "id": 12345,
-                    "title": "The Matrix",
-                    "release_date": "1999-03-31",
-                    "popularity": 50.0,
-                },
-            ],
-        },
+        200, json={"results": [_movie(12345, "The Matrix", "1999-03-31", vote=100)]},
     )
-    match = await configured_tmdb.search_movie("The Matrix", 1999)
-    assert match is not None
-    assert match.tmdb_id == 12345
-    assert match.title == "The Matrix"
-    assert match.year == 1999
-    assert match.confidence > 0.85
+    outcome = await configured_tmdb.search_movie("The Matrix", 1999)
+    assert outcome.result == "matched"
+    assert outcome.match.tmdb_id == 12345
+    assert outcome.match.year == 1999
+    assert outcome.confidence > 0.85
 
 
 async def test_search_movie_caches_result(configured_tmdb, tmdb_mock):
-    """A second call with the same (title, year) must hit cache, not the network."""
     route = tmdb_mock.get("/3/search/movie").respond(
-        200,
-        json={
-            "results": [
-                {"id": 99, "title": "Foo", "release_date": "2020-01-01", "popularity": 1.0},
-            ],
-        },
+        200, json={"results": [_movie(99, "Foo", "2020-01-01")]},
     )
     first = await configured_tmdb.search_movie("Foo", 2020)
     second = await configured_tmdb.search_movie("Foo", 2020)
@@ -66,25 +53,82 @@ async def test_search_movie_caches_result(configured_tmdb, tmdb_mock):
 
 
 async def test_search_movie_caches_no_match(configured_tmdb, tmdb_mock):
-    """Cached `None` must remain distinguishable from a miss — second call cached."""
     route = tmdb_mock.get("/3/search/movie").respond(200, json={"results": []})
-    assert await configured_tmdb.search_movie("Nope", None) is None
-    assert await configured_tmdb.search_movie("Nope", None) is None
+    o1 = await configured_tmdb.search_movie("Nope", None)
+    o2 = await configured_tmdb.search_movie("Nope", None)
+    assert o1.result == "nomatch" and o1.match is None
+    assert o1 == o2
     assert route.call_count == 1
 
 
-async def test_search_movie_returns_none_when_not_configured(monkeypatch):
-    """No API key → return None without hitting the network."""
+async def test_search_movie_returns_nomatch_when_not_configured(monkeypatch):
     from app.services import tmdb_service as mod
 
     monkeypatch.setattr(mod.settings, "TMDB_API_KEY", "")
     svc = TMDBService()
-    assert await svc.search_movie("anything", None) is None
+    outcome = await svc.search_movie("anything", None)
+    assert outcome.result == "nomatch"
+    assert outcome.match is None
+
+
+async def test_wrong_year_blocks_automatch(configured_tmdb, tmdb_mock):
+    """Hairspray 1988 vs a 2007 candidate → year mismatch zeroes the year score."""
+    tmdb_mock.get("/3/search/movie").respond(
+        200, json={"results": [_movie(2, "Hairspray", "2007-07-20")]},
+    )
+    outcome = await configured_tmdb.search_movie("Hairspray", 1988)
+    assert outcome.result == "nomatch"   # 0.7*1.0 + 0.3*0.0 = 0.70 < 0.85
+    assert outcome.best is not None       # best score still recorded
+
+
+async def test_matches_via_original_title(configured_tmdb, tmdb_mock):
+    tmdb_mock.get("/3/search/movie").respond(
+        200, json={"results": [
+            _movie(5, "El Rey León", "1994-06-24", original="The Lion King", vote=500),
+        ]},
+    )
+    outcome = await configured_tmdb.search_movie("The Lion King", 1994)
+    assert outcome.result == "matched"
+    assert outcome.match.tmdb_id == 5
+
+
+async def test_token_set_handles_word_order(configured_tmdb, tmdb_mock):
+    tmdb_mock.get("/3/search/movie").respond(
+        200, json={"results": [_movie(8, "Spider-Man: No Way Home", "2021-12-15", vote=900)]},
+    )
+    outcome = await configured_tmdb.search_movie("No Way Home Spider Man", 2021)
+    assert outcome.result == "matched"
+    assert outcome.match.tmdb_id == 8
+
+
+async def test_homonyms_are_ambiguous_without_summary(configured_tmdb, tmdb_mock):
+    tmdb_mock.get("/3/search/movie").respond(
+        200, json={"results": [
+            _movie(1, "Crash", overview="A car-accident fetish subculture."),
+            _movie(2, "Crash", overview="Racial tensions collide in Los Angeles."),
+        ]},
+    )
+    outcome = await configured_tmdb.search_movie("Crash", None)
+    assert outcome.result == "ambiguous"  # equal scores, margin < 0.05
+    assert outcome.match is None
+
+
+async def test_summary_breaks_the_tie(configured_tmdb, tmdb_mock):
+    tmdb_mock.get("/3/search/movie").respond(
+        200, json={"results": [
+            _movie(1, "Crash", overview="A car-accident fetish subculture."),
+            _movie(2, "Crash", overview="Racial tensions collide in Los Angeles over several days."),
+        ]},
+    )
+    outcome = await configured_tmdb.search_movie(
+        "Crash", None,
+        summary="Racial tensions collide in Los Angeles among strangers.",
+    )
+    assert outcome.result == "matched"
+    assert outcome.match.tmdb_id == 2   # summary picks the LA drama, not the fetish film
 
 
 async def test_429_with_retry_after(configured_tmdb, tmdb_mock, monkeypatch):
-    """A 429 response should be retried after the Retry-After delay (mocked to 0)."""
-    # Speed test up by stubbing asyncio.sleep
     from app.services import tmdb_service as mod
 
     async def _no_sleep(_):
@@ -92,19 +136,13 @@ async def test_429_with_retry_after(configured_tmdb, tmdb_mock, monkeypatch):
 
     monkeypatch.setattr(mod.asyncio, "sleep", _no_sleep)
 
+    import httpx
     route = tmdb_mock.get("/3/search/movie")
     route.side_effect = [
-        # First call: 429 with Retry-After
-        __import__("httpx").Response(429, headers={"Retry-After": "1"}),
-        # Second call: ok
-        __import__("httpx").Response(
-            200,
-            json={"results": [
-                {"id": 7, "title": "Bar", "release_date": "2010-05-05", "popularity": 1.0},
-            ]},
-        ),
+        httpx.Response(429, headers={"Retry-After": "1"}),
+        httpx.Response(200, json={"results": [_movie(7, "Bar", "2010-05-05")]}),
     ]
-    match = await configured_tmdb.search_movie("Bar", 2010)
-    assert match is not None
-    assert match.tmdb_id == 7
+    outcome = await configured_tmdb.search_movie("Bar", 2010)
+    assert outcome.result == "matched"
+    assert outcome.match.tmdb_id == 7
     assert route.call_count == 2

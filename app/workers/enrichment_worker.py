@@ -1,12 +1,14 @@
 import asyncio
 import logging
+from dataclasses import dataclass
 
 from sqlalchemy import select, update
 
 from app.config import settings
 from app.db.database import async_session_factory
 from app.models.database import Media, EnrichmentQueue, XtreamAccount
-from app.services.tmdb_service import tmdb_service
+from app.services import scrape_cache_service as scrape_cache
+from app.services.tmdb_service import TMDBEnrichmentData, TMDBSearchOutcome, tmdb_service
 from app.utils.time import now_ms
 from app.utils.db_retry import commit_with_retry
 
@@ -17,103 +19,140 @@ CONCURRENCY = 8   # Parallel TMDB requests (free tier ~4 req/s, keep headroom)
 MAX_ATTEMPTS = 3  # Max enrichment attempts before permanently skipping
 
 
-async def _fetch_movie_data(item, semaphore):
-    """Fetch TMDB data for a movie with optimized API usage.
+@dataclass
+class FetchResult:
+    item: EnrichmentQueue
+    data: TMDBEnrichmentData | None
+    confidence: float | None
+    result: str            # matched | nomatch | ambiguous | skipped
+    api_used: int
+    cache_key: str | None  # set when the outcome should be written to scrape cache
+    from_cache: bool = False
 
-    Returns (item, enrichment_data, confidence, api_used) where
-    enrichment_data is a TMDBEnrichmentData or None.
 
-    Handles 4 scenarios:
-    1. Both IDs present: should be filtered out by enqueue (won't happen)
-    2. TMDB present, IMDB absent: fetch details+external_ids (1 API call)
-    3. IMDB present, TMDB absent: keep IMDB, skip for now
-    4. Both absent: search + details+external_ids (2 API calls)
-    """
+async def _search_with_fallback(
+    media_type: str, title: str, year: int | None, summary: str | None,
+) -> tuple[TMDBSearchOutcome, int]:
+    """Try progressively looser searches; return (outcome, network_searches).
+
+    Order (plan §3.3): default → without year → en-US → /search/multi. Stops at
+    the first auto-match; otherwise returns the highest-scoring attempt so the
+    best score is still recorded."""
+    search = tmdb_service.search_movie if media_type == "movie" else tmdb_service.search_tv
+    multi_kind = "movie" if media_type == "movie" else "tv"
+    attempts: list[TMDBSearchOutcome] = []
+
+    o = await search(title, year, summary=summary)
+    attempts.append(o)
+    if o.result != "matched" and year is not None:
+        o = await search(title, None, summary=summary)
+        attempts.append(o)
+    if attempts[-1].result != "matched":
+        o = await search(title, year, summary=summary, language="en-US")
+        attempts.append(o)
+    if attempts[-1].result != "matched":
+        o = await tmdb_service.search_multi(title, multi_kind)
+        attempts.append(o)
+
+    for o in attempts:
+        if o.result == "matched":
+            return o, len(attempts)
+    # No match — surface the best-scoring attempt (for recording / metrics).
+    best = max(attempts, key=lambda a: a.confidence)
+    return best, len(attempts)
+
+
+async def _resolve(item, media_type: str, semaphore) -> FetchResult:
+    """Resolve one queue item to TMDB data, using the persistent scrape cache
+    first and the fallback search chain on a miss."""
+    get_details = (
+        tmdb_service.get_movie_details if media_type == "movie"
+        else tmdb_service.get_tv_details
+    )
     async with semaphore:
         try:
             existing_tmdb = item.existing_tmdb_id
             existing_imdb = item.existing_imdb_id
 
-            # Scenario 2: TMDB present, IMDB absent — get full details in 1 call
+            # Scenario 2: TMDB id known, IMDB missing — fetch details only.
             if existing_tmdb and not existing_imdb:
                 tmdb_id = int(existing_tmdb) if str(existing_tmdb).isdigit() else None
                 if tmdb_id:
-                    details = await tmdb_service.get_movie_details(tmdb_id)
-                    return item, details, 1.0, 1
-                return item, None, None, 0
+                    details = await get_details(tmdb_id)
+                    return FetchResult(item, details, 1.0, "matched", 1, None)
+                return FetchResult(item, None, None, "skipped", 0, None)
 
-            # Scenario 3: IMDB present, TMDB absent — keep IMDB, skip search
+            # Scenario 3: IMDB known, TMDB missing — keep IMDB, nothing to do.
             if existing_imdb and not existing_tmdb:
-                return item, None, None, 0
+                return FetchResult(item, None, None, "skipped", 0, None)
 
-            # Scenario 4: Both absent — full search + details
-            if tmdb_service.is_configured:
-                match = await tmdb_service.search_movie(item.title, item.year)
-                if match and match.confidence >= 0.85:
-                    details = await tmdb_service.get_movie_details(match.tmdb_id)
-                    return item, details, match.confidence, 2
-                return item, None, None, 1  # search call used, no match
+            if not tmdb_service.is_configured:
+                return FetchResult(item, None, None, "skipped", 0, None)
 
-            return item, None, None, 0
+            # Scenario 4: both absent — persistent cache first, then search.
+            cache_key = scrape_cache.make_key(media_type, item.title, item.year)
+            async with async_session_factory() as cdb:
+                hit = await scrape_cache.get(cdb, cache_key, now_ms())
+            if hit is not None:
+                return FetchResult(item, hit.data, hit.confidence, hit.result, 0, None, from_cache=True)
+
+            outcome, n_search = await _search_with_fallback(
+                media_type, item.title, item.year, item.existing_summary,
+            )
+            if outcome.result == "matched" and outcome.match:
+                details = await get_details(outcome.match.tmdb_id)
+                return FetchResult(
+                    item, details, outcome.match.confidence, "matched",
+                    n_search + 1, cache_key,
+                )
+            return FetchResult(item, None, outcome.confidence, outcome.result, n_search, cache_key)
         except Exception as e:
             logger.warning(f"Enrichment fetch failed for {item.rating_key}: {e}", exc_info=True)
-            return item, None, None, 0
+            return FetchResult(item, None, None, "skipped", 0, None)
+
+
+async def _fetch_movie_data(item, semaphore):
+    return await _resolve(item, "movie", semaphore)
 
 
 async def _fetch_series_data(item, semaphore):
-    """Fetch TMDB data for a series with optimized API usage.
-
-    Same pattern as movies but uses TV endpoints.
-    """
-    async with semaphore:
-        try:
-            existing_tmdb = item.existing_tmdb_id
-            existing_imdb = item.existing_imdb_id
-
-            # Scenario 2: TMDB present, IMDB absent — get full details in 1 call
-            if existing_tmdb and not existing_imdb:
-                tmdb_id = int(existing_tmdb) if str(existing_tmdb).isdigit() else None
-                if tmdb_id:
-                    details = await tmdb_service.get_tv_details(tmdb_id)
-                    return item, details, 1.0, 1
-                return item, None, None, 0
-
-            # Scenario 3: IMDB present, TMDB absent — keep IMDB
-            if existing_imdb and not existing_tmdb:
-                return item, None, None, 0
-
-            # Scenario 4: Both absent — full search + details
-            if tmdb_service.is_configured:
-                match = await tmdb_service.search_tv(item.title, item.year)
-                if match and match.confidence >= 0.85:
-                    details = await tmdb_service.get_tv_details(match.tmdb_id)
-                    return item, details, match.confidence, 2
-                return item, None, None, 1
-
-            return item, None, None, 0
-        except Exception as e:
-            logger.warning(f"Enrichment fetch failed for series '{item.title}': {e}", exc_info=True)
-            return item, None, None, 0
+    return await _resolve(item, "show", semaphore)
 
 
-async def _apply_enrichment_results(db, results):
-    """Apply enrichment results to DB — IDs + rich metadata from TMDB."""
+async def _apply_enrichment_results(db, results: list[FetchResult]):
+    """Apply enrichment results to DB — IDs + rich metadata + scrape cache + metric."""
+    from app.utils.metrics import tmdb_match_total
+
     batch_used = 0
-    for item, enrichment_data, confidence, api_used in results:
+    ts = now_ms()
+    for fr in results:
+        item = fr.item
+        enrichment_data = fr.data
+
+        # Outcome metric (only the genuine matching attempts — skip scenario 2/3).
+        if fr.result in ("matched", "nomatch", "ambiguous"):
+            metric_type = "movie" if item.media_type == "movie" else "tv"
+            tmdb_match_total.labels(media_type=metric_type, result=fr.result).inc()
+
+        # Persist the resolution so the same title is never re-queried.
+        if fr.cache_key and not fr.from_cache:
+            await scrape_cache.put(
+                db, fr.cache_key, item.media_type, fr.result,
+                fr.confidence, enrichment_data, ts,
+            )
+
         if enrichment_data:
             tmdb_id = enrichment_data.tmdb_id
             imdb_id = enrichment_data.imdb_id
             new_unif = f"imdb://{imdb_id}" if imdb_id else f"tmdb://{tmdb_id}"
 
-            # Build update dict: always overwrite all fields with TMDB data
             update_values = {
                 "tmdb_id": str(tmdb_id),
                 "imdb_id": imdb_id,
                 "unification_id": new_unif,
                 "history_group_key": new_unif,
-                "tmdb_match_confidence": confidence,
+                "tmdb_match_confidence": fr.confidence,
             }
-
             if enrichment_data.overview:
                 update_values["summary"] = enrichment_data.overview
             if enrichment_data.genres:
@@ -138,13 +177,22 @@ async def _apply_enrichment_results(db, results):
                 )
                 .values(**update_values)
             )
-
             item.status = "done"
         else:
+            # Record the best score even without a match (future manual review).
+            if fr.confidence is not None:
+                await db.execute(
+                    update(Media)
+                    .where(
+                        Media.rating_key == item.rating_key,
+                        Media.server_id == item.server_id,
+                    )
+                    .values(tmdb_match_confidence=fr.confidence)
+                )
             item.status = "skipped"
         item.attempts += 1
-        item.processed_at = now_ms()
-        batch_used += api_used
+        item.processed_at = ts
+        batch_used += fr.api_used
     return batch_used
 
 

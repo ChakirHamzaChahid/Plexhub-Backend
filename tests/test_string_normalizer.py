@@ -125,14 +125,15 @@ class TestParseTitleAndYear:
 
 
 class TestNormalizeForSorting:
+    # Aligned on Android StringNormalizer: lowercase + strip punctuation.
     def test_strips_leading_the(self):
-        assert normalize_for_sorting("The Matrix") == "Matrix"
+        assert normalize_for_sorting("The Matrix") == "matrix"
 
     def test_strips_leading_le(self):
-        assert normalize_for_sorting("Le Monde") == "Monde"
+        assert normalize_for_sorting("Le Monde") == "monde"
 
     def test_removes_diacritics(self):
-        assert normalize_for_sorting("Amélie") == "Amelie"
+        assert normalize_for_sorting("Amélie") == "amelie"
 
 
 class TestParseTitleYearAndSuffix:

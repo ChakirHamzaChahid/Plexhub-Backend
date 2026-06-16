@@ -267,6 +267,7 @@ class MediaService:
             row.created_at = ts
             row.existing_imdb_id = media.imdb_id
             row.existing_tmdb_id = media.tmdb_id
+            row.existing_summary = media.summary
         else:
             db.add(EnrichmentQueue(
                 rating_key=rating_key,
@@ -279,6 +280,7 @@ class MediaService:
                 created_at=ts,
                 existing_imdb_id=media.imdb_id,
                 existing_tmdb_id=media.tmdb_id,
+                existing_summary=media.summary,
             ))
         await db.flush()
         return True

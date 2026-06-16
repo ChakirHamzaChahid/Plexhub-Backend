@@ -61,6 +61,14 @@ class Settings:
     OLLAMA_URL: str = os.getenv("OLLAMA_URL", "http://khoj-ollama:11434")
     OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "gemma4:e4b")
 
+    # AI subtitle translation
+    SUBTITLE_CHUNK_CUES: int = _safe_int("SUBTITLE_CHUNK_CUES", 20)          # cues per LLM call
+    SUBTITLE_CONCURRENCY: int = _safe_int("SUBTITLE_CONCURRENCY", 4)         # max concurrent LLM calls
+    SUBTITLE_MAX_CUES: int = _safe_int("SUBTITLE_MAX_CUES", 3000)            # reject above (413); long film ≈ 2500 cues
+    SUBTITLE_MAX_BYTES: int = _safe_int("SUBTITLE_MAX_BYTES", 2000000)       # ~2 MB, reject above (413)
+    SUBTITLE_PER_CHUNK_TIMEOUT: int = _safe_int("SUBTITLE_PER_CHUNK_TIMEOUT", 120)  # seconds per chunk
+    SUBTITLE_TOTAL_TIMEOUT: int = _safe_int("SUBTITLE_TOTAL_TIMEOUT", 600)   # whole-request deadline (seconds)
+
     # Xtream account auto-provisioning from env
     XTREAM_BASE_URL: str = os.getenv("XTREAM_BASE_URL", "")
     XTREAM_PORT: int = _safe_int("XTREAM_PORT", 80)

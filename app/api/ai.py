@@ -13,8 +13,12 @@ mounted here is auth-protected.
 """
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import httpx
 import logging
 import os
+import time
 from typing import AsyncIterator, Literal
 
 import psutil
@@ -22,10 +26,15 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.alias_generators import to_camel
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import verify_api_key
 from app.db.database import async_session_factory, get_db
+from app.models.database import AiSubtitleCache
+from app.utils.db_retry import commit_with_retry
+from app.utils.time import now_ms
 from app.services.embedding_service import EmbeddingUnavailableError, weighted_centroid
 from app.services.recommendation_service import (
     cosine_rank,
@@ -431,6 +440,11 @@ async def embed_status(db: AsyncSession = Depends(get_db)) -> EmbedStatus:
 
 from app.services import ollama_service  # noqa: E402 — import after router definition
 from app.config import settings as _settings  # noqa: E402
+from app.services.subtitle_service import (  # noqa: E402
+    SubtitleFormatError,
+    SubtitleTooLargeError,
+    translate_subtitles,
+)
 
 
 class DescribeRequest(BaseModel):
@@ -548,5 +562,132 @@ async def llm_status() -> LlmStatus:
         model=_settings.OLLAMA_MODEL,
         ollama_url=_settings.OLLAMA_URL,
         detail=detail,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# POST /api/ai/subtitles/translate
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class SubtitleTranslateRequest(BaseModel):
+    model_config = _CAMEL_CONFIG
+
+    content: str = Field(min_length=1)      # raw SRT or VTT
+    target_lang: str = "fr"                 # JSON: targetLang
+    format: str | None = None               # "srt"|"vtt"; auto-detect when null
+    source_lang: str | None = None          # JSON: sourceLang (hint)
+    media_id: str | None = None             # JSON: mediaId (optional, traceability)
+    rating_key: str | None = None           # JSON: ratingKey (optional)
+
+
+class SubtitleTranslateResponse(BaseModel):
+    model_config = _CAMEL_CONFIG
+
+    translated_content: str                 # JSON: translatedContent
+    format: str
+    cue_count: int                          # JSON: cueCount
+    cached: bool
+    model: str
+    duration_seconds: float                 # JSON: durationSeconds
+
+
+@router.post(
+    "/subtitles/translate",
+    response_model=SubtitleTranslateResponse,
+    response_model_by_alias=True,
+)
+async def translate_subtitle(
+    payload: SubtitleTranslateRequest,
+    db: AsyncSession = Depends(get_db),
+) -> SubtitleTranslateResponse:
+    """Translate subtitle content (SRT or VTT) via Ollama.
+
+    Cache keyed on SHA-256(content + target_lang + model). Returns cached result
+    immediately on hit (durationSeconds=0.0, cached=True). On miss, calls the
+    subtitle_service, persists to ai_subtitle_cache, then returns the result.
+    """
+    # 1. Compute deterministic cache key — fold in format + source_lang so that
+    #    the same content requested with a different format override or sourceLang
+    #    hint is never served a stale cache entry.
+    cache_key = hashlib.sha256(
+        "\x00".join([
+            payload.content,
+            payload.target_lang,
+            payload.format or "",
+            payload.source_lang or "",
+            _settings.OLLAMA_MODEL,
+        ]).encode("utf-8")
+    ).hexdigest()
+
+    # 2. Cache lookup
+    row = (
+        await db.execute(select(AiSubtitleCache).where(AiSubtitleCache.cache_key == cache_key))
+    ).scalar_one_or_none()
+    if row is not None:
+        return SubtitleTranslateResponse(
+            translated_content=row.translated_content,
+            format=row.source_format,
+            cue_count=row.cue_count,
+            cached=True,
+            model=row.model,
+            duration_seconds=0.0,
+        )
+
+    # 3. Cache miss — call translation service
+    t0 = time.perf_counter()
+    try:
+        result = await translate_subtitles(
+            payload.content,
+            target_lang=payload.target_lang,
+            fmt=payload.format,
+            source_lang=payload.source_lang,
+        )
+    except SubtitleFormatError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=str(exc) or "Malformed or unrecognized subtitle content",
+        ) from exc
+    except SubtitleTooLargeError as exc:
+        raise HTTPException(
+            status_code=413,
+            detail=str(exc) or "Subtitle file too large",
+        ) from exc
+    except (httpx.HTTPError, asyncio.TimeoutError) as exc:
+        # Real LLM/transport/timeout failure — mapped to 503 per contract.
+        raise _ollama_503(exc) from exc
+    except Exception as exc:
+        # Unexpected failure: log full traceback so the root cause is diagnosable,
+        # then still return 503 to the client (contract unchanged).
+        logger.error("subtitle translate failed", exc_info=True)
+        raise _ollama_503(exc) from exc
+
+    duration = round(time.perf_counter() - t0, 2)
+
+    # 4. Persist to cache — ignore concurrent race on same cache_key
+    try:
+        db.add(
+            AiSubtitleCache(
+                cache_key=cache_key,
+                target_lang=payload.target_lang,
+                model=result.model,
+                source_format=result.fmt,
+                cue_count=result.cue_count,
+                translated_content=result.translated_content,
+                created_at=now_ms(),
+            )
+        )
+        await commit_with_retry(db)
+    except IntegrityError:
+        await db.rollback()
+
+    # 5. Return fresh result
+    return SubtitleTranslateResponse(
+        translated_content=result.translated_content,
+        format=result.fmt,
+        cue_count=result.cue_count,
+        cached=False,
+        model=result.model,
+        duration_seconds=duration,
     )
 

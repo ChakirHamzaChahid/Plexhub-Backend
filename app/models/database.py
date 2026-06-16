@@ -250,6 +250,25 @@ class TvAuthSession(Base):
     )
 
 
+class AiSubtitleCache(Base):
+    """Cache for AI-translated subtitle content (WP3 ai-subtitle-translation).
+
+    cache_key is a deterministic hash of (source_content, target_lang, model,
+    source_format) so the same source always resolves to the same cache entry.
+    created_at stores epoch milliseconds (utils/time.now_ms).
+    """
+
+    __tablename__ = "ai_subtitle_cache"
+
+    cache_key = Column(Text, primary_key=True)
+    target_lang = Column(Text, nullable=False)
+    model = Column(Text, nullable=False)
+    source_format = Column(Text, nullable=False)
+    cue_count = Column(Integer, nullable=False)
+    translated_content = Column(Text, nullable=False)
+    created_at = Column(BigInteger, nullable=False)  # epoch ms
+
+
 class EnrichmentQueue(Base):
     __tablename__ = "enrichment_queue"
 

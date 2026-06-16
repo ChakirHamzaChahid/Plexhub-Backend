@@ -29,6 +29,7 @@ async def run_migrations(engine: AsyncEngine) -> None:
         await _migration_008_ai_embeddings(conn)
 
     await _migration_009_create_tv_auth_sessions(engine)
+    await _migration_010_create_subtitle_cache(engine)
 
     logger.info("All migrations completed successfully")
 
@@ -267,6 +268,40 @@ async def _migration_009_create_tv_auth_sessions(engine: AsyncEngine) -> None:
             logger.info("Migration 009: tv_auth_sessions table created")
         except Exception as e:
             logger.warning(f"Migration 009: Table may already exist: {e}")
+
+
+async def _migration_010_create_subtitle_cache(engine: AsyncEngine) -> None:
+    """Create ai_subtitle_cache table for AI subtitle translation (WP3).
+
+    Caches translated subtitle content keyed by a deterministic hash of the
+    source material so repeated translation requests are served from cache.
+    Idempotent: every DDL uses IF NOT EXISTS.
+    """
+    logger.info("Migration 010: Creating ai_subtitle_cache table")
+
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS ai_subtitle_cache (
+                    cache_key          TEXT PRIMARY KEY,
+                    target_lang        TEXT    NOT NULL,
+                    model              TEXT    NOT NULL,
+                    source_format      TEXT    NOT NULL,
+                    cue_count          INTEGER NOT NULL,
+                    translated_content TEXT    NOT NULL,
+                    created_at         INTEGER NOT NULL
+                )
+            """))
+
+            for idx_sql in [
+                "CREATE INDEX IF NOT EXISTS ix_subtitle_cache_lang ON ai_subtitle_cache(target_lang)",
+                "CREATE INDEX IF NOT EXISTS ix_subtitle_cache_created ON ai_subtitle_cache(created_at)",
+            ]:
+                await conn.execute(text(idx_sql))
+
+            logger.info("Migration 010: ai_subtitle_cache table created")
+        except Exception as e:
+            logger.warning(f"Migration 010: Table may already exist: {e}")
 
 
 async def _migration_008_ai_embeddings(conn) -> None:

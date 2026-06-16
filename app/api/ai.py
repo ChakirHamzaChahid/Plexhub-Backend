@@ -84,6 +84,7 @@ class RankRequest(BaseModel):
     candidates: list[MediaRef]
     limit: int = Field(default=20, ge=1, le=200)
     media_type: Literal["movie", "tv"] = "movie"
+    explain: bool = False
 
 
 class RankMultiRequest(BaseModel):
@@ -101,6 +102,7 @@ class RankMultiRequest(BaseModel):
     limit: int = Field(default=20, ge=1, le=200)
     media_type: Literal["movie", "tv"] = "movie"
     exclude_refs: bool = True
+    explain: bool = False
 
 
 class RankedItem(BaseModel):
@@ -109,6 +111,7 @@ class RankedItem(BaseModel):
     tmdb_id: int
     imdb_id: str | None = None
     score: float
+    explanation: str | None = None
 
 
 class RankResponse(BaseModel):
@@ -176,6 +179,98 @@ class EmbedStatus(BaseModel):
     embedding_dim: int
     vec_loaded: bool
     vec_error: str
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# F5 – "why recommended" explanation constants + helper
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Maximum number of top results that receive LLM-generated explanations per
+# /rank or /rank-multi call (bounds Ollama cost; the rest keep explanation=None).
+EXPLAIN_CAP = 5
+
+# Max concurrency for concurrent Ollama explain calls (semaphore).
+_EXPLAIN_CONCURRENCY = 4
+
+# Per-call timeout for explanation generation (best-effort; failure -> None).
+_EXPLAIN_TIMEOUT_S = 20.0
+
+
+async def _fetch_titles_from_cache(
+    db: AsyncSession,
+    tmdb_ids: list[int],
+) -> dict[int, str | None]:
+    """Read title column from ai_tmdb_cache for the given tmdb_ids.
+
+    Returns {tmdb_id: title_or_None}. IDs absent from the cache are not included.
+    """
+    if not tmdb_ids:
+        return {}
+    from sqlalchemy import text as _text
+    placeholders = ",".join(f":id{i}" for i in range(len(tmdb_ids)))
+    params = {f"id{i}": tid for i, tid in enumerate(tmdb_ids)}
+    sql = _text(
+        f"SELECT tmdb_id, title FROM ai_tmdb_cache WHERE tmdb_id IN ({placeholders})"
+    )
+    rows = (await db.execute(sql, params)).fetchall()
+    return {row[0]: row[1] for row in rows}
+
+
+async def _explain_items(
+    items: list[RankedItem],
+    ref_titles: list[str | None],
+    db: AsyncSession,
+) -> None:
+    """Populate explanation on the first EXPLAIN_CAP items (in-place, best-effort).
+
+    Fetches candidate titles from ai_tmdb_cache, then launches up to
+    _EXPLAIN_CONCURRENCY concurrent Ollama calls. Any failure or timeout leaves
+    the item's explanation as None.  Never raises — explain is a bonus feature.
+
+    ref_titles: display names for the reference(s) used to build the prompt.
+    items: the ranked list (modified in-place); only [:EXPLAIN_CAP] are touched.
+    """
+    from app.services import ollama_service as _ollama
+
+    to_explain = items[:EXPLAIN_CAP]
+    if not to_explain:
+        return
+
+    # Build a readable reference string for the prompt.
+    clean_refs = [t for t in ref_titles if t]
+    if clean_refs:
+        ref_label = " / ".join(clean_refs)
+    else:
+        ref_label = "le(s) titre(s) de référence"
+
+    # Fetch candidate titles from cache (one SQL call).
+    cand_ids = [item.tmdb_id for item in to_explain]
+    titles_map = await _fetch_titles_from_cache(db, cand_ids)
+
+    sem = asyncio.Semaphore(_EXPLAIN_CONCURRENCY)
+
+    async def _one(item: RankedItem) -> None:
+        cand_title = titles_map.get(item.tmdb_id) or f"tmdb:{item.tmdb_id}"
+        prompt = (
+            f"En une seule phrase courte (25 mots maximum), explique en français pourquoi "
+            f"'{cand_title}' est recommandé à quelqu'un qui a aimé '{ref_label}'. "
+            f"Commence par 'Car' ou 'Parce que'. Ne répète pas les titres entiers dans la phrase."
+        )
+        async with sem:
+            try:
+                text_out = await asyncio.wait_for(
+                    _ollama.generate(prompt),
+                    timeout=_EXPLAIN_TIMEOUT_S,
+                )
+                item.explanation = text_out.strip() or None
+            except Exception as exc:
+                logger.debug(
+                    "explain skipped for tmdb_id=%s (%s: %s)",
+                    item.tmdb_id, type(exc).__name__, exc,
+                )
+                # Leave item.explanation = None (best-effort).
+
+    await asyncio.gather(*(_one(item) for item in to_explain), return_exceptions=True)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -282,6 +377,13 @@ async def rank(
         RankedItem(tmdb_id=tid, imdb_id=cand_mapping.get(tid), score=score)
         for tid, score in ranked_pairs
     ]
+
+    # F5: optional "why recommended" explanations (best-effort, never 503 on failure).
+    if payload.explain and ranked_items:
+        ref_titles_map = await _fetch_titles_from_cache(db, [ref_tmdb])
+        ref_title = ref_titles_map.get(ref_tmdb)
+        await _explain_items(ranked_items, [ref_title], db)
+
     return RankResponse(
         ranked=ranked_items,
         cache_hits=cache_hits,
@@ -373,6 +475,13 @@ async def rank_multi(
         RankedItem(tmdb_id=tid, imdb_id=cand_mapping.get(tid), score=score)
         for tid, score in ranked_pairs
     ]
+
+    # F5: optional "why recommended" explanations (best-effort, never 503 on failure).
+    if payload.explain and ranked_items:
+        ref_titles_map = await _fetch_titles_from_cache(db, available_ref_ids)
+        ref_titles = [ref_titles_map.get(tid) for tid in available_ref_ids]
+        await _explain_items(ranked_items, ref_titles, db)
+
     return RankResponse(
         ranked=ranked_items,
         cache_hits=cache_hits,

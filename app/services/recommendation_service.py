@@ -202,6 +202,83 @@ async def hydrate_misses(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Semantic KNN search over ai_embeddings + join ai_tmdb_cache
+# ──────────────────────────────────────────────────────────────────────────────
+
+async def semantic_search(
+    db: AsyncSession,
+    query_vec: list[float],
+    media_type: str | None,
+    limit: int,
+) -> list[tuple[int, str | None, str, float]]:
+    """KNN vector search against ai_embeddings, returning joined cache metadata.
+
+    Uses the native sqlite-vec KNN syntax:
+        WHERE embedding MATCH :vec AND k = :k ORDER BY distance
+
+    The vec0 distance metric is L2.  Because every embedding stored by this
+    project is L2-normalised (output of embed_passages / embed_query), the
+    conversion from L2 distance to cosine similarity is exact:
+        cosine_sim = 1.0 - (l2_distance ** 2) / 2.0
+
+    When media_type is given the vec0 table has no media_type column, so we
+    over-fetch (limit * 4, capped at 200) from the KNN query, then filter by
+    joining ai_tmdb_cache and truncate to limit.  When media_type is None no
+    extra filtering is needed and we fetch exactly limit rows.
+
+    Returns a list of (tmdb_id, title, media_type, score) tuples, sorted by
+    score descending.  Rows with no matching ai_tmdb_cache entry are dropped
+    (they cannot be hydrated into a usable result).
+    """
+    vec_blob = _serialize_vec(query_vec)
+
+    # Determine how many rows to fetch from the KNN index before filtering.
+    if media_type is not None:
+        # Over-fetch to account for the type filter; cap to avoid runaway queries.
+        knn_k = min(limit * 4, 200)
+    else:
+        knn_k = limit
+
+    # Phase 1 — KNN over the vec0 virtual table (index scan, no full table scan).
+    knn_sql = text(
+        "SELECT tmdb_id, distance "
+        "FROM ai_embeddings "
+        "WHERE embedding MATCH :vec AND k = :k "
+        "ORDER BY distance"
+    )
+    knn_rows = (await db.execute(knn_sql, {"vec": vec_blob, "k": knn_k})).fetchall()
+    if not knn_rows:
+        return []
+
+    # Phase 2 — join ai_tmdb_cache for title / media_type.
+    knn_ids = [row[0] for row in knn_rows]
+    dist_by_id = {row[0]: row[1] for row in knn_rows}
+
+    placeholders = ",".join(f":id{i}" for i in range(len(knn_ids)))
+    params: dict = {f"id{i}": tid for i, tid in enumerate(knn_ids)}
+    cache_sql = text(
+        f"SELECT tmdb_id, title, media_type "
+        f"FROM ai_tmdb_cache "
+        f"WHERE tmdb_id IN ({placeholders})"
+    )
+    cache_rows = (await db.execute(cache_sql, params)).fetchall()
+
+    # Build results, optionally filtering by media_type.
+    results: list[tuple[int, str | None, str, float]] = []
+    for tmdb_id, title, row_media_type in cache_rows:
+        if media_type is not None and row_media_type != media_type:
+            continue
+        dist = dist_by_id[tmdb_id]
+        # L2-norm vectors: cosine_sim = 1 - dist^2 / 2
+        score = round(1.0 - (dist ** 2) / 2.0, 6)
+        results.append((tmdb_id, title, row_media_type, score))
+
+    # Re-sort by score descending (join may have reordered) and truncate.
+    results.sort(key=lambda x: x[3], reverse=True)
+    return results[:limit]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Cosine ranking
 # ──────────────────────────────────────────────────────────────────────────────
 

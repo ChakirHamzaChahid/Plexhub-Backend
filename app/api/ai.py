@@ -40,6 +40,7 @@ from app.services.recommendation_service import (
     cosine_rank,
     hydrate_misses,
     load_cached_vectors,
+    semantic_search,
 )
 from app.services.tmdb_service import tmdb_service
 from app.workers.embedding_worker import enqueue_rebuild, get_job
@@ -117,6 +118,33 @@ class RankResponse(BaseModel):
     cache_misses: int
     cache_misses_dropped: int
     resolution_failed: int
+
+
+class SearchRequest(BaseModel):
+    """Request body for POST /api/ai/search."""
+
+    model_config = _CAMEL_CONFIG
+
+    query: str = Field(min_length=1)
+    media_type: Literal["movie", "tv"] | None = None
+    limit: int = Field(default=20, ge=1, le=50)
+
+
+class SearchResult(BaseModel):
+    model_config = _CAMEL_CONFIG
+
+    tmdb_id: int
+    title: str | None = None
+    media_type: str
+    score: float
+
+
+class SearchResponse(BaseModel):
+    model_config = _CAMEL_CONFIG
+
+    results: list[SearchResult]
+    query_used: str
+    model: str
 
 
 class RebuildResponse(BaseModel):
@@ -350,6 +378,93 @@ async def rank_multi(
         cache_misses=stats.hydrated,
         cache_misses_dropped=stats.dropped,
         resolution_failed=resolution_failed,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# POST /api/ai/search  (F2 — natural-language semantic search)
+# ──────────────────────────────────────────────────────────────────────────────
+
+@router.post("/search", response_model=SearchResponse, response_model_by_alias=True)
+async def search(
+    payload: SearchRequest,
+    db: AsyncSession = Depends(get_db),
+) -> SearchResponse:
+    """Natural-language semantic search over the embedded catalog.
+
+    Pipeline:
+      1. Best-effort query reformulation via Ollama/gemma4 (graceful degrades:
+         if Ollama is unreachable or times out, the raw query is used instead —
+         this is NOT a 503 path, unlike /describe).
+      2. Embed the (possibly reformulated) query via fastembed. An embedding
+         model failure propagates as EmbeddingUnavailableError -> 503
+         (same contract as /rank).
+      3. KNN over ai_embeddings (sqlite-vec vec0 MATCH syntax) joined to
+         ai_tmdb_cache for titles.  media_type filter is applied post-KNN
+         (over-fetch then truncate) because vec0 has no media_type column.
+      4. Return ranked results with camelCase aliases.
+    """
+    from app.services import ollama_service as _ollama
+    from app.config import settings as _cfg
+
+    # 1. Query reformulation (best-effort, never 503 on LLM failure).
+    query_used = payload.query
+    try:
+        rewrite_prompt = (
+            "Rewrite the following user search query into ONE concise sentence "
+            "that describes the ideal title's themes, tone, and genre. "
+            "Reply ONLY with that sentence — no explanations, no quotes. "
+            "Keep the same language as the input query.\n\n"
+            f"Query: {payload.query}"
+        )
+        reformulated = await asyncio.wait_for(
+            _ollama.generate(rewrite_prompt),
+            timeout=15.0,
+        )
+        reformulated = reformulated.strip()
+        if reformulated:
+            query_used = reformulated
+    except Exception as exc:
+        # Ollama down / timeout / any error — degrade gracefully to raw query.
+        logger.info("Query reformulation skipped (%s); using raw query.", type(exc).__name__)
+
+    # 2. Embed the query (propagates EmbeddingUnavailableError -> 503).
+    from app.services.embedding_service import (
+        EmbeddingUnavailableError as _EmbUnavail,
+        embed_query as _embed_query,
+        DEFAULT_MODEL_NAME,
+    )
+    try:
+        query_vec = await _embed_query(query_used)
+    except _EmbUnavail as exc:
+        logger.warning("embedding unavailable during /search: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI model unavailable",
+        ) from exc
+
+    # 3. KNN + join.
+    rows = await semantic_search(
+        db=db,
+        query_vec=query_vec,
+        media_type=payload.media_type,
+        limit=payload.limit,
+    )
+
+    # 4. Build response.
+    results = [
+        SearchResult(
+            tmdb_id=tmdb_id,
+            title=title,
+            media_type=row_media_type,
+            score=score,
+        )
+        for tmdb_id, title, row_media_type, score in rows
+    ]
+    return SearchResponse(
+        results=results,
+        query_used=query_used,
+        model=DEFAULT_MODEL_NAME,
     )
 
 

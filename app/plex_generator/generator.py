@@ -9,11 +9,12 @@ from app.plex_generator.mapping import MappingStore
 from app.plex_generator.models import PlexMovie, PlexSeries, SyncReport
 from app.plex_generator.naming import (
     movie_path,
+    movie_version_path,
     movie_nfo_path,
     movie_poster_path,
     movie_fanart_path,
     series_episode_path,
-    series_episode_nfo_path,
+    series_episode_version_path,
     series_nfo_path,
     series_poster_path,
     series_fanart_path,
@@ -172,14 +173,18 @@ class PlexLibraryGenerator:
         self._image_futures: list[Future] = []
 
         self.mapping.load()
-        seen_source_ids: set[str] = set()
+        # Mapping keys are version keys: f"{server_id}:{source_id}". seen_paths
+        # tracks every .strm path written this run so we can tell, on deletion,
+        # whether a folder still holds a live version (shared NFO must survive).
+        seen_keys: set[str] = set()
+        seen_paths: set[str] = set()
 
         # --- Movies ---
         movies = await self.source.get_movies()
         movie_names = _resolve_movie_names(movies)
         for movie in movies:
             try:
-                self._sync_movie(movie, movie_names[movie.source_id], report, seen_source_ids)
+                self._sync_movie(movie, movie_names[movie.source_id], report, seen_keys, seen_paths)
             except Exception as e:
                 msg = f"Error processing movie {movie.source_id} ({movie.title}): {e}"
                 logger.error(msg, exc_info=True)
@@ -190,7 +195,7 @@ class PlexLibraryGenerator:
         series_names = _resolve_series_names(series_list)
         for series in series_list:
             try:
-                self._sync_series(series, series_names[series.source_id], report, seen_source_ids)
+                self._sync_series(series, series_names[series.source_id], report, seen_keys, seen_paths)
             except Exception as e:
                 msg = f"Error processing series {series.source_id} ({series.title}): {e}"
                 logger.error(msg, exc_info=True)
@@ -216,24 +221,26 @@ class PlexLibraryGenerator:
                     )
             self._image_futures.clear()
 
-        # --- Delete stale entries (including associated NFO/images) ---
-        stale_ids = self.mapping.all_source_ids() - seen_source_ids
-        for source_id in stale_ids:
-            entry = self.mapping.get(source_id)
+        # --- Delete stale versions (folder-aware) ---
+        # A folder still referenced by a live version keeps its shared NFO/images;
+        # only when no live version remains do we remove the folder-level metadata.
+        from pathlib import PurePosixPath
+        live_dirs = {str(PurePosixPath(p).parent) for p in seen_paths}
+        stale_keys = self.mapping.all_source_ids() - seen_keys
+        for key in stale_keys:
+            entry = self.mapping.get(key)
             if entry:
-                self.storage.delete_file(entry.path)
-                # Also delete associated metadata files in same directory
-                from pathlib import PurePosixPath
                 p = PurePosixPath(entry.path)
                 parent = str(p.parent)
-                stem = p.stem
-                # Delete NFO with same stem as the media file
+                self.storage.delete_file(entry.path)
+                # Per-file sibling NFO (episodes write one NFO per version file).
                 self.storage.delete_file(str(p.with_suffix(".nfo")))
-                # Delete well-known metadata files in the same directory
-                for name in ("poster.jpg", "fanart.jpg", "movie.nfo", "tvshow.nfo"):
-                    self.storage.delete_file(f"{parent}/{name}")
+                # Shared folder-level metadata only when the folder is now dead.
+                if parent not in live_dirs:
+                    for name in ("poster.jpg", "fanart.jpg", "movie.nfo", "tvshow.nfo"):
+                        self.storage.delete_file(f"{parent}/{name}")
                 self.storage.cleanup_empty_dirs(entry.path)
-                self.mapping.remove(source_id)
+                self.mapping.remove(key)
                 report.deleted += 1
                 logger.debug(f"Deleted: {entry.path}")
 
@@ -260,46 +267,58 @@ class PlexLibraryGenerator:
             )
         return report
 
-    def _sync_movie(
-        self, movie: PlexMovie, name: _NameResolution,
-        report: SyncReport, seen: set[str],
+    def _sync_strm(
+        self, key: str, path: str, stream_url: str, report: SyncReport,
     ) -> None:
-        seen.add(movie.source_id)
-        expected_path = movie_path(
-            name.clean_title, name.year,
-            suffix=name.suffix, fallback_id=name.fallback_id,
-        )
-        existing = self.mapping.get(movie.source_id)
+        """Idempotent write of a single .strm version, keyed by version key.
 
+        CREATE (new key) / MOVE (path changed) / UPDATE (url changed) / unchanged."""
+        existing = self.mapping.get(key)
         if existing is None:
-            # CREATE
-            self.storage.write_strm(expected_path, movie.stream_url)
-            if not self.strm_only:
-                self._write_movie_metadata(movie, name, report)
-            self.mapping.set(movie.source_id, expected_path, movie.stream_url)
+            self.storage.write_strm(path, stream_url)
+            self.mapping.set(key, path, stream_url)
             report.created += 1
-            logger.debug(f"Created: {expected_path}")
-
-        elif existing.path != expected_path:
-            # MOVE (title/year/suffix changed)
+            logger.debug(f"Created: {path}")
+        elif existing.path != path:
             self.storage.delete_file(existing.path)
+            self.storage.delete_file(existing.path[:-5] + ".nfo" if existing.path.endswith(".strm") else existing.path)
             self.storage.cleanup_empty_dirs(existing.path)
-            self.storage.write_strm(expected_path, movie.stream_url)
-            if not self.strm_only:
-                self._write_movie_metadata(movie, name, report)
-            self.mapping.set(movie.source_id, expected_path, movie.stream_url)
+            self.storage.write_strm(path, stream_url)
+            self.mapping.set(key, path, stream_url)
             report.updated += 1
-            logger.debug(f"Moved: {existing.path} -> {expected_path}")
-
-        elif existing.stream_url != movie.stream_url:
-            # UPDATE (URL changed)
-            self.storage.write_strm(expected_path, movie.stream_url)
-            self.mapping.set(movie.source_id, expected_path, movie.stream_url)
+            logger.debug(f"Moved: {existing.path} -> {path}")
+        elif existing.stream_url != stream_url:
+            self.storage.write_strm(path, stream_url)
+            self.mapping.set(key, path, stream_url)
             report.updated += 1
-            logger.debug(f"Updated URL: {expected_path}")
-
+            logger.debug(f"Updated URL: {path}")
         else:
             report.unchanged += 1
+
+    def _sync_movie(
+        self, movie: PlexMovie, name: _NameResolution,
+        report: SyncReport, seen_keys: set[str], seen_paths: set[str],
+    ) -> None:
+        multi = len(movie.versions) > 1
+        for v in movie.versions:
+            key = f"{v.server_id}:{v.source_id}"
+            seen_keys.add(key)
+            if multi:
+                path = movie_version_path(
+                    name.clean_title, name.year, v.label or v.source_id,
+                    suffix=name.suffix, fallback_id=name.fallback_id,
+                )
+            else:
+                path = movie_path(
+                    name.clean_title, name.year,
+                    suffix=name.suffix, fallback_id=name.fallback_id,
+                )
+            seen_paths.add(path)
+            self._sync_strm(key, path, v.stream_url, report)
+
+        # Folder-level metadata (movie.nfo + poster/fanart) written once per group.
+        if not self.strm_only:
+            self._write_movie_metadata(movie, name, report)
 
     def _write_movie_metadata(
         self, movie: PlexMovie, name: _NameResolution, report: SyncReport,
@@ -333,16 +352,16 @@ class PlexLibraryGenerator:
 
     def _sync_series(
         self, series: PlexSeries, name: _NameResolution,
-        report: SyncReport, seen: set[str],
+        report: SyncReport, seen_keys: set[str], seen_paths: set[str],
     ) -> None:
-        # Write series-level metadata (NFO, poster, fanart) once
+        # Write series-level metadata (tvshow.nfo, poster, fanart) once per group
         if not self.strm_only:
             self._write_series_metadata(series, name, report)
 
-        # Sync each episode using the same name resolution as the series
+        # Sync each episode slot using the same name resolution as the series
         for ep in series.episodes:
             try:
-                self._sync_episode(ep, name, report, seen)
+                self._sync_episode(ep, name, report, seen_keys, seen_paths)
             except Exception as e:
                 msg = (
                     f"Error processing episode {ep.source_id} "
@@ -352,51 +371,30 @@ class PlexLibraryGenerator:
                 report.errors.append(msg)
 
     def _sync_episode(
-        self, ep, name: _NameResolution, report: SyncReport, seen: set[str],
+        self, ep, name: _NameResolution,
+        report: SyncReport, seen_keys: set[str], seen_paths: set[str],
     ) -> None:
-        seen.add(ep.source_id)
-        expected_path = series_episode_path(
-            name.clean_title, ep.season_num, ep.episode_num,
-            year=name.year, suffix=name.suffix, fallback_id=name.fallback_id,
-        )
-        existing = self.mapping.get(ep.source_id)
-
-        if existing is None:
-            self.storage.write_strm(expected_path, ep.stream_url)
-            if not self.strm_only:
-                self._write_episode_metadata(ep, name)
-            self.mapping.set(ep.source_id, expected_path, ep.stream_url)
-            report.created += 1
-            logger.debug(f"Created: {expected_path}")
-
-        elif existing.path != expected_path:
-            self.storage.delete_file(existing.path)
-            self.storage.cleanup_empty_dirs(existing.path)
-            self.storage.write_strm(expected_path, ep.stream_url)
-            if not self.strm_only:
-                self._write_episode_metadata(ep, name)
-            self.mapping.set(ep.source_id, expected_path, ep.stream_url)
-            report.updated += 1
-            logger.debug(f"Moved: {existing.path} -> {expected_path}")
-
-        elif existing.stream_url != ep.stream_url:
-            self.storage.write_strm(expected_path, ep.stream_url)
-            self.mapping.set(ep.source_id, expected_path, ep.stream_url)
-            report.updated += 1
-            logger.debug(f"Updated URL: {expected_path}")
-
-        else:
-            report.unchanged += 1
-
-    def _write_episode_metadata(self, ep, name: _NameResolution) -> None:
-        nfo = build_episode_nfo(ep)
-        self.storage.write_file(
-            series_episode_nfo_path(
-                name.clean_title, ep.season_num, ep.episode_num,
-                year=name.year, suffix=name.suffix, fallback_id=name.fallback_id,
-            ),
-            nfo,
-        )
+        # Plex merges several files sharing the same SxxEyy into one episode with
+        # multiple versions; each version is a distinct file with a matching NFO.
+        multi = len(ep.versions) > 1
+        nfo = build_episode_nfo(ep) if not self.strm_only else None
+        for v in ep.versions:
+            key = f"{v.server_id}:{v.source_id}"
+            seen_keys.add(key)
+            if multi:
+                path = series_episode_version_path(
+                    name.clean_title, ep.season_num, ep.episode_num, v.label or v.source_id,
+                    year=name.year, suffix=name.suffix, fallback_id=name.fallback_id,
+                )
+            else:
+                path = series_episode_path(
+                    name.clean_title, ep.season_num, ep.episode_num,
+                    year=name.year, suffix=name.suffix, fallback_id=name.fallback_id,
+                )
+            seen_paths.add(path)
+            self._sync_strm(key, path, v.stream_url, report)
+            if nfo is not None:
+                self.storage.write_file(path[:-5] + ".nfo", nfo)
 
     def _write_series_metadata(
         self, series: PlexSeries, name: _NameResolution, report: SyncReport,

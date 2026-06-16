@@ -43,54 +43,25 @@ async def generate_plex_library(req: GenerateRequest):
         )
     output = Path(output_dir)
 
-    if not req.account_id and not req.all_accounts:
-        raise HTTPException(
-            status_code=400,
-            detail="Provide accountId or set allAccounts to true",
-        )
-
     from app.plex_generator.generator import PlexLibraryGenerator
     from app.plex_generator.source import DatabaseSource
     from app.plex_generator.storage import LocalStorage, DryRunStorage
 
-    reports = []
+    # Unified library: one flat, deduped tree. `accountId` (optional) restricts
+    # the aggregation to a single account; otherwise all active accounts are
+    # merged. `allAccounts` is kept for backward compatibility (now the default).
+    account_ids = [req.account_id] if req.account_id else None
 
-    if req.all_accounts:
-        from sqlalchemy import select
-        from app.db.database import async_session_factory
-        from app.models.database import XtreamAccount
+    storage = DryRunStorage() if req.dry_run else LocalStorage(output)
+    source = DatabaseSource(account_ids)
+    gen = PlexLibraryGenerator(source, storage, output, req.strm_only)
+    report = await gen.generate()
 
-        async with async_session_factory() as db:
-            result = await db.execute(
-                select(XtreamAccount.id).where(XtreamAccount.is_active == True)
-            )
-            account_ids = [row[0] for row in result]
-
-        if not account_ids:
-            raise HTTPException(status_code=404, detail="No active accounts found")
-
-        for aid in account_ids:
-            account_output = output / aid
-            storage = DryRunStorage() if req.dry_run else LocalStorage(account_output)
-            source = DatabaseSource(aid)
-            gen = PlexLibraryGenerator(source, storage, account_output, req.strm_only)
-            reports.append(await gen.generate())
-    else:
-        account_output = output / req.account_id
-        storage = DryRunStorage() if req.dry_run else LocalStorage(account_output)
-        source = DatabaseSource(req.account_id)
-        gen = PlexLibraryGenerator(source, storage, account_output, req.strm_only)
-        reports.append(await gen.generate())
-
-    # Aggregate reports
-    total = GenerateResponse()
-    for r in reports:
-        total.created += r.created
-        total.updated += r.updated
-        total.deleted += r.deleted
-        total.unchanged += r.unchanged
-        total.errors.extend(r.errors)
-        total.duration_seconds += r.duration_seconds
-    total.duration_seconds = round(total.duration_seconds, 2)
-
-    return total
+    return GenerateResponse(
+        created=report.created,
+        updated=report.updated,
+        deleted=report.deleted,
+        unchanged=report.unchanged,
+        errors=report.errors,
+        duration_seconds=round(report.duration_seconds, 2),
+    )

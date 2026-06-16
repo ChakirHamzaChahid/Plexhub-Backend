@@ -100,21 +100,22 @@ async def _auto_generate_plex_library():
         logger.warning("No active accounts — skipping Plex library generation")
         return
 
-    logger.info(f"Auto-generating Plex library for {len(account_ids)} account(s)")
-    for aid in account_ids:
-        try:
-            account_output = output / aid
-            account_storage = LocalStorage(account_output)
-            source = DatabaseSource(aid)
-            gen = PlexLibraryGenerator(source, account_storage, account_output)
-            report = await gen.generate()
-            logger.info(
-                f"Plex generation for account {aid}: "
-                f"{report.created} created, {report.updated} updated, "
-                f"{report.deleted} deleted, {report.unchanged} unchanged"
-            )
-        except Exception as e:
-            logger.error(f"Plex generation failed for account {aid}: {e}", exc_info=True)
+    # Unified library: one flat tree deduped across ALL active accounts (the same
+    # movie/series from several panels = one folder + one NFO + multiple versions).
+    logger.info(
+        f"Auto-generating unified Plex library across {len(account_ids)} account(s)"
+    )
+    try:
+        storage = LocalStorage(output)
+        source = DatabaseSource()  # None => all active accounts
+        gen = PlexLibraryGenerator(source, storage, output)
+        report = await gen.generate()
+        logger.info(
+            f"Plex generation: {report.created} created, {report.updated} updated, "
+            f"{report.deleted} deleted, {report.unchanged} unchanged"
+        )
+    except Exception as e:
+        logger.error(f"Plex generation failed: {e}", exc_info=True)
 
 
 async def _auto_provision_xtream_account():

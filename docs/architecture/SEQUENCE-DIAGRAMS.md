@@ -178,38 +178,40 @@ sequenceDiagram
 
 ---
 
-## 4. Génération bibliothèque Plex (NFO + arborescence + images)
+## 4. Génération bibliothèque Plex UNIFIÉE (dédup multi-comptes → 1 NFO par titre)
 
-Pour chaque compte : lit la DB via `DatabaseSource`, génère NFO + arbo + `.strm` + images. Idempotent (created/updated/deleted/unchanged). Images via pool de 8 threads.
+`DatabaseSource()` agrège **tous les comptes actifs** et **regroupe par `unification_id`** (imdb→tmdb→titre+année). Chaque titre dédupliqué = **1 dossier + 1 NFO + 1 poster** ; chaque source/qualité/langue = un `.strm` distinct (films taggés `{edition-Label}`, épisodes ` SxxEyy - Label`). Suppression folder-aware. Idempotent (created/updated/deleted/unchanged au niveau fichier-version). Images via pool de 8 threads. Aucune migration (`unification_id` déjà peuplé).
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant T as Pipeline / POST /api/plex/generate / CLI
-    participant SRC as DatabaseSource(account_id)
+    participant SRC as DatabaseSource() — tous comptes actifs
+    participant GRP as Regroupement par unification_id
     participant GEN as PlexLibraryGenerator
-    participant NFO as nfo_builder + naming
-    participant MAP as MappingStore (JSON)
+    participant NFO as nfo_builder + naming (edition tags)
+    participant MAP as MappingStore (clé server_id + rating_key)
     participant ST as LocalStorage (écritures atomiques)
     participant POOL as _image_pool (8 threads)
-    participant FS as Système de fichiers output/{account_id}
+    participant FS as output/ (arbre plat unique)
 
-    T->>SRC: charge films/séries/épisodes enrichis (DB)
-    SRC-->>GEN: PlexMovie / PlexSeries / PlexEpisode (Pydantic)
-    loop par item
-        GEN->>MAP: déjà généré ? (diff état précédent)
-        alt nouveau / modifié
-            GEN->>NFO: construit chemin + XML NFO
-            GEN->>ST: écrit .nfo + .strm (atomique)
-            GEN->>POOL: télécharge poster/fanart (async via threads)
-            POOL->>FS: écrit images
-            GEN->>MAP: enregistre l'état (hash)
-        else inchangé
-            Note over GEN: skip (unchanged)
+    T->>SRC: charge films/séries de TOUS les comptes (DB)
+    SRC->>GRP: groupe les rows par unification_id (best row = métadonnées)
+    GRP-->>GEN: PlexMovie/PlexSeries (1 par titre) + N versions
+    GEN->>GEN: resolve_names (désambigue les groupes distincts même titre+année)
+    loop par groupe (titre dédupliqué)
+        GEN->>NFO: 1 movie.nfo / tvshow.nfo (best row) — écrit une fois
+        GEN->>POOL: 1 poster/fanart (async threads)
+        POOL->>FS: écrit images
+        loop par version (source/qualité/langue)
+            GEN->>MAP: clé version connue ? (create / move / update / unchanged)
+            GEN->>ST: écrit .strm taggé edition-Label (atomique)
+            GEN->>MAP: enregistre version vers chemin
         end
     end
-    GEN->>ST: supprime ce qui n'existe plus (deleted)
-    GEN-->>T: GenerationReport (created/updated/deleted/unchanged/errors/duration)
+    Note over GEN,ST: Suppression folder-aware - version disparue, strm supprimé. NFO partagé conservé tant qu une version vit dans le dossier
+    GEN->>ST: supprime versions absentes (deleted)
+    GEN-->>T: GenerationReport (created/updated/deleted/unchanged)
 ```
 
 ---

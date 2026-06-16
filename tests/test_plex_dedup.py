@@ -29,6 +29,29 @@ from app.utils.server_id import build_server_id
 # ─── Naming ─────────────────────────────────────────────────────────────
 
 
+class TestCanonicalTitle:
+    def _row(self, title, year=None):
+        return _movie_row("a", "vod_x.mp4", title, "", 0) if year is None else \
+            Media(rating_key="vod_x.mp4", server_id="xtream_a", filter="all",
+                  sort_order="default", library_section_id="xtream_vod",
+                  title=title, type="movie", year=year, unification_id="")
+
+    def test_strips_qualifier_keeps_year(self):
+        from app.services.aggregation_service import canonical_title_year
+        assert canonical_title_year(self._row("Terminator (1984) (VF)", 1984)) == ("Terminator", 1984)
+
+    def test_year_from_title_when_column_missing(self):
+        from app.services.aggregation_service import canonical_title_year
+        row = Media(rating_key="vod_y.mp4", server_id="xtream_a", filter="all",
+                    sort_order="default", library_section_id="xtream_vod",
+                    title="Dune (2021) (HD)", type="movie", unification_id="")
+        assert canonical_title_year(row) == ("Dune", 2021)
+
+    def test_clean_title_unchanged(self):
+        from app.services.aggregation_service import canonical_title_year
+        assert canonical_title_year(self._row("Inception", 2010)) == ("Inception", 2010)
+
+
 class TestVersionNaming:
     def test_movie_version_path(self):
         assert movie_version_path("Terminator", 1984, "VF · Compte 1") == (
@@ -246,6 +269,9 @@ class TestUnifiedDatabaseSource:
         by_group = {m.source_id: m for m in movies}
         assert "tmdb://218" in by_group
         term = by_group["tmdb://218"]
+        # Canonical title is cleaned (qualifier stripped), year preserved.
+        assert term.title == "Terminator"
+        assert term.year == 1984
         # Three versions merged under one group.
         assert len(term.versions) == 3
         urls = {v.stream_url for v in term.versions}
@@ -315,6 +341,9 @@ class TestUnifiedApiService:
         assert total == 2
         labels = await media_service.account_labels(db_session)
         by_key = {g.key: g for g in groups}
+        # Canonical title cleaned for the unified card.
+        from app.services.aggregation_service import canonical_title_year
+        assert canonical_title_year(by_key["tmdb://218"].best) == ("Terminator", 1984)
         versions = _build_versions(by_key["tmdb://218"].members, labels)
         assert len(versions) == 2
         assert {v.server_id for v in versions} == {"xtream_a", "xtream_b"}

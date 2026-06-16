@@ -12,7 +12,8 @@ from app.plex_generator.models import (
     PlexSeries,
 )
 from app.services.aggregation_service import (
-    aggregate_movies, aggregate_series, dedup_labels, version_label,
+    aggregate_movies, aggregate_series, canonical_title_year,
+    dedup_labels, version_label,
 )
 from app.services.stream_service import build_stream_url
 from app.utils.server_id import build_server_id
@@ -93,10 +94,11 @@ class DatabaseSource(MediaSource):
                 if not triples:
                     continue
                 best = grp.best
+                clean_title, clean_year = canonical_title_year(best)
                 movies.append(PlexMovie(
                     source_id=grp.key,
-                    title=best.title,
-                    year=best.year,
+                    title=clean_title,
+                    year=clean_year,
                     versions=[PlexMovieVersion(
                         source_id=row.rating_key, server_id=row.server_id,
                         label=label, stream_url=url,
@@ -149,6 +151,7 @@ class DatabaseSource(MediaSource):
             series_list: list[PlexSeries] = []
             for grp in aggregate_series(shows, episodes):
                 best = grp.best
+                clean_title, clean_year = canonical_title_year(best)
                 plex_episodes: list[PlexEpisode] = []
                 for slot in grp.slots:
                     triples = self._build_versions(slot.members, accounts)
@@ -157,7 +160,7 @@ class DatabaseSource(MediaSource):
                     best_ep = slot.best
                     plex_episodes.append(PlexEpisode(
                         source_id=f"{grp.key}|S{slot.season:02d}E{slot.episode:02d}",
-                        series_title=best.title,
+                        series_title=clean_title,
                         season_num=slot.season,
                         episode_num=slot.episode,
                         title=best_ep.title,
@@ -175,8 +178,8 @@ class DatabaseSource(MediaSource):
 
                 series_list.append(PlexSeries(
                     source_id=grp.key,
-                    title=best.title,
-                    year=best.year,
+                    title=clean_title,
+                    year=clean_year,
                     poster_url=best.resolved_thumb_url or best.thumb_url,
                     fanart_url=best.resolved_art_url or best.art_url,
                     genres=best.genres,

@@ -41,6 +41,17 @@ def best_row(rows: list[Media]) -> Media:
     return max(rows, key=lambda r: (key(r), r.server_id or "", r.rating_key or ""))
 
 
+def canonical_title_year(row: Media) -> tuple[str, int | None]:
+    """Clean display title + year for a group's representative row.
+
+    Strips the version qualifier (VF/HD/VOSTFR/…) and any embedded year so the
+    deduped entry shows a single clean title — e.g. "Terminator (1984) (VF)" →
+    ("Terminator", 1984). The qualifier still lives on each version's label."""
+    clean, parsed_year, _ = parse_title_year_and_suffix(row.title or "")
+    year = row.year if row.year is not None else parsed_year
+    return clean, year
+
+
 def version_label(row: Media, account_label: str) -> str:
     """Human-readable version label, e.g. "VF · Compte 1" / "Compte 1".
 

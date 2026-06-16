@@ -15,7 +15,9 @@ from app.models.schemas import (
     UnifiedEpisodeResponse,
     UnifiedEpisodeListResponse,
 )
-from app.services.aggregation_service import dedup_labels, version_label
+from app.services.aggregation_service import (
+    canonical_title_year, dedup_labels, version_label,
+)
 from app.services.media_service import media_service
 
 router = APIRouter(prefix="/media", tags=["media"])
@@ -133,8 +135,9 @@ async def list_movies_unified(
     items = []
     for g in groups:
         best = g.best
+        clean_title, clean_year = canonical_title_year(best)
         items.append(UnifiedMediaResponse(
-            unification_id=g.key, type="movie", title=best.title, year=best.year,
+            unification_id=g.key, type="movie", title=clean_title, year=clean_year,
             summary=best.summary, genres=best.genres, content_rating=best.content_rating,
             thumb_url=best.resolved_thumb_url or best.thumb_url,
             art_url=best.resolved_art_url or best.art_url,
@@ -166,8 +169,9 @@ async def list_shows_unified(
     items = []
     for g in groups:
         best = g.best
+        clean_title, clean_year = canonical_title_year(best)
         items.append(UnifiedMediaResponse(
-            unification_id=g.key, type="show", title=best.title, year=best.year,
+            unification_id=g.key, type="show", title=clean_title, year=clean_year,
             summary=best.summary, genres=best.genres, content_rating=best.content_rating,
             thumb_url=best.resolved_thumb_url or best.thumb_url,
             art_url=best.resolved_art_url or best.art_url,
@@ -207,7 +211,7 @@ async def list_episodes_unified(
         for slot in slots
     ]
     return UnifiedEpisodeListResponse(
-        unification_id=unification_id, series_title=group.best.title,
+        unification_id=unification_id, series_title=canonical_title_year(group.best)[0],
         items=items, total=len(items),
     )
 

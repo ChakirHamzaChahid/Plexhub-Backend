@@ -1,16 +1,16 @@
 # PlexHub Backend — Diagrammes de séquence par fonctionnalité
 
-> Cartographie des flux bout-en-bout du backend FastAPI (HEAD `40cc8e9`).
+> Cartographie des flux bout-en-bout du backend FastAPI (HEAD `4887ee6`).
 > Source : `app/main.py`, `app/api/*`, `app/workers/*`, `app/services/*`, `app/plex_generator/*`.
 > **Docs liées** : `docs/architecture/ARCHITECTURE.md` §6 (description textuelle des mêmes flux + flowchart global) et `CLAUDE.md` §5 (flux clés, autorité de vérité). Ce fichier en est la **vue dynamique** (séquences d'échanges).
 >
-> ⚠️ Delta vs ARCHITECTURE.md/CLAUDE.md (cartographiés à HEAD `1da2ab9`) : la fonctionnalité **#7 LLM génératif (Ollama `/describe` `/chat`)** est plus récente et n'y figure pas encore — elle est documentée ici (vérifiée dans `app/api/ai.py:493-540`).
+> ℹ️ Les 3 docs sont alignées à HEAD `4887ee6` : la fonctionnalité **#7 LLM génératif (Ollama `/describe` `/chat` `/llm/status`)** est désormais documentée dans `ARCHITECTURE.md` §6.7 et `CLAUDE.md` §5.7 (vérifiée dans `app/api/ai.py:493-540`).
 
 Le backend a **8 fonctionnalités** :
 
 | # | Fonctionnalité | Déclencheur | Réf code |
 |---|---|---|---|
-| 0 | Boot + élection master/worker + pipeline planifié | Démarrage app | `main.py:198,241-320` |
+| 0 | Boot + élection master/worker + pipeline planifié | Démarrage app | `main.py:226-227,248-321` |
 | 1 | Sync Xtream (VOD/séries/épisodes/Live/EPG) | Pipeline / `POST /api/sync` | `workers/sync_worker.py` |
 | 2 | Enrichissement TMDB | Pipeline (après sync) | `workers/enrichment_worker.py` |
 | 3 | Validation de flux (santé streams) | Pipeline + cron 2h | `workers/health_check_worker.py` |
@@ -37,7 +37,7 @@ sequenceDiagram
     participant PIPE as Pipeline sync→enrich→validate→plex
 
     U->>L: startup (par worker)
-    L->>DB: init_db() (PRAGMA WAL, migrations 001→009)
+    L->>DB: init_db() (PRAGMA WAL, migrations 001→010)
     L->>FS: tente fcntl.flock(LOCK_EX|LOCK_NB)
     alt lock acquis → MASTER
         FS-->>L: OK

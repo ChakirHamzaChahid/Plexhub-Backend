@@ -288,6 +288,22 @@ async def lifespan(app: FastAPI):
                 coalesce=True,
                 misfire_grace_time=3600,
             )
+
+            async def _subtitle_cache_cleanup():
+                from app.services import subtitle_service
+                from app.db.database import async_session_factory
+                await subtitle_service.cleanup_cache(async_session_factory)
+
+            scheduler.add_job(
+                _subtitle_cache_cleanup,
+                "cron",
+                hour=3,
+                id="subtitle_cache_cleanup",
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=3600,
+            )
+
             if settings.BACKUP_ENABLED:
                 from app.scripts.backup_db import run_backup as _run_backup
 

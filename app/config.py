@@ -68,6 +68,7 @@ class Settings:
     SUBTITLE_MAX_BYTES: int = _safe_int("SUBTITLE_MAX_BYTES", 2000000)       # ~2 MB, reject above (413)
     SUBTITLE_PER_CHUNK_TIMEOUT: int = _safe_int("SUBTITLE_PER_CHUNK_TIMEOUT", 120)  # seconds per chunk
     SUBTITLE_TOTAL_TIMEOUT: int = _safe_int("SUBTITLE_TOTAL_TIMEOUT", 600)   # whole-request deadline (seconds)
+    SUBTITLE_CACHE_RETENTION_DAYS: int = _safe_int("SUBTITLE_CACHE_RETENTION_DAYS", 30)  # 0 = keep forever
 
     # Xtream account auto-provisioning from env
     XTREAM_BASE_URL: str = os.getenv("XTREAM_BASE_URL", "")

@@ -31,7 +31,8 @@ import asyncio
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any
+
+from sqlalchemy import delete
 
 from app.config import settings
 from app.services import ollama_service
@@ -174,6 +175,10 @@ def _serialize_srt(blocks: list[_Block]) -> str:
     cue_number = 1
     for block in blocks:
         if isinstance(block, _Cue):
+            # block.header (original SRT index) is intentionally unused here:
+            # renumbering 1..N is the standard SRT practice and keeps output
+            # consistent after any filtering.  header is retained on _Cue so
+            # the VTT path (_serialize_vtt) can emit cue identifiers verbatim.
             parts.append(f"{cue_number}\n{block.timecode}\n{block.text}")
             cue_number += 1
         # _Passthrough blocks are not expected in SRT (parser drops them)
@@ -585,3 +590,36 @@ async def translate_subtitles(
         cue_count=len(cues),
         model=settings.OLLAMA_MODEL,
     )
+
+
+# ---------------------------------------------------------------------------
+# Cache pruning (called by daily cron job, master-only)
+# ---------------------------------------------------------------------------
+
+async def cleanup_cache(sessionmaker) -> int:
+    """Delete ai_subtitle_cache rows older than SUBTITLE_CACHE_RETENTION_DAYS.
+
+    If retention is 0, this is a no-op (keep forever) and returns 0.
+    Uses commit_with_retry to handle SQLite write contention.
+    Returns the number of rows deleted.
+    """
+    retention_days = settings.SUBTITLE_CACHE_RETENTION_DAYS
+    if retention_days <= 0:
+        logger.debug("Subtitle cache retention=0 — skipping pruning")
+        return 0
+
+    from app.models.database import AiSubtitleCache
+    from app.utils.db_retry import commit_with_retry
+    from app.utils.time import now_ms
+
+    cutoff_ms = now_ms() - retention_days * 24 * 60 * 60 * 1000
+
+    async with sessionmaker() as db:
+        result = await db.execute(
+            delete(AiSubtitleCache).where(AiSubtitleCache.created_at < cutoff_ms)
+        )
+        await commit_with_retry(db)
+
+    deleted = result.rowcount
+    logger.info("Subtitle cache cleanup: removed %d entries older than %d days", deleted, retention_days)
+    return deleted

@@ -529,3 +529,93 @@ async def test_global_timeout_503(sub_client, monkeypatch):
         json={"content": SRT_2_CUES, "targetLang": "fr"},
     )
     assert resp.status_code == 503, resp.text
+
+
+# ---------------------------------------------------------------------------
+# TC-13 — cleanup_cache: prunes old rows, keeps recent, no-op when retention=0
+# ---------------------------------------------------------------------------
+
+async def test_cleanup_cache_prunes_old_keeps_recent(subtitle_factory, monkeypatch):
+    """cleanup_cache deletes rows older than retention days and keeps recent ones."""
+    from app.models.database import AiSubtitleCache
+    from app.services import subtitle_service
+    from app.utils.time import now_ms
+
+    monkeypatch.setattr(settings, "SUBTITLE_CACHE_RETENTION_DAYS", 30)
+
+    now = now_ms()
+    forty_days_ago = now - 40 * 24 * 60 * 60 * 1000
+
+    recent_key = "cache-key-recent"
+    old_key = "cache-key-old"
+
+    async with subtitle_factory() as db:
+        db.add(AiSubtitleCache(
+            cache_key=recent_key,
+            target_lang="fr",
+            model="test-model",
+            source_format="srt",
+            cue_count=2,
+            translated_content="recent content",
+            created_at=now,
+        ))
+        db.add(AiSubtitleCache(
+            cache_key=old_key,
+            target_lang="fr",
+            model="test-model",
+            source_format="srt",
+            cue_count=2,
+            translated_content="old content",
+            created_at=forty_days_ago,
+        ))
+        await db.commit()
+
+    deleted = await subtitle_service.cleanup_cache(subtitle_factory)
+
+    assert deleted == 1, f"Expected 1 deleted row, got {deleted}"
+
+    from sqlalchemy import select
+    async with subtitle_factory() as db:
+        result = await db.execute(
+            select(AiSubtitleCache.cache_key)
+        )
+        remaining_keys = {row[0] for row in result}
+
+    assert recent_key in remaining_keys, "Recent cache entry was incorrectly deleted"
+    assert old_key not in remaining_keys, "Old cache entry was not deleted"
+
+
+async def test_cleanup_cache_noop_when_retention_zero(subtitle_factory, monkeypatch):
+    """cleanup_cache returns 0 and deletes nothing when retention is 0."""
+    from app.models.database import AiSubtitleCache
+    from app.services import subtitle_service
+    from app.utils.time import now_ms
+
+    monkeypatch.setattr(settings, "SUBTITLE_CACHE_RETENTION_DAYS", 0)
+
+    forty_days_ago = now_ms() - 40 * 24 * 60 * 60 * 1000
+    old_key = "cache-key-zero-retention"
+
+    async with subtitle_factory() as db:
+        db.add(AiSubtitleCache(
+            cache_key=old_key,
+            target_lang="fr",
+            model="test-model",
+            source_format="srt",
+            cue_count=1,
+            translated_content="old content",
+            created_at=forty_days_ago,
+        ))
+        await db.commit()
+
+    deleted = await subtitle_service.cleanup_cache(subtitle_factory)
+
+    assert deleted == 0, f"Expected 0 deleted rows (retention=0), got {deleted}"
+
+    from sqlalchemy import select
+    async with subtitle_factory() as db:
+        result = await db.execute(
+            select(AiSubtitleCache.cache_key).where(AiSubtitleCache.cache_key == old_key)
+        )
+        row = result.first()
+    assert row is not None, "Row was deleted despite retention=0"

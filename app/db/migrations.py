@@ -30,6 +30,8 @@ async def run_migrations(engine: AsyncEngine) -> None:
 
     await _migration_009_create_tv_auth_sessions(engine)
     await _migration_010_scrape_cache(engine)
+    await _migration_011_create_subtitle_cache(engine)
+    await _migration_012_create_media_blurb(engine)
 
     logger.info("All migrations completed successfully")
 
@@ -312,6 +314,75 @@ async def _migration_010_scrape_cache(engine: AsyncEngine) -> None:
             logger.info("Migration 010: tmdb_scrape_cache table created")
         except Exception as e:
             logger.warning(f"Migration 010: Table may already exist: {e}")
+
+
+async def _migration_011_create_subtitle_cache(engine: AsyncEngine) -> None:
+    """Create ai_subtitle_cache table for AI subtitle translation (WP3).
+
+    Caches translated subtitle content keyed by a deterministic hash of the
+    source material so repeated translation requests are served from cache.
+    Idempotent: every DDL uses IF NOT EXISTS.
+    """
+    logger.info("Migration 011: Creating ai_subtitle_cache table")
+
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS ai_subtitle_cache (
+                    cache_key          TEXT PRIMARY KEY,
+                    target_lang        TEXT    NOT NULL,
+                    model              TEXT    NOT NULL,
+                    source_format      TEXT    NOT NULL,
+                    cue_count          INTEGER NOT NULL,
+                    translated_content TEXT    NOT NULL,
+                    created_at         INTEGER NOT NULL
+                )
+            """))
+
+            for idx_sql in [
+                "CREATE INDEX IF NOT EXISTS ix_subtitle_cache_lang ON ai_subtitle_cache(target_lang)",
+                "CREATE INDEX IF NOT EXISTS ix_subtitle_cache_created ON ai_subtitle_cache(created_at)",
+            ]:
+                await conn.execute(text(idx_sql))
+
+            logger.info("Migration 011: ai_subtitle_cache table created")
+        except Exception as e:
+            logger.warning(f"Migration 011: Table may already exist: {e}")
+
+
+async def _migration_012_create_media_blurb(engine: AsyncEngine) -> None:
+    """Create ai_media_blurb table for AI-generated French synopsis + mood tags (F3).
+
+    Keyed on (tmdb_id, media_type, lang) so the same title can have blurbs for
+    multiple languages.  tags is stored as a JSON array string.
+    Idempotent: every DDL uses IF NOT EXISTS.
+    """
+    logger.info("Migration 012: Creating ai_media_blurb table")
+
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS ai_media_blurb (
+                    tmdb_id    INTEGER NOT NULL,
+                    media_type TEXT    NOT NULL,
+                    lang       TEXT    NOT NULL,
+                    summary    TEXT    NOT NULL,
+                    tags       TEXT    NOT NULL,
+                    model      TEXT    NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    PRIMARY KEY (tmdb_id, media_type, lang)
+                )
+            """))
+
+            for idx_sql in [
+                "CREATE INDEX IF NOT EXISTS ix_media_blurb_tmdb ON ai_media_blurb(tmdb_id)",
+                "CREATE INDEX IF NOT EXISTS ix_media_blurb_lang ON ai_media_blurb(lang)",
+            ]:
+                await conn.execute(text(idx_sql))
+
+            logger.info("Migration 012: ai_media_blurb table created")
+        except Exception as e:
+            logger.warning(f"Migration 012: Table may already exist: {e}")
 
 
 async def _migration_008_ai_embeddings(conn) -> None:

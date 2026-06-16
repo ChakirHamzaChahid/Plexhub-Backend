@@ -1,11 +1,14 @@
 """Pure ranking logic: cache lookup, parallel hydrate with timeout, cosine, centroid.
 
+Also provides generate_blurb() for F3 (French synopsis + mood tags via Ollama/gemma4).
+
 Stateless wrt user: only operates on tmdb_id integers. imdb_id resolution is done
 by the endpoint layer (J3b) before calling this service.
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import struct
 import time
@@ -202,6 +205,135 @@ async def hydrate_misses(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Semantic KNN search over ai_embeddings + join ai_tmdb_cache
+# ──────────────────────────────────────────────────────────────────────────────
+
+async def semantic_search(
+    db: AsyncSession,
+    query_vec: list[float],
+    media_type: str | None,
+    limit: int,
+) -> list[tuple[int, str | None, str, float]]:
+    """KNN vector search against ai_embeddings, returning joined cache metadata.
+
+    Uses the native sqlite-vec KNN syntax:
+        WHERE embedding MATCH :vec AND k = :k ORDER BY distance
+
+    The vec0 distance metric is L2.  Because every embedding stored by this
+    project is L2-normalised (output of embed_passages / embed_query), the
+    conversion from L2 distance to cosine similarity is exact:
+        cosine_sim = 1.0 - (l2_distance ** 2) / 2.0
+
+    When media_type is given the vec0 table has no media_type column, so we
+    over-fetch (limit * 4, capped at 200) from the KNN query, then filter by
+    joining ai_tmdb_cache and truncate to limit.  When media_type is None no
+    extra filtering is needed and we fetch exactly limit rows.
+
+    Returns a list of (tmdb_id, title, media_type, score) tuples, sorted by
+    score descending.  Rows with no matching ai_tmdb_cache entry are dropped
+    (they cannot be hydrated into a usable result).
+    """
+    vec_blob = _serialize_vec(query_vec)
+
+    # Determine how many rows to fetch from the KNN index before filtering.
+    if media_type is not None:
+        # Over-fetch to account for the type filter; cap to avoid runaway queries.
+        knn_k = min(limit * 4, 200)
+    else:
+        knn_k = limit
+
+    # Phase 1 — KNN over the vec0 virtual table (index scan, no full table scan).
+    knn_sql = text(
+        "SELECT tmdb_id, distance "
+        "FROM ai_embeddings "
+        "WHERE embedding MATCH :vec AND k = :k "
+        "ORDER BY distance"
+    )
+    knn_rows = (await db.execute(knn_sql, {"vec": vec_blob, "k": knn_k})).fetchall()
+    if not knn_rows:
+        return []
+
+    # Phase 2 — join ai_tmdb_cache for title / media_type.
+    knn_ids = [row[0] for row in knn_rows]
+    dist_by_id = {row[0]: row[1] for row in knn_rows}
+
+    placeholders = ",".join(f":id{i}" for i in range(len(knn_ids)))
+    params: dict = {f"id{i}": tid for i, tid in enumerate(knn_ids)}
+    cache_sql = text(
+        f"SELECT tmdb_id, title, media_type "
+        f"FROM ai_tmdb_cache "
+        f"WHERE tmdb_id IN ({placeholders})"
+    )
+    cache_rows = (await db.execute(cache_sql, params)).fetchall()
+
+    # Build results, optionally filtering by media_type.
+    results: list[tuple[int, str | None, str, float]] = []
+    for tmdb_id, title, row_media_type in cache_rows:
+        if media_type is not None and row_media_type != media_type:
+            continue
+        dist = dist_by_id[tmdb_id]
+        # L2-norm vectors: cosine_sim = 1 - dist^2 / 2
+        score = round(1.0 - (dist ** 2) / 2.0, 6)
+        results.append((tmdb_id, title, row_media_type, score))
+
+    # Re-sort by score descending (join may have reordered) and truncate.
+    results.sort(key=lambda x: x[3], reverse=True)
+    return results[:limit]
+
+
+async def semantic_search_with_overview(
+    db: AsyncSession,
+    query_vec: list[float],
+    media_type: str | None,
+    limit: int,
+) -> list[tuple[int, str | None, str, float, str | None]]:
+    """Like semantic_search but also returns the overview column from ai_tmdb_cache.
+
+    Returns a list of (tmdb_id, title, media_type, score, overview) tuples,
+    sorted by score descending.  overview may be None when not yet fetched.
+    """
+    vec_blob = _serialize_vec(query_vec)
+
+    if media_type is not None:
+        knn_k = min(limit * 4, 200)
+    else:
+        knn_k = limit
+
+    knn_sql = text(
+        "SELECT tmdb_id, distance "
+        "FROM ai_embeddings "
+        "WHERE embedding MATCH :vec AND k = :k "
+        "ORDER BY distance"
+    )
+    knn_rows = (await db.execute(knn_sql, {"vec": vec_blob, "k": knn_k})).fetchall()
+    if not knn_rows:
+        return []
+
+    knn_ids = [row[0] for row in knn_rows]
+    dist_by_id = {row[0]: row[1] for row in knn_rows}
+
+    placeholders = ",".join(f":id{i}" for i in range(len(knn_ids)))
+    params: dict = {f"id{i}": tid for i, tid in enumerate(knn_ids)}
+    cache_sql = text(
+        f"SELECT tmdb_id, title, media_type, overview "
+        f"FROM ai_tmdb_cache "
+        f"WHERE tmdb_id IN ({placeholders})"
+    )
+    cache_rows = (await db.execute(cache_sql, params)).fetchall()
+
+    results: list[tuple[int, str | None, str, float, str | None]] = []
+    for tmdb_id, title, row_media_type, overview in cache_rows:
+        if media_type is not None and row_media_type != media_type:
+            continue
+        dist = dist_by_id[tmdb_id]
+        score = round(1.0 - (dist ** 2) / 2.0, 6)
+        results.append((tmdb_id, title, row_media_type, score, overview))
+
+    results.sort(key=lambda x: x[3], reverse=True)
+    return results[:limit]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Cosine ranking
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -231,3 +363,99 @@ def cosine_rank(
         items.append((tid, score))
     items.sort(key=lambda x: x[1], reverse=True)
     return items[:limit]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# F3 — AI-generated French synopsis + mood tags
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _strip_code_fences(text: str) -> str:
+    """Remove leading/trailing markdown code fences if present."""
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        # drop first line (```json or ```) and last line (```)
+        lines = stripped.splitlines()
+        inner = lines[1:] if len(lines) > 1 else lines
+        # drop trailing ```
+        if inner and inner[-1].strip() == "```":
+            inner = inner[:-1]
+        stripped = "\n".join(inner).strip()
+    return stripped
+
+
+def _parse_blurb_json(raw: str) -> dict | None:
+    """Try to parse the LLM output as {"summary": str, "tags": list[str]}.
+
+    Returns the dict on success, None on failure.
+    """
+    try:
+        obj = json.loads(_strip_code_fences(raw))
+        if isinstance(obj, dict) and "summary" in obj and "tags" in obj:
+            summary = str(obj["summary"]).strip()
+            tags = obj["tags"] if isinstance(obj["tags"], list) else []
+            tags = [str(t).strip() for t in tags if str(t).strip()]
+            return {"summary": summary, "tags": tags}
+    except Exception:
+        pass
+    return None
+
+
+async def generate_blurb(
+    tmdb_id: int,
+    media_type: Literal["movie", "tv"],
+    title: str,
+    overview: str,
+    genres: str,
+    lang: str = "fr",
+) -> dict:
+    """Call Ollama/gemma4 to produce a French synopsis + mood/genre tags.
+
+    The LLM is asked for a JSON object:
+        {"summary": "1-2 sentence spoiler-free synopsis", "tags": ["tag1", ...]}
+
+    Parse strategy (robust fallback):
+      1. Strip markdown code fences, parse JSON — if valid, return it.
+      2. Retry once with a stricter prompt on parse failure.
+      3. If still unparseable, fall back: summary = first 300 chars of raw text,
+         tags = [].
+
+    Returns {"summary": str, "tags": list[str]}.
+    Propagates any exception from ollama_service.generate (caller handles 503).
+    """
+    from app.services import ollama_service as _ollama
+
+    lang_label = "français" if lang == "fr" else lang
+
+    def _build_prompt(strict: bool = False) -> str:
+        genres_str = genres or "N/A"
+        overview_str = overview or "Non disponible"
+        strictness = (
+            " Réponds UNIQUEMENT avec le JSON, rien d'autre, pas de texte avant ou après."
+            if strict else ""
+        )
+        return (
+            f"Tu es un expert en cinéma et séries TV. "
+            f"Pour le titre suivant, génère un synopsis court (1-2 phrases, sans spoiler) "
+            f"et 3 à 6 étiquettes courtes de genre/ambiance, EN {lang_label.upper()}. "
+            f"Réponds UNIQUEMENT en JSON avec ce format exactement : "
+            f'{{\"summary\": \"...\", \"tags\": [\"...\", ...]}}. '
+            f"Pas d'explication, pas de markdown.{strictness}\n\n"
+            f"Titre : {title}\n"
+            f"Genres : {genres_str}\n"
+            f"Synopsis TMDB : {overview_str}"
+        )
+
+    # First attempt
+    raw = await _ollama.generate(_build_prompt(strict=False))
+    result = _parse_blurb_json(raw)
+
+    if result is None:
+        # Retry once with stricter prompt
+        raw2 = await _ollama.generate(_build_prompt(strict=True))
+        result = _parse_blurb_json(raw2)
+        if result is None:
+            # Graceful fallback: use first 300 chars as summary, empty tags
+            fallback_text = _strip_code_fences(raw2 or raw).strip()
+            result = {"summary": fallback_text[:300] or title, "tags": []}
+
+    return result

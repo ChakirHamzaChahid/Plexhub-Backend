@@ -29,6 +29,7 @@ async def run_migrations(engine: AsyncEngine) -> None:
         await _migration_008_ai_embeddings(conn)
 
     await _migration_009_create_tv_auth_sessions(engine)
+    await _migration_010_scrape_cache(engine)
 
     logger.info("All migrations completed successfully")
 
@@ -267,6 +268,50 @@ async def _migration_009_create_tv_auth_sessions(engine: AsyncEngine) -> None:
             logger.info("Migration 009: tv_auth_sessions table created")
         except Exception as e:
             logger.warning(f"Migration 009: Table may already exist: {e}")
+
+
+async def _migration_010_scrape_cache(engine: AsyncEngine) -> None:
+    """Persistent TMDB scrape cache + existing_summary on enrichment_queue.
+
+    The scrape cache lets enrichment reuse a previous TMDB resolution for the
+    same (media_type, normalized title, year) — across accounts AND restarts —
+    so we never re-query TMDB for the same film/series. existing_summary carries
+    the Xtream plot into the matcher for the summary-based tie-break.
+    """
+    logger.info("Migration 010: scrape cache + enrichment summary")
+
+    # Separate transactions so a guarded ADD COLUMN failure (column already
+    # present on a fresh DB created via create_all) can't abort the CREATE TABLE.
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(text("""
+                ALTER TABLE enrichment_queue ADD COLUMN existing_summary TEXT
+            """))
+            logger.info("Migration 010: existing_summary column added")
+        except Exception as e:
+            logger.warning(f"Migration 010: existing_summary may already exist: {e}")
+
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS tmdb_scrape_cache (
+                    cache_key TEXT PRIMARY KEY,
+                    media_type TEXT NOT NULL,
+                    result TEXT NOT NULL,
+                    tmdb_id TEXT,
+                    imdb_id TEXT,
+                    confidence REAL,
+                    payload TEXT,
+                    fetched_at INTEGER NOT NULL
+                )
+            """))
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_scrape_cache_fetched_at "
+                "ON tmdb_scrape_cache(fetched_at)"
+            ))
+            logger.info("Migration 010: tmdb_scrape_cache table created")
+        except Exception as e:
+            logger.warning(f"Migration 010: Table may already exist: {e}")
 
 
 async def _migration_008_ai_embeddings(conn) -> None:

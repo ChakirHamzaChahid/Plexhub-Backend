@@ -3,15 +3,42 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 
 from app.db.database import get_db
+from app.models.database import Media
 from app.models.schemas import (
     MediaResponse,
     MediaListResponse,
     MediaUpdate,
     MediaStatsResponse,
+    MediaVersionResponse,
+    UnifiedMediaResponse,
+    UnifiedMediaListResponse,
+    UnifiedEpisodeResponse,
+    UnifiedEpisodeListResponse,
+)
+from app.services.aggregation_service import (
+    canonical_title_year, dedup_labels, version_label,
 )
 from app.services.media_service import media_service
 
 router = APIRouter(prefix="/media", tags=["media"])
+
+
+def _build_versions(
+    members: list[Media], labels: dict[str, str],
+) -> list[MediaVersionResponse]:
+    """Turn group member rows into unique-labelled version entries."""
+    raw = [version_label(m, labels.get(m.server_id, m.server_id)) for m in members]
+    return [
+        MediaVersionResponse(
+            server_id=m.server_id, rating_key=m.rating_key,
+            title=m.title, label=label, is_broken=m.is_broken,
+        )
+        for m, label in zip(members, dedup_labels(raw))
+    ]
+
+
+def _tmdb_str(value) -> str | None:
+    return str(value) if value not in (None, "") else None
 
 
 @router.get("/movies", response_model=MediaListResponse)
@@ -87,6 +114,105 @@ async def list_episodes(
         items=[MediaResponse.model_validate(i) for i in items],
         total=total,
         has_more=(offset + limit) < total,
+    )
+
+
+@router.get("/movies/unified", response_model=UnifiedMediaListResponse)
+async def list_movies_unified(
+    limit: int = Query(200, ge=1, le=2000),
+    offset: int = Query(0, ge=0),
+    search: Optional[str] = Query(None),
+    genre: Optional[str] = Query(None),
+    year: Optional[int] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Movies deduped across ALL accounts: one entry per title + its versions."""
+    groups, total = await media_service.get_unified_list(
+        db, media_type="movie", limit=limit, offset=offset,
+        search=search, genre=genre, year=year,
+    )
+    labels = await media_service.account_labels(db)
+    items = []
+    for g in groups:
+        best = g.best
+        clean_title, clean_year = canonical_title_year(best)
+        items.append(UnifiedMediaResponse(
+            unification_id=g.key, type="movie", title=clean_title, year=clean_year,
+            summary=best.summary, genres=best.genres, content_rating=best.content_rating,
+            thumb_url=best.resolved_thumb_url or best.thumb_url,
+            art_url=best.resolved_art_url or best.art_url,
+            imdb_id=best.imdb_id, tmdb_id=_tmdb_str(best.tmdb_id),
+            rating=best.display_rating or best.scraped_rating, cast=best.cast,
+            versions=_build_versions(g.members, labels),
+            version_count=len(g.members),
+        ))
+    return UnifiedMediaListResponse(
+        items=items, total=total, has_more=(offset + limit) < total,
+    )
+
+
+@router.get("/shows/unified", response_model=UnifiedMediaListResponse)
+async def list_shows_unified(
+    limit: int = Query(200, ge=1, le=2000),
+    offset: int = Query(0, ge=0),
+    search: Optional[str] = Query(None),
+    genre: Optional[str] = Query(None),
+    year: Optional[int] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Shows deduped across ALL accounts. Episodes via /shows/{id}/episodes."""
+    groups, total = await media_service.get_unified_list(
+        db, media_type="show", limit=limit, offset=offset,
+        search=search, genre=genre, year=year,
+    )
+    labels = await media_service.account_labels(db)
+    items = []
+    for g in groups:
+        best = g.best
+        clean_title, clean_year = canonical_title_year(best)
+        items.append(UnifiedMediaResponse(
+            unification_id=g.key, type="show", title=clean_title, year=clean_year,
+            summary=best.summary, genres=best.genres, content_rating=best.content_rating,
+            thumb_url=best.resolved_thumb_url or best.thumb_url,
+            art_url=best.resolved_art_url or best.art_url,
+            imdb_id=best.imdb_id, tmdb_id=_tmdb_str(best.tmdb_id),
+            rating=best.display_rating or best.scraped_rating, cast=best.cast,
+            versions=_build_versions(g.members, labels),
+            version_count=len(g.members),
+        ))
+    return UnifiedMediaListResponse(
+        items=items, total=total, has_more=(offset + limit) < total,
+    )
+
+
+@router.get("/episodes/unified", response_model=UnifiedEpisodeListResponse)
+async def list_episodes_unified(
+    unification_id: str = Query(..., description="Show unificationId, e.g. tmdb://1396"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Episodes of a unified show, deduped across accounts into (season, episode)
+    slots — each slot exposes every account/quality version it exists in."""
+    result = await media_service.get_unified_episodes(db, unification_id)
+    if result is None:
+        raise HTTPException(404, "No show found for that unificationId")
+    shows, group = result
+    labels = await media_service.account_labels(db)
+
+    slots = sorted(group.slots, key=lambda s: (s.season, s.episode))
+    items = [
+        UnifiedEpisodeResponse(
+            season=slot.season, episode=slot.episode,
+            title=slot.best.title, summary=slot.best.summary,
+            thumb_url=slot.best.resolved_thumb_url or slot.best.thumb_url,
+            duration=slot.best.duration,
+            versions=_build_versions(slot.members, labels),
+            version_count=len(slot.members),
+        )
+        for slot in slots
+    ]
+    return UnifiedEpisodeListResponse(
+        unification_id=unification_id, series_title=canonical_title_year(group.best)[0],
+        items=items, total=len(items),
     )
 
 

@@ -90,6 +90,71 @@ class MediaListResponse(BaseModel):
     has_more: bool
 
 
+# --- Unified (deduped) media schemas — one entry per title, N versions ---
+
+class MediaVersionResponse(BaseModel):
+    """One playable source (account/quality/language) of a unified title."""
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    server_id: str
+    rating_key: str
+    title: str            # raw source title (carries the VF/HD/… qualifier)
+    label: str            # human version label, e.g. "VF · Compte 1"
+    is_broken: bool = False
+
+
+class UnifiedMediaResponse(BaseModel):
+    """A movie or show deduped across accounts into a single card + versions."""
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    unification_id: str
+    type: str             # 'movie' or 'show'
+    title: str
+    year: Optional[int] = None
+    summary: Optional[str] = None
+    genres: Optional[str] = None
+    content_rating: Optional[str] = None
+    thumb_url: Optional[str] = None
+    art_url: Optional[str] = None
+    imdb_id: Optional[str] = None
+    tmdb_id: Optional[str] = None
+    rating: Optional[float] = None
+    cast: Optional[str] = None
+    version_count: int = 0
+    versions: list[MediaVersionResponse] = []
+
+
+class UnifiedMediaListResponse(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    items: list[UnifiedMediaResponse]
+    total: int
+    has_more: bool
+
+
+class UnifiedEpisodeResponse(BaseModel):
+    """A single (season, episode) slot deduped across accounts."""
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    season: int
+    episode: int
+    title: Optional[str] = None
+    summary: Optional[str] = None
+    thumb_url: Optional[str] = None
+    duration: Optional[int] = None
+    version_count: int = 0
+    versions: list[MediaVersionResponse] = []
+
+
+class UnifiedEpisodeListResponse(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    unification_id: str
+    series_title: str
+    items: list[UnifiedEpisodeResponse]
+    total: int
+
+
 class MediaUpdate(BaseModel):
     """Partial update for a media item. Editable fields: imdb_id, tmdb_id."""
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)

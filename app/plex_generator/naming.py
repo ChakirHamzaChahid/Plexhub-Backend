@@ -3,6 +3,8 @@ import re
 
 # Characters invalid on Windows and/or problematic for Plex path parsing
 _INVALID_CHARS = re.compile(r'[\\/:*?"<>|]')
+# Braces would break Plex's "{edition-...}" parsing if they appear inside a label.
+_EDITION_INVALID_CHARS = re.compile(r'[\\/:*?"<>|{}]')
 
 
 def sanitize_for_filesystem(name: str) -> str:
@@ -17,6 +19,17 @@ def sanitize_for_filesystem(name: str) -> str:
     name = re.sub(r"\s+", " ", name).strip()
     name = name.rstrip(".")
     return name.strip() or "Unknown"
+
+
+def sanitize_edition_label(label: str) -> str:
+    """Sanitize a label used inside a Plex ``{edition-LABEL}`` tag.
+
+    Same rules as :func:`sanitize_for_filesystem` but also strips braces so a
+    label can never close the edition tag prematurely."""
+    label = _EDITION_INVALID_CHARS.sub(" ", label)
+    label = re.sub(r"\s+", " ", label).strip()
+    label = label.rstrip(".")
+    return label.strip() or "v"
 
 
 def _decorate_with_disambiguator(
@@ -152,3 +165,41 @@ def series_fanart_path(
     """Relative path for a series fanart image."""
     safe_title = _series_folder(series_title, year, suffix, fallback_id)
     return f"Series/{safe_title}/fanart.jpg"
+
+
+# ── Multi-version (dedup) paths ────────────────────────────────────────────
+# When the same movie/episode exists across several accounts (or as several
+# qualities/languages within one), they share ONE folder + ONE .nfo and each
+# playable source becomes a distinct file with a " - label" differentiator.
+# This convention is recognised as "multiple versions" by BOTH Jellyfin/Emby
+# (alternate versions, same folder) AND Plex (the shared movie.nfo pins the
+# identity; extra files in the folder become versions) — no Plex-only edition tag.
+
+
+def movie_version_path(
+    title: str, year: int | None, version_label: str,
+    suffix: str | None = None, fallback_id: str | None = None,
+) -> str:
+    """Relative path for one version of a movie (Plex + Jellyfin compatible).
+
+    Example: Films/Terminator (1984)/Terminator (1984) - VF Compte 1.strm
+    """
+    folder = _movie_folder(title, year, suffix, fallback_id)
+    label = sanitize_for_filesystem(version_label)
+    return f"Films/{folder}/{folder} - {label}.strm"
+
+
+def series_episode_version_path(
+    series_title: str, season: int, episode: int, version_label: str,
+    year: int | None = None,
+    suffix: str | None = None, fallback_id: str | None = None,
+) -> str:
+    """Relative path for one version of an episode.
+
+    Example: Series/Show (2020)/Season 01/Show (2020) S01E01 - VF Compte 1.strm
+    """
+    folder = _series_folder(series_title, year, suffix, fallback_id)
+    season_str = f"Season {season:02d}"
+    base = f"{folder} S{season:02d}E{episode:02d}"
+    label = sanitize_for_filesystem(version_label)
+    return f"Series/{folder}/{season_str}/{base} - {label}.strm"

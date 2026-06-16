@@ -24,6 +24,12 @@ tmdb_requests_total = Counter(
     labelnames=("kind", "result"),  # kind: search_movie|search_tv|details, result: ok|miss|error|rate_limited
 )
 
+tmdb_match_total = Counter(
+    "plexhub_tmdb_match_total",
+    "TMDB enrichment outcomes, to track auto-match rate before/after.",
+    labelnames=("media_type", "result"),  # result: matched | nomatch | ambiguous
+)
+
 streams_alive_ratio = Gauge(
     "plexhub_streams_alive_ratio",
     "Ratio (0-1) of non-broken streams per account, computed at health check end.",

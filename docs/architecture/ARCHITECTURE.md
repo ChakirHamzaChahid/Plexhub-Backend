@@ -144,6 +144,8 @@ Ordre d'**exécution** (≠ ordre de définition dans le fichier) :
 
 ## 6. Flux services / workers
 
+> 📐 **Diagrammes de séquence** (un par fonctionnalité, vue dynamique des échanges) : `docs/architecture/SEQUENCE-DIAGRAMS.md`. La présente §6 est la description textuelle ; le fichier de séquences en est la contrepartie visuelle (boot/élection, sync, enrichissement, validation, génération Plex, IA rank/rebuild, LLM Ollama, appairage TV).
+
 ### 6.1 Sync (`workers/sync_worker.py`)
 `run_all_accounts()` (`:1290`) → `sync_account(id)` (`:854`, lock async par compte). Séquence : refresh catégories → VOD (incrémental `dto_hash`, fetch détails parallèle sém. 25, batches 100 + savepoints) → séries → épisodes (séries changées seulement) → Live → recalcul visibilité catégories → `last_synced_at`. Cleanup différentiel selon `filter_mode`. `server_id = f"xtream_{account_id}"` (`utils/server_id.py`). Métrique `plexhub_sync_duration_seconds`.
 

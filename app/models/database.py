@@ -266,9 +266,34 @@ class EnrichmentQueue(Base):
     processed_at = Column(BigInteger)
     existing_tmdb_id = Column(Text)  # TMDB ID present before enrichment (if any)
     existing_imdb_id = Column(Text)  # IMDB ID present before enrichment (if any)
+    existing_summary = Column(Text)  # Xtream plot — feeds the summary tie-break
 
     __table_args__ = (
         Index("ix_enrichment_status", "status"),
         Index("uix_enrichment_item", "rating_key", "server_id", unique=True),
         Index("ix_enrichment_status_type", "status", "media_type"),
+    )
+
+
+class TmdbScrapeCache(Base):
+    """Persistent cache of a TMDB resolution for a normalized title signature.
+
+    Keyed by `cache_key = f"{media_type}|{normalized_title}|{year or ''}"` so the
+    same film/series across accounts (and across restarts) reuses one resolution
+    instead of re-querying TMDB. `payload` holds the enrichment JSON on a match.
+    """
+
+    __tablename__ = "tmdb_scrape_cache"
+
+    cache_key = Column(Text, primary_key=True)
+    media_type = Column(Text, nullable=False)  # 'movie' | 'show'
+    result = Column(Text, nullable=False)       # 'matched' | 'ambiguous' | 'nomatch'
+    tmdb_id = Column(Text)
+    imdb_id = Column(Text)
+    confidence = Column(Float)
+    payload = Column(Text)                      # JSON of TMDBEnrichmentData when matched
+    fetched_at = Column(BigInteger, nullable=False)
+
+    __table_args__ = (
+        Index("ix_scrape_cache_fetched_at", "fetched_at"),
     )

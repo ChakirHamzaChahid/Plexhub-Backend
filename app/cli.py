@@ -40,32 +40,13 @@ async def _run_generate(
 
     storage = DryRunStorage() if dry_run else LocalStorage(output)
 
-    if all_accounts:
-        from sqlalchemy import select
-        from app.db.database import async_session_factory
-        from app.models.database import XtreamAccount
-
-        async with async_session_factory() as db:
-            result = await db.execute(
-                select(XtreamAccount.id).where(XtreamAccount.is_active == True)
-            )
-            account_ids = [row[0] for row in result]
-
-        if not account_ids:
-            logger.error("No active accounts found")
-            raise typer.Exit(code=1)
-
-        logger.info(f"Generating Plex library for {len(account_ids)} accounts")
-        for aid in account_ids:
-            source = DatabaseSource(aid)
-            gen = PlexLibraryGenerator(source, storage, output, strm_only)
-            report = await gen.generate()
-            _print_report(aid, report)
-    else:
-        source = DatabaseSource(account_id)
-        gen = PlexLibraryGenerator(source, storage, output, strm_only)
-        report = await gen.generate()
-        _print_report(account_id, report)
+    # Unified library: one flat, deduped tree. `--account-id` restricts the
+    # aggregation to one account; `--all` (or neither) merges every active one.
+    account_ids = [account_id] if account_id and not all_accounts else None
+    source = DatabaseSource(account_ids)
+    gen = PlexLibraryGenerator(source, storage, output, strm_only)
+    report = await gen.generate()
+    _print_report("all" if account_ids is None else account_id, report)
 
 
 def _print_report(account_id: str, report) -> None:

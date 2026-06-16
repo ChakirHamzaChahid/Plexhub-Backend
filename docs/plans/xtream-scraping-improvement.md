@@ -220,3 +220,36 @@ Pas de re-enrichissement automatique sur churn ni d'endpoint admin de re-scrape 
 
 > Référence source : `PlexHubTV/domain/.../usecase/ScraperMatcher.kt` et
 > `PlexHubTV/core/common/.../StringNormalizer.kt`.
+
+---
+
+## 7. Addendum (demandé en plus du plan — IMPLÉMENTÉ)
+
+### 7.1 Cache de scrape PERSISTANT (ne plus rappeler TMDB pour un même film/série)
+Les caches `tmdb_service` (`_search_cache` 24h, `_imdb_find_cache` 7j) sont **en mémoire** → perdus
+au redémarrage, et les détails n'étaient pas cachés. Ajout d'un cache **persistant SQLite** :
+- Table `tmdb_scrape_cache` (migration **010**) : `cache_key` PK =
+  `f"{media_type}|{normalize_for_sorting(titre)}|{year or ''}"`, `result` (matched/ambiguous/nomatch),
+  `tmdb_id`/`imdb_id`/`confidence`, `payload` (JSON de `TMDBEnrichmentData`), `fetched_at`.
+- `app/services/scrape_cache_service.py` : `make_key` / `get` (TTL **30 j** match · **3 j** négatif) /
+  `put`. Le worker (scénario 4) **consulte le cache AVANT TMDB** ; sur miss il résout puis `put`.
+  → même titre à travers comptes/qualités **et** après redémarrage = **0 appel TMDB**.
+- Idempotent ; aucun impact sur le cap quotidien (les hits ne consomment rien).
+
+### 7.2 Critère de désambiguïsation par le RÉSUMÉ Xtream
+Quand titre+année laissent un **doute** (top-2 dans la marge `MIN_MARGIN`), on départage avec le
+**résumé fourni par Xtream** (`media.summary`) comparé à l'`overview` de chaque candidat TMDB :
+- `_best_match` calcule `summary_sim = token_set_ratio(résumé_xtream, overview_candidat)` pour les
+  candidats proches ; si un candidat dépasse `SUMMARY_MIN_SIM=0.30` **et** distance le 2ᵉ de
+  `SUMMARY_TIEBREAK_MARGIN=0.10` → auto-match ce candidat. Sinon → `ambiguous` (pas de faux match).
+- Le résumé Xtream est porté jusqu'au matcher via `EnrichmentQueue.existing_summary` (migration **010**,
+  peuplé à l'enqueue au sync et au rescrape), passé en `search_movie/search_tv(..., summary=…)`.
+
+### 7.3 État livré
+Migration courante = **010**. Fichiers : `string_normalizer.py` (`clean_title` + `normalize_for_sorting`
+durci), `sync_worker.py` (branché sur `clean_title`), `tmdb_service.py` (scoring pondéré + original_title
++ marge + vote_count + tie-break résumé + `language`/`search_multi`), `enrichment_worker.py` (cache +
+fallback + record best score), `scrape_cache_service.py`, `metrics.py` (`plexhub_tmdb_match_total`),
+migration 010 + modèles. Tests : `test_title_cleaning.py`, `test_tmdb_service_mocked.py` (scoring +
+tie-break), `test_enrichment_scraping.py` (cache + fallback). **Reste à faire (op runtime)** : repasser
+les `EnrichmentQueue.status='skipped'` / `Media` sans `tmdb_id` en `pending` pour rejouer (étape §5.6).

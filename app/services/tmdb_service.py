@@ -18,6 +18,17 @@ _RETRYABLE = (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolEr
 POSTER_BASE = "https://image.tmdb.org/t/p/w342"
 BACKDROP_BASE = "https://image.tmdb.org/t/p/w1280"
 
+# Matching thresholds (transposed from PlexHubTV ScraperMatcher.kt).
+TITLE_WEIGHT = 0.7
+YEAR_WEIGHT = 0.3
+AUTO_MATCH_THRESHOLD = 0.85   # min weighted confidence to auto-match
+MIN_TITLE_SCORE = 0.90        # min title similarity to auto-match
+MIN_MARGIN = 0.05             # min confidence gap vs 2nd candidate (anti-ambiguity)
+# When title+year are strong but the top-2 are within MIN_MARGIN, the Xtream
+# summary breaks the tie if one candidate's overview is clearly closer.
+SUMMARY_TIEBREAK_MARGIN = 0.10
+SUMMARY_MIN_SIM = 0.30
+
 # Search results rarely change within a day; bounded to keep memory predictable.
 _SEARCH_CACHE_SIZE = 5000
 _SEARCH_CACHE_TTL = 24 * 3600  # 24 h
@@ -32,6 +43,22 @@ class TMDBMatch:
     title: str
     year: int | None
     confidence: float
+    title_score: float = 0.0
+    vote_count: int = 0
+
+
+@dataclass
+class TMDBSearchOutcome:
+    """Result of a search+score. `match` is set only on auto-match; `best` is
+    the top candidate regardless (kept so callers can record the best score
+    even on ambiguous/nomatch for later manual review)."""
+    result: str                 # "matched" | "ambiguous" | "nomatch"
+    match: TMDBMatch | None = None
+    best: TMDBMatch | None = None
+
+    @property
+    def confidence(self) -> float:
+        return self.best.confidence if self.best else 0.0
 
 
 @dataclass
@@ -53,7 +80,7 @@ class TMDBService:
 
     def __init__(self):
         self._client: Optional[httpx.AsyncClient] = None
-        self._search_cache: TTLCache[tuple[str, str, int | None], TMDBMatch | None] = TTLCache(
+        self._search_cache: TTLCache[tuple, TMDBSearchOutcome] = TTLCache(
             max_size=_SEARCH_CACHE_SIZE, ttl_seconds=_SEARCH_CACHE_TTL,
         )
         # imdb_id -> tmdb_id mapping is stable; cache 7 days. Bounded to keep RAM
@@ -139,39 +166,68 @@ class TMDBService:
 
     async def search_movie(
         self, title: str, year: int | None,
-    ) -> TMDBMatch | None:
+        *, summary: str | None = None, language: str | None = None,
+    ) -> TMDBSearchOutcome:
         if not self.is_configured:
-            return None
-        cache_key = ("movie", title, year)
+            return TMDBSearchOutcome("nomatch")
+        lang = language or settings.TMDB_LANGUAGE
+        cache_key = ("movie", title, year, lang)
         cached = self._search_cache.get(cache_key, default=_MISSING)
         if cached is not _MISSING:
             return cached
-        params: dict = {"query": title, "language": settings.TMDB_LANGUAGE}
+        params: dict = {"query": title, "language": lang}
         if year:
             params["year"] = year
         data = await self._request("/search/movie", params=params)
         results = data.get("results", [])
-        match = self._best_match(results, title, year, title_key="title", date_key="release_date")
-        self._search_cache.set(cache_key, match)
-        return match
+        outcome = self._best_match(
+            results, title, year, summary,
+            title_key="title", orig_key="original_title", date_key="release_date",
+        )
+        self._search_cache.set(cache_key, outcome)
+        return outcome
 
     async def search_tv(
         self, title: str, year: int | None,
-    ) -> TMDBMatch | None:
+        *, summary: str | None = None, language: str | None = None,
+    ) -> TMDBSearchOutcome:
         if not self.is_configured:
-            return None
-        cache_key = ("tv", title, year)
+            return TMDBSearchOutcome("nomatch")
+        lang = language or settings.TMDB_LANGUAGE
+        cache_key = ("tv", title, year, lang)
         cached = self._search_cache.get(cache_key, default=_MISSING)
         if cached is not _MISSING:
             return cached
-        params: dict = {"query": title, "language": settings.TMDB_LANGUAGE}
+        params: dict = {"query": title, "language": lang}
         if year:
             params["first_air_date_year"] = year
         data = await self._request("/search/tv", params=params)
         results = data.get("results", [])
-        match = self._best_match(results, title, year, title_key="name", date_key="first_air_date")
-        self._search_cache.set(cache_key, match)
-        return match
+        outcome = self._best_match(
+            results, title, year, summary,
+            title_key="name", orig_key="original_name", date_key="first_air_date",
+        )
+        self._search_cache.set(cache_key, outcome)
+        return outcome
+
+    async def search_multi(
+        self, title: str, media_type: Literal["movie", "tv"],
+        *, language: str | None = None,
+    ) -> TMDBSearchOutcome:
+        """Last-resort title-only search via /search/multi (no year filter)."""
+        if not self.is_configured:
+            return TMDBSearchOutcome("nomatch")
+        lang = language or settings.TMDB_LANGUAGE
+        data = await self._request("/search/multi", params={"query": title, "language": lang})
+        wanted = "movie" if media_type == "movie" else "tv"
+        results = [r for r in data.get("results", []) if r.get("media_type") == wanted]
+        title_key = "title" if media_type == "movie" else "name"
+        orig_key = "original_title" if media_type == "movie" else "original_name"
+        date_key = "release_date" if media_type == "movie" else "first_air_date"
+        return self._best_match(
+            results, title, None, None,
+            title_key=title_key, orig_key=orig_key, date_key=date_key,
+        )
 
     async def get_movie_details(self, tmdb_id: int) -> TMDBEnrichmentData:
         """Fetch movie details + external_ids in a single API call."""
@@ -271,58 +327,98 @@ class TMDBService:
             cast=cast,
         )
 
+    @staticmethod
+    def _title_sim(query_norm: str, raw: str) -> float:
+        """Best of ratio (Levenshtein-like) and token_set_ratio (order/extra-word
+        robust), on normalized titles. 0..1."""
+        if not raw:
+            return 0.0
+        cand = normalize_for_sorting(raw)
+        if not cand:
+            return 0.0
+        return max(fuzz.ratio(query_norm, cand), fuzz.token_set_ratio(query_norm, cand)) / 100.0
+
+    @staticmethod
+    def _year_score(query_year: int | None, r_year: int | None) -> float:
+        """1.0 exact · 0.8 ±1 · 0.5 unknown on a side · 0.0 mismatch."""
+        if query_year and r_year:
+            if query_year == r_year:
+                return 1.0
+            if abs(query_year - r_year) <= 1:
+                return 0.8
+            return 0.0
+        return 0.5
+
     def _best_match(
         self,
         results: list[dict],
         title: str,
         year: int | None,
+        summary: str | None,
+        *,
         title_key: str,
+        orig_key: str,
         date_key: str,
-    ) -> TMDBMatch | None:
-        """Fuzzy match by title + year, return best with confidence score."""
+    ) -> TMDBSearchOutcome:
+        """Score candidates (title vs localized+original, weighted with year),
+        enforce anti-ambiguity margin, and break ties with the Xtream summary."""
         if not results:
-            return None
+            return TMDBSearchOutcome("nomatch")
 
-        normalized_query = normalize_for_sorting(title).lower()
-        best: TMDBMatch | None = None
-        best_confidence = 0.0
+        query_norm = normalize_for_sorting(title)
+        scored: list[tuple[TMDBMatch, str]] = []  # (match, overview)
+        for r in results[:10]:
+            r_date = r.get(date_key, "") or ""
+            r_year = int(r_date[:4]) if len(r_date) >= 4 and r_date[:4].isdigit() else None
+            title_score = max(
+                self._title_sim(query_norm, r.get(title_key, "")),
+                self._title_sim(query_norm, r.get(orig_key, "")),
+            )
+            confidence = TITLE_WEIGHT * title_score + YEAR_WEIGHT * self._year_score(year, r_year)
+            scored.append((
+                TMDBMatch(
+                    tmdb_id=r["id"], title=r.get(title_key, ""), year=r_year,
+                    confidence=confidence, title_score=title_score,
+                    vote_count=r.get("vote_count", 0) or 0,
+                ),
+                r.get("overview") or "",
+            ))
 
-        for r in results[:10]:  # Check top 10 results
-            r_title = r.get(title_key, "")
-            r_normalized = normalize_for_sorting(r_title).lower()
+        # confidence desc, then vote_count desc.
+        scored.sort(key=lambda mo: (mo[0].confidence, mo[0].vote_count), reverse=True)
+        best = scored[0][0]
+        second = scored[1][0] if len(scored) > 1 else None
+        margin = best.confidence - (second.confidence if second else 0.0)
 
-            # Title similarity (0-100 from rapidfuzz, normalize to 0-1)
-            title_sim = fuzz.ratio(normalized_query, r_normalized) / 100.0
+        # Below the title/confidence bar → genuine no-match (keep best for recording).
+        if best.confidence < AUTO_MATCH_THRESHOLD or best.title_score < MIN_TITLE_SCORE:
+            return TMDBSearchOutcome("nomatch", match=None, best=best)
 
-            # Year factor
-            r_date = r.get(date_key, "")
-            r_year = int(r_date[:4]) if r_date and len(r_date) >= 4 else None
-            year_factor = 1.0
-            if year and r_year:
-                if year == r_year:
-                    year_factor = 1.0
-                elif abs(year - r_year) <= 1:
-                    year_factor = 0.95
-                else:
-                    year_factor = 0.85
-            elif year and not r_year:
-                year_factor = 0.9
+        # Clear winner.
+        if margin >= MIN_MARGIN:
+            return TMDBSearchOutcome("matched", match=best, best=best)
 
-            confidence = title_sim * year_factor
+        # Ambiguous (top-2 too close) → try to break the tie with the Xtream summary.
+        if summary:
+            close = [(m, ov) for (m, ov) in scored if best.confidence - m.confidence < MIN_MARGIN]
+            sim_ranked = sorted(
+                ((m, self._summary_sim(summary, ov)) for (m, ov) in close),
+                key=lambda ms: ms[1], reverse=True,
+            )
+            if sim_ranked:
+                top_m, top_sim = sim_ranked[0]
+                runner_sim = sim_ranked[1][1] if len(sim_ranked) > 1 else 0.0
+                if top_sim >= SUMMARY_MIN_SIM and (top_sim - runner_sim) >= SUMMARY_TIEBREAK_MARGIN:
+                    return TMDBSearchOutcome("matched", match=top_m, best=best)
 
-            if confidence > best_confidence:
-                best_confidence = confidence
-                best = TMDBMatch(
-                    tmdb_id=r["id"],
-                    title=r_title,
-                    year=r_year,
-                    confidence=confidence,
-                )
+        return TMDBSearchOutcome("ambiguous", match=None, best=best)
 
-        # Threshold: >= 0.85
-        if best and best.confidence >= 0.85:
-            return best
-        return None
+    @staticmethod
+    def _summary_sim(xtream_summary: str, tmdb_overview: str) -> float:
+        """Token-set similarity between the Xtream plot and a TMDB overview. 0..1."""
+        if not xtream_summary or not tmdb_overview:
+            return 0.0
+        return fuzz.token_set_ratio(xtream_summary.lower(), tmdb_overview.lower()) / 100.0
 
 
 # Singleton

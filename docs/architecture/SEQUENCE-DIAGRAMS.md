@@ -2,7 +2,9 @@
 
 > Cartographie des flux bout-en-bout du backend FastAPI (HEAD `40cc8e9`).
 > Source : `app/main.py`, `app/api/*`, `app/workers/*`, `app/services/*`, `app/plex_generator/*`.
-> Voir aussi `CLAUDE.md` §5 (flux clés).
+> **Docs liées** : `docs/architecture/ARCHITECTURE.md` §6 (description textuelle des mêmes flux + flowchart global) et `CLAUDE.md` §5 (flux clés, autorité de vérité). Ce fichier en est la **vue dynamique** (séquences d'échanges).
+>
+> ⚠️ Delta vs ARCHITECTURE.md/CLAUDE.md (cartographiés à HEAD `1da2ab9`) : la fonctionnalité **#7 LLM génératif (Ollama `/describe` `/chat`)** est plus récente et n'y figure pas encore — elle est documentée ici (vérifiée dans `app/api/ai.py:493-540`).
 
 Le backend a **8 fonctionnalités** :
 

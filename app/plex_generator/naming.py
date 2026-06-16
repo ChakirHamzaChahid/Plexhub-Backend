@@ -170,21 +170,23 @@ def series_fanart_path(
 # ── Multi-version (dedup) paths ────────────────────────────────────────────
 # When the same movie/episode exists across several accounts (or as several
 # qualities/languages within one), they share ONE folder + ONE .nfo and each
-# playable source becomes a distinct file. Movies use Plex "{edition-...}" tags;
-# episodes use a trailing " - label" (Plex merges files by SxxEyy automatically).
+# playable source becomes a distinct file with a " - label" differentiator.
+# This convention is recognised as "multiple versions" by BOTH Jellyfin/Emby
+# (alternate versions, same folder) AND Plex (the shared movie.nfo pins the
+# identity; extra files in the folder become versions) — no Plex-only edition tag.
 
 
 def movie_version_path(
-    title: str, year: int | None, edition_label: str,
+    title: str, year: int | None, version_label: str,
     suffix: str | None = None, fallback_id: str | None = None,
 ) -> str:
-    """Relative path for one version of a movie, tagged as a Plex edition.
+    """Relative path for one version of a movie (Plex + Jellyfin compatible).
 
-    Example: Films/Terminator (1984)/Terminator (1984) {edition-VF Compte 1}.strm
+    Example: Films/Terminator (1984)/Terminator (1984) - VF Compte 1.strm
     """
     folder = _movie_folder(title, year, suffix, fallback_id)
-    tag = sanitize_edition_label(edition_label)
-    return f"Films/{folder}/{folder} {{edition-{tag}}}.strm"
+    label = sanitize_for_filesystem(version_label)
+    return f"Films/{folder}/{folder} - {label}.strm"
 
 
 def series_episode_version_path(

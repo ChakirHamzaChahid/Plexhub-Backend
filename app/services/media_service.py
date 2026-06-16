@@ -4,7 +4,11 @@ from typing import Optional
 from sqlalchemy import select, func, delete, update, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.database import Media, EnrichmentQueue
+from app.models.database import Media, EnrichmentQueue, XtreamAccount
+from app.services.aggregation_service import (
+    MovieGroup, SeriesGroup, aggregate_movies, aggregate_series,
+)
+from app.utils.server_id import build_server_id
 from app.utils.time import now_ms
 
 logger = logging.getLogger("plexhub.media")
@@ -98,6 +102,79 @@ class MediaService:
 
         logger.debug(f"get_media_list result: found {len(items)} items (total={total})")
         return items, total
+
+    async def account_labels(self, db: AsyncSession) -> dict[str, str]:
+        """Map server_id -> account label (falls back to the id)."""
+        rows = await db.execute(select(XtreamAccount.id, XtreamAccount.label))
+        return {build_server_id(i): (label or i) for i, label in rows}
+
+    async def get_unified_list(
+        self,
+        db: AsyncSession,
+        media_type: str,
+        *,
+        limit: int = 500,
+        offset: int = 0,
+        search: Optional[str] = None,
+        genre: Optional[str] = None,
+        year: Optional[int] = None,
+        include_broken: bool = True,
+    ) -> tuple[list[MovieGroup], int]:
+        """Aggregate movie/show rows across ALL accounts by unification_id.
+
+        Returns (page_of_groups, total_groups). Grouping is in-memory over the
+        filtered, category-allowed rows (the same logic the Plex/Jellyfin
+        generator uses), then groups are sorted by recency and paginated."""
+        query = select(Media).where(
+            Media.type == media_type,
+            Media.is_in_allowed_categories == True,  # noqa: E712
+        )
+        if search:
+            safe = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            query = query.where(Media.title.ilike(f"%{safe}%", escape="\\"))
+        if genre:
+            safe = genre.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            query = query.where(Media.genres.ilike(f"%{safe}%", escape="\\"))
+        if year:
+            query = query.where(Media.year == year)
+        if not include_broken:
+            query = query.where(Media.is_broken == False)  # noqa: E712
+
+        rows = list((await db.execute(query)).scalars().all())
+        groups = aggregate_movies(rows)  # generic: groups by key + picks best row
+        groups.sort(key=lambda g: (g.best.added_at or 0), reverse=True)
+        total = len(groups)
+        return groups[offset:offset + limit], total
+
+    async def get_unified_episodes(
+        self, db: AsyncSession, unification_id: str,
+    ) -> Optional[tuple[list[Media], SeriesGroup]]:
+        """Aggregate episodes of a unified show (all member accounts) into
+        per-(season, episode) slots. Returns (member_shows, series_group) or
+        None if no show carries that unification_id."""
+        shows = list((await db.execute(
+            select(Media).where(
+                Media.type == "show",
+                Media.unification_id == unification_id,
+                Media.is_in_allowed_categories == True,  # noqa: E712
+            )
+        )).scalars().all())
+        if not shows:
+            return None
+
+        server_ids = {s.server_id for s in shows}
+        show_keys = {s.rating_key for s in shows}
+        episodes = list((await db.execute(
+            select(Media).where(
+                Media.type == "episode",
+                Media.server_id.in_(server_ids),
+                Media.grandparent_rating_key.in_(show_keys),
+            )
+        )).scalars().all())
+
+        groups = aggregate_series(shows, episodes)
+        # All member shows share unification_id => exactly one group.
+        return shows, groups[0]
 
     async def get_media_by_key(
         self,

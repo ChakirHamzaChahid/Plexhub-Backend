@@ -178,40 +178,55 @@ sequenceDiagram
 
 ---
 
-## 4. Génération bibliothèque Plex UNIFIÉE (dédup multi-comptes → 1 NFO par titre)
+## 4. Dédup unifiée par `unification_id` (logique partagée, DEUX consommateurs)
 
-`DatabaseSource()` agrège **tous les comptes actifs** et **regroupe par `unification_id`** (imdb→tmdb→titre+année). Chaque titre dédupliqué = **1 dossier + 1 NFO + 1 poster** ; chaque source/qualité/langue = un `.strm` distinct (films taggés `{edition-Label}`, épisodes ` SxxEyy - Label`). Suppression folder-aware. Idempotent (created/updated/deleted/unchanged au niveau fichier-version). Images via pool de 8 threads. Aucune migration (`unification_id` déjà peuplé).
+`aggregation_service` regroupe les lignes `media` par `unification_id` (imdb→tmdb→titre+année) et alimente **deux** chemins : (a) l'**API REST** consommée par l'app PlexHubTV, (b) la **génération NFO/.strm** scannée par Plex/Jellyfin. Même regroupement, même résultat. Aucune migration (`unification_id` déjà peuplé).
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant T as Pipeline / POST /api/plex/generate / CLI
-    participant SRC as DatabaseSource() — tous comptes actifs
-    participant GRP as Regroupement par unification_id
+    participant APP as App PlexHubTV
+    participant API as api/media (endpoints unified)
+    participant AGG as aggregation_service (regroupe par unification_id)
+    participant MS as media_service
+    participant GENPATH as Pipeline / API plex / CLI
+    participant SRC as DatabaseSource() tous comptes
     participant GEN as PlexLibraryGenerator
-    participant NFO as nfo_builder + naming (edition tags)
-    participant MAP as MappingStore (clé server_id + rating_key)
-    participant ST as LocalStorage (écritures atomiques)
-    participant POOL as _image_pool (8 threads)
+    participant ST as LocalStorage + _image_pool
     participant FS as output/ (arbre plat unique)
 
-    T->>SRC: charge films/séries de TOUS les comptes (DB)
-    SRC->>GRP: groupe les rows par unification_id (best row = métadonnées)
-    GRP-->>GEN: PlexMovie/PlexSeries (1 par titre) + N versions
-    GEN->>GEN: resolve_names (désambigue les groupes distincts même titre+année)
-    loop par groupe (titre dédupliqué)
-        GEN->>NFO: 1 movie.nfo / tvshow.nfo (best row) — écrit une fois
-        GEN->>POOL: 1 poster/fanart (async threads)
-        POOL->>FS: écrit images
-        loop par version (source/qualité/langue)
-            GEN->>MAP: clé version connue ? (create / move / update / unchanged)
-            GEN->>ST: écrit .strm taggé edition-Label (atomique)
-            GEN->>MAP: enregistre version vers chemin
+    rect rgb(235,245,255)
+    Note over APP,MS: (a) Consommateur APP — agrégation à la volée
+    APP->>API: GET /api/media/movies|shows/unified
+    API->>MS: get_unified_list (catégories autorisées)
+    MS->>AGG: aggregate_movies(rows)
+    AGG-->>MS: 1 groupe par titre (best row + membres)
+    MS-->>API: groupes paginés
+    API-->>APP: UnifiedMediaResponse[] (1 entrée/titre + versions[])
+    APP->>API: GET /api/media/episodes/unified?unification_id=...
+    API->>MS: get_unified_episodes
+    MS->>AGG: aggregate_series(shows, episodes)
+    AGG-->>MS: créneaux (saison, épisode) + versions multi-comptes
+    API-->>APP: UnifiedEpisodeResponse[] (1 par SxxEyy + versions[])
+    end
+
+    rect rgb(235,255,235)
+    Note over GENPATH,FS: (b) Consommateur SERVEUR MÉDIA — fichiers NFO/.strm (Plex + Jellyfin)
+    GENPATH->>SRC: charge films/séries de TOUS les comptes
+    SRC->>AGG: aggregate_movies / aggregate_series (même logique)
+    AGG-->>SRC: groupes (1 par titre) + versions
+    SRC-->>GEN: PlexMovie/PlexSeries + N versions
+    loop par titre dédupliqué
+        GEN->>ST: 1 movie.nfo/tvshow.nfo + 1 poster (une fois)
+        loop par version
+            GEN->>ST: écrit .strm nommé " - Label" (Plex + Jellyfin)
         end
     end
-    Note over GEN,ST: Suppression folder-aware - version disparue, strm supprimé. NFO partagé conservé tant qu une version vit dans le dossier
-    GEN->>ST: supprime versions absentes (deleted)
-    GEN-->>T: GenerationReport (created/updated/deleted/unchanged)
+    Note over GEN,ST: Suppression folder-aware - NFO partagé conservé tant qu une version vit dans le dossier
+    GEN->>ST: supprime versions absentes
+    GEN-->>GENPATH: GenerationReport
+    ST->>FS: écritures atomiques
+    end
 ```
 
 ---

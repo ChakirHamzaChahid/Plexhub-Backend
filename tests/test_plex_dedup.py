@@ -17,7 +17,6 @@ from app.plex_generator.models import (
     PlexSeries,
 )
 from app.plex_generator.naming import (
-    sanitize_edition_label,
     movie_version_path,
     series_episode_version_path,
 )
@@ -31,21 +30,16 @@ from app.utils.server_id import build_server_id
 
 
 class TestVersionNaming:
-    def test_sanitize_edition_label_strips_braces(self):
-        assert sanitize_edition_label("VF {x} · C1") == "VF x · C1"
-
-    def test_sanitize_edition_label_empty(self):
-        assert sanitize_edition_label("///") == "v"
-
     def test_movie_version_path(self):
         assert movie_version_path("Terminator", 1984, "VF · Compte 1") == (
-            "Films/Terminator (1984)/Terminator (1984) {edition-VF · Compte 1}.strm"
+            "Films/Terminator (1984)/Terminator (1984) - VF · Compte 1.strm"
         )
 
     def test_movie_version_path_sanitizes(self):
-        path = movie_version_path("Terminator", 1984, "HD {raw}")
-        assert "{edition-HD raw}" in path
-        assert path.count("{") == 1 and path.count("}") == 1
+        # No Plex-only braces — portable to Jellyfin/Emby too.
+        path = movie_version_path("Terminator", 1984, "HD <raw>")
+        assert "{" not in path and "}" not in path
+        assert path.endswith("Terminator (1984) - HD raw.strm")
 
     def test_series_episode_version_path(self):
         assert series_episode_version_path(
@@ -105,12 +99,12 @@ class TestMovieDedup:
         assert (folder / "movie.nfo").exists()
         nfos = list(folder.glob("*.nfo"))
         assert nfos == [folder / "movie.nfo"]
-        # Three edition-tagged .strm files, one per source version.
+        # Three version .strm files (Plex+Jellyfin " - label"), one per source.
         strms = sorted(p.name for p in folder.glob("*.strm"))
         assert strms == [
-            "Terminator (1984) {edition-HD · Compte 1}.strm",
-            "Terminator (1984) {edition-VF · Compte 1}.strm",
-            "Terminator (1984) {edition-VF · Compte 2}.strm",
+            "Terminator (1984) - HD · Compte 1.strm",
+            "Terminator (1984) - VF · Compte 1.strm",
+            "Terminator (1984) - VF · Compte 2.strm",
         ]
         assert report.created == 3
 
@@ -134,8 +128,8 @@ class TestMovieDedup:
         assert r2.deleted == 1
         # Shared metadata survives because the folder still has live versions.
         assert (folder / "movie.nfo").exists()
-        assert not (folder / "Terminator (1984) {edition-VF · Compte 2}.strm").exists()
-        assert (folder / "Terminator (1984) {edition-VF · Compte 1}.strm").exists()
+        assert not (folder / "Terminator (1984) - VF · Compte 2.strm").exists()
+        assert (folder / "Terminator (1984) - VF · Compte 1.strm").exists()
 
     def test_removing_all_versions_deletes_folder(self, tmp_path):
         storage = LocalStorage(tmp_path)
@@ -276,3 +270,75 @@ class TestUnifiedDatabaseSource:
         # Only account "a" sources are aggregated.
         assert len(term.versions) == 2
         assert all(v.server_id == "xtream_a" for v in term.versions)
+
+
+# ─── API-level dedup (media_service) ────────────────────────────────────
+
+
+def _show_row(account_id: str, rating_key: str, title: str, unif: str,
+              page_offset: int = 0) -> Media:
+    return Media(
+        rating_key=rating_key, server_id=build_server_id(account_id),
+        filter="all", sort_order="default", library_section_id="xtream_series",
+        title=title, type="show", year=2008, unification_id=unif,
+        page_offset=page_offset, is_in_allowed_categories=True, is_broken=False,
+    )
+
+
+def _episode_row(account_id: str, rating_key: str, show_rk: str,
+                 season: int, episode: int, page_offset: int = 0) -> Media:
+    return Media(
+        rating_key=rating_key, server_id=build_server_id(account_id),
+        filter="all", sort_order="default", library_section_id="xtream_series",
+        title=f"Episode {episode}", type="episode",
+        grandparent_rating_key=show_rk, parent_index=season, index=episode,
+        unification_id="", page_offset=page_offset,
+        is_in_allowed_categories=True, is_broken=False,
+    )
+
+
+class TestUnifiedApiService:
+    @pytest.mark.asyncio
+    async def test_unified_movies_group_and_versions(self, db_session):
+        from app.services.media_service import media_service
+        from app.api.media import _build_versions
+
+        db_session.add_all([
+            _account("a", "Compte 1"), _account("b", "Compte 2"),
+            _movie_row("a", "vod_1.mp4", "Terminator (1984) (VF)", "tmdb://218", 0),
+            _movie_row("b", "vod_9.mp4", "Terminator (1984) (HD)", "tmdb://218", 0),
+            _movie_row("a", "vod_5.mp4", "Alien (1979)", "imdb://tt0078748", 1),
+        ])
+        await db_session.commit()
+
+        groups, total = await media_service.get_unified_list(db_session, "movie")
+        assert total == 2
+        labels = await media_service.account_labels(db_session)
+        by_key = {g.key: g for g in groups}
+        versions = _build_versions(by_key["tmdb://218"].members, labels)
+        assert len(versions) == 2
+        assert {v.server_id for v in versions} == {"xtream_a", "xtream_b"}
+        assert sorted(v.label for v in versions) == ["HD · Compte 2", "VF · Compte 1"]
+
+    @pytest.mark.asyncio
+    async def test_unified_episodes_merge_across_accounts(self, db_session):
+        from app.services.media_service import media_service
+
+        db_session.add_all([
+            _account("a", "Compte 1"), _account("b", "Compte 2"),
+            _show_row("a", "series_1", "Breaking Bad", "tmdb://1396", 0),
+            _show_row("b", "series_9", "Breaking Bad", "tmdb://1396", 0),
+            _episode_row("a", "ep_1.mkv", "series_1", 1, 1, 1),
+            _episode_row("b", "ep_9.mkv", "series_9", 1, 1, 1),
+            _episode_row("a", "ep_2.mkv", "series_1", 1, 2, 2),
+        ])
+        await db_session.commit()
+
+        result = await media_service.get_unified_episodes(db_session, "tmdb://1396")
+        assert result is not None
+        shows, group = result
+        assert len(shows) == 2
+        slots = {(s.season, s.episode): s for s in group.slots}
+        # S01E01 exists on both accounts -> 2 versions; S01E02 only on a -> 1.
+        assert len(slots[(1, 1)].members) == 2
+        assert len(slots[(1, 2)].members) == 1

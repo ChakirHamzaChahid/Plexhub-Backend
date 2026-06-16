@@ -11,9 +11,11 @@ from app.plex_generator.models import (
     PlexEpisode, PlexEpisodeVersion,
     PlexSeries,
 )
+from app.services.aggregation_service import (
+    aggregate_movies, aggregate_series, dedup_labels, version_label,
+)
 from app.services.stream_service import build_stream_url
 from app.utils.server_id import build_server_id
-from app.utils.string_normalizer import parse_title_year_and_suffix
 
 logger = logging.getLogger("plexhub.plex_generator.source")
 
@@ -28,45 +30,8 @@ class MediaSource(ABC):
     async def get_series(self) -> list[PlexSeries]: ...
 
 
-def _group_key(row: Media) -> str:
-    """Grouping key for dedup. Prefers the cross-source unification_id
-    (imdb://… > tmdb://… > title_…_year). Falls back to a per-row key so an
-    item with no resolvable identity stays a group of its own (no false merge).
-    """
-    return row.unification_id or f"{row.server_id}:{row.rating_key}"
-
-
-def _is_enriched(row: Media) -> bool:
-    return bool(row.imdb_id) or bool(row.tmdb_id and str(row.tmdb_id).isdigit())
-
-
-def _best_row(rows: list[Media]) -> Media:
-    """Pick the row whose metadata best represents the group (NFO + images).
-
-    Preference: enriched (has imdb/tmdb) > has resolved poster > higher rating >
-    has a year > longer (more descriptive) title. Deterministic tie-break on
-    (server_id, rating_key) so re-runs are stable."""
-    def key(r: Media):
-        return (
-            _is_enriched(r),
-            bool(r.resolved_thumb_url or r.thumb_url),
-            r.display_rating or r.scraped_rating or 0.0,
-            r.year is not None,
-            len(r.title or ""),
-            # stable tie-break (negated lexicographically via reverse=True below)
-        )
-    return max(rows, key=lambda r: (key(r), r.server_id or "", r.rating_key or ""))
-
-
-def _dedup_labels(labels: list[str]) -> list[str]:
-    """Ensure version labels are unique within a group (append #n on collision)."""
-    seen: dict[str, int] = {}
-    out: list[str] = []
-    for label in labels:
-        n = seen.get(label, 0) + 1
-        seen[label] = n
-        out.append(label if n == 1 else f"{label} #{n}")
-    return out
+def _tmdb_int(value) -> int | None:
+    return int(value) if value and str(value).isdigit() else None
 
 
 class DatabaseSource(MediaSource):
@@ -89,16 +54,21 @@ class DatabaseSource(MediaSource):
         accounts = result.scalars().all()
         return {build_server_id(acc.id): acc for acc in accounts}
 
-    def _version_label(self, row: Media, account: XtreamAccount) -> str:
-        """Human-readable edition label, e.g. "VF · Compte 1" / "Compte 1".
-
-        The qualifier (VF/HD/VOSTFR…) comes from the source title; the account
-        label disambiguates the same qualifier across providers."""
-        _, _, suffix = parse_title_year_and_suffix(row.title or "")
-        acc_label = (account.label or account.id).strip()
-        if suffix:
-            return f"{suffix} · {acc_label}"
-        return acc_label
+    def _build_versions(self, members, accounts):
+        """Turn group member rows into (row, url, unique-label) triples."""
+        raw_labels: list[str] = []
+        pending: list[tuple[Media, str]] = []
+        for row in members:
+            account = accounts.get(row.server_id)
+            if account is None:
+                continue
+            url = build_stream_url(account, row.rating_key)
+            if not url:
+                continue
+            raw_labels.append(version_label(row, account.label or account.id))
+            pending.append((row, url))
+        labels = dedup_labels(raw_labels)
+        return [(row, url, label) for (row, url), label in zip(pending, labels)]
 
     async def get_movies(self) -> list[PlexMovie]:
         async with async_session_factory() as db:
@@ -115,50 +85,28 @@ class DatabaseSource(MediaSource):
             if settings.STREAM_FILTER_BROKEN:
                 query = query.where(Media.is_broken == False)  # noqa: E712
             result = await db.stream(query.execution_options(yield_per=1000))
-
-            groups: dict[str, list[Media]] = {}
-            async for row in result.scalars():
-                groups.setdefault(_group_key(row), []).append(row)
+            rows = [row async for row in result.scalars()]
 
             movies: list[PlexMovie] = []
-            for gkey, rows in groups.items():
-                best = _best_row(rows)
-
-                versions: list[PlexMovieVersion] = []
-                raw_labels: list[str] = []
-                pending: list[tuple[Media, str]] = []
-                for row in rows:
-                    account = accounts.get(row.server_id)
-                    if account is None:
-                        continue
-                    url = build_stream_url(account, row.rating_key)
-                    if not url:
-                        continue
-                    raw_labels.append(self._version_label(row, account))
-                    pending.append((row, url))
-
-                if not pending:
+            for grp in aggregate_movies(rows):
+                triples = self._build_versions(grp.members, accounts)
+                if not triples:
                     continue
-
-                for (row, url), label in zip(pending, _dedup_labels(raw_labels)):
-                    versions.append(PlexMovieVersion(
-                        source_id=row.rating_key,
-                        server_id=row.server_id,
-                        label=label,
-                        stream_url=url,
-                    ))
-
+                best = grp.best
                 movies.append(PlexMovie(
-                    source_id=gkey,
+                    source_id=grp.key,
                     title=best.title,
                     year=best.year,
-                    versions=versions,
+                    versions=[PlexMovieVersion(
+                        source_id=row.rating_key, server_id=row.server_id,
+                        label=label, stream_url=url,
+                    ) for row, url, label in triples],
                     poster_url=best.resolved_thumb_url or best.thumb_url,
                     fanart_url=best.resolved_art_url or best.art_url,
                     genres=best.genres,
                     summary=best.summary,
                     imdb_id=best.imdb_id,
-                    tmdb_id=int(best.tmdb_id) if best.tmdb_id and str(best.tmdb_id).isdigit() else None,
+                    tmdb_id=_tmdb_int(best.tmdb_id),
                     content_rating=best.content_rating,
                     rating=best.display_rating if best.display_rating else best.scraped_rating,
                     duration_ms=best.duration,
@@ -178,10 +126,8 @@ class DatabaseSource(MediaSource):
             if not accounts:
                 logger.warning("No active accounts for Plex generation (series)")
                 return []
-
             server_ids = list(accounts.keys())
 
-            # Shows, grouped by unification across accounts.
             show_stream = await db.stream(
                 select(Media).where(
                     Media.server_id.in_(server_ids),
@@ -189,12 +135,8 @@ class DatabaseSource(MediaSource):
                     Media.is_in_allowed_categories == True,  # noqa: E712
                 ).execution_options(yield_per=1000)
             )
-            show_groups: dict[str, list[Media]] = {}
-            async for show in show_stream.scalars():
-                show_groups.setdefault(_group_key(show), []).append(show)
+            shows = [s async for s in show_stream.scalars()]
 
-            # Episodes, indexed by their owning show (scoped per server — a
-            # ratingKey is only unique within one server, AUDIT-APP-16 style).
             ep_query = select(Media).where(
                 Media.server_id.in_(server_ids),
                 Media.type == "episode",
@@ -202,59 +144,27 @@ class DatabaseSource(MediaSource):
             if settings.STREAM_FILTER_BROKEN:
                 ep_query = ep_query.where(Media.is_broken == False)  # noqa: E712
             ep_stream = await db.stream(ep_query.execution_options(yield_per=1000))
-            episodes_by_show: dict[tuple[str, str], list[Media]] = {}
-            async for ep in ep_stream.scalars():
-                key = (ep.server_id, ep.grandparent_rating_key or "")
-                episodes_by_show.setdefault(key, []).append(ep)
+            episodes = [e async for e in ep_stream.scalars()]
 
             series_list: list[PlexSeries] = []
-            for gkey, shows in show_groups.items():
-                best = _best_row(shows)
-
-                # Gather every episode of every show in the group, then regroup
-                # by (season, episode) so the same SxxEyy across accounts merges.
-                slots: dict[tuple[int, int], list[Media]] = {}
-                for show in shows:
-                    for ep in episodes_by_show.get((show.server_id, show.rating_key), []):
-                        if not ep.parent_index or not ep.index:
-                            continue
-                        slots.setdefault((ep.parent_index, ep.index), []).append(ep)
-
+            for grp in aggregate_series(shows, episodes):
+                best = grp.best
                 plex_episodes: list[PlexEpisode] = []
-                for (season_num, episode_num), eps in slots.items():
-                    best_ep = _best_row(eps)
-
-                    raw_labels: list[str] = []
-                    pending: list[tuple[Media, str]] = []
-                    for ep in eps:
-                        account = accounts.get(ep.server_id)
-                        if account is None:
-                            continue
-                        url = build_stream_url(account, ep.rating_key)
-                        if not url:
-                            continue
-                        raw_labels.append(self._version_label(ep, account))
-                        pending.append((ep, url))
-
-                    if not pending:
+                for slot in grp.slots:
+                    triples = self._build_versions(slot.members, accounts)
+                    if not triples:
                         continue
-
-                    ep_versions: list[PlexEpisodeVersion] = []
-                    for (ep, url), label in zip(pending, _dedup_labels(raw_labels)):
-                        ep_versions.append(PlexEpisodeVersion(
-                            source_id=ep.rating_key,
-                            server_id=ep.server_id,
-                            label=label,
-                            stream_url=url,
-                        ))
-
+                    best_ep = slot.best
                     plex_episodes.append(PlexEpisode(
-                        source_id=f"{gkey}|S{season_num:02d}E{episode_num:02d}",
+                        source_id=f"{grp.key}|S{slot.season:02d}E{slot.episode:02d}",
                         series_title=best.title,
-                        season_num=season_num,
-                        episode_num=episode_num,
+                        season_num=slot.season,
+                        episode_num=slot.episode,
                         title=best_ep.title,
-                        versions=ep_versions,
+                        versions=[PlexEpisodeVersion(
+                            source_id=row.rating_key, server_id=row.server_id,
+                            label=label, stream_url=url,
+                        ) for row, url, label in triples],
                         summary=best_ep.summary,
                         duration_ms=best_ep.duration,
                         thumb_url=best_ep.resolved_thumb_url or best_ep.thumb_url,
@@ -264,7 +174,7 @@ class DatabaseSource(MediaSource):
                     continue
 
                 series_list.append(PlexSeries(
-                    source_id=gkey,
+                    source_id=grp.key,
                     title=best.title,
                     year=best.year,
                     poster_url=best.resolved_thumb_url or best.thumb_url,
@@ -272,7 +182,7 @@ class DatabaseSource(MediaSource):
                     genres=best.genres,
                     summary=best.summary,
                     imdb_id=best.imdb_id,
-                    tmdb_id=int(best.tmdb_id) if best.tmdb_id and str(best.tmdb_id).isdigit() else None,
+                    tmdb_id=_tmdb_int(best.tmdb_id),
                     content_rating=best.content_rating,
                     rating=best.display_rating if best.display_rating else best.scraped_rating,
                     cast=best.cast,

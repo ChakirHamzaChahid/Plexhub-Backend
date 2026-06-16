@@ -54,8 +54,7 @@ l'archi est une **instanciation** de ces packs pour le périmètre, pas une réi
    └── requirements*.txt / pyproject.toml
    ```
 
-8. **CI / release** — branche d'intégration **`main`** ; CI `tests.yml` (Python 3.13, `pytest -v`) ;
-   image Docker via `docker.yml` ; versioning `APP_VERSION` (`app/main.py`), tag `vX.Y.Z` sur `main`.
+8. **CI / release** — **dév direct sur `develop`** (branche de travail+intégration, **pas de branche par tâche**) ; `main` = stable/release only (merge `develop`→`main` + tag à la release) ; CI `tests.yml` (Python 3.13, `pytest -v`) sur `develop` et `main` ; image Docker via `docker.yml` ; versioning `APP_VERSION` (`app/main.py`), tag `vX.Y.Z` sur `main`.
 
 9. **Budgets non-fonctionnels** — chiffre-les pour le périmètre :
    - **Latence** : endpoints synchrones < ~200 ms hors I/O externe ; `/rank` chaud rapide (le **cold

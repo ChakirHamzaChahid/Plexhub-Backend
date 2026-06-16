@@ -17,7 +17,7 @@ Tu es le **DevOps Engineer**. Tu construis les rails sur lesquels l'équipe ship
 
 # Livrables
 
-1. **`docs/23-git-strategy.md`** — le modèle de branches (`main` protégée = intégration + prod ; branches courtes `feature|fix|refactor|chore|audit|hotfix/<slug>`), la convention de commit (**Conventional Commits** `type(scope): description`, scope = module : `ai`, `sync`, `plex_generator`, `db`, `tv-auth`…), les règles de PR, la politique **squash-merge** (historique linéaire, pas de force-push sur `main`), et le process release/tag (`vX.Y.Z` sur `main`).
+1. **`docs/23-git-strategy.md`** — le modèle de branches **en vigueur** : **développement direct sur `develop`** (branche de travail + intégration, **PAS de branche par tâche** — `feature/*`/`fix/*` proscrites) ; `main` = **stable/release uniquement**, mise à jour par merge de `develop` + tag `vX.Y.Z` à la release ; seule exception `hotfix/<version>` depuis `main`. Convention de commit (**Conventional Commits** `type(scope): description`, scope = module : `ai`, `sync`, `plex_generator`, `db`, `tv-auth`…), revue **sur `develop`**, **jamais** de force-push sur `main`/`develop`, process release/tag (`vX.Y.Z` sur `main`).
 2. **Hygiène du repo** — `.gitignore` Python/FastAPI ; garantir qu'aucun `.env`, clé API (`TMDB_API_KEY`, `AI_API_KEY`), clé **Fernet** (`TV_AUTH_ENCRYPTION_KEY`), identifiant Xtream, ni `data/*.db` n'est jamais tracké. `.env.example` (sans valeurs) comme modèle.
 3. **CI — GitHub Actions** :
    - **`.github/workflows/tests.yml`** : Python **3.13**, `pip install -r requirements-dev.txt`, `pytest -v` (pytest-asyncio mode auto). Build vert + tests verts = **gate de merge dur**. Le `--deselect` sur le test base64 flaky pré-existant reste jusqu'à correction (à retirer ensuite).

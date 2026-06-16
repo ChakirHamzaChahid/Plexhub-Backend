@@ -4,7 +4,7 @@ argument-hint: <symptôme, ex. "500 sur /api/ai/rank" / "sync KO sur compte Xtre
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash, Task, Agent
 ---
 
-> 🟢 **PlexHub Backend — FastAPI/Python 3.13.** Branche `main`. Lis `.claude/WORKFLOWS.md` + `CLAUDE.md` §9. Validation = `pytest -v` + boot `uvicorn app.main:app` + `GET /api/health` 200.
+> 🟢 **PlexHub Backend — FastAPI/Python 3.13.** Dév **directement sur `develop`** (correctif urgent prod = `hotfix/<version>` depuis `main`). Lis `.claude/WORKFLOWS.md` + `CLAUDE.md` §9. Validation = `pytest -v` + boot `uvicorn app.main:app` + `GET /api/health` 200.
 
 # /incident — triage & remédiation en multi-agents
 

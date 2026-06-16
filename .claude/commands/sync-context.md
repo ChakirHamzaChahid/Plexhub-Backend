@@ -3,7 +3,7 @@ description: MAJ LÉGÈRE de la fraîcheur de CLAUDE.md — recale le bandeau (d
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash
 ---
 
-> 🟢 **PlexHub Backend — FastAPI/Python 3.13.** Branche `main`. Objectif : que CLAUDE.md ne dérive plus. **Léger et fréquent** (≠ `/refresh-context` qui régénère intégralement via `a0-cartographer`). À lancer **après chaque lot de commits structurels** (ou quand le détecteur SessionStart signale la péremption). Validation = `pytest -v` + boot `uvicorn app.main:app` + `GET /api/health` 200.
+> 🟢 **PlexHub Backend — FastAPI/Python 3.13.** Branche de travail `develop` (pas de branche par tâche ; `main` = release only). Objectif : que CLAUDE.md ne dérive plus. **Léger et fréquent** (≠ `/refresh-context` qui régénère intégralement via `a0-cartographer`). À lancer **après chaque lot de commits structurels** (ou quand le détecteur SessionStart signale la péremption). Validation = `pytest -v` + boot `uvicorn app.main:app` + `GET /api/health` 200.
 
 # /sync-context — recaler la fraîcheur de CLAUDE.md
 

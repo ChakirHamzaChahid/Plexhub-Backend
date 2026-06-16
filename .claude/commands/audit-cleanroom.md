@@ -3,7 +3,7 @@ description: Audit « clean-room » (table rase, SANS historique) — diagnostic
 allowed-tools: Read, Glob, Grep, Bash, Task, Agent
 ---
 
-> 🟢 **PlexHub Backend — FastAPI/Python 3.13.** Branche `main`. Lis `.claude/WORKFLOWS.md` + `CLAUDE.md` §2/§3/§5/§9. Validation = `pytest -v` + boot `uvicorn app.main:app` + `GET /api/health` 200.
+> 🟢 **PlexHub Backend — FastAPI/Python 3.13.** Dév **directement sur `develop`** (lecture seule ici ; `main` = release only). Lis `.claude/WORKFLOWS.md` + `CLAUDE.md` §2/§3/§5/§9. Validation = `pytest -v` + boot `uvicorn app.main:app` + `GET /api/health` 200.
 
 # /audit-cleanroom — diagnostic indépendant à neuf
 

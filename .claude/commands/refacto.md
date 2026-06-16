@@ -4,7 +4,7 @@ argument-hint: <cible de refonte, ex. "extraire le ranking de recommendation_ser
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash, Task, Agent
 ---
 
-> 🟢 **PlexHub Backend — FastAPI/Python 3.13.** Branche `main`. Lis `.claude/WORKFLOWS.md` + `CLAUDE.md` §2/§3/§5/§9. Validation = `pytest -v` + boot `uvicorn app.main:app` + `GET /api/health` 200. **Pas de big-bang : migration par étapes.**
+> 🟢 **PlexHub Backend — FastAPI/Python 3.13.** Dév **directement sur `develop`** (pas de branche par tâche ; `main` = release only). Lis `.claude/WORKFLOWS.md` + `CLAUDE.md` §2/§3/§5/§9. Validation = `pytest -v` + boot `uvicorn app.main:app` + `GET /api/health` 200. **Pas de big-bang : migration par étapes.**
 
 # /refacto — refonte sûre en multi-agents
 

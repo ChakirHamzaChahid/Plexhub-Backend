@@ -14,7 +14,7 @@ Tu es le **Code Reviewer**. Tu n'es pas l'ami du développeur. Tu es la gate.
 
 # Contrat d'entrée
 
-On te donne un nom de branche (ex. `feat/ai-rank-multi`) et l'ID du ticket.
+On te donne le périmètre d'un ticket (ses commits/lots sur `develop` — **pas** de branche dédiée) et l'ID du ticket. Tu relis le diff de ces commits sur `develop`.
 
 # Ce que tu vérifies, dans l'ordre
 

@@ -480,3 +480,51 @@ async def test_show_import_unmatched_when_nfo_missing(tmp_path, db_session):
     )
     assert report.matched == 0
     assert any("Ghost Show" in u for u in report.unmatched)
+
+
+# ---------- unification recompute on id write ----------
+
+def _nfo(media_type: str = "show", **ids):
+    return nfo_import_service.NfoEntry(
+        path=Path("x"), folder_name="x", media_type=media_type, **ids
+    )
+
+
+def test_compute_updates_recomputes_unification_when_tmdb_written():
+    """Writing a tmdb_id refreshes the stale title-based unification key.
+
+    The Plex generator groups by unification_id, not tmdb_id, so without this
+    the same title splits into "[imdb]" / "[title_]" folders.
+    """
+    row = Media(
+        rating_key="series_1", server_id=_SERVER_ID,
+        library_section_id="lib-1", title="Chad Powers", type="show", year=2025,
+        unification_id="title_chad_powers_2025",
+    )
+    updates = nfo_import_service._compute_updates(row, _nfo(tmdb_id="12345"), overwrite=False)
+    assert updates["tmdb_id"] == "12345"
+    assert updates["unification_id"] == "tmdb://12345"
+    assert updates["history_group_key"] == "tmdb://12345"
+
+
+def test_compute_updates_unification_prefers_imdb():
+    row = Media(
+        rating_key="series_2", server_id=_SERVER_ID,
+        library_section_id="lib-1", title="Chad Powers", type="show", year=2025,
+        unification_id="title_chad_powers_2025",
+    )
+    updates = nfo_import_service._compute_updates(
+        row, _nfo(imdb_id="tt1234567", tmdb_id="12345"), overwrite=False
+    )
+    assert updates["unification_id"] == "imdb://tt1234567"
+
+
+def test_compute_updates_no_unification_churn_when_nothing_written():
+    """An already-set id (no field change) must not rewrite the unification."""
+    row = Media(
+        rating_key="series_3", server_id=_SERVER_ID,
+        library_section_id="lib-1", title="Chad Powers", type="show", year=2025,
+        tmdb_id="12345", unification_id="tmdb://12345",
+    )
+    updates = nfo_import_service._compute_updates(row, _nfo(tmdb_id="12345"), overwrite=False)
+    assert updates == {}

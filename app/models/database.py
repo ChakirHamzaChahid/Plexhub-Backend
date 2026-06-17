@@ -83,6 +83,7 @@ class Media(Base):
     content_hash = Column(Text)  # MD5 of sync-provided fields, skip UPDATE if unchanged
     dto_hash = Column(Text)  # MD5 of Xtream DTO basic fields, for incremental sync
     is_in_allowed_categories = Column(Boolean, nullable=False, default=True)  # Category filtering
+    is_adult = Column(Boolean, nullable=False, default=False)  # Adult/X-rated (from adult Xtream category)
 
     __table_args__ = (
         Index("uix_media_pagination", "server_id", "library_section_id", "filter", "sort_order", "page_offset", unique=True),
@@ -98,6 +99,7 @@ class Media(Base):
         Index("ix_media_broken", "is_broken"),
         Index("ix_media_updated", "updated_at"),
         Index("ix_media_category_visible", "is_in_allowed_categories"),
+        Index("ix_media_adult", "is_adult"),
         # Compound indexes for common query patterns
         Index("ix_media_server_type", "server_id", "type"),
         Index("ix_media_server_visible", "server_id", "is_in_allowed_categories"),

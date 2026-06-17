@@ -6,10 +6,23 @@ import time
 from typing import List, Optional
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.config import settings
 from app.models.database import XtreamCategory, XtreamAccount, Media, LiveChannel
 from app.utils.server_id import build_server_id
 
 logger = logging.getLogger(__name__)
+
+
+def _is_adult_category_name(name: Optional[str]) -> bool:
+    """True when a category name matches any configured adult keyword.
+
+    Case-insensitive substring match against settings.ADULT_CATEGORY_KEYWORDS
+    (e.g. "VOD - ADULT +18" matches "adult" and "+18").
+    """
+    if not name:
+        return False
+    lowered = name.lower()
+    return any(kw in lowered for kw in settings.ADULT_CATEGORY_KEYWORDS)
 
 
 async def get_categories(
@@ -391,4 +404,77 @@ async def update_media_category_visibility(
         f"Series categories={len(allowed_series_ids)}, "
         f"Live categories={len(allowed_live_ids)}, "
         f"visible series={len(visible_series_keys)}"
+    )
+
+
+async def update_media_adult_flags(
+    db: AsyncSession,
+    account_id: str,
+) -> None:
+    """Recalculate is_adult for ALL movies of an account from its categories.
+
+    A VOD category is "adult" when its name matches an adult keyword
+    (settings.ADULT_CATEGORY_KEYWORDS) OR its category_id is explicitly listed
+    in settings.ADULT_CATEGORY_IDS. Movies whose media.filter (Xtream
+    category_id) belongs to such a category are flagged is_adult and have their
+    content_rating forced to settings.ADULT_CONTENT_RATING (read by the NFO
+    <mpaa> tag and the API). Non-adult movies keep their original content_rating.
+
+    Movies only (matches the adult-category scope); the title "[XXX]" prefix is
+    applied at API serialization, never stored. Idempotent and retroactive:
+    runs every sync after update_media_category_visibility.
+    """
+    server_id = build_server_id(account_id)
+
+    result = await db.execute(
+        select(XtreamCategory).where(XtreamCategory.account_id == account_id)
+    )
+    categories = result.scalars().all()
+
+    explicit_ids = set(settings.ADULT_CATEGORY_IDS)
+    adult_vod_ids = {
+        cat.category_id
+        for cat in categories
+        if cat.category_type == "vod"
+        and (_is_adult_category_name(cat.category_name) or cat.category_id in explicit_ids)
+    }
+
+    # Reset every movie to non-adult, then flag the adult categories.
+    await db.execute(
+        update(Media)
+        .where(Media.server_id == server_id, Media.type == "movie")
+        .values(is_adult=False)
+    )
+
+    if adult_vod_ids:
+        chunk_size = 500
+        vod_list = list(adult_vod_ids)
+        for i in range(0, len(vod_list), chunk_size):
+            chunk = vod_list[i : i + chunk_size]
+            await db.execute(
+                update(Media)
+                .where(
+                    Media.server_id == server_id,
+                    Media.type == "movie",
+                    Media.filter.in_(chunk),
+                )
+                .values(is_adult=True)
+            )
+
+        # Force the +18 certification on flagged movies (NFO <mpaa> / API).
+        await db.execute(
+            update(Media)
+            .where(
+                Media.server_id == server_id,
+                Media.type == "movie",
+                Media.is_adult == True,
+            )
+            .values(content_rating=settings.ADULT_CONTENT_RATING)
+        )
+
+    await db.commit()
+
+    logger.info(
+        f"Adult flags update [{account_id}]: "
+        f"adult VOD categories={len(adult_vod_ids)}"
     )

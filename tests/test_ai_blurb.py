@@ -27,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.config import settings
 from app.db.database import _VEC_LOADED, register_sqlite_vec_listener
-from app.db.migrations import _migration_008_ai_embeddings, _migration_011_create_media_blurb
+from app.db.migrations import _migration_008_ai_embeddings, _migration_012_create_media_blurb
 from app.models.database import Base
 from app.services import ollama_service
 
@@ -47,7 +47,7 @@ async def blurb_engine(tmp_path):
     async with engine.begin() as conn:
         await _migration_008_ai_embeddings(conn)
     # M011 operates on the engine (not a bare connection), mirroring M010
-    await _migration_011_create_media_blurb(engine)
+    await _migration_012_create_media_blurb(engine)
     # Ensure all ORM-mapped tables are also present (AiMediaBlurb, AiSubtitleCache, etc.)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -375,7 +375,7 @@ async def test_missing_auth_401(blurb_client):
 async def test_m011_table_exists(blurb_engine):
     """Running M011 twice must not raise; table must be queryable."""
     # Run M011 a second time — must be a no-op (idempotent)
-    await _migration_011_create_media_blurb(blurb_engine)
+    await _migration_012_create_media_blurb(blurb_engine)
 
     async with blurb_engine.connect() as conn:
         result = await conn.execute(text("SELECT COUNT(*) FROM ai_media_blurb"))

@@ -14,7 +14,7 @@ from app.db.database import init_db
 from app.api import accounts, admin, ai, categories, health, live, media, plex, stream, sync, tv_auth
 from app.utils.request_context import RequestIdLogFilter, RequestIdMiddleware
 
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.3"
 
 logger = logging.getLogger("plexhub")
 

@@ -75,18 +75,20 @@ def _seed_movie_on_disk(
     nfo_content: str = _MOVIE_NFO,
     account_id: str = _ACCOUNT_ID,
 ) -> Path:
-    """Mimic plex_generator output: <root>/<account>/Films/<folder>/<folder>.strm
-    + movie.nfo in same folder + entry in .plex_mapping.json."""
-    account_root = tmp_path / account_id
+    """Mimic plex_generator output (flat unified tree):
+    <root>/Films/<folder>/<folder>.strm + movie.nfo in same folder + entry in
+    the single <root>/.plex_mapping.json keyed by "{server_id}:{rating_key}"."""
     rel_strm = movie_path(title, year)
-    strm_full = account_root / rel_strm
+    strm_full = tmp_path / rel_strm
     strm_full.parent.mkdir(parents=True, exist_ok=True)
     strm_full.write_text("http://example/stream\n", encoding="utf-8")
     (strm_full.parent / "movie.nfo").write_text(nfo_content, encoding="utf-8")
 
-    mapping = MappingStore(account_root)
+    mapping = MappingStore(tmp_path)
     mapping.load()
-    mapping.set(rating_key, rel_strm, "http://example/stream")
+    mapping.set(
+        f"{build_server_id(account_id)}:{rating_key}", rel_strm, "http://example/stream",
+    )
     mapping.save()
     return strm_full.parent
 
@@ -108,12 +110,11 @@ def _seed_show_on_disk(
     creates a fake .strm and adds it to .plex_mapping.json so the show
     folder is discoverable via the mapping (matches production layout).
     """
-    account_root = tmp_path / account_id
     if folder_override:
         nfo_rel = f"Series/{folder_override}/tvshow.nfo"
     else:
         nfo_rel = series_nfo_path(title, year=year)
-    nfo_full = account_root / nfo_rel
+    nfo_full = tmp_path / nfo_rel
     nfo_full.parent.mkdir(parents=True, exist_ok=True)
     nfo_full.write_text(nfo_content, encoding="utf-8")
 
@@ -121,12 +122,14 @@ def _seed_show_on_disk(
         ep_rk, _ = with_episode
         show_folder = nfo_full.parent.name
         ep_rel = f"Series/{show_folder}/Season 01/{show_folder} S01E01.strm"
-        ep_full = account_root / ep_rel
+        ep_full = tmp_path / ep_rel
         ep_full.parent.mkdir(parents=True, exist_ok=True)
         ep_full.write_text("http://example/ep1\n", encoding="utf-8")
-        mapping = MappingStore(account_root)
+        mapping = MappingStore(tmp_path)
         mapping.load()
-        mapping.set(ep_rk, ep_rel, "http://example/ep1")
+        mapping.set(
+            f"{build_server_id(account_id)}:{ep_rk}", ep_rel, "http://example/ep1",
+        )
         mapping.save()
     return nfo_full
 
@@ -297,6 +300,68 @@ async def test_movie_import_unmatched_when_db_row_missing(
     assert any("vod_orphan.mkv" in u for u in report.unmatched)
 
 
+async def test_movie_import_reads_flat_tree_not_per_account(tmp_path, db_session):
+    """Regression: after the unified flat-tree refactor the library lives at
+    <root>/Films + a single <root>/.plex_mapping.json (no <root>/<account_id>/).
+    A movie seeded ONLY in the flat tree must import — and a decoy in the legacy
+    per-account dir must be ignored."""
+    await _seed_account(db_session)
+    rating_key = "vod_18661.mkv"
+    _seed_movie_on_disk(tmp_path, rating_key, "Die Hard 4", 2007)
+
+    # Legacy decoy that the old importer would have read: <root>/<account>/Films/...
+    legacy = tmp_path / _ACCOUNT_ID / "Films" / "Decoy (1999)"
+    legacy.mkdir(parents=True, exist_ok=True)
+    (legacy / "movie.nfo").write_text(_MOVIE_NFO, encoding="utf-8")
+
+    db_session.add(Media(
+        rating_key=rating_key, server_id=_SERVER_ID,
+        filter="all", sort_order="default",
+        library_section_id="lib-1", title="Die Hard 4",
+        type="movie", year=2007,
+        added_at=1, updated_at=1,
+    ))
+    await db_session.commit()
+
+    [report] = await nfo_import_service.import_nfo(
+        db_session, tmp_path, kinds=("movies",), overwrite=False, dry_run=False,
+    )
+    await db_session.commit()
+    assert report.matched == 1
+    assert report.written == 1
+
+
+async def test_movie_import_ignores_legacy_bare_key(tmp_path, db_session):
+    """Guard: mapping keys are now 'server_id:rating_key'. A legacy bare
+    rating_key entry (old per-account format) must not be selected."""
+    await _seed_account(db_session)
+    rating_key = "vod_legacy.mkv"
+    rel_strm = movie_path("Legacy Movie", 2001)
+    strm_full = tmp_path / rel_strm
+    strm_full.parent.mkdir(parents=True, exist_ok=True)
+    strm_full.write_text("http://x\n", encoding="utf-8")
+    (strm_full.parent / "movie.nfo").write_text(_MOVIE_NFO, encoding="utf-8")
+    mapping = MappingStore(tmp_path)
+    mapping.load()
+    mapping.set(rating_key, rel_strm, "http://x")  # BARE key, no "server_id:" prefix
+    mapping.save()
+
+    db_session.add(Media(
+        rating_key=rating_key, server_id=_SERVER_ID,
+        filter="all", sort_order="default",
+        library_section_id="lib-1", title="Legacy Movie",
+        type="movie", year=2001,
+        added_at=1, updated_at=1,
+    ))
+    await db_session.commit()
+
+    [report] = await nfo_import_service.import_nfo(
+        db_session, tmp_path, kinds=("movies",), overwrite=False, dry_run=False,
+    )
+    assert report.scanned == 0
+    assert report.matched == 0
+
+
 async def test_movie_import_skips_other_account(tmp_path, db_session):
     """A row owned by a different server_id must not be touched."""
     await _seed_account(db_session)
@@ -464,8 +529,7 @@ async def test_execute_with_lock_retry_propagates_other_errors(monkeypatch):
 
 async def test_show_import_unmatched_when_nfo_missing(tmp_path, db_session):
     await _seed_account(db_session)
-    # account dir exists but no Series/<title>/tvshow.nfo
-    (tmp_path / _ACCOUNT_ID).mkdir(parents=True, exist_ok=True)
+    # Flat root exists but no Series/<title>/tvshow.nfo for this show.
     db_session.add(Media(
         rating_key="series_42", server_id=_SERVER_ID,
         filter="all", sort_order="default",

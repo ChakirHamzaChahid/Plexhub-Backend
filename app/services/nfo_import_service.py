@@ -2,24 +2,26 @@
 
 Reconciliation is fully deterministic — no fuzzy matching, no title comparison.
 
-For each active Xtream account we read the per-account mapping that
-plex_generator already maintains (`<root>/<account_id>/.plex_mapping.json`).
-That JSON is keyed by `rating_key` and stores the relative path of every
-generated `.strm`. The companion `movie.nfo` lives in the same folder, so we
-join on `rating_key` directly:
+The Plex/Jellyfin library is now a single FLAT tree deduplicated across every
+active account (see plex_generator): one `<root>/Films` + `<root>/Series` and a
+single `<root>/.plex_mapping.json`. That JSON is keyed by `"{server_id}:{rating_key}"`
+and stores the relative path of every generated `.strm`. The companion
+`movie.nfo` lives in the same folder, so we split the key back to
+(server_id, rating_key) and join directly:
 
-    movies: Films/<folder>/<folder>.strm
-            -> Films/<folder>/movie.nfo
+    movies: <root>/Films/<folder>/<folder>.strm
+            -> <root>/Films/<folder>/movie.nfo
             -> UPDATE media WHERE rating_key=<key> AND server_id=<server_id>
 
-For shows the mapping only contains episodes, but `tvshow.nfo` is a single
-file at the series root. We iterate `Media WHERE type='show'` for the account
-and compute the expected NFO path with the same `series_nfo_path()` helper
-the generator uses. If the file exists we read it and update the row.
+For shows the mapping only contains episodes, but `tvshow.nfo` is a single file
+at the series root (`<root>/Series/<folder>/tvshow.nfo`). Shows with no mapped
+episode fall back to the path the generator would use, computed with the same
+`series_nfo_path()` helper. Mapping entries are filtered per account by the
+`"{server_id}:"` key prefix so each ImportReport stays account-scoped.
 
-Only `imdb_id` and `tmdb_id` are written. By default we only fill missing
-values (`overwrite=True` to replace existing ones). Caller commits via
-Depends(get_db); when dry_run=True nothing is written.
+Only `imdb_id` and `tmdb_id` (plus other NFO metadata) are written. By default we
+only fill missing values (`overwrite=True` to replace existing ones). Caller
+commits via Depends(get_db); when dry_run=True nothing is written.
 """
 from __future__ import annotations
 
@@ -394,7 +396,8 @@ def _classify_no_update(
 async def _import_movies_for_account(
     db: AsyncSession,
     account: XtreamAccount,
-    account_root: Path,
+    root: Path,
+    mapping: MappingStore,
     server_id: str,
     overwrite: bool,
     dry_run: bool,
@@ -404,12 +407,14 @@ async def _import_movies_for_account(
         overwrite=overwrite, dry_run=dry_run,
     )
 
-    mapping = MappingStore(account_root)
-    mapping.load()
+    # Flat unified tree: one shared mapping at <root>/.plex_mapping.json keyed by
+    # "{server_id}:{rating_key}". Select this account's film entries by prefix and
+    # strip it back to the bare rating_key for the DB join.
     # MappingStore exposes no public iteration; access internal dict directly.
+    prefix = f"{server_id}:"
     movie_entries = [
-        (rk, entry) for rk, entry in mapping._data.items()
-        if entry.path.startswith("Films/")
+        (key[len(prefix):], entry) for key, entry in mapping._data.items()
+        if entry.path.startswith("Films/") and key.startswith(prefix)
     ]
     logger.info(
         "NFO movies account=%s: %d film entries in mapping",
@@ -418,7 +423,7 @@ async def _import_movies_for_account(
 
     pending_writes = 0
     for rating_key, entry in movie_entries:
-        strm_full = account_root / entry.path
+        strm_full = root / entry.path
         nfo_path = strm_full.parent / "movie.nfo"
         folder_name = strm_full.parent.name
 
@@ -534,7 +539,8 @@ async def _apply_show_nfo(
 async def _import_shows_for_account(
     db: AsyncSession,
     account: XtreamAccount,
-    account_root: Path,
+    root: Path,
+    mapping: MappingStore,
     server_id: str,
     overwrite: bool,
     dry_run: bool,
@@ -568,14 +574,15 @@ async def _import_shows_for_account(
     )
 
     # ---------- Pass 1: mapping-driven ----------
-    # mapping.path looks like "Series/<show_folder>/Season XX/<ep>.strm"
-    # → show_folder is parts[1]; tvshow.nfo lives at <root>/Series/<show_folder>/tvshow.nfo.
-    mapping = MappingStore(account_root)
-    mapping.load()
+    # Shared flat mapping keyed by "{server_id}:{rating_key}"; entry.path looks
+    # like "Series/<show_folder>/Season XX/<ep>.strm" → show_folder is parts[1];
+    # tvshow.nfo lives at <root>/Series/<show_folder>/tvshow.nfo.
+    prefix = f"{server_id}:"
     show_folder_to_episode_rks: dict[str, list[str]] = {}
-    for source_id, entry in mapping._data.items():
-        if not entry.path.startswith("Series/"):
+    for key, entry in mapping._data.items():
+        if not entry.path.startswith("Series/") or not key.startswith(prefix):
             continue
+        source_id = key[len(prefix):]
         parts = Path(entry.path).parts
         if len(parts) < 2:
             continue
@@ -620,7 +627,7 @@ async def _import_shows_for_account(
             continue
         handled_show_rks.add(show_rk)
         show = shows_by_rk[show_rk]
-        nfo_path = account_root / "Series" / show_folder / "tvshow.nfo"
+        nfo_path = root / "Series" / show_folder / "tvshow.nfo"
         pending_writes = await _apply_show_nfo(
             db, show, nfo_path, label=show.title or show_folder,
             overwrite=overwrite, dry_run=dry_run,
@@ -635,7 +642,7 @@ async def _import_shows_for_account(
         if show_rk in handled_show_rks:
             continue
         nfo_rel = series_nfo_path(show.title or "", year=show.year)
-        nfo_path = account_root / nfo_rel
+        nfo_path = root / nfo_rel
         fallback_count += 1
         pending_writes = await _apply_show_nfo(
             db, show, nfo_path, label=show.title or show_rk,
@@ -681,6 +688,12 @@ async def import_nfo(
     if not dry_run:
         await _prepare_db_for_bulk_writes(db)
 
+    # Flat unified library: a single shared mapping at <root>/.plex_mapping.json
+    # covers every account (keys are "{server_id}:{rating_key}"). Load it once and
+    # let each account select its own entries by key prefix.
+    mapping = MappingStore(root)
+    mapping.load()
+
     accounts_q = await _execute_with_lock_retry(
         db,
         select(XtreamAccount).where(XtreamAccount.is_active == True),  # noqa: E712
@@ -693,21 +706,15 @@ async def import_nfo(
 
     reports: list[ImportReport] = []
     for account in accounts:
-        account_root = root / account.id
-        if not account_root.exists():
-            logger.warning(
-                "NFO account dir missing: %s (account=%s)", account_root, account.id,
-            )
-            continue
         server_id = build_server_id(account.id)
 
         if "movies" in kinds:
             reports.append(await _import_movies_for_account(
-                db, account, account_root, server_id, overwrite, dry_run,
+                db, account, root, mapping, server_id, overwrite, dry_run,
             ))
         if "shows" in kinds:
             reports.append(await _import_shows_for_account(
-                db, account, account_root, server_id, overwrite, dry_run,
+                db, account, root, mapping, server_id, overwrite, dry_run,
             ))
 
     logger.info("NFO import end: %d report(s)", len(reports))

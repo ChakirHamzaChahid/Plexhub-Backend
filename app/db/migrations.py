@@ -32,6 +32,7 @@ async def run_migrations(engine: AsyncEngine) -> None:
     await _migration_010_scrape_cache(engine)
     await _migration_011_create_subtitle_cache(engine)
     await _migration_012_create_media_blurb(engine)
+    await _migration_013_add_media_is_adult(engine)
 
     logger.info("All migrations completed successfully")
 
@@ -383,6 +384,31 @@ async def _migration_012_create_media_blurb(engine: AsyncEngine) -> None:
             logger.info("Migration 012: ai_media_blurb table created")
         except Exception as e:
             logger.warning(f"Migration 012: Table may already exist: {e}")
+
+
+async def _migration_013_add_media_is_adult(engine: AsyncEngine) -> None:
+    """Add is_adult flag to media table (adult/X-rated tagging).
+
+    Set per-sync by category_service.update_media_adult_flags based on the
+    Xtream category name/id. Idempotent: ADD COLUMN guarded by try/except.
+    """
+    logger.info("Migration 013: Adding is_adult to media")
+
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(text("""
+                ALTER TABLE media
+                ADD COLUMN is_adult INTEGER NOT NULL DEFAULT 0
+            """))
+
+            await conn.execute(text("""
+                CREATE INDEX IF NOT EXISTS ix_media_adult
+                ON media(is_adult)
+            """))
+
+            logger.info("Migration 013: is_adult column added")
+        except Exception as e:
+            logger.warning(f"Migration 013: Column may already exist: {e}")
 
 
 async def _migration_008_ai_embeddings(conn) -> None:

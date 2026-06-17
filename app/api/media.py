@@ -14,6 +14,7 @@ from app.models.schemas import (
     UnifiedMediaListResponse,
     UnifiedEpisodeResponse,
     UnifiedEpisodeListResponse,
+    apply_adult_prefix,
 )
 from app.services.aggregation_service import (
     canonical_title_year, dedup_labels, version_label,
@@ -136,13 +137,16 @@ async def list_movies_unified(
     for g in groups:
         best = g.best
         clean_title, clean_year = canonical_title_year(best)
+        is_adult = bool(getattr(best, "is_adult", False))
         items.append(UnifiedMediaResponse(
-            unification_id=g.key, type="movie", title=clean_title, year=clean_year,
+            unification_id=g.key, type="movie",
+            title=apply_adult_prefix(clean_title, is_adult), year=clean_year,
             summary=best.summary, genres=best.genres, content_rating=best.content_rating,
             thumb_url=best.resolved_thumb_url or best.thumb_url,
             art_url=best.resolved_art_url or best.art_url,
             imdb_id=best.imdb_id, tmdb_id=_tmdb_str(best.tmdb_id),
             rating=best.display_rating or best.scraped_rating, cast=best.cast,
+            is_adult=is_adult,
             versions=_build_versions(g.members, labels),
             version_count=len(g.members),
         ))

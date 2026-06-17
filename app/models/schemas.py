@@ -1,12 +1,23 @@
 import re
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic.alias_generators import to_camel
 from typing import Optional
 
 
 _IMDB_ID_RE = re.compile(r"^tt\d{7,10}$")
 _TMDB_ID_RE = re.compile(r"^\d{1,9}$")
+
+# Display-only prefix prepended to adult/X-rated titles at serialization.
+# Never stored on Media.title (avoids double-prefixing on re-sync).
+ADULT_TITLE_PREFIX = "[XXX] "
+
+
+def apply_adult_prefix(title: str, is_adult: bool) -> str:
+    """Prepend ADULT_TITLE_PREFIX to an adult title, idempotently."""
+    if is_adult and title and not title.startswith(ADULT_TITLE_PREFIX):
+        return f"{ADULT_TITLE_PREFIX}{title}"
+    return title
 
 
 # --- Media Schemas ---
@@ -79,7 +90,13 @@ class MediaResponse(BaseModel):
 
     # Backend-specific
     is_broken: bool = False
+    is_adult: bool = False
     tmdb_match_confidence: Optional[float] = None
+
+    @model_validator(mode="after")
+    def _prefix_adult_title(self) -> "MediaResponse":
+        self.title = apply_adult_prefix(self.title, self.is_adult)
+        return self
 
 
 class MediaListResponse(BaseModel):
@@ -120,6 +137,7 @@ class UnifiedMediaResponse(BaseModel):
     tmdb_id: Optional[str] = None
     rating: Optional[float] = None
     cast: Optional[str] = None
+    is_adult: bool = False
     version_count: int = 0
     versions: list[MediaVersionResponse] = []
 

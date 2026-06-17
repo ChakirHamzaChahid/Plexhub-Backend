@@ -76,6 +76,25 @@ class Settings:
     XTREAM_USERNAME: str = os.getenv("XTREAM_USERNAME", "")
     XTREAM_PASSWORD: str = os.getenv("XTREAM_PASSWORD", "")
 
+    # Adult / X-rated content tagging.
+    # Movies whose Xtream category name matches one of ADULT_CATEGORY_KEYWORDS
+    # (or whose category_id is in ADULT_CATEGORY_IDS) are flagged is_adult,
+    # get content_rating forced to ADULT_CONTENT_RATING (NFO <mpaa>), and are
+    # prefixed in the API title (see api/media.py / schemas.py).
+    ADULT_CONTENT_RATING: str = os.getenv("ADULT_CONTENT_RATING", "XXX")
+    ADULT_CATEGORY_KEYWORDS: list[str] = [
+        kw.strip().lower()
+        for kw in os.getenv(
+            "ADULT_CATEGORY_KEYWORDS", "adult,xxx,+18,18+,porn,porno,x-rated"
+        ).split(",")
+        if kw.strip()
+    ]
+    ADULT_CATEGORY_IDS: list[str] = [
+        cid.strip()
+        for cid in os.getenv("ADULT_CATEGORY_IDS", "").split(",")
+        if cid.strip()
+    ]
+
     @property
     def has_xtream_env(self) -> bool:
         return bool(self.XTREAM_BASE_URL and self.XTREAM_USERNAME and self.XTREAM_PASSWORD)
@@ -91,6 +110,11 @@ class Settings:
             logger.warning("TMDB_API_KEY not set — enrichment will be disabled")
 
         logger.info(f"Ollama LLM: {self.OLLAMA_URL} / model={self.OLLAMA_MODEL}")
+        logger.info(
+            f"Adult tagging: rating={self.ADULT_CONTENT_RATING!r}, "
+            f"keywords={self.ADULT_CATEGORY_KEYWORDS}, "
+            f"explicit_ids={self.ADULT_CATEGORY_IDS}"
+        )
 
 
 settings = Settings()

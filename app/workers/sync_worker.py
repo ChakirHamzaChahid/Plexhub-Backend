@@ -1281,8 +1281,13 @@ async def sync_account(account_id: str):
                 logger.info(f"Live sync: {len(live_rows)} updated, {live_skipped} unchanged, {len(all_live_ids)} total")
 
                 # Recalculate visibility for ALL media based on category config
-                from app.services.category_service import update_media_category_visibility
+                from app.services.category_service import (
+                    update_media_category_visibility,
+                    update_media_adult_flags,
+                )
                 await update_media_category_visibility(db, account_id)
+                # Tag adult movies (+18 rating) from their Xtream category
+                await update_media_adult_flags(db, account_id)
 
                 # Reconcile enrichment_queue: drop rows whose media was removed
                 # (provider churn / pagination eviction leaves them orphaned).

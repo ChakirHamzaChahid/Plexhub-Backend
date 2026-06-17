@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,7 +11,7 @@ router = APIRouter(tags=["health"])
 
 
 @router.get("/health", response_model=HealthResponse)
-async def health_check(db: AsyncSession = Depends(get_db)):
+async def health_check(request: Request, db: AsyncSession = Depends(get_db)):
     stats = await media_service.get_stats(db)
 
     # Count accounts
@@ -28,7 +28,9 @@ async def health_check(db: AsyncSession = Depends(get_db)):
 
     return HealthResponse(
         status="ok",
-        version="1.0.0",
+        # Report the live app version (= APP_VERSION, passed to FastAPI(version=...)
+        # in app/main.py) instead of a hardcoded literal that silently drifts.
+        version=request.app.version,
         accounts=account_count,
         total_media=stats["total_media"],
         enriched_media=stats["enriched_media"],

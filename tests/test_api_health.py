@@ -51,6 +51,18 @@ async def test_health_counts_existing_accounts(monkeypatch, api_client, db_engin
     assert body["lastSyncAt"] == 1234567890
 
 
+async def test_health_version_matches_app_version(api_client, db_factory, monkeypatch):
+    """Regression: /api/health must report the live APP_VERSION, not a hardcoded
+    literal. Guards against health.py drifting from app/main.py:APP_VERSION
+    (the previous "1.0.0" hardcode silently diverged after version bumps)."""
+    from app.main import APP_VERSION
+
+    monkeypatch.setattr(db_module, "async_session_factory", db_factory)
+    resp = await api_client.get("/api/health")
+    assert resp.status_code == 200
+    assert resp.json()["version"] == APP_VERSION
+
+
 async def test_request_id_echoed_in_response_header(api_client, db_factory, monkeypatch):
     """RequestIdMiddleware should echo (or generate) X-Request-ID."""
     monkeypatch.setattr(db_module, "async_session_factory", db_factory)

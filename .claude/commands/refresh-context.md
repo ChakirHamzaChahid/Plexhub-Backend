@@ -28,7 +28,7 @@ ne travaille sur une carte périmée. **Re-cartographie complète** (≠ `/sync-
      une fois le contenu régénéré et corrige les faits (numéro de migration courant, fastembed/sqlite-vec…).
 4. Chaque fait DOIT être prouvé par **`fichier:ligne`** (pas de reprise aveugle de l'ancien contenu).
    Marque « à confirmer » ce qui n'est pas vérifiable.
-5. Commit sur `main` (`docs: refresh context @ HEAD <hash>`). Présente un court diff des changements
+5. Commit sur `develop` (`docs: refresh context @ HEAD <hash>`). Présente un court diff des changements
    de fond (ce qui était périmé et a été corrigé).
 
 À lancer **avant toute grosse campagne** (run de missions, audit) et **après** des changements

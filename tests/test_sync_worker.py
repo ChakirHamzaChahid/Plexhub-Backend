@@ -3,6 +3,9 @@ import asyncio
 
 import pytest
 
+from sqlalchemy import select
+
+from app.models.database import Media, EnrichmentQueue
 from app.workers.sync_worker import (
     _parse_duration_ms,
     _safe_duration,
@@ -11,6 +14,7 @@ from app.workers.sync_worker import (
     _record_sync_job,
     get_sync_job,
     get_all_sync_jobs,
+    cleanup_orphan_enrichment_queue,
 )
 from app.utils.server_id import parse_server_id, build_server_id
 
@@ -150,3 +154,66 @@ class TestServerIdUtility:
     def test_roundtrip(self):
         account_id = "my_account"
         assert parse_server_id(build_server_id(account_id)) == account_id
+
+
+# ─── Orphan enrichment_queue cleanup ───────────────────────────
+
+
+def _media(rating_key: str, server_id: str, title: str = "X") -> Media:
+    return Media(
+        rating_key=rating_key, server_id=server_id, library_section_id="1",
+        title=title, type="movie",
+    )
+
+
+def _queue(rating_key: str, server_id: str, title: str = "X") -> EnrichmentQueue:
+    return EnrichmentQueue(
+        rating_key=rating_key, server_id=server_id, media_type="movie",
+        title=title, status="skipped", attempts=3, created_at=0,
+    )
+
+
+class TestOrphanEnrichmentQueueCleanup:
+    async def test_purges_only_orphans(self, db_session):
+        """A queue row whose media was deleted is removed; a live one survives."""
+        sid = "xtream_acc1"
+        db_session.add_all([
+            _media("vod_live.mkv", sid),       # media present
+            _queue("vod_live.mkv", sid),       # → keep
+            _queue("vod_gone.mkv", sid),       # no media → orphan, drop
+        ])
+        await db_session.commit()
+
+        removed = await cleanup_orphan_enrichment_queue(db_session, sid)
+        await db_session.commit()
+
+        assert removed == 1
+        remaining = (await db_session.execute(
+            select(EnrichmentQueue.rating_key)
+        )).scalars().all()
+        assert remaining == ["vod_live.mkv"]
+
+    async def test_scoped_to_server(self, db_session):
+        """The sweep must not touch another server's orphan rows."""
+        db_session.add_all([
+            _queue("vod_gone.mkv", "xtream_a"),   # orphan on server A
+            _queue("vod_gone.mkv", "xtream_b"),   # orphan on server B
+        ])
+        await db_session.commit()
+
+        removed = await cleanup_orphan_enrichment_queue(db_session, "xtream_a")
+        await db_session.commit()
+
+        assert removed == 1
+        servers = (await db_session.execute(
+            select(EnrichmentQueue.server_id)
+        )).scalars().all()
+        assert servers == ["xtream_b"]
+
+    async def test_idempotent(self, db_session):
+        """A second sweep on a clean server removes nothing."""
+        sid = "xtream_acc1"
+        db_session.add_all([_media("vod_1.mkv", sid), _queue("vod_1.mkv", sid)])
+        await db_session.commit()
+
+        assert await cleanup_orphan_enrichment_queue(db_session, sid) == 0

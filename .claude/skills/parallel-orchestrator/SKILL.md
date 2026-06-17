@@ -56,7 +56,7 @@ Appelée depuis `/feature` ou par le tech-manager une fois que `docs/31-board.md
    branche au message suivant. Les reviewers tournent en parallèle entre eux **et** avec les devs
    encore en cours.
 
-   **Merge gate** : seuls les PR `APPROVED` passent au tech-manager pour merge sur `main` → le board
+   **Gate review (sur `develop`)** : un lot n'est validé qu'après `APPROVED` du code-reviewer sur ses commits **sur `develop`** (pas de branche par tâche) ; le tech-manager ne promeut `develop`→`main` qu'à la release → le board
    passe `review → qa`. `REQUEST CHANGES` re-spawn le développeur d'origine avec les notes du
    reviewer. Cap de cycles de review (2 cycles) appliqué par l'orchestrateur — au-delà, on remonte à
    l'utilisateur. La GATE finale exige la DoD backend complète (tests verts, boot OK, /api/health
@@ -95,9 +95,9 @@ PH-004 n'est PAS lancé tant que PH-001 (la migration dont il dépend) n'a pas r
 Après les trois DONE :
 ```
 [même message]
-Agent(code-reviewer, "Relis feat/PH-001-... pour PH-001")
-Agent(code-reviewer, "Relis feat/PH-002-... pour PH-002")
-Agent(code-reviewer, "Relis feat/PH-003-... pour PH-003")
+Agent(code-reviewer, "Relis les commits de PH-001 sur develop")
+Agent(code-reviewer, "Relis les commits de PH-002 sur develop")
+Agent(code-reviewer, "Relis les commits de PH-003 sur develop")
 ```
 
 Puis PH-004 part avec ai-recsys-specialist, en parallèle de ce qui est désormais prêt.

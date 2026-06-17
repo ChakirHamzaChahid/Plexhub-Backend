@@ -40,7 +40,7 @@ Tu lis `docs/00-vision.md` et (s'il existe) `docs/10-prd.md`. Tu peux lire les d
 4. **Préoccupations transverses** — auth (`X-API-Key`), logging (logger `plexhub` + `request_id`, jamais de secret en clair), métriques Prometheus, secrets via env/`.env`, élection master-worker.
 5. **Contrat d'API** — endpoints que l'app PlexHubTV consomme : préfixe `/api`, `GET /api/health`, `/api/ai/rank` & `rank-multi` & `embed/*`, tv-auth device-flow. Décris la forme des contrats clés et les 3 motifs **503** contractuels de l'IA.
 6. **Layout du dépôt** — structure top-level (`app/`, `tests/`, `docs/`, `Dockerfile`, `docker-compose.yml`).
-7. **CI / release** — modèle de branches : branche d'intégration = **`main`** (pas `develop`) ; pipeline `tests.yml` (Python 3.13) ; image via `docker.yml` ; tag `vX.Y.Z` sur `main`. Le merge gate est tenu par `tech-manager`.
+7. **CI / release** — modèle de branches : **développement direct sur `develop`** (branche de travail + intégration, **pas de branche par tâche**) ; `main` = stable/release uniquement, atteinte par merge de `develop` au moment d'une release + tag `vX.Y.Z` ; CI `tests.yml` (Python 3.13) sur `develop` et `main` ; image via `docker.yml`. La promotion `develop`→`main` est tenue par `tech-manager`.
 8. **Budgets non-fonctionnels** — latence **p90** des endpoints chauds (hors cold-start), RAM conteneur **2 Go** (modèle IA + ONNX), cold-start fastembed **~30 s** au 1ᵉʳ `/rank` (toléré, override `AI_EMBED_MODEL`), aucun appel bloquant dans la boucle d'événements.
 9. **Risques** — top 3 risques techniques + mitigation chacun (ex. : `fcntl.flock` POSIX-only ; "database is locked" sous SQLite ; cold-start IA).
 

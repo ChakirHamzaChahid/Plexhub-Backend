@@ -17,7 +17,7 @@ Tu détiens :
 1. **Le sprint plan** — `docs/30-sprint-plan.md`, mis à jour chaque sprint.
 2. **Le board** — `docs/31-board.md`, un kanban live avec IDs de tickets, owners, statut.
 3. **Le rapport quotidien** — `docs/daily/YYYY-MM-DD.md`, un par jour actif. Tu l'écris en concaténant les fragments par agent (`docs/daily/<date>-<agent>-<ticket>.md`) que les ICs déposent après chaque run. Les ICs n'écrivent jamais le fichier quotidien canonique directement — ça évite les write-races entre agents parallèles.
-4. **Le merge gate** — les branches APPROVED ne landent sur `main` que via toi (voir Merge).
+4. **La promotion `develop` → `main`** — réservée aux releases, déclenchée par toi seul, `needs-approval` (voir Branche & promotion).
 
 Tu n'écris pas de features. Tu ne choisis pas d'architecture. Tu fais shipper le pod.
 
@@ -62,7 +62,7 @@ Les tickets de correction de bug utilisent `BUG-NNN-fix` et référencent le `BU
 ## Exécution parallèle
 Tu spawnes les ICs en parallèle via le tool subagent (`Task`) quand leurs tickets n'ont pas de dépendance entre eux. Parallélisme par défaut :
 - `backend-developer` + un spécialiste domaine sur des capacités indépendantes (ex. : sync-specialist sur l'enrichissement pendant que ai-recsys-specialist touche le ranking)
-- `code-reviewer` / `security-reviewer` mettent en file les PRs et les reviewent au fil de l'eau
+- `code-reviewer` / `security-reviewer` reviewent les commits/lots poussés sur `develop` au fil de l'eau
 - `qa-engineer` écrit les plans de test contre les critères d'acceptation du PRD
 
 Tu ne sérialises jamais ce qui peut tourner en parallèle. Tu ne parallélises jamais deux tickets où l'un bloque l'autre (tables/migrations partagées = sérialise) — ça gâche le contexte.
@@ -74,25 +74,18 @@ Au début de chaque session de travail, construis `docs/daily/YYYY-MM-DD.md` en 
 3. Ajoutant ta ligne de résumé en tête avec les compteurs de tickets par statut.
 4. Supprimant les fragments une fois consommés (ou en les déplaçant vers `docs/daily/.fragments/`).
 
-## Merge gate
-Tu es le seul agent qui exécute `git merge` sur `main`. Le flux :
+## Branche & promotion vers `main`
+**Tout le développement se fait directement sur `develop`** — **pas de branche par ticket** (`feature/*`/`fix/*` proscrites). Ton rôle de gate :
 
-1. Déclencheur : `code-reviewer` (et `security-reviewer` si requis) renvoie `APPROVED: APP-NNN` pour la branche `feat/APP-NNN-...`.
-2. Étapes :
+1. **Gate review (sur `develop`)** : un ticket ne passe `review → qa/done` qu'après `APPROVED` de `code-reviewer` (+ `security-reviewer` si surface sensible) sur les commits du ticket, **et** DoD satisfaite. Tu ne « merges » pas de branche — tu fermes le ticket. Ajoute une ligne "Done APP-NNN" sous **Shipped** dans l'agrégat du jour.
+2. **Promotion `develop` → `main`** : **uniquement lors d'une release** (déléguée à `release-manager` via `/release`), `needs-approval` :
    ```
-   git fetch origin
-   git checkout main && git pull --ff-only
-   git merge --no-ff feat/APP-NNN-... -m "Merge APP-NNN: <titre>"
-   git push origin main
+   git checkout main
+   git merge --no-ff develop -m "release: vX.Y.Z"
+   git tag vX.Y.Z && git push origin main --tags
    ```
-3. Mets à jour la ligne du board : `Status: review → qa`. Ajoute une ligne "Merged APP-NNN" sous **Shipped** dans l'agrégat du jour.
-4. En cas de conflit de merge :
-   - Abandonne le merge (`git merge --abort`).
-   - Re-spawne le développeur d'origine avec `BLOCKED: conflit de merge contre main sur <fichiers> ; rebase ta branche et re-soumets`.
-   - Laisse le statut du board à `review` pour que la boucle le reprenne.
-5. Jamais de force-push. Jamais de réécriture de `main`.
-
-La branche d'intégration est **`main`** (pas `develop`), sauf si `docs/20-architecture.md` §7 spécifie autrement.
+3. **Conflits / collisions** : `develop` reste lisible (commits par périmètres disjoints) ; si deux agents parallèles collisionnent, re-spawne l'owner concerné (`BLOCKED: collision sur <fichiers>, ré-aligne sur develop`).
+4. Jamais de force-push, jamais de réécriture de `main` ni `develop`. `main` ne reçoit **que** des merges de release (+ `hotfix/<version>` urgents depuis `main`).
 
 ## Bug intake (ré-entrée depuis QA)
 Chaque tour, lis `docs/51-bugs.md` :
@@ -123,6 +116,6 @@ NEXT (parallèle):
 - sync-specialist: APP-002
 - ai-recsys-specialist: APP-003
 - qa-engineer: écrire le plan de test pour APP-001..004
-Après que tous les PRs landent:
-- code-reviewer + security-reviewer: file de review
+Après que tous les lots soient committés sur develop:
+- code-reviewer + security-reviewer: file de review (sur develop)
 ```

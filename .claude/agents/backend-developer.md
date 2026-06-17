@@ -40,7 +40,7 @@ Invoque `house-conventions` et charge `stack-defaults.md` + `python-conventions.
    - Tout nouveau comportement = un test ; tout bug corrigé = un test de garde.
 5. Vérifie le boot : `uvicorn app.main:app` démarre et `GET /api/health` répond `200`.
 6. Mets à jour le contrat d'API (`docs/40-api.md`) — l'app Android le lit. Le contrat OpenAPI auto (`/openapi.json`, `/docs`) reste cohérent.
-7. Commit sur `feat/<scope>-<slug>` en **Conventional Commits** (`feat(scope): …`, scope = module : `ai`, `sync`, `plex_generator`, `db`, `tv-auth`…).
+7. Commit **directement sur `develop`** (branche de travail par défaut — **jamais de branche par tâche**) en **Conventional Commits** (`feat(scope): …`, scope = module : `ai`, `sync`, `plex_generator`, `db`, `tv-auth`…). Commits petits, verts, réversibles ; périmètre de fichiers disjoint des autres agents parallèles.
 8. Note de statut d'un paragraphe dans `docs/daily/<date>.md` (tech-manager concatène pour éviter les write-races).
 
 # Coordination avec les spécialistes domaine
@@ -59,7 +59,7 @@ Délègue / coordonne quand pertinent : `db-migration-specialist` (schéma SQLit
 
 ```
 DONE: <ticket>
-Branch: feat/<scope>-<slug>
+Branche: develop (commits directs, pas de branche par tâche)
 Endpoints: <liste, ou "none">
 Migrations: <liste, ou "none">
 Contrat mis à jour: docs/40-api.md

@@ -49,6 +49,73 @@ async def _run_generate(
     _print_report("all" if account_ids is None else account_id, report)
 
 
+async def _run_recompute_unification(dry_run: bool) -> tuple[int, int]:
+    """Recompute media.unification_id from current ids; returns (scanned, fixed)."""
+    from sqlalchemy import select, update
+
+    from app.db.database import init_db, async_session_factory
+    from app.models.database import Media
+    from app.utils.db_retry import commit_with_retry
+    from app.utils.unification import (
+        calculate_unification_id,
+        calculate_history_group_key,
+    )
+
+    await init_db()
+    scanned = fixed = 0
+    async with async_session_factory() as db:
+        result = await db.execute(
+            select(
+                Media.rating_key, Media.server_id, Media.title, Media.year,
+                Media.imdb_id, Media.tmdb_id, Media.unification_id,
+            )
+            .where(Media.type.in_(("movie", "show")))
+            .distinct()
+        )
+        pending = 0
+        for rk, sid, title, year, imdb, tmdb, old_unif in result.all():
+            scanned += 1
+            new_unif = calculate_unification_id(title or "", year, imdb, tmdb)
+            if not new_unif or new_unif == (old_unif or ""):
+                continue
+            fixed += 1
+            if dry_run:
+                continue
+            await db.execute(
+                update(Media)
+                .where(Media.rating_key == rk, Media.server_id == sid)
+                .values(
+                    unification_id=new_unif,
+                    history_group_key=calculate_history_group_key(new_unif, rk, sid),
+                )
+            )
+            pending += 1
+            if pending >= 500:
+                await commit_with_retry(db)
+                pending = 0
+        if not dry_run and pending:
+            await commit_with_retry(db)
+    return scanned, fixed
+
+
+@app.command(name="recompute-unification")
+def recompute_unification(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Count changes without writing"),
+) -> None:
+    """Recompute media.unification_id from current imdb_id/tmdb_id/title/year.
+
+    Fixes library entries that split into separate folders (e.g. "[imdb]" vs
+    "[title_]") when an id was set out-of-band (e.g. a .nfo import) without
+    refreshing the unification key the Plex generator groups by. Run, then
+    regenerate the library.
+    """
+    mode = "DRY-RUN" if dry_run else "LIVE"
+    typer.echo(f"Recompute unification_id [{mode}]")
+    scanned, fixed = asyncio.run(_run_recompute_unification(dry_run))
+    typer.echo(f"  Scanned: {scanned}")
+    typer.echo(f"  {'Would update' if dry_run else 'Updated'}: {fixed}")
+
+
 def _print_report(account_id: str, report) -> None:
     typer.echo(f"\n--- Sync Report (account: {account_id}) ---")
     typer.echo(f"  Created:   {report.created}")

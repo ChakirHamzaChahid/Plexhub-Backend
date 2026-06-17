@@ -4,7 +4,7 @@ argument-hint: <optionnel : goulot/correctif ciblé ex. "cache embedding sqlite-
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash, Task, Agent
 ---
 
-> 🟢 **PlexHub Backend — FastAPI/Python 3.13.** Branche `main`. Lis `.claude/WORKFLOWS.md` + `CLAUDE.md` §5/§9. Validation = `pytest -v` + boot `uvicorn app.main:app` + `GET /api/health` 200.
+> 🟢 **PlexHub Backend — FastAPI/Python 3.13.** Dév **directement sur `develop`** (pas de branche par tâche ; `main` = release only). Lis `.claude/WORKFLOWS.md` + `CLAUDE.md` §5/§9. Validation = `pytest -v` + boot `uvicorn app.main:app` + `GET /api/health` 200.
 
 # /fix-bench-perf — corriger la perf, mesure à l'appui
 

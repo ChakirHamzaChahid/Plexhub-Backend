@@ -665,6 +665,31 @@ async def differential_cleanup(
 
 
 
+async def cleanup_orphan_enrichment_queue(db, server_id: str) -> int:
+    """Drop enrichment_queue rows whose media no longer exists for this server.
+
+    The differential_cleanup* paths and the pagination-slot eviction in
+    upsert_media_batch remove Media rows for delisted/churned Xtream items but
+    never their enrichment_queue rows, so dead queue entries pile up across
+    provider churn. This anti-join sweep reconciles them, scoped to one server.
+    Idempotent — safe to run on every sync.
+    """
+    orphan = select(Media.rating_key).where(
+        Media.rating_key == EnrichmentQueue.rating_key,
+        Media.server_id == EnrichmentQueue.server_id,
+    )
+    result = await db.execute(
+        delete(EnrichmentQueue).where(
+            EnrichmentQueue.server_id == server_id,
+            ~orphan.exists(),
+        )
+    )
+    removed = result.rowcount or 0
+    if removed:
+        logger.info(f"Removed {removed} orphan enrichment_queue rows from {server_id}")
+    return removed
+
+
 async def _load_category_config(db, account_id: str) -> tuple[str, dict, dict]:
     """
     Load category filtering configuration for an account.
@@ -1258,6 +1283,10 @@ async def sync_account(account_id: str):
                 # Recalculate visibility for ALL media based on category config
                 from app.services.category_service import update_media_category_visibility
                 await update_media_category_visibility(db, account_id)
+
+                # Reconcile enrichment_queue: drop rows whose media was removed
+                # (provider churn / pagination eviction leaves them orphaned).
+                await cleanup_orphan_enrichment_queue(db, server_id)
 
                 # Update account last_synced_at
                 await db.execute(

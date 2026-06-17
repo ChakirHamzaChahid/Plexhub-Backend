@@ -48,7 +48,7 @@ Convertit `docs/10-prd.md` + `docs/22-impl-spec-backend.md` en `docs/30-sprint-p
    Status démarre à `todo`. Évolue via `in_progress → review → qa → done` (ou `blocked`).
 
 6. **Definition of Done** — liste-la en haut du board pour que tout le monde utilise la même :
-   - Code mergé sur **`main`**
+   - Code committé sur **`develop`** (mergé sur `main` seulement à la release)
    - `pytest -v` **vert**
    - boot OK : `uvicorn app.main:app` démarre
    - `GET /api/health` répond **200**

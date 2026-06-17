@@ -1,4 +1,9 @@
-fastapi>=0.115
+# Keep FastAPI <0.116 and prometheus-fastapi-instrumentator <8 together:
+# FastAPI 0.116+ emits internal _IncludedRouter route objects that the
+# instrumentator 8.x route-name walker can't handle (route.path AttributeError
+# -> every /api/* returns HTTP 500). Both were left floating and a rebuild
+# resolved to 0.137.1 + 8.0.0, taking the whole API down. See instrumentator pin.
+fastapi>=0.115,<0.116
 uvicorn[standard]>=0.27
 sqlalchemy[asyncio]>=2.0
 aiosqlite>=0.20
@@ -9,7 +14,7 @@ apscheduler>=3.10
 rapidfuzz>=3.6
 python-dotenv
 typer>=0.9.0
-prometheus-fastapi-instrumentator>=7.0
+prometheus-fastapi-instrumentator>=7.0,<8  # see FastAPI pin note (route-walker incompat)
 prometheus-client>=0.20
 jinja2>=3.1
 python-multipart>=0.0.9

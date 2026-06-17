@@ -40,6 +40,10 @@ from app.plex_generator.mapping import MappingStore
 from app.plex_generator.naming import series_nfo_path
 from app.utils.server_id import build_server_id
 from app.utils.time import now_ms
+from app.utils.unification import (
+    calculate_unification_id,
+    calculate_history_group_key,
+)
 
 
 logger = logging.getLogger("plexhub.nfo_import")
@@ -349,6 +353,23 @@ def _compute_updates(row: Media, parsed: NfoEntry, overwrite: bool) -> dict:
         if current == new_val:
             continue  # already up-to-date
         updates[col] = new_val
+
+    # When an identifier (or year) is (re)written, recompute the unification key.
+    # The Plex generator groups by unification_id, NOT by tmdb_id directly, so an
+    # imported id whose unification stays title-based would split the same title
+    # into separate "[title_]" / "[imdb]" folders. Recompute from the post-update
+    # values so the row regroups with its twins. (Only fires when we already write
+    # something — an unchanged id can't change the unification.)
+    if updates:
+        new_imdb = updates.get("imdb_id", row.imdb_id)
+        new_tmdb = updates.get("tmdb_id", row.tmdb_id)
+        new_year = updates.get("year", row.year)
+        new_unif = calculate_unification_id(row.title or "", new_year, new_imdb, new_tmdb)
+        if new_unif and new_unif != (row.unification_id or ""):
+            updates["unification_id"] = new_unif
+            updates["history_group_key"] = calculate_history_group_key(
+                new_unif, row.rating_key, row.server_id,
+            )
     return updates
 
 

@@ -22,7 +22,7 @@ Le code-reviewer fait respecter la correction vis-à-vis de la spec. Toi, tu fai
 
 # Checklist
 
-Parcours cette liste contre la branche d'intégration `main`. Pour chaque item : `PASS`, `FAIL: <sévérité> — <constat>`, ou `N/A: <raison>`.
+Parcours cette liste contre `develop` (la branche de travail ; et obligatoirement contre `main` avant une release). Pour chaque item : `PASS`, `FAIL: <sévérité> — <constat>`, ou `N/A: <raison>`.
 
 ## Secrets & credentials
 1. **Aucun secret committé** : `grep -Ri` sur motifs connus (`BEGIN PRIVATE KEY`, `api_key`, `TMDB_API_KEY=`, `AI_API_KEY=`, clé **Fernet** / `TV_AUTH_ENCRYPTION_KEY`, identifiants Xtream). `.env` gitignored, `.env.example` sans valeurs.

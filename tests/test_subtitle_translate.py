@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.config import settings
 from app.db.database import _VEC_LOADED, register_sqlite_vec_listener
-from app.db.migrations import _migration_008_ai_embeddings, _migration_010_create_subtitle_cache
+from app.db.migrations import _migration_008_ai_embeddings, _migration_011_create_subtitle_cache
 from app.models.database import Base
 from app.services import ollama_service
 
@@ -84,7 +84,7 @@ async def subtitle_engine(tmp_path):
     async with engine.begin() as conn:
         await _migration_008_ai_embeddings(conn)
     # M010 operates on engine (not bare conn)
-    await _migration_010_create_subtitle_cache(engine)
+    await _migration_011_create_subtitle_cache(engine)
     # Also ensure the ORM model tables are present (AiSubtitleCache mapped to Base)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

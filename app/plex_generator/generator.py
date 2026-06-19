@@ -22,6 +22,7 @@ from app.plex_generator.naming import (
 from app.plex_generator.nfo_builder import build_movie_nfo, build_tvshow_nfo, build_episode_nfo
 from app.plex_generator.source import MediaSource
 from app.plex_generator.storage import LibraryStorage
+from app.models.schemas import apply_adult_prefix
 from app.utils.string_normalizer import parse_title_year_and_suffix
 
 logger = logging.getLogger("plexhub.plex_generator")
@@ -63,6 +64,12 @@ def _resolve_movie_names(movies) -> dict[str, _NameResolution]:
     groups: dict[tuple[str, int | None], list[str]] = {}
     for movie in movies:
         clean, parsed_year, suffix = parse_title_year_and_suffix(movie.title or "")
+        # Re-apply the "[XXX] " tag AFTER parsing: parse_title_year_and_suffix
+        # strips a leading [...] bracket, so prefixing earlier would be lost. The
+        # tagged title becomes the grouping/path basis → folders + .strm files
+        # carry the tag (an adult movie and a non-adult homonym land in distinct
+        # folders). Idempotent guard lives in apply_adult_prefix.
+        clean = apply_adult_prefix(clean, getattr(movie, "is_adult", False))
         year = movie.year if movie.year is not None else parsed_year
         parsed[movie.source_id] = (clean, year, suffix)
         groups.setdefault((clean, year), []).append(movie.source_id)

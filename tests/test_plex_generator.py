@@ -484,3 +484,102 @@ class TestResolveCollisions:
         # c is the only HD -> just suffix
         assert res["vod_c.mkv"].suffix == "HD"
         assert res["vod_c.mkv"].fallback_id is None
+
+
+class TestAdultTagging:
+    """Adult/XXX movies get the "[XXX] " tag on the generated folder, the .strm
+    file names AND the movie.nfo <title> — not only in API responses."""
+
+    def test_nfo_title_prefixed_for_adult_movie(self):
+        movie = PlexMovie(
+            source_id="vod_x.mp4", title="Naughty Film", is_adult=True,
+            year=2020, stream_url="http://x",
+        )
+        xml = build_movie_nfo(movie)
+        assert "<title>[XXX] Naughty Film</title>" in xml
+
+    def test_nfo_title_not_prefixed_for_non_adult(self):
+        movie = PlexMovie(
+            source_id="vod_y.mp4", title="Family Film", year=2020, stream_url="http://x",
+        )
+        xml = build_movie_nfo(movie)
+        assert "<title>Family Film</title>" in xml
+        assert "[XXX]" not in xml
+
+    def test_nfo_title_idempotent_when_already_prefixed(self):
+        movie = PlexMovie(
+            source_id="vod_z.mp4", title="[XXX] Already", is_adult=True,
+            year=2020, stream_url="http://x",
+        )
+        xml = build_movie_nfo(movie)
+        assert "<title>[XXX] Already</title>" in xml
+        assert "[XXX] [XXX]" not in xml
+
+    def test_resolve_names_prefixes_adult_title(self):
+        from app.plex_generator.generator import _resolve_movie_names
+        m = PlexMovie(
+            source_id="vod_1", title="Naughty Film", is_adult=True,
+            year=2020, stream_url="http://x",
+        )
+        res = _resolve_movie_names([m])
+        assert res["vod_1"].clean_title == "[XXX] Naughty Film"
+        assert res["vod_1"].year == 2020
+
+    def test_generate_adult_movie_folder_and_file_tagged(self, tmp_path):
+        movie = PlexMovie(
+            source_id="vod_1.mp4", title="Naughty Film", is_adult=True,
+            year=2020, stream_url="http://stream/adult",
+        )
+        source = MockSource(movies=[movie])
+        storage = LocalStorage(tmp_path)
+        gen = PlexLibraryGenerator(source, storage, tmp_path, strm_only=False)
+        report = asyncio.run(gen.generate())
+
+        assert report.created == 1
+        folder = tmp_path / "Films" / "[XXX] Naughty Film (2020)"
+        assert (folder / "[XXX] Naughty Film (2020).strm").exists()
+        nfo = folder / "movie.nfo"
+        assert nfo.exists()
+        assert "<title>[XXX] Naughty Film</title>" in nfo.read_text(encoding="utf-8")
+
+    def test_generate_adult_multi_version_tagged(self, tmp_path):
+        from app.plex_generator.models import PlexMovieVersion
+        movie = PlexMovie(
+            source_id="grp_1", title="Naughty Film", is_adult=True, year=2020,
+            versions=[
+                PlexMovieVersion(
+                    source_id="vod_1.mp4", server_id="s1", label="VF",
+                    stream_url="http://a",
+                ),
+                PlexMovieVersion(
+                    source_id="vod_2.mp4", server_id="s2", label="VOSTFR",
+                    stream_url="http://b",
+                ),
+            ],
+        )
+        source = MockSource(movies=[movie])
+        storage = LocalStorage(tmp_path)
+        gen = PlexLibraryGenerator(source, storage, tmp_path, strm_only=True)
+        report = asyncio.run(gen.generate())
+
+        assert report.created == 2
+        folder = tmp_path / "Films" / "[XXX] Naughty Film (2020)"
+        assert (folder / "[XXX] Naughty Film (2020) - VF.strm").exists()
+        assert (folder / "[XXX] Naughty Film (2020) - VOSTFR.strm").exists()
+
+    def test_adult_and_non_adult_homonym_land_in_distinct_folders(self, tmp_path):
+        adult = PlexMovie(
+            source_id="vod_a.mp4", title="Twins", is_adult=True, year=2020,
+            stream_url="http://adult",
+        )
+        clean = PlexMovie(
+            source_id="vod_b.mp4", title="Twins", is_adult=False, year=2020,
+            stream_url="http://clean",
+        )
+        source = MockSource(movies=[adult, clean])
+        storage = LocalStorage(tmp_path)
+        gen = PlexLibraryGenerator(source, storage, tmp_path, strm_only=True)
+        asyncio.run(gen.generate())
+
+        assert (tmp_path / "Films" / "[XXX] Twins (2020)" / "[XXX] Twins (2020).strm").exists()
+        assert (tmp_path / "Films" / "Twins (2020)" / "Twins (2020).strm").exists()

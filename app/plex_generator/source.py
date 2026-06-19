@@ -98,6 +98,7 @@ class DatabaseSource(MediaSource):
                 movies.append(PlexMovie(
                     source_id=grp.key,
                     title=clean_title,
+                    is_adult=bool(best.is_adult),
                     year=clean_year,
                     versions=[PlexMovieVersion(
                         source_id=row.rating_key, server_id=row.server_id,

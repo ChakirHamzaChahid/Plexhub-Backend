@@ -15,6 +15,7 @@ class PlexMovieVersion(BaseModel):
 class PlexMovie(BaseModel):
     source_id: str            # GROUP id (unification_id, or rating_key when ungrouped)
     title: str
+    is_adult: bool = False    # adult/X-rated → folder/file/NFO title get the "[XXX] " tag
     year: int | None = None
     stream_url: str | None = None       # back-compat single-version shortcut
     versions: list[PlexMovieVersion] = []

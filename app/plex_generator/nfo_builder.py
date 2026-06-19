@@ -1,6 +1,7 @@
 from xml.etree.ElementTree import Element, SubElement, tostring
 from xml.dom.minidom import parseString
 
+from app.models.schemas import apply_adult_prefix
 from app.plex_generator.models import PlexMovie, PlexSeries, PlexEpisode
 
 
@@ -66,7 +67,11 @@ def build_movie_nfo(movie: PlexMovie) -> str:
     """Build a Jellyfin/Kodi-compatible movie.nfo XML string."""
     root = Element("movie")
 
-    SubElement(root, "title").text = movie.title
+    # Adult movies carry the "[XXX] " tag in their displayed <title> (mirrors the
+    # folder/file naming and the API serialization). Idempotent; non-adult untouched.
+    SubElement(root, "title").text = apply_adult_prefix(
+        movie.title, getattr(movie, "is_adult", False),
+    )
     if movie.year:
         SubElement(root, "year").text = str(movie.year)
     if movie.summary:

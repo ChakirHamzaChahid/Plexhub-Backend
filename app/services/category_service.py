@@ -420,9 +420,11 @@ async def update_media_adult_flags(
     content_rating forced to settings.ADULT_CONTENT_RATING (read by the NFO
     <mpaa> tag and the API). Non-adult movies keep their original content_rating.
 
-    Movies only (matches the adult-category scope); the title "[XXX]" prefix is
-    applied at API serialization, never stored. Idempotent and retroactive:
-    runs every sync after update_media_category_visibility.
+    Movies only (matches the adult-category scope). The title "[XXX] " prefix is
+    applied at the output boundaries — API serialization AND Plex/Jellyfin library
+    generation (folder/file names + movie.nfo <title>) — via apply_adult_prefix,
+    but never stored on media.title. Idempotent and retroactive: runs every sync
+    after update_media_category_visibility.
     """
     server_id = build_server_id(account_id)
 

@@ -26,6 +26,7 @@ async def _get_client() -> httpx.AsyncClient:
             if _client is None or _client.is_closed:
                 _client = httpx.AsyncClient(
                     timeout=httpx.Timeout(settings.STREAM_VALIDATION_TIMEOUT, connect=10.0),
+                    headers={"User-Agent": settings.XTREAM_USER_AGENT},
                     limits=httpx.Limits(
                         max_connections=max(50, settings.STREAM_VALIDATION_CONCURRENCY * 2),
                         max_keepalive_connections=settings.STREAM_VALIDATION_CONCURRENCY,

@@ -75,6 +75,10 @@ class Settings:
     XTREAM_PORT: int = _safe_int("XTREAM_PORT", 80)
     XTREAM_USERNAME: str = os.getenv("XTREAM_USERNAME", "")
     XTREAM_PASSWORD: str = os.getenv("XTREAM_PASSWORD", "")
+    # Some providers sit behind Cloudflare, which 403-blocks the default
+    # python-httpx User-Agent. Send a real media-player UA on every request
+    # to the provider (player_api.php and stream validation alike).
+    XTREAM_USER_AGENT: str = os.getenv("XTREAM_USER_AGENT", "VLC/3.0.20 LibVLC/3.0.20")
 
     # Adult / X-rated content tagging.
     # Movies whose Xtream category name matches one of ADULT_CATEGORY_KEYWORDS

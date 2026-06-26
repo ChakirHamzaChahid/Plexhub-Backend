@@ -172,6 +172,11 @@ async def _check_one(client: httpx.AsyncClient, item, account, semaphore):
             return item, True, "timeout"
         except httpx.ConnectError:
             return item, True, "connect_error"
+        except httpx.InvalidURL:
+            # Provider answered with a malformed redirect (bad Location header)
+            # that httpx can't follow — the stream is effectively broken. Expected
+            # provider-side garbage, so classify it without a noisy warning.
+            return item, True, "bad_redirect"
         except Exception as e:
             logger.warning(f"Health check error for {item.rating_key}: {e}")
             return item, True, f"exception:{type(e).__name__}"

@@ -2,6 +2,8 @@ import asyncio
 import logging
 from dataclasses import dataclass
 
+import httpx
+
 from sqlalchemy import select, update
 
 from app.config import settings
@@ -106,6 +108,15 @@ async def _resolve(item, media_type: str, semaphore) -> FetchResult:
                     n_search + 1, cache_key,
                 )
             return FetchResult(item, None, outcome.confidence, outcome.result, n_search, cache_key)
+        except httpx.HTTPStatusError as e:
+            # A 404 means the tmdb_id supplied by the provider no longer exists
+            # on TMDB — an expected, recoverable miss, not a code fault. Log it
+            # quietly without a traceback; let real HTTP errors surface loudly.
+            if e.response.status_code == 404:
+                logger.info(f"Enrichment skipped for {item.rating_key}: TMDB 404 (stale id)")
+                return FetchResult(item, None, None, "not_found", 0, None)
+            logger.warning(f"Enrichment fetch failed for {item.rating_key}: {e}", exc_info=True)
+            return FetchResult(item, None, None, "skipped", 0, None)
         except Exception as e:
             logger.warning(f"Enrichment fetch failed for {item.rating_key}: {e}", exc_info=True)
             return FetchResult(item, None, None, "skipped", 0, None)

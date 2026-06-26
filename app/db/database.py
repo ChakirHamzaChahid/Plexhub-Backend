@@ -6,7 +6,13 @@ DATABASE_URL = f"sqlite+aiosqlite:///{settings.DB_PATH}"
 engine = create_async_engine(
     DATABASE_URL,
     echo=False,
-    connect_args={"check_same_thread": False},
+    # ``timeout`` is passed to sqlite3.connect() and sets the busy timeout on
+    # EVERY pooled connection (busy_timeout is per-connection — the PRAGMA in
+    # init_db only covered the init connection, so worker connections failed
+    # immediately with "database is locked" while the long-running stream
+    # validation held the single WAL writer lock). 60s lets a writer wait for
+    # the gap between validation's per-batch commits instead of crashing.
+    connect_args={"check_same_thread": False, "timeout": 60},
 )
 
 async_session_factory = async_sessionmaker(
@@ -81,7 +87,7 @@ async def init_db():
         await conn.execute(text("PRAGMA synchronous=NORMAL"))
         await conn.execute(text("PRAGMA cache_size=-64000"))  # 64MB cache
         await conn.execute(text("PRAGMA temp_store=MEMORY"))
-        await conn.execute(text("PRAGMA busy_timeout=5000"))  # Wait 5s on lock instead of failing
+        await conn.execute(text("PRAGMA busy_timeout=60000"))  # Wait 60s on lock (matches connect_args timeout)
         await conn.execute(text("PRAGMA mmap_size=268435456"))  # 256MB mmap for read perf
         await conn.run_sync(Base.metadata.create_all)
 

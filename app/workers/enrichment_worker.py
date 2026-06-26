@@ -2,6 +2,8 @@ import asyncio
 import logging
 from dataclasses import dataclass
 
+import httpx
+
 from sqlalchemy import select, update
 
 from app.config import settings
@@ -106,6 +108,15 @@ async def _resolve(item, media_type: str, semaphore) -> FetchResult:
                     n_search + 1, cache_key,
                 )
             return FetchResult(item, None, outcome.confidence, outcome.result, n_search, cache_key)
+        except httpx.HTTPStatusError as e:
+            # A 404 means the tmdb_id supplied by the provider no longer exists
+            # on TMDB — an expected, recoverable miss, not a code fault. Log it
+            # quietly without a traceback; let real HTTP errors surface loudly.
+            if e.response.status_code == 404:
+                logger.info(f"Enrichment skipped for {item.rating_key}: TMDB 404 (stale id)")
+                return FetchResult(item, None, None, "not_found", 0, None)
+            logger.warning(f"Enrichment fetch failed for {item.rating_key}: {e}", exc_info=True)
+            return FetchResult(item, None, None, "skipped", 0, None)
         except Exception as e:
             logger.warning(f"Enrichment fetch failed for {item.rating_key}: {e}", exc_info=True)
             return FetchResult(item, None, None, "skipped", 0, None)
@@ -125,74 +136,80 @@ async def _apply_enrichment_results(db, results: list[FetchResult]):
 
     batch_used = 0
     ts = now_ms()
-    for fr in results:
-        item = fr.item
-        enrichment_data = fr.data
+    # Defer ORM flushes of the dirty EnrichmentQueue items to the single commit
+    # in run(). Without this, every in-loop query autoflushes them, and if that
+    # write hits the WAL writer lock (held for hours by stream validation) it
+    # raises mid-loop and crashes the whole batch instead of being retried at
+    # commit time. Paired with the 60s busy_timeout on the engine connection.
+    with db.no_autoflush:
+        for fr in results:
+            item = fr.item
+            enrichment_data = fr.data
 
-        # Outcome metric (only the genuine matching attempts — skip scenario 2/3).
-        if fr.result in ("matched", "nomatch", "ambiguous"):
-            metric_type = "movie" if item.media_type == "movie" else "tv"
-            tmdb_match_total.labels(media_type=metric_type, result=fr.result).inc()
+            # Outcome metric (only the genuine matching attempts — skip scenario 2/3).
+            if fr.result in ("matched", "nomatch", "ambiguous"):
+                metric_type = "movie" if item.media_type == "movie" else "tv"
+                tmdb_match_total.labels(media_type=metric_type, result=fr.result).inc()
 
-        # Persist the resolution so the same title is never re-queried.
-        if fr.cache_key and not fr.from_cache:
-            await scrape_cache.put(
-                db, fr.cache_key, item.media_type, fr.result,
-                fr.confidence, enrichment_data, ts,
-            )
-
-        if enrichment_data:
-            tmdb_id = enrichment_data.tmdb_id
-            imdb_id = enrichment_data.imdb_id
-            new_unif = f"imdb://{imdb_id}" if imdb_id else f"tmdb://{tmdb_id}"
-
-            update_values = {
-                "tmdb_id": str(tmdb_id),
-                "imdb_id": imdb_id,
-                "unification_id": new_unif,
-                "history_group_key": new_unif,
-                "tmdb_match_confidence": fr.confidence,
-            }
-            if enrichment_data.overview:
-                update_values["summary"] = enrichment_data.overview
-            if enrichment_data.genres:
-                update_values["genres"] = enrichment_data.genres
-            if enrichment_data.poster_url:
-                update_values["resolved_thumb_url"] = enrichment_data.poster_url
-            if enrichment_data.backdrop_url:
-                update_values["resolved_art_url"] = enrichment_data.backdrop_url
-            if enrichment_data.vote_average:
-                update_values["scraped_rating"] = enrichment_data.vote_average
-                update_values["display_rating"] = enrichment_data.vote_average
-            if enrichment_data.year:
-                update_values["year"] = enrichment_data.year
-            if enrichment_data.cast:
-                update_values["cast"] = enrichment_data.cast
-
-            await db.execute(
-                update(Media)
-                .where(
-                    Media.rating_key == item.rating_key,
-                    Media.server_id == item.server_id,
+            # Persist the resolution so the same title is never re-queried.
+            if fr.cache_key and not fr.from_cache:
+                await scrape_cache.put(
+                    db, fr.cache_key, item.media_type, fr.result,
+                    fr.confidence, enrichment_data, ts,
                 )
-                .values(**update_values)
-            )
-            item.status = "done"
-        else:
-            # Record the best score even without a match (future manual review).
-            if fr.confidence is not None:
+
+            if enrichment_data:
+                tmdb_id = enrichment_data.tmdb_id
+                imdb_id = enrichment_data.imdb_id
+                new_unif = f"imdb://{imdb_id}" if imdb_id else f"tmdb://{tmdb_id}"
+
+                update_values = {
+                    "tmdb_id": str(tmdb_id),
+                    "imdb_id": imdb_id,
+                    "unification_id": new_unif,
+                    "history_group_key": new_unif,
+                    "tmdb_match_confidence": fr.confidence,
+                }
+                if enrichment_data.overview:
+                    update_values["summary"] = enrichment_data.overview
+                if enrichment_data.genres:
+                    update_values["genres"] = enrichment_data.genres
+                if enrichment_data.poster_url:
+                    update_values["resolved_thumb_url"] = enrichment_data.poster_url
+                if enrichment_data.backdrop_url:
+                    update_values["resolved_art_url"] = enrichment_data.backdrop_url
+                if enrichment_data.vote_average:
+                    update_values["scraped_rating"] = enrichment_data.vote_average
+                    update_values["display_rating"] = enrichment_data.vote_average
+                if enrichment_data.year:
+                    update_values["year"] = enrichment_data.year
+                if enrichment_data.cast:
+                    update_values["cast"] = enrichment_data.cast
+
                 await db.execute(
                     update(Media)
                     .where(
                         Media.rating_key == item.rating_key,
                         Media.server_id == item.server_id,
                     )
-                    .values(tmdb_match_confidence=fr.confidence)
+                    .values(**update_values)
                 )
-            item.status = "skipped"
-        item.attempts += 1
-        item.processed_at = ts
-        batch_used += fr.api_used
+                item.status = "done"
+            else:
+                # Record the best score even without a match (future manual review).
+                if fr.confidence is not None:
+                    await db.execute(
+                        update(Media)
+                        .where(
+                            Media.rating_key == item.rating_key,
+                            Media.server_id == item.server_id,
+                        )
+                        .values(tmdb_match_confidence=fr.confidence)
+                    )
+                item.status = "skipped"
+            item.attempts += 1
+            item.processed_at = ts
+            batch_used += fr.api_used
     return batch_used
 
 

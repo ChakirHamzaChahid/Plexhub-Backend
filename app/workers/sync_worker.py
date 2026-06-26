@@ -793,7 +793,14 @@ async def _fetch_streams_by_categories(
     Returns:
         Merged list of all stream DTOs across requested categories.
     """
-    sem = asyncio.Semaphore(concurrency)
+    # Clamp to the provider's max_connections cap when set (>0). Xtream uses
+    # 0 to mean "unlimited", so only narrow concurrency, never widen it past
+    # the requested default -- otherwise a 1-connection account stalls 9/10
+    # in-flight calls and the whole content type fails to sync.
+    max_conns = getattr(account, "max_connections", 0) or 0
+    if max_conns > 0:
+        concurrency = min(concurrency, max_conns)
+    sem = asyncio.Semaphore(max(1, concurrency))
     all_streams: list[dict] = []
     failed = 0
 
@@ -919,6 +926,7 @@ async def sync_account(account_id: str):
                     port=account.port,
                     username=account.username,
                     password=account.password,
+                    max_connections=account.max_connections,
                 )
 
                 server_id = build_server_id(account_id)

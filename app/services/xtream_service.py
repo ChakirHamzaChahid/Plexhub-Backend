@@ -4,6 +4,8 @@ from typing import Any, Optional
 
 import httpx
 
+from app.config import settings
+
 logger = logging.getLogger("plexhub.xtream")
 
 _RETRY_DELAYS = (1, 2, 4)  # Exponential backoff: 1s, 2s, 4s
@@ -20,6 +22,7 @@ class XtreamService:
         if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient(
                 timeout=30.0,
+                headers={"User-Agent": settings.XTREAM_USER_AGENT},
                 limits=httpx.Limits(
                     max_connections=50,
                     max_keepalive_connections=30,

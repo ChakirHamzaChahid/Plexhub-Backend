@@ -42,6 +42,28 @@ def _tmdb_str(value) -> str | None:
     return str(value) if value not in (None, "") else None
 
 
+def _nfo_metadata(best: Media) -> dict:
+    """NFO-imported metadata (tinyMediaManager) carried on the unified card.
+
+    Shared by /movies/unified and /shows/unified so both surface the same
+    extended fields from the group's best row."""
+    return dict(
+        original_title=best.original_title,
+        tagline=best.tagline,
+        premiered=best.premiered,
+        status=best.status,
+        studio=best.studio,
+        country=best.country,
+        tvdb_id=best.tvdb_id,
+        wikidata_id=best.wikidata_id,
+        imdb_rating=best.imdb_rating,
+        imdb_votes=best.imdb_votes,
+        tmdb_rating=best.tmdb_rating,
+        tmdb_votes=best.tmdb_votes,
+        cast_json=best.cast_json,
+    )
+
+
 @router.get("/movies", response_model=MediaListResponse)
 async def list_movies(
     limit: int = Query(500, ge=1, le=5000),
@@ -149,6 +171,7 @@ async def list_movies_unified(
             is_adult=is_adult,
             versions=_build_versions(g.members, labels),
             version_count=len(g.members),
+            **_nfo_metadata(best),
         ))
     return UnifiedMediaListResponse(
         items=items, total=total, has_more=(offset + limit) < total,
@@ -183,6 +206,7 @@ async def list_shows_unified(
             rating=best.display_rating or best.scraped_rating, cast=best.cast,
             versions=_build_versions(g.members, labels),
             version_count=len(g.members),
+            **_nfo_metadata(best),
         ))
     return UnifiedMediaListResponse(
         items=items, total=total, has_more=(offset + limit) < total,

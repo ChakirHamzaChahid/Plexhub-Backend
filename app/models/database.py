@@ -75,6 +75,22 @@ class Media(Base):
     alternative_thumb_urls = Column(Text)  # pipe-separated
     cast = Column(Text)  # comma-separated actor names from TMDB
 
+    # NFO-imported metadata (tinyMediaManager) — see services/nfo_import_service.
+    # Filled from movie.nfo / tvshow.nfo; never sourced from the Xtream sync.
+    original_title = Column(Text)            # <originaltitle> / <english_title>
+    tagline = Column(Text)                   # <tagline>
+    premiered = Column(Text)                 # ISO date "YYYY-MM-DD" (<premiered>/<aired>)
+    status = Column(Text)                    # show status: "Continuing" / "Ended"
+    studio = Column(Text)                    # comma-separated <studio>
+    country = Column(Text)                   # comma-separated <country>
+    tvdb_id = Column(Text)                   # <uniqueid type="tvdb">
+    wikidata_id = Column(Text)               # <uniqueid type="wikidata">
+    imdb_rating = Column(Float)              # <ratings><rating name="imdb"><value>
+    imdb_votes = Column(Integer)             # <ratings><rating name="imdb"><votes>
+    tmdb_rating = Column(Float)              # <ratings><rating name="themoviedb"><value>
+    tmdb_votes = Column(Integer)             # <ratings><rating name="themoviedb"><votes>
+    cast_json = Column(Text)                 # JSON [{name, role, thumb, profile, tvdbid}]
+
     # Backend-specific
     stream_error_count = Column(Integer, nullable=False, default=0)
     last_stream_check = Column(BigInteger)
@@ -91,6 +107,7 @@ class Media(Base):
         Index("ix_media_type_added", "type", "added_at"),
         Index("ix_media_imdb", "imdb_id"),
         Index("ix_media_tmdb", "tmdb_id"),
+        Index("ix_media_tvdb", "tvdb_id"),
         Index("ix_media_server_lib", "server_id", "library_section_id"),
         Index("ix_media_unification", "unification_id"),
         Index("ix_media_type_rating", "type", "display_rating"),

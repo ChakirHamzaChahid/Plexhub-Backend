@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from dataclasses import dataclass
 from typing import Literal, Optional
@@ -17,6 +18,11 @@ _RETRYABLE = (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolEr
 
 POSTER_BASE = "https://image.tmdb.org/t/p/w342"
 BACKDROP_BASE = "https://image.tmdb.org/t/p/w1280"
+PROFILE_BASE = "https://image.tmdb.org/t/p/w185"
+PERSON_URL_BASE = "https://www.themoviedb.org/person"
+
+# Top-N actors kept for the `cast` / `cast_json` columns (mirrors NFO behaviour).
+_CAST_LIMIT = 20
 
 # Matching thresholds (transposed from PlexHubTV ScraperMatcher.kt).
 TITLE_WEIGHT = 0.7
@@ -63,7 +69,16 @@ class TMDBSearchOutcome:
 
 @dataclass
 class TMDBEnrichmentData:
-    """Rich metadata from TMDB movie/{id} or tv/{id} with append_to_response=credits,external_ids."""
+    """Rich metadata from TMDB movie/{id} or tv/{id} with
+    append_to_response=credits,external_ids,release_dates|content_ratings.
+
+    The trailing fields mirror the NFO-imported columns (see nfo_import_service)
+    so the TMDB enrichment path can populate them too. They carry defaults so
+    that older scrape-cache payloads (written before these existed) still
+    deserialize via ``TMDBEnrichmentData(**json.loads(payload))``.
+    `imdb_rating`/`imdb_votes` are intentionally absent — TMDB does not expose
+    IMDb scores (that needs OMDb); those columns stay NFO-only.
+    """
     tmdb_id: int
     imdb_id: str | None
     overview: str | None
@@ -73,6 +88,19 @@ class TMDBEnrichmentData:
     genres: str | None  # comma-separated
     year: int | None
     cast: str | None  # comma-separated actor names
+    # --- rich metadata (mirrors the NFO columns), all optional/back-compatible ---
+    original_title: str | None = None
+    tagline: str | None = None
+    premiered: str | None = None      # ISO date "YYYY-MM-DD"
+    status: str | None = None
+    studio: str | None = None         # comma-separated
+    country: str | None = None        # comma-separated
+    content_rating: str | None = None
+    tvdb_id: str | None = None
+    wikidata_id: str | None = None
+    tmdb_rating: float | None = None  # = vote_average, kept distinct per NFO schema
+    tmdb_votes: int | None = None
+    cast_json: str | None = None      # JSON [{name, role, thumb, profile}]
 
 
 class TMDBService:
@@ -230,20 +258,26 @@ class TMDBService:
         )
 
     async def get_movie_details(self, tmdb_id: int) -> TMDBEnrichmentData:
-        """Fetch movie details + external_ids in a single API call."""
+        """Fetch movie details + external_ids + certifications in one API call."""
         data = await self._request(
             f"/movie/{tmdb_id}",
-            params={"append_to_response": "credits,external_ids", "language": settings.TMDB_LANGUAGE},
+            params={
+                "append_to_response": "credits,external_ids,release_dates",
+                "language": settings.TMDB_LANGUAGE,
+            },
         )
-        return self._parse_details(data, tmdb_id, date_key="release_date")
+        return self._parse_details(data, tmdb_id, media_kind="movie")
 
     async def get_tv_details(self, tmdb_id: int) -> TMDBEnrichmentData:
-        """Fetch TV details + external_ids in a single API call."""
+        """Fetch TV details + external_ids + certifications in one API call."""
         data = await self._request(
             f"/tv/{tmdb_id}",
-            params={"append_to_response": "credits,external_ids", "language": settings.TMDB_LANGUAGE},
+            params={
+                "append_to_response": "credits,external_ids,content_ratings",
+                "language": settings.TMDB_LANGUAGE,
+            },
         )
-        return self._parse_details(data, tmdb_id, date_key="first_air_date")
+        return self._parse_details(data, tmdb_id, media_kind="tv")
 
     async def find_by_imdb_id(
         self,
@@ -293,27 +327,133 @@ class TMDBService:
         self._imdb_find_cache.set(cache_key, tmdb_id)
         return tmdb_id
 
-    def _parse_details(self, data: dict, tmdb_id: int, date_key: str) -> TMDBEnrichmentData:
-        """Parse TMDB detail response into TMDBEnrichmentData."""
+    @staticmethod
+    def _preferred_region() -> str:
+        """Country code from TMDB_LANGUAGE (e.g. 'fr-FR' -> 'FR'), default 'US'."""
+        lang = settings.TMDB_LANGUAGE or ""
+        if "-" in lang:
+            return lang.rsplit("-", 1)[-1].upper()
+        return "US"
+
+    @classmethod
+    def _movie_certification(cls, data: dict) -> str | None:
+        """Pick the certification for the preferred region, falling back to US,
+        from /movie/{id}?append_to_response=release_dates."""
+        results = (data.get("release_dates") or {}).get("results") or []
+        by_region = {r.get("iso_3166_1"): r for r in results if r.get("iso_3166_1")}
+        for region in (cls._preferred_region(), "US"):
+            entry = by_region.get(region)
+            if not entry:
+                continue
+            for rd in entry.get("release_dates", []):
+                cert = (rd.get("certification") or "").strip()
+                if cert:
+                    return cert
+        return None
+
+    @classmethod
+    def _tv_certification(cls, data: dict) -> str | None:
+        """Pick the content rating for the preferred region, falling back to US,
+        from /tv/{id}?append_to_response=content_ratings."""
+        results = (data.get("content_ratings") or {}).get("results") or []
+        by_region = {r.get("iso_3166_1"): r for r in results if r.get("iso_3166_1")}
+        for region in (cls._preferred_region(), "US"):
+            entry = by_region.get(region)
+            if entry and (entry.get("rating") or "").strip():
+                return entry["rating"].strip()
+        return None
+
+    @staticmethod
+    def _join_names(items: list[dict], limit: int | None = None) -> str | None:
+        names = [i["name"].strip() for i in items if i.get("name") and i["name"].strip()]
+        if limit is not None:
+            names = names[:limit]
+        # De-dup while preserving order.
+        seen: set[str] = set()
+        uniq = [n for n in names if not (n in seen or seen.add(n))]
+        return ", ".join(uniq) or None
+
+    @classmethod
+    def _build_cast_json(cls, cast_list: list[dict]) -> str | None:
+        """Serialize the top actors to the same JSON shape the NFO importer uses:
+        [{name, role?, thumb?, profile?}]. `role` = TMDB character."""
+        actors: list[dict[str, str]] = []
+        for a in cast_list[:_CAST_LIMIT]:
+            name = (a.get("name") or "").strip()
+            if not name:
+                continue
+            entry: dict[str, str] = {"name": name}
+            role = (a.get("character") or "").strip()
+            if role:
+                entry["role"] = role
+            profile_path = a.get("profile_path")
+            if profile_path:
+                entry["thumb"] = f"{PROFILE_BASE}{profile_path}"
+            person_id = a.get("id")
+            if person_id:
+                entry["profile"] = f"{PERSON_URL_BASE}/{person_id}"
+            actors.append(entry)
+        return json.dumps(actors, ensure_ascii=False) if actors else None
+
+    def _parse_details(
+        self, data: dict, tmdb_id: int, *, media_kind: str,
+    ) -> TMDBEnrichmentData:
+        """Parse a TMDB movie/tv detail response into TMDBEnrichmentData.
+
+        `media_kind` is "movie" or "tv" — it selects the right localized title /
+        date / studio / certification source between the two TMDB schemas."""
+        is_movie = media_kind == "movie"
+        date_key = "release_date" if is_movie else "first_air_date"
+        title_key = "original_title" if is_movie else "original_name"
+
+        external = data.get("external_ids") or {}
         # IMDB ID with guaranteed 'tt' prefix
-        imdb_id = data.get("external_ids", {}).get("imdb_id")
+        imdb_id = external.get("imdb_id")
         if imdb_id and not imdb_id.startswith("tt"):
             imdb_id = f"tt{imdb_id}"
 
+        # TVDB id only exists for TV on TMDB; wikidata for both.
+        tvdb_raw = external.get("tvdb_id")
+        tvdb_id = str(tvdb_raw) if tvdb_raw not in (None, "", 0) else None
+        wikidata_id = external.get("wikidata_id") or None
+
         poster = data.get("poster_path")
         backdrop = data.get("backdrop_path")
-        genres_list = data.get("genres", [])
-        genres = ", ".join(g["name"] for g in genres_list if g.get("name")) or None
+        genres = self._join_names(data.get("genres") or [])
 
-        release_date = data.get(date_key, "")
-        year = int(release_date[:4]) if release_date and len(release_date) >= 4 else None
+        release_date = data.get(date_key, "") or ""
+        premiered = release_date if len(release_date) >= 10 else None
+        year = int(release_date[:4]) if len(release_date) >= 4 and release_date[:4].isdigit() else None
 
-        # Extract cast (top 20 actors)
-        credits = data.get("credits", {})
-        cast_list = credits.get("cast", [])
-        cast = ", ".join(
-            a["name"] for a in cast_list[:20] if a.get("name")
+        # Studio: networks for TV (the channel), production companies otherwise.
+        studio_sources = (data.get("networks") or []) if not is_movie else []
+        studio_sources = studio_sources or (data.get("production_companies") or [])
+        studio = self._join_names(studio_sources, limit=5)
+
+        # Country: production_countries (named) preferred, else origin_country codes.
+        prod_countries = data.get("production_countries") or []
+        country = ", ".join(
+            c["name"].strip() for c in prod_countries if c.get("name") and c["name"].strip()
         ) or None
+        if not country:
+            origin = [c for c in (data.get("origin_country") or []) if c]
+            country = ", ".join(origin) or None
+
+        content_rating = (
+            self._movie_certification(data) if is_movie else self._tv_certification(data)
+        )
+
+        vote_average = data.get("vote_average")
+        vote_count = data.get("vote_count")
+        tmdb_votes = int(vote_count) if isinstance(vote_count, (int, float)) and vote_count else None
+
+        # Extract cast (top N actors) — flat names + structured JSON.
+        cast_list = (data.get("credits") or {}).get("cast") or []
+        cast = ", ".join(
+            a["name"].strip() for a in cast_list[:_CAST_LIMIT]
+            if a.get("name") and a["name"].strip()
+        ) or None
+        cast_json = self._build_cast_json(cast_list)
 
         return TMDBEnrichmentData(
             tmdb_id=tmdb_id,
@@ -321,10 +461,22 @@ class TMDBService:
             overview=data.get("overview") or None,
             poster_url=f"{POSTER_BASE}{poster}" if poster else None,
             backdrop_url=f"{BACKDROP_BASE}{backdrop}" if backdrop else None,
-            vote_average=data.get("vote_average"),
+            vote_average=vote_average,
             genres=genres,
             year=year,
             cast=cast,
+            original_title=data.get(title_key) or None,
+            tagline=(data.get("tagline") or "").strip() or None,
+            premiered=premiered,
+            status=(data.get("status") or "").strip() or None,
+            studio=studio,
+            country=country,
+            content_rating=content_rating,
+            tvdb_id=tvdb_id,
+            wikidata_id=wikidata_id,
+            tmdb_rating=vote_average if vote_average else None,
+            tmdb_votes=tmdb_votes,
+            cast_json=cast_json,
         )
 
     @staticmethod

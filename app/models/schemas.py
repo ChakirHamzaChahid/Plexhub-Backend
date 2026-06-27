@@ -93,6 +93,22 @@ class MediaResponse(BaseModel):
     is_adult: bool = False
     tmdb_match_confidence: Optional[float] = None
 
+    # NFO-imported metadata (tinyMediaManager — see nfo_import_service)
+    cast: Optional[str] = None
+    cast_json: Optional[str] = None
+    original_title: Optional[str] = None
+    tagline: Optional[str] = None
+    premiered: Optional[str] = None
+    status: Optional[str] = None
+    studio: Optional[str] = None
+    country: Optional[str] = None
+    tvdb_id: Optional[str] = None
+    wikidata_id: Optional[str] = None
+    imdb_rating: Optional[float] = None
+    imdb_votes: Optional[int] = None
+    tmdb_rating: Optional[float] = None
+    tmdb_votes: Optional[int] = None
+
     @model_validator(mode="after")
     def _prefix_adult_title(self) -> "MediaResponse":
         self.title = apply_adult_prefix(self.title, self.is_adult)
@@ -138,6 +154,20 @@ class UnifiedMediaResponse(BaseModel):
     rating: Optional[float] = None
     cast: Optional[str] = None
     is_adult: bool = False
+    # NFO-imported metadata (tinyMediaManager — see nfo_import_service)
+    original_title: Optional[str] = None
+    tagline: Optional[str] = None
+    premiered: Optional[str] = None
+    status: Optional[str] = None
+    studio: Optional[str] = None
+    country: Optional[str] = None
+    tvdb_id: Optional[str] = None
+    wikidata_id: Optional[str] = None
+    imdb_rating: Optional[float] = None
+    imdb_votes: Optional[int] = None
+    tmdb_rating: Optional[float] = None
+    tmdb_votes: Optional[int] = None
+    cast_json: Optional[str] = None
     version_count: int = 0
     versions: list[MediaVersionResponse] = []
 

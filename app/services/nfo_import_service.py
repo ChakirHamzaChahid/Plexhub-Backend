@@ -26,6 +26,7 @@ commits via Depends(get_db); when dry_run=True nothing is written.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -45,6 +46,7 @@ from app.utils.time import now_ms
 from app.utils.unification import (
     calculate_unification_id,
     calculate_history_group_key,
+    calculate_display_rating,
 )
 
 
@@ -52,6 +54,9 @@ logger = logging.getLogger("plexhub.nfo_import")
 
 _IMDB_ID_RE = re.compile(r"^tt\d{7,10}$")
 _TMDB_ID_RE = re.compile(r"^\d{1,9}$")
+_TVDB_ID_RE = re.compile(r"^\d{1,12}$")
+_WIKIDATA_ID_RE = re.compile(r"^Q\d+$")
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # Commit frequency for bulk UPDATEs. Smaller = releases the SQLite writer lock
 # more often (good when the health_check_worker is also writing concurrently),
@@ -148,6 +153,24 @@ class NfoEntry:
     genres_csv: Optional[str] = None      # join of <genre>...</genre>
     cast_csv: Optional[str] = None        # join of <actor><name>
     rating: Optional[float] = None        # IMDb-priority pick from <ratings>
+    # Extended tinyMediaManager metadata (NFO import only)
+    title_sortable: Optional[str] = None  # <sorttitle>
+    original_title: Optional[str] = None  # <originaltitle> / <english_title>
+    tagline: Optional[str] = None         # <tagline>
+    premiered: Optional[str] = None       # ISO date "YYYY-MM-DD" (<premiered>/<aired>)
+    status: Optional[str] = None          # <status> (Continuing/Ended)
+    studio_csv: Optional[str] = None      # join of <studio>...</studio>
+    country_csv: Optional[str] = None     # join of <country>...</country>
+    tvdb_id: Optional[str] = None         # <uniqueid type="tvdb">
+    wikidata_id: Optional[str] = None     # <uniqueid type="wikidata">
+    poster_url: Optional[str] = None      # <thumb aspect="poster">
+    fanart_url: Optional[str] = None      # <fanart><thumb>
+    imdb_rating: Optional[float] = None   # <ratings><rating name="imdb"><value>
+    imdb_votes: Optional[int] = None      # <ratings><rating name="imdb"><votes>
+    tmdb_rating: Optional[float] = None   # <ratings><rating name="themoviedb"><value>
+    tmdb_votes: Optional[int] = None      # <ratings><rating name="themoviedb"><votes>
+    audience_rating: Optional[float] = None  # = tmdb_rating (TMDB community score)
+    cast_json: Optional[str] = None       # JSON [{name, role, thumb, profile, tvdbid}]
 
 
 # Ratings preference order — first hit wins.
@@ -268,6 +291,99 @@ def _extract_best_rating(root: ET.Element) -> Optional[float]:
     return None
 
 
+def _validate_tvdb(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    value = value.strip()
+    return value if _TVDB_ID_RE.match(value) else None
+
+
+def _validate_wikidata(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    value = value.strip()
+    return value if _WIKIDATA_ID_RE.match(value) else None
+
+
+def _extract_premiered(root: ET.Element) -> Optional[str]:
+    """Return an ISO date 'YYYY-MM-DD' from <premiered> (shows) or <aired>."""
+    raw = _first_text(root, "premiered", "aired", "releasedate")
+    if raw and _ISO_DATE_RE.match(raw):
+        return raw
+    return None
+
+
+def _extract_poster_url(root: ET.Element) -> Optional[str]:
+    """First <thumb aspect="poster"> URL (tinyMM poster), else a bare <thumb>."""
+    fallback: Optional[str] = None
+    for el in root.findall("thumb"):
+        if not (el.text and el.text.strip()):
+            continue
+        if (el.get("aspect") or "").lower() == "poster":
+            return el.text.strip()
+        if fallback is None:
+            fallback = el.text.strip()
+    return fallback
+
+
+def _extract_fanart_url(root: ET.Element) -> Optional[str]:
+    el = root.find("fanart/thumb")
+    if el is not None and el.text and el.text.strip():
+        return el.text.strip()
+    return None
+
+
+def _extract_named_rating(
+    root: ET.Element, *names: str,
+) -> tuple[Optional[float], Optional[int]]:
+    """Return (value, votes) for the first <ratings><rating name=…> whose name
+    matches one of `names` (case-insensitive). votes may be None."""
+    wanted = {n.lower() for n in names}
+    for el in root.findall("ratings/rating"):
+        if (el.get("name") or "").strip().lower() not in wanted:
+            continue
+        value_el = el.find("value")
+        if value_el is None or not value_el.text:
+            continue
+        try:
+            value = float(value_el.text)
+        except ValueError:
+            continue
+        if value <= 0:
+            continue
+        votes: Optional[int] = None
+        votes_el = el.find("votes")
+        if votes_el is not None and votes_el.text:
+            try:
+                votes = int(votes_el.text)
+            except ValueError:
+                votes = None
+        return value, votes
+    return None, None
+
+
+def _extract_cast_json(root: ET.Element) -> Optional[str]:
+    """Serialize <actor> entries (name/role/thumb/profile/tvdbid) to a JSON list,
+    preserving declaration order. Only actors with a non-empty <name> are kept."""
+    actors: list[dict[str, str]] = []
+    for actor in root.findall("actor"):
+        name_el = actor.find("name")
+        if name_el is None or not name_el.text or not name_el.text.strip():
+            continue
+        entry: dict[str, str] = {"name": name_el.text.strip()}
+        for tag, key in (
+            ("role", "role"),
+            ("thumb", "thumb"),
+            ("profile", "profile"),
+            ("tvdbid", "tvdbid"),
+        ):
+            el = actor.find(tag)
+            if el is not None and el.text and el.text.strip():
+                entry[key] = el.text.strip()
+        actors.append(entry)
+    return json.dumps(actors, ensure_ascii=False) if actors else None
+
+
 def parse_nfo_file(path: Path, media_type: str) -> Optional[NfoEntry]:
     """Parse a movie.nfo / tvshow.nfo. Returns None on hard failure."""
     try:
@@ -297,6 +413,9 @@ def parse_nfo_file(path: Path, media_type: str) -> Optional[NfoEntry]:
         except ValueError:
             nfo_year = None
 
+    imdb_rating, imdb_votes = _extract_named_rating(root, "imdb")
+    tmdb_rating, tmdb_votes = _extract_named_rating(root, "themoviedb", "tmdb")
+
     return NfoEntry(
         path=path,
         folder_name=path.parent.name,
@@ -310,6 +429,24 @@ def parse_nfo_file(path: Path, media_type: str) -> Optional[NfoEntry]:
         genres_csv=_join_multi(root, "genre"),
         cast_csv=_extract_cast(root),
         rating=_extract_best_rating(root),
+        # Extended tinyMediaManager metadata
+        title_sortable=_first_text(root, "sorttitle"),
+        original_title=_first_text(root, "originaltitle", "english_title"),
+        tagline=_first_text(root, "tagline"),
+        premiered=_extract_premiered(root),
+        status=_first_text(root, "status"),
+        studio_csv=_join_multi(root, "studio"),
+        country_csv=_join_multi(root, "country"),
+        tvdb_id=_validate_tvdb(_uniqueid(root, "tvdb")),
+        wikidata_id=_validate_wikidata(_uniqueid(root, "wikidata")),
+        poster_url=_extract_poster_url(root),
+        fanart_url=_extract_fanart_url(root),
+        imdb_rating=imdb_rating,
+        imdb_votes=imdb_votes,
+        tmdb_rating=tmdb_rating,
+        tmdb_votes=tmdb_votes,
+        audience_rating=tmdb_rating,
+        cast_json=_extract_cast_json(root),
     )
 
 
@@ -334,6 +471,24 @@ _FIELD_MAP: tuple[tuple[str, str, callable], ...] = (
     ("genres",         "genres_csv",    _is_text_missing),
     ("cast",           "cast_csv",      _is_text_missing),
     ("scraped_rating", "rating",        _is_numeric_missing),
+    # Extended tinyMediaManager metadata (migration 014)
+    ("title_sortable",     "title_sortable",  _is_text_missing),
+    ("resolved_thumb_url", "poster_url",      _is_text_missing),
+    ("resolved_art_url",   "fanart_url",       _is_text_missing),
+    ("original_title",     "original_title",  _is_text_missing),
+    ("tagline",            "tagline",         _is_text_missing),
+    ("premiered",          "premiered",       _is_text_missing),
+    ("status",             "status",          _is_text_missing),
+    ("studio",             "studio_csv",      _is_text_missing),
+    ("country",            "country_csv",     _is_text_missing),
+    ("tvdb_id",            "tvdb_id",         _is_text_missing),
+    ("wikidata_id",        "wikidata_id",     _is_text_missing),
+    ("audience_rating",    "audience_rating", _is_numeric_missing),
+    ("imdb_rating",        "imdb_rating",     _is_numeric_missing),
+    ("imdb_votes",         "imdb_votes",      _is_numeric_missing),
+    ("tmdb_rating",        "tmdb_rating",     _is_numeric_missing),
+    ("tmdb_votes",         "tmdb_votes",      _is_numeric_missing),
+    ("cast_json",          "cast_json",       _is_text_missing),
 )
 
 
@@ -372,6 +527,18 @@ def _compute_updates(row: Media, parsed: NfoEntry, overwrite: bool) -> dict:
             updates["history_group_key"] = calculate_history_group_key(
                 new_unif, row.rating_key, row.server_id,
             )
+
+        # Keep display_rating in sync when we (re)write a rating. The read paths
+        # fall back COALESCE(display_rating, scraped_rating), but display_rating
+        # is what sync_worker/enrichment_worker persist and what's indexed for
+        # sorting (ix_media_type_rating) — so mirror the same priority here:
+        # COALESCE(scraped_rating, audience_rating, rating).
+        if "scraped_rating" in updates or "audience_rating" in updates:
+            new_scraped = updates.get("scraped_rating", row.scraped_rating)
+            new_audience = updates.get("audience_rating", row.audience_rating)
+            new_display = calculate_display_rating(new_scraped, new_audience, row.rating)
+            if new_display and new_display != (row.display_rating or 0.0):
+                updates["display_rating"] = new_display
     return updates
 
 

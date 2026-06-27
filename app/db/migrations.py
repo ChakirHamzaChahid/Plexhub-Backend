@@ -33,6 +33,7 @@ async def run_migrations(engine: AsyncEngine) -> None:
     await _migration_011_create_subtitle_cache(engine)
     await _migration_012_create_media_blurb(engine)
     await _migration_013_add_media_is_adult(engine)
+    await _migration_014_add_nfo_metadata(engine)
 
     logger.info("All migrations completed successfully")
 
@@ -409,6 +410,58 @@ async def _migration_013_add_media_is_adult(engine: AsyncEngine) -> None:
             logger.info("Migration 013: is_adult column added")
         except Exception as e:
             logger.warning(f"Migration 013: Column may already exist: {e}")
+
+
+async def _migration_014_add_nfo_metadata(engine: AsyncEngine) -> None:
+    """Add tinyMediaManager NFO metadata columns to the media table.
+
+    Populated only by services/nfo_import_service (never by the Xtream sync):
+    - identity / descriptive: original_title, tagline, premiered, status,
+      studio, country
+    - external IDs: tvdb_id, wikidata_id
+    - per-source ratings + vote counts: imdb_rating/imdb_votes,
+      tmdb_rating/tmdb_votes (feed the IMDb/TMDb badges)
+    - structured cast: cast_json (the legacy `cast` CSV is kept untouched)
+
+    Idempotent: each ADD COLUMN is guarded individually so a column already
+    present (fresh DB via create_all) can't abort the others.
+    """
+    logger.info("Migration 014: Adding NFO metadata columns to media")
+
+    columns = [
+        ("original_title", "TEXT"),
+        ("tagline", "TEXT"),
+        ("premiered", "TEXT"),
+        ("status", "TEXT"),
+        ("studio", "TEXT"),
+        ("country", "TEXT"),
+        ("tvdb_id", "TEXT"),
+        ("wikidata_id", "TEXT"),
+        ("imdb_rating", "REAL"),
+        ("imdb_votes", "INTEGER"),
+        ("tmdb_rating", "REAL"),
+        ("tmdb_votes", "INTEGER"),
+        ("cast_json", "TEXT"),
+    ]
+
+    for name, sql_type in columns:
+        async with engine.begin() as conn:
+            try:
+                await conn.execute(text(
+                    f"ALTER TABLE media ADD COLUMN {name} {sql_type}"
+                ))
+                logger.info("Migration 014: %s column added", name)
+            except Exception as e:
+                logger.warning("Migration 014: %s may already exist: %s", name, e)
+
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_media_tvdb ON media(tvdb_id)"
+            ))
+            logger.info("Migration 014: ix_media_tvdb index created")
+        except Exception as e:
+            logger.warning("Migration 014: index may already exist: %s", e)
 
 
 async def _migration_008_ai_embeddings(conn) -> None:

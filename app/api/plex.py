@@ -27,6 +27,7 @@ class GenerateResponse(BaseModel):
     updated: int = 0
     deleted: int = 0
     unchanged: int = 0
+    pruned: int = 0
     errors: list[str] = []
     duration_seconds: float = 0.0
 
@@ -62,6 +63,7 @@ async def generate_plex_library(req: GenerateRequest):
         updated=report.updated,
         deleted=report.deleted,
         unchanged=report.unchanged,
+        pruned=report.pruned,
         errors=report.errors,
         duration_seconds=round(report.duration_seconds, 2),
     )

@@ -41,6 +41,23 @@ def _short_id(rating_key: str, length: int = 6) -> str:
     return safe[:length] or "x"
 
 
+def _disambiguation_token(source_id: str) -> str:
+    """Human-meaningful, collision-free folder tag for two groups that genuinely
+    collide on (title, year) with distinct identities.
+
+    Uses the *identifying* part of the unification id, never its scheme prefix —
+    so two real homonyms become `[tt111]` / `[tt222]` (unique) instead of both
+    truncating to `[imdb]` (which would collide on disk), and an unresolved twin
+    never surfaces as `[title_]`."""
+    if source_id.startswith("imdb://"):
+        return source_id[len("imdb://"):]          # tt1234567
+    if source_id.startswith("tmdb://"):
+        return "tmdb" + source_id[len("tmdb://"):]  # tmdb456
+    if source_id.startswith("title_"):
+        return source_id[len("title_"):]            # alex_2017
+    return _short_id(source_id)
+
+
 @dataclass
 class _NameResolution:
     """The folder/file disambiguation chosen for a single media."""
@@ -91,7 +108,7 @@ def _resolve_movie_names(movies) -> dict[str, _NameResolution]:
             else:
                 for sid in sids:
                     resolutions[sid] = _NameResolution(
-                        clean, year, suffix, _short_id(sid),
+                        clean, year, suffix, _disambiguation_token(sid),
                     )
     return resolutions
 
@@ -124,7 +141,7 @@ def _resolve_series_names(series_list) -> dict[str, _NameResolution]:
             else:
                 for sid in sids:
                     resolutions[sid] = _NameResolution(
-                        clean, year, suffix, _short_id(sid),
+                        clean, year, suffix, _disambiguation_token(sid),
                     )
     return resolutions
 
@@ -251,6 +268,17 @@ class PlexLibraryGenerator:
                 report.deleted += 1
                 logger.debug(f"Deleted: {entry.path}")
 
+        # Sweep generated title folders no longer holding any live version. Covers
+        # the case where a title's versions MOVED folder (unification_id changed)
+        # and left an episode-less shell behind (the folder-aware deletion above
+        # only fires for keys that disappear, not for keys that moved).
+        live_dirs = {
+            f"{parts[0]}/{parts[1]}"
+            for parts in (PurePosixPath(p).parts for p in seen_paths)
+            if len(parts) >= 2
+        }
+        report.pruned = self.storage.prune_orphan_dirs(live_dirs)
+
         self.mapping.save()
         report.duration_seconds = round(time.monotonic() - start, 2)
 
@@ -258,6 +286,7 @@ class PlexLibraryGenerator:
             f"Plex library sync complete: "
             f"{report.created} created, {report.updated} updated, "
             f"{report.deleted} deleted, {report.unchanged} unchanged, "
+            f"{report.pruned} pruned, "
             f"{report.image_failures} image failures, "
             f"{len(report.errors)} errors "
             f"({report.duration_seconds}s)"

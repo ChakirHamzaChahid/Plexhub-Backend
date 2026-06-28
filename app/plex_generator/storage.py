@@ -1,11 +1,16 @@
 import logging
 import os
+import shutil
 import threading
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import httpx
+
+# Folder-level files the generator owns. A title folder containing ONLY these
+# (and per-episode .nfo siblings) and no .strm is a safe-to-remove orphan.
+_GENERATED_FILES = frozenset({"tvshow.nfo", "movie.nfo", "poster.jpg", "fanart.jpg"})
 
 
 def _atomic_write_bytes(target: Path, payload: bytes) -> None:
@@ -87,6 +92,9 @@ class LibraryStorage(ABC):
     @abstractmethod
     def cleanup_empty_dirs(self, rel_path: str) -> None: ...
 
+    @abstractmethod
+    def prune_orphan_dirs(self, live_dirs: set[str]) -> int: ...
+
 
 class LocalStorage(LibraryStorage):
     """Writes Plex library files to the local filesystem."""
@@ -159,6 +167,34 @@ class LocalStorage(LibraryStorage):
             except OSError:
                 break
 
+    def prune_orphan_dirs(self, live_dirs: set[str]) -> int:
+        """Remove generated title folders that hold no playable `.strm` anymore.
+
+        Closes the folder-aware deletion gap: when a title's versions MOVE to a
+        new folder (e.g. its unification_id changed), the old folder keeps its
+        shared tvshow.nfo/poster and lingers empty-of-episodes. `live_dirs` is the
+        set of "Films/<title>" / "Series/<title>" produced this run; anything else
+        on disk is an orphan. Only generator-owned files are removed — a folder
+        with a `.strm` or any unexpected file is kept (anti data-loss)."""
+        pruned = 0
+        for top in ("Films", "Series"):
+            root = self.base_dir / top
+            if not root.exists():
+                continue
+            for title_dir in [p for p in root.iterdir() if p.is_dir()]:
+                if f"{top}/{title_dir.name}" in live_dirs:
+                    continue
+                files = [p for p in title_dir.rglob("*") if p.is_file()]
+                if any(f.suffix == ".strm" for f in files):
+                    continue  # still has playable content — never touch
+                if any(f.name not in _GENERATED_FILES and f.suffix != ".nfo" for f in files):
+                    logger.warning("Orphan dir kept (unexpected files): %s", title_dir)
+                    continue
+                shutil.rmtree(title_dir, ignore_errors=True)
+                pruned += 1
+                logger.debug("Pruned orphan dir: %s", title_dir)
+        return pruned
+
 
 class DryRunStorage(LibraryStorage):
     """No-op storage that logs operations without writing to disk."""
@@ -181,3 +217,6 @@ class DryRunStorage(LibraryStorage):
 
     def cleanup_empty_dirs(self, rel_path: str) -> None:
         pass
+
+    def prune_orphan_dirs(self, live_dirs: set[str]) -> int:
+        return 0

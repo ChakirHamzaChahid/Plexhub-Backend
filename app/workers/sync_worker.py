@@ -507,10 +507,19 @@ _HASH_EXCLUDE = {
 
 
 def _compute_dto_hash(dto: dict) -> str:
-    """Hash basic VOD DTO fields to detect changes without calling get_vod_info."""
+    """Hash stable VOD DTO fields to detect changes without calling get_vod_info.
+
+    `stream_icon` and `rating` are deliberately EXCLUDED: some providers/mirrors
+    return them inconsistently between identical requests (e.g. a TMDB poster url
+    or `""`; a real rating or `0`) — measured ~60% of items flapping per fetch on
+    one mirror. Including them made most items look "changed" every sync, forcing
+    needless get_vod_info re-fetches (provider 503 throttling) and churn. Both are
+    redundant anyway: the poster comes from enrichment (`resolved_thumb_url`) and
+    the rating from TMDB (`display_rating`). The remaining fields are stable and
+    are the real identity/availability signals.
+    """
     fields = {k: dto.get(k) for k in (
-        "name", "added", "stream_icon", "rating",
-        "category_id", "container_extension",
+        "name", "added", "category_id", "container_extension",
     )}
     return hashlib.md5(json.dumps(fields, sort_keys=True, default=str).encode()).hexdigest()
 

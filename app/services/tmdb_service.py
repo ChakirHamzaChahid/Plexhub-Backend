@@ -337,31 +337,20 @@ class TMDBService:
 
     @classmethod
     def _movie_certification(cls, data: dict) -> str | None:
-        """Pick the certification for the preferred region, falling back to US,
-        from /movie/{id}?append_to_response=release_dates."""
-        results = (data.get("release_dates") or {}).get("results") or []
-        by_region = {r.get("iso_3166_1"): r for r in results if r.get("iso_3166_1")}
-        for region in (cls._preferred_region(), "US"):
-            entry = by_region.get(region)
-            if not entry:
-                continue
-            for rd in entry.get("release_dates", []):
-                cert = (rd.get("certification") or "").strip()
-                if cert:
-                    return cert
-        return None
+        """Pick the certification for the preferred region (then US, then first country with a
+        cert; theatrical type==3 first) from /movie/{id}?append_to_response=release_dates.
+
+        Delegates to the module-level pure parser so the live enrichment path and the unit-tested
+        backfill share ONE implementation (single source of truth)."""
+        return _parse_movie_certification(data)
 
     @classmethod
     def _tv_certification(cls, data: dict) -> str | None:
-        """Pick the content rating for the preferred region, falling back to US,
-        from /tv/{id}?append_to_response=content_ratings."""
-        results = (data.get("content_ratings") or {}).get("results") or []
-        by_region = {r.get("iso_3166_1"): r for r in results if r.get("iso_3166_1")}
-        for region in (cls._preferred_region(), "US"):
-            entry = by_region.get(region)
-            if entry and (entry.get("rating") or "").strip():
-                return entry["rating"].strip()
-        return None
+        """Pick the content rating for the preferred region (then US, then first country with a
+        rating) from /tv/{id}?append_to_response=content_ratings.
+
+        Delegates to the module-level pure parser (see [_movie_certification])."""
+        return _parse_tv_certification(data)
 
     @staticmethod
     def _join_names(items: list[dict], limit: int | None = None) -> str | None:

@@ -575,3 +575,83 @@ class TMDBService:
 
 # Singleton
 tmdb_service = TMDBService()
+
+
+# ---------------------------------------------------------------------------
+# Module-level pure parsers — importable without a service instance.
+# These are thin wrappers around the classmethods above so that unit tests
+# and the backfill script can validate parsing logic without any HTTP.
+# ---------------------------------------------------------------------------
+
+def _parse_movie_certification(release_dates_json: dict) -> str | None:
+    """Parse a TMDb /movie/{id}?append_to_response=release_dates response.
+
+    Prefers the configured TMDB_LANGUAGE region (e.g. 'FR' from 'fr-FR'),
+    falls back to 'US', then accepts the first country that has a non-empty
+    certification.  Within a country entry the theatrical release type
+    (type==3) is tried first; the first non-empty certification in any
+    release_date entry is returned otherwise.
+
+    Returns the RAW certification string (e.g. 'PG-13', 'U', '12') or None
+    when no certification is found.  The Android app normalises via
+    ContentRatingHelper — do NOT normalise here.
+    """
+    results = (release_dates_json.get("release_dates") or {}).get("results") or []
+
+    preferred = TMDBService._preferred_region()
+    by_region: dict[str, dict] = {
+        r["iso_3166_1"]: r for r in results if r.get("iso_3166_1")
+    }
+
+    def _pick(entry: dict) -> str | None:
+        release_date_list = entry.get("release_dates") or []
+        # Prefer theatrical (type 3) first, then any non-empty cert.
+        for rd in sorted(release_date_list, key=lambda rd: 0 if rd.get("type") == 3 else 1):
+            cert = (rd.get("certification") or "").strip()
+            if cert:
+                return cert
+        return None
+
+    for region in (preferred, "US"):
+        entry = by_region.get(region)
+        if entry:
+            cert = _pick(entry)
+            if cert:
+                return cert
+
+    # Final fallback: first country that has any cert.
+    for entry in results:
+        cert = _pick(entry)
+        if cert:
+            return cert
+
+    return None
+
+
+def _parse_tv_certification(content_ratings_json: dict) -> str | None:
+    """Parse a TMDb /tv/{id}?append_to_response=content_ratings response.
+
+    Prefers the configured TMDB_LANGUAGE region (e.g. 'FR'), falls back to
+    'US', then the first country with a non-empty rating.
+
+    Returns the RAW rating string (e.g. 'TV-MA', 'NR', '12') or None.
+    """
+    results = (content_ratings_json.get("content_ratings") or {}).get("results") or []
+
+    preferred = TMDBService._preferred_region()
+    by_region: dict[str, dict] = {
+        r["iso_3166_1"]: r for r in results if r.get("iso_3166_1")
+    }
+
+    for region in (preferred, "US"):
+        entry = by_region.get(region)
+        if entry and (entry.get("rating") or "").strip():
+            return entry["rating"].strip()
+
+    # Final fallback: first country that has any rating.
+    for entry in results:
+        rating = (entry.get("rating") or "").strip()
+        if rating:
+            return rating
+
+    return None

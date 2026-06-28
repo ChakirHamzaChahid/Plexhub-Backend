@@ -371,3 +371,32 @@ class TestUnifiedApiService:
         # S01E01 exists on both accounts -> 2 versions; S01E02 only on a -> 1.
         assert len(slots[(1, 1)].members) == 2
         assert len(slots[(1, 2)].members) == 1
+
+
+# ─── Deterministic version labels (rename-oscillation regression) ───────────
+
+
+def test_version_label_assignment_is_order_independent():
+    """Regression: version labels must NOT depend on member row order.
+
+    Two same-account, same-suffix versions collide on their version_label and
+    get a `#n` disambiguator. The suffix must always attach to the SAME physical
+    version (rows sorted by server_id, rating_key) regardless of the order they
+    arrive from the DB — otherwise the .strm filename flips between generations
+    and the generator records spurious Moves (the rename oscillation that erodes
+    downstream Jellyfin/Plex metadata). See DatabaseSource._build_versions /
+    api.media._build_versions.
+    """
+    from app.api.media import _build_versions
+
+    labels = {build_server_id("a"): "Compte 1"}
+    m1 = _movie_row("a", "vod_1.mp4", "Heat (1995) (VF)", "tmdb://949")
+    m2 = _movie_row("a", "vod_2.mp4", "Heat (1995) (VF)", "tmdb://949")
+
+    forward = {v.rating_key: v.label for v in _build_versions([m1, m2], labels)}
+    reverse = {v.rating_key: v.label for v in _build_versions([m2, m1], labels)}
+
+    assert forward == reverse  # same file -> same label, whatever the input order
+    # The bare label deterministically lands on the lexicographically smaller key.
+    assert forward["vod_1.mp4"] == "VF · Compte 1"
+    assert forward["vod_2.mp4"] == "VF · Compte 1 #2"

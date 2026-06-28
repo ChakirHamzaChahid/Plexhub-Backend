@@ -56,10 +56,18 @@ class DatabaseSource(MediaSource):
         return {build_server_id(acc.id): acc for acc in accounts}
 
     def _build_versions(self, members, accounts):
-        """Turn group member rows into (row, url, unique-label) triples."""
+        """Turn group member rows into (row, url, unique-label) triples.
+
+        Members are sorted by a STABLE identity (server_id, rating_key) before
+        labelling so `dedup_labels` assigns the same ``#n`` suffix to the same
+        physical version on every run. Otherwise rows arrive in SQLite physical
+        (rowid) order, which shifts whenever a sync/enrichment rewrites rows —
+        flipping a version's label and therefore its .strm filename, which the
+        generator then records as a spurious Moved every generation (the rename
+        oscillation that erodes downstream Jellyfin/Plex metadata)."""
         raw_labels: list[str] = []
         pending: list[tuple[Media, str]] = []
-        for row in members:
+        for row in sorted(members, key=lambda r: (r.server_id or "", r.rating_key or "")):
             account = accounts.get(row.server_id)
             if account is None:
                 continue

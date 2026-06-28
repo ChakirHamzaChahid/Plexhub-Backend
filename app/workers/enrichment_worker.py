@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 
 from app.config import settings
 from app.db.database import async_session_factory
@@ -185,6 +185,29 @@ async def _apply_enrichment_results(db, results: list[FetchResult]):
                     update_values["year"] = enrichment_data.year
                 if enrichment_data.cast:
                     update_values["cast"] = enrichment_data.cast
+
+                # Rich metadata mirroring the NFO columns. Fill-missing-only via
+                # COALESCE so we never clobber richer data already imported from a
+                # tvshow.nfo / movie.nfo, nor the adult tagging's content_rating
+                # ("XXX"). `imdb_rating`/`imdb_votes` stay untouched — TMDB has no
+                # IMDb scores. (col, value) pairs; skipped when TMDB gave nothing.
+                rich = (
+                    ("content_rating", enrichment_data.content_rating),
+                    ("original_title", enrichment_data.original_title),
+                    ("tagline", enrichment_data.tagline),
+                    ("premiered", enrichment_data.premiered),
+                    ("status", enrichment_data.status),
+                    ("studio", enrichment_data.studio),
+                    ("country", enrichment_data.country),
+                    ("tvdb_id", enrichment_data.tvdb_id),
+                    ("wikidata_id", enrichment_data.wikidata_id),
+                    ("tmdb_rating", enrichment_data.tmdb_rating),
+                    ("tmdb_votes", enrichment_data.tmdb_votes),
+                    ("cast_json", enrichment_data.cast_json),
+                )
+                for col, value in rich:
+                    if value is not None:
+                        update_values[col] = func.coalesce(getattr(Media, col), value)
 
                 await db.execute(
                     update(Media)

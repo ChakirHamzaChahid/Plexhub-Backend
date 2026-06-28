@@ -117,3 +117,46 @@ class TestEnrichmentCacheShortCircuit:
         assert fr.cache_key == scrape_cache.make_key("movie", "Terminator", 1999)
         assert calls["search"] >= 2  # first (with year) missed, retry (no year) matched
         assert calls["details"] == 1
+
+
+class TestApplyResultsCacheDedup:
+    """Regression: bulk re-queue of no-id duplicates (same normalized title+year)
+    puts several items with one shared cache_key into a single batch. Under
+    `no_autoflush`, a naive per-item `scrape_cache.put` adds two rows with the
+    same primary key → `UNIQUE constraint failed: tmdb_scrape_cache.cache_key`
+    crashes the whole batch. The batch must dedupe puts by cache_key."""
+
+    @pytest.mark.asyncio
+    async def test_same_cache_key_in_batch_does_not_crash(self, db_session):
+        from app.workers.enrichment_worker import _apply_enrichment_results, FetchResult
+        from app.models.database import TmdbScrapeCache
+        from sqlalchemy import select, func as sa_func
+
+        key = scrape_cache.make_key("movie", "Terminator", 1984)
+        items = [
+            EnrichmentQueue(
+                rating_key=f"vod_{i}.mp4", server_id="xtream_a",
+                media_type="movie", title="Terminator", year=1984,
+                status="pending", attempts=0, created_at=0,
+            )
+            for i in (1, 2, 3)
+        ]
+        db_session.add_all(items)
+        await db_session.flush()
+
+        results = [
+            FetchResult(item=it, data=_data(), confidence=0.97, result="matched",
+                        api_used=1, cache_key=key, from_cache=False)
+            for it in items
+        ]
+
+        # Must not raise IntegrityError on commit.
+        await _apply_enrichment_results(db_session, results)
+        await db_session.commit()
+
+        n = (await db_session.execute(
+            select(sa_func.count()).select_from(TmdbScrapeCache)
+            .where(TmdbScrapeCache.cache_key == key)
+        )).scalar_one()
+        assert n == 1                                  # one cache row, not three
+        assert all(it.status == "done" for it in items)  # every row still resolved

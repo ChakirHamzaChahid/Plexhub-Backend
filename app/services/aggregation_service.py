@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 
 from app.models.database import Media
 from app.utils.string_normalizer import parse_title_year_and_suffix
+from app.utils.unification import calculate_unification_id
 
 
 def group_key(row: Media) -> str:
@@ -99,11 +100,124 @@ class SeriesGroup:
     slots: list[EpisodeSlot] = field(default_factory=list)
 
 
+def _key_rank(k: str) -> tuple[int, str]:
+    """Priority for choosing a cluster's representative key: imdb > tmdb > title > fallback."""
+    if k.startswith("imdb://"):
+        return (0, k)
+    if k.startswith("tmdb://"):
+        return (1, k)
+    if k.startswith("title_"):
+        return (2, k)
+    return (3, k)
+
+
+def _id_tokens(row: Media) -> list[str]:
+    """Stable external-id tokens for a row (`imdb:tt…`, `tmdb:123`).
+
+    Used to merge rows that designate the SAME entity even though their derived
+    `unification_id` strings differ (imdb takes priority over tmdb in
+    calculate_unification_id, so a row carrying imdb+tmdb keys as `imdb://…`
+    while its tmdb-only twin keys as `tmdb://…` — same film, different key)."""
+    toks: list[str] = []
+    if row.imdb_id and str(row.imdb_id).strip():
+        toks.append(f"imdb:{str(row.imdb_id).strip()}")
+    tmdb = str(row.tmdb_id).strip() if row.tmdb_id is not None else ""
+    if tmdb.isdigit() and tmdb != "0":
+        toks.append(f"tmdb:{tmdb}")
+    return toks
+
+
+def _merge_by_shared_ids(groups: dict[str, list[Media]]) -> dict[str, list[Media]]:
+    """Pass A — fold together groups that share a non-null imdb_id OR tmdb_id.
+
+    Precise (no homonym risk): two rows linked only if they carry the same
+    physical external id. Repairs the "imdb vs tmdb" split where the same film
+    is keyed `imdb://…` on one row and `tmdb://…` on another. The surviving key
+    per cluster is the strongest one (imdb > tmdb > title)."""
+    if len(groups) < 2:
+        return groups
+    parent = {k: k for k in groups}
+
+    def find(x: str) -> str:
+        root = x
+        while parent[root] != root:
+            root = parent[root]
+        while parent[x] != root:
+            parent[x], x = root, parent[x]
+        return root
+
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    seen: dict[str, str] = {}
+    for k, rows in groups.items():
+        for row in rows:
+            for token in _id_tokens(row):
+                if token in seen:
+                    union(k, seen[token])
+                else:
+                    seen[token] = k
+
+    clusters: dict[str, list[str]] = {}
+    for k in groups:
+        clusters.setdefault(find(k), []).append(k)
+    if len(clusters) == len(groups):
+        return groups  # nothing merged
+
+    merged: dict[str, list[Media]] = {}
+    for member_keys in clusters.values():
+        rep = min(member_keys, key=_key_rank)
+        bucket = merged.setdefault(rep, [])
+        for k in member_keys:
+            bucket.extend(groups[k])
+    return merged
+
+
+def _absorb_title_groups(groups: dict[str, list[Media]]) -> dict[str, list[Media]]:
+    """Pass B — fold an unresolved `title_…` group into an id-based group of the
+    SAME canonical title+year (one side resolved via TMM/TMDB, its twin didn't).
+
+    Reuses calculate_unification_id for an identical title normalization, and
+    skips degenerate (empty) titles — e.g. non-latin titles that normalize to
+    `title__<year>` — so unrelated foreign films never false-merge."""
+    if len(groups) < 2:
+        return groups
+    remap: dict[str, str] = {}
+    for k, rows in groups.items():
+        if "://" not in k:
+            continue  # only id-based groups absorb a title twin
+        best = best_row(rows)
+        base = calculate_unification_id(best.title or "", None)  # 'title_<norm>' / ''
+        if not base.startswith("title_") or not any(c.isalnum() for c in base[len("title_"):]):
+            continue  # degenerate / Unknown title — don't absorb
+        tkey = calculate_unification_id(best.title or "", best.year)
+        if tkey in groups and tkey not in remap:
+            remap[tkey] = k
+    if not remap:
+        return groups
+    merged: dict[str, list[Media]] = {}
+    for k, rows in groups.items():
+        merged.setdefault(remap.get(k, k), []).extend(rows)
+    return merged
+
+
+def _converge(groups: dict[str, list[Media]]) -> dict[str, list[Media]]:
+    """Repair split identities so one entity = one group (see Pass A / Pass B).
+
+    Shared by movies and series; runs on the unification_id→rows map BEFORE the
+    final groups are built, so both the REST `/unified` endpoints and the Plex
+    generator dedup identically."""
+    return _absorb_title_groups(_merge_by_shared_ids(groups))
+
+
 def aggregate_movies(rows: list[Media]) -> list[MovieGroup]:
     """Group movie rows by unification key into one MovieGroup each."""
     groups: dict[str, list[Media]] = {}
     for row in rows:
         groups.setdefault(group_key(row), []).append(row)
+    groups = _converge(groups)
     return [MovieGroup(key=k, best=best_row(rs), members=rs) for k, rs in groups.items()]
 
 
@@ -120,6 +234,7 @@ def aggregate_series(shows: list[Media], episodes: list[Media]) -> list[SeriesGr
     show_groups: dict[str, list[Media]] = {}
     for show in shows:
         show_groups.setdefault(group_key(show), []).append(show)
+    show_groups = _converge(show_groups)
 
     result: list[SeriesGroup] = []
     for key, member_shows in show_groups.items():

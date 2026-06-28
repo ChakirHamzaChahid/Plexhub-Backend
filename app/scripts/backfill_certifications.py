@@ -35,7 +35,7 @@ import logging
 import sys
 from dataclasses import dataclass, field
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, or_, select, tuple_, update
 
 from app.config import settings
 from app.db.database import async_session_factory
@@ -96,26 +96,33 @@ async def _fetch_cert(
             return None
 
 
-async def _candidates_page(db, offset: int, limit: int) -> list[Media]:
-    """Return one page of candidate rows (NULL/empty/+ content_rating with tmdb_id)."""
+async def _candidates_page(db, after: tuple[str, str] | None, limit: int) -> list[Media]:
+    """Return one page of candidate rows (NULL/empty/+ content_rating with tmdb_id), using
+    KEYSET pagination on (rating_key, server_id).
+
+    Keyset, not OFFSET: a live run mutates content_rating, so processed rows leave the candidate
+    set. An advancing OFFSET over a shrinking set would skip an equal number of still-unprocessed
+    rows (incomplete in one pass). A forward cursor `(rating_key, server_id) > after` visits every
+    row exactly once for BOTH live and dry-run, and terminates when the page comes back empty.
+    """
+    conditions = [
+        Media.tmdb_id.isnot(None),
+        Media.tmdb_id != "",
+        or_(
+            Media.content_rating.is_(None),
+            Media.content_rating == "",
+            Media.content_rating == "+",
+        ),
+        # Only movies and shows — episodes inherit from the parent; skipping
+        # them avoids unnecessary TMDb calls and keeps the run short.
+        Media.type.in_(("movie", "show")),
+    ]
+    if after is not None:
+        conditions.append(tuple_(Media.rating_key, Media.server_id) > tuple_(after[0], after[1]))
     result = await db.execute(
         select(Media)
-        .where(
-            and_(
-                Media.tmdb_id.isnot(None),
-                Media.tmdb_id != "",
-                or_(
-                    Media.content_rating.is_(None),
-                    Media.content_rating == "",
-                    Media.content_rating == "+",
-                ),
-                # Only movies and shows — episodes inherit from the parent; skipping
-                # them avoids unnecessary TMDb calls and keeps the run short.
-                Media.type.in_(("movie", "show")),
-            )
-        )
+        .where(and_(*conditions))
         .order_by(Media.rating_key, Media.server_id)
-        .offset(offset)
         .limit(limit)
     )
     return list(result.scalars().all())
@@ -162,15 +169,20 @@ async def run(*, dry_run: bool = False, limit: int | None = None) -> _Stats:
             logger.info("Nothing to do — all rows already have content_rating.")
             return stats
 
-        offset = 0
+        after: tuple[str, str] | None = None
+        processed = 0
         committed_since_last = 0
 
-        while offset < total:
-            page_size = min(_DB_PAGE, total - offset)
-            rows = await _candidates_page(db, offset, page_size)
+        while limit is None or processed < total:
+            page_size = _DB_PAGE if limit is None else min(_DB_PAGE, total - processed)
+            if page_size <= 0:
+                break
+            rows = await _candidates_page(db, after, page_size)
             if not rows:
                 break
 
+            # Advance the keyset cursor BEFORE mutating the rows (which removes them from the set).
+            after = (rows[-1].rating_key, rows[-1].server_id)
             stats.pages += 1
             # Fan-out TMDb calls for the page.
             tasks = [
@@ -213,10 +225,8 @@ async def run(*, dry_run: bool = False, limit: int | None = None) -> _Stats:
                         stats.fetched, total, stats.updated, stats.skipped_no_cert,
                     )
 
-            offset += len(rows)
-
-            if offset < total:
-                await asyncio.sleep(_INTER_BATCH_SLEEP)
+            processed += len(rows)
+            await asyncio.sleep(_INTER_BATCH_SLEEP)
 
         # Final commit for any remainder.
         if not dry_run and committed_since_last > 0:

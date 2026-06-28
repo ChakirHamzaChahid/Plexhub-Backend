@@ -201,7 +201,14 @@ async def run():
     Skips this run entirely when a pipeline stream validation is already
     holding the validation lock — the cron is a best-effort re-check, so
     skipping one cycle is preferable to contending for the SQLite write lock.
+
+    Gated by STREAM_VALIDATION_ENABLED like the pipeline validator, so the
+    flag turns off *all* stream checking (cron + pipeline), not just the
+    pipeline pass.
     """
+    if not settings.STREAM_VALIDATION_ENABLED:
+        logger.info("Health check (cron) disabled (STREAM_VALIDATION_ENABLED=false)")
+        return
     if _VALIDATION_LOCK.locked():
         logger.info("Health check (cron) skipped — stream validation already in progress")
         return

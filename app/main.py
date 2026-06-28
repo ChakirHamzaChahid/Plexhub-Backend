@@ -112,7 +112,8 @@ async def _auto_generate_plex_library():
         report = await gen.generate()
         logger.info(
             f"Plex generation: {report.created} created, {report.updated} updated, "
-            f"{report.deleted} deleted, {report.unchanged} unchanged"
+            f"{report.deleted} deleted, {report.unchanged} unchanged, "
+            f"{report.pruned} pruned"
         )
     except Exception as e:
         logger.error(f"Plex generation failed: {e}", exc_info=True)

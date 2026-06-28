@@ -27,7 +27,14 @@ router = APIRouter(prefix="/media", tags=["media"])
 def _build_versions(
     members: list[Media], labels: dict[str, str],
 ) -> list[MediaVersionResponse]:
-    """Turn group member rows into unique-labelled version entries."""
+    """Turn group member rows into unique-labelled version entries.
+
+    Members are sorted by a STABLE identity (server_id, rating_key) first so the
+    ``#n`` collision suffix from `dedup_labels` always lands on the same physical
+    version, regardless of DB row order — matching the generator's
+    `DatabaseSource._build_versions` so the API and the on-disk library label
+    versions identically and deterministically."""
+    members = sorted(members, key=lambda m: (m.server_id or "", m.rating_key or ""))
     raw = [version_label(m, labels.get(m.server_id, m.server_id)) for m in members]
     return [
         MediaVersionResponse(

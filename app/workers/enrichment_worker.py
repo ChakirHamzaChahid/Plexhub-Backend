@@ -142,6 +142,14 @@ async def _apply_enrichment_results(db, results: list[FetchResult]):
     # raises mid-loop and crashes the whole batch instead of being retried at
     # commit time. Paired with the 60s busy_timeout on the engine connection.
     with db.no_autoflush:
+        # Dedupe cache writes within the batch: several items can share one
+        # cache_key (same normalized title+year across versions/accounts). Under
+        # `no_autoflush` a second `scrape_cache.put` for the same key can't see
+        # the first's still-pending INSERT, so it would add a second row with the
+        # same primary key → `UNIQUE constraint failed: tmdb_scrape_cache.cache_key`
+        # crashes the whole batch at commit. One put per key is enough — the id is
+        # still applied to every media row below regardless.
+        put_keys: set[str] = set()
         for fr in results:
             item = fr.item
             enrichment_data = fr.data
@@ -152,7 +160,8 @@ async def _apply_enrichment_results(db, results: list[FetchResult]):
                 tmdb_match_total.labels(media_type=metric_type, result=fr.result).inc()
 
             # Persist the resolution so the same title is never re-queried.
-            if fr.cache_key and not fr.from_cache:
+            if fr.cache_key and not fr.from_cache and fr.cache_key not in put_keys:
+                put_keys.add(fr.cache_key)
                 await scrape_cache.put(
                     db, fr.cache_key, item.media_type, fr.result,
                     fr.confidence, enrichment_data, ts,

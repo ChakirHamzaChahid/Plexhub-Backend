@@ -178,11 +178,38 @@ async def _check_one(client: httpx.AsyncClient, item, account, semaphore):
             # provider-side garbage, so classify it without a noisy warning.
             return item, True, "bad_redirect"
         except Exception as e:
-            logger.warning(f"Health check error for {item.rating_key}: {e}")
+            # Many remote-IPTV failures (RemoteProtocolError, ReadError, SSL…)
+            # stringify to an empty message — include the type so the log line
+            # is actionable instead of "...: " with nothing after the colon.
+            logger.warning(
+                f"Health check error for {item.rating_key}: {type(e).__name__}: {e}"
+            )
             return item, True, f"exception:{type(e).__name__}"
 
 
+# Serializes the two stream-validation writers (the hour=2 cron run() and the
+# pipeline run_pipeline_validation()). Both UPDATE `media` and, when they
+# overlap, the second writer can starve past the 60s busy_timeout and raise
+# "database is locked", crashing the cron job (dette CR-F24). Same process /
+# event loop, so a module-level asyncio.Lock is enough.
+_VALIDATION_LOCK = asyncio.Lock()
+
+
 async def run():
+    """Cron entrypoint for the random-sample health check.
+
+    Skips this run entirely when a pipeline stream validation is already
+    holding the validation lock — the cron is a best-effort re-check, so
+    skipping one cycle is preferable to contending for the SQLite write lock.
+    """
+    if _VALIDATION_LOCK.locked():
+        logger.info("Health check (cron) skipped — stream validation already in progress")
+        return
+    async with _VALIDATION_LOCK:
+        await _run_health_check_batch()
+
+
+async def _run_health_check_batch():
     """Check a batch of stream URLs for availability (cron job, random sample)."""
     batch_size = settings.HEALTH_CHECK_BATCH_SIZE
     timeout = float(settings.STREAM_VALIDATION_TIMEOUT)
@@ -283,7 +310,15 @@ async def run_pipeline_validation():
     Unlike the cron-based run() which samples randomly, this targets
     streams that have never been checked or whose check is stale.
     Ensures new content is validated before Plex file generation.
+
+    Holds _VALIDATION_LOCK for its whole duration so the hour=2 cron run()
+    skips instead of contending for the SQLite write lock (dette CR-F24).
     """
+    async with _VALIDATION_LOCK:
+        await _run_pipeline_validation_impl()
+
+
+async def _run_pipeline_validation_impl():
     if not settings.STREAM_VALIDATION_ENABLED:
         logger.info("Stream validation disabled (STREAM_VALIDATION_ENABLED=false)")
         return

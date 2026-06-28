@@ -108,6 +108,23 @@ class TestDtoHash:
         assert isinstance(h, str)
         assert len(h) == 32  # MD5 hex
 
+    def test_volatile_fields_ignored(self):
+        # Regression: some mirrors flap stream_icon (poster url vs "") and rating
+        # (real vs 0) between identical requests. Those must NOT change the hash,
+        # else most items look "changed" every sync (needless re-fetch + churn).
+        base = {"name": "Test", "added": "123", "category_id": "1",
+                "container_extension": "mp4"}
+        a = {**base, "stream_icon": "https://image.tmdb.org/x.jpg", "rating": "8.2"}
+        b = {**base, "stream_icon": "", "rating": "0"}
+        assert _compute_dto_hash(a) == _compute_dto_hash(b)
+
+    def test_real_change_still_detected(self):
+        # A genuine availability/identity change must still flip the hash.
+        base = {"name": "Test", "added": "123", "category_id": "1",
+                "container_extension": "mp4"}
+        assert _compute_dto_hash(base) != _compute_dto_hash({**base, "added": "999"})
+        assert _compute_dto_hash(base) != _compute_dto_hash({**base, "container_extension": "mkv"})
+
 
 # ─── Sync Job Tracking ─────────────────────────────────────────
 

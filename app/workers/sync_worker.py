@@ -4,7 +4,7 @@ import json
 import logging
 from types import SimpleNamespace
 
-from sqlalchemy import select, delete, update
+from sqlalchemy import select, delete, update, func, case
 from sqlalchemy.dialects.sqlite import insert as sqlite_upsert
 
 from app.db.database import async_session_factory
@@ -577,9 +577,32 @@ async def upsert_media_batch(db, rows: list[dict]):
     for i in range(0, len(rows), 100):
         chunk = rows[i:i + 100]
         stmt = sqlite_upsert(Media).values(chunk)
+        set_ = {k: stmt.excluded[k] for k in update_keys}
+
+        # Preserve enrichment-owned identity across a provider content change
+        # (e.g. a title rename flips content_hash and re-fires this UPDATE).
+        # Without this, the UPDATE overwrites the enriched tmdb_id with the
+        # provider's value — usually empty — and reverts unification_id to a
+        # title-based key, losing the TMDB match until the next enrichment pass
+        # (and the title may carry no imdb_id to fall back on).
+        if "tmdb_id" in set_:
+            # Keep an id we already have; only let the provider seed an empty slot.
+            set_["tmdb_id"] = func.coalesce(Media.tmdb_id, stmt.excluded.tmdb_id)
+        # An id-based unification key (imdb://… / tmdb://…) is enrichment-owned and
+        # title-independent — keep it. A title-based key may still follow a rename.
+        keep_uni = Media.unification_id.like("%://%")
+        if "unification_id" in set_:
+            set_["unification_id"] = case(
+                (keep_uni, Media.unification_id), else_=stmt.excluded.unification_id
+            )
+        if "history_group_key" in set_:
+            set_["history_group_key"] = case(
+                (keep_uni, Media.history_group_key), else_=stmt.excluded.history_group_key
+            )
+
         stmt = stmt.on_conflict_do_update(
             index_elements=["rating_key", "server_id", "filter", "sort_order"],
-            set_={k: stmt.excluded[k] for k in update_keys},
+            set_=set_,
             where=Media.content_hash != stmt.excluded.content_hash,
         )
         await db.execute(stmt)

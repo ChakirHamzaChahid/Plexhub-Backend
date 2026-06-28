@@ -129,6 +129,81 @@ class TestMediaUpsert:
 
         asyncio.run(_test())
 
+    def test_rename_preserves_enriched_ids(self, db_session):
+        """A provider rename (same rating_key, new content_hash) must NOT wipe the
+        enriched tmdb_id nor revert an id-based unification_id — only the title
+        follows the rename."""
+        async def _test():
+            from app.workers.sync_worker import upsert_media_batch
+            async with db_session() as db:
+                base = {
+                    "rating_key": "vod_rename", "server_id": "xtream_test",
+                    "filter": "all", "sort_order": "default",
+                    "library_section_id": "xtream_vod", "type": "movie",
+                    "page_offset": 0, "added_at": 1000, "updated_at": 1000,
+                }
+                # Insert + simulate enrichment having set the ids.
+                await upsert_media_batch(db, [{**base, "title": "Old Title",
+                                               "title_sortable": "old title",
+                                               "content_hash": "h1"}])
+                await db.execute(
+                    Media.__table__.update()
+                    .where(Media.rating_key == "vod_rename")
+                    .values(tmdb_id="555", unification_id="imdb://tt999",
+                            history_group_key="imdb://tt999")
+                )
+                await db.commit()
+
+                # Provider renames it: new title, no tmdb, title-based unification.
+                await upsert_media_batch(db, [{**base, "title": "New Title",
+                                               "title_sortable": "new title",
+                                               "tmdb_id": None,
+                                               "unification_id": "title_new_title",
+                                               "history_group_key": "title_new_title",
+                                               "content_hash": "h2"}])
+                await db.commit()
+
+                item = (await db.execute(
+                    select(Media).where(Media.rating_key == "vod_rename")
+                )).scalars().first()
+                assert item.title == "New Title"           # rename applied
+                assert item.tmdb_id == "555"               # enriched id PRESERVED
+                assert item.unification_id == "imdb://tt999"   # id-based key kept
+
+        asyncio.run(_test())
+
+    def test_rename_recomputes_title_based_unification(self, db_session):
+        """For a never-enriched (title-only) item, a rename SHOULD follow through
+        to the new title-based unification key (no stale-title split)."""
+        async def _test():
+            from app.workers.sync_worker import upsert_media_batch
+            async with db_session() as db:
+                base = {
+                    "rating_key": "vod_titleonly", "server_id": "xtream_test",
+                    "filter": "all", "sort_order": "default",
+                    "library_section_id": "xtream_vod", "type": "movie",
+                    "page_offset": 0, "added_at": 1000, "updated_at": 1000,
+                }
+                await upsert_media_batch(db, [{**base, "title": "Old", "title_sortable": "old",
+                                               "tmdb_id": None,
+                                               "unification_id": "title_old_2020",
+                                               "history_group_key": "title_old_2020",
+                                               "content_hash": "h1"}])
+                await db.commit()
+                await upsert_media_batch(db, [{**base, "title": "New", "title_sortable": "new",
+                                               "tmdb_id": None,
+                                               "unification_id": "title_new_2020",
+                                               "history_group_key": "title_new_2020",
+                                               "content_hash": "h2"}])
+                await db.commit()
+
+                item = (await db.execute(
+                    select(Media).where(Media.rating_key == "vod_titleonly")
+                )).scalars().first()
+                assert item.unification_id == "title_new_2020"  # follows the rename
+
+        asyncio.run(_test())
+
 
 class TestMediaServiceSearch:
     """Test search/filter functionality in media_service."""

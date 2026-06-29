@@ -30,13 +30,14 @@ import secrets
 import time
 import uuid
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.deps import verify_backend_secret as verify_pairing_api_key
 from app.config import settings
 from app.db.database import get_db
 from app.models.database import TvAuthSession
@@ -63,28 +64,9 @@ STATUS_COMPLETED = "completed"
 STATUS_EXPIRED = "expired"
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Auth dependency (approve only) — backend shared secret, constant-time.
-# Mirrors app/api/deps.py:verify_api_key WITHOUT the AI-specific sqlite-vec
-# check (irrelevant for pairing).
-# ──────────────────────────────────────────────────────────────────────────────
-
-async def verify_pairing_api_key(
-    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
-) -> None:
-    if not settings.AI_API_KEY:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="TV pairing not configured",
-        )
-    if x_api_key is None or not secrets.compare_digest(
-        x_api_key.encode("utf-8"),
-        settings.AI_API_KEY.encode("utf-8"),
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid API key",
-        )
+# Auth dependency for /tv-auth/approve — the backend shared secret, constant-time.
+# Now sourced from app.api.deps.verify_backend_secret (imported above as
+# verify_pairing_api_key) so the JSON API and pairing share one implementation.
 
 
 # ──────────────────────────────────────────────────────────────────────────────

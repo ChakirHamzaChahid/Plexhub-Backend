@@ -104,6 +104,26 @@ def _is_definitive_failure(reason: str) -> bool:
     return any(reason.startswith(p) for p in _DEFINITIVE_PREFIXES)
 
 
+def _account_concurrency(account) -> int:
+    """Validation concurrency clamped to the account's `max_connections`.
+
+    Probing more streams in parallel than the provider allows does NOT validate
+    faster — it just trips the provider's connection cap, which answers `503`
+    (or drops the connection → timeout/ReadError). Those throttle responses then
+    look like dead streams and, across `STREAM_BROKEN_THRESHOLD` runs, get a
+    perfectly playable stream wrongly marked `is_broken`. So mirror the sync
+    worker (PR #11): never open more concurrent checks than `max_connections`.
+
+    `max_connections=0` means the provider sets no limit → fall back to the
+    global `STREAM_VALIDATION_CONCURRENCY`, which also serves as the upper bound
+    (the validator's own resource cap) when a provider advertises a huge limit.
+    """
+    mc = account.max_connections or 0
+    if mc > 0:
+        return max(1, min(mc, settings.STREAM_VALIDATION_CONCURRENCY))
+    return settings.STREAM_VALIDATION_CONCURRENCY
+
+
 # Diagnostic counters (reset each run)
 _diag_reasons: dict[str, int] = {}
 
@@ -223,7 +243,10 @@ async def _run_health_check_batch():
     concurrency = settings.STREAM_VALIDATION_CONCURRENCY
     cutoff = now_ms() - 7 * 24 * 3600 * 1000  # 7 days ago
 
-    logger.info(f"Starting health check (batch size: {batch_size}, concurrency: {concurrency}, timeout: {timeout}s)")
+    logger.info(
+        f"Starting health check (batch size: {batch_size}, "
+        f"concurrency: ≤{concurrency}/account, timeout: {timeout}s)"
+    )
 
     async with async_session_factory() as db:
         # Get random batch of streams not checked in 7 days
@@ -253,7 +276,13 @@ async def _run_health_check_batch():
         )
         accounts = {acc.id: acc for acc in acc_result.scalars().all()}
 
-        semaphore = asyncio.Semaphore(concurrency)
+        # One semaphore PER account, sized to its max_connections — a shared
+        # global semaphore would let a low-limit provider be hammered by checks
+        # destined for another account. See _account_concurrency.
+        semaphores = {
+            acc_id: asyncio.Semaphore(_account_concurrency(acc))
+            for acc_id, acc in accounts.items()
+        }
         checked = 0
         broken_count = 0
 
@@ -266,7 +295,7 @@ async def _run_health_check_batch():
             account = accounts.get(account_id)
             if not account:
                 continue
-            tasks.append(_check_one(client, item, account, semaphore))
+            tasks.append(_check_one(client, item, account, semaphores[account_id]))
 
         # Run all health checks concurrently
         results = await asyncio.gather(*tasks)
@@ -336,7 +365,7 @@ async def _run_pipeline_validation_impl():
 
     logger.info(
         f"Starting pipeline stream validation "
-        f"(concurrency: {concurrency}, timeout: {timeout}s, "
+        f"(concurrency: ≤{concurrency}/account, timeout: {timeout}s, "
         f"recheck window: {settings.STREAM_VALIDATION_RECHECK_HOURS}h)"
     )
 
@@ -375,7 +404,6 @@ async def _run_pipeline_validation_impl():
         )
         accounts = {acc.id: acc for acc in acc_result.scalars().all()}
 
-        semaphore = asyncio.Semaphore(concurrency)
         commit_interval = 200  # Commit and log every N results
         log_interval = 50  # Log progress every N results
         circuit_breaker_sample = 50  # Check failure rate after N results
@@ -393,6 +421,18 @@ async def _run_pipeline_validation_impl():
             account = accounts.get(account_id)
             if not account:
                 continue
+
+            # Per-account semaphore clamped to the provider's max_connections —
+            # checking wider than the provider allows only yields 503/timeout
+            # throttle noise (false "broken"), not faster validation. See
+            # _account_concurrency.
+            acct_concurrency = _account_concurrency(account)
+            semaphore = asyncio.Semaphore(acct_concurrency)
+            logger.info(
+                f"Validating account {account_id}: {len(account_items)} streams "
+                f"@ concurrency {acct_concurrency} "
+                f"(max_connections={account.max_connections})"
+            )
 
             account_checked = 0
             account_broken = 0

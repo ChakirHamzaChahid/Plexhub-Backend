@@ -22,6 +22,12 @@ class Settings:
     TMDB_API_KEY: str = os.getenv("TMDB_API_KEY", "")
     AI_API_KEY: str = os.getenv("AI_API_KEY", "")
 
+    # Admin web UI (/admin) — HTTP Basic Auth, separate from the X-API-Key
+    # backend secret. Browser-friendly (custom headers can't be sent on a
+    # navigation). When ADMIN_PASSWORD is empty the UI is fail-closed (503).
+    ADMIN_USERNAME: str = os.getenv("ADMIN_USERNAME", "admin")
+    ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "")
+
     # TV pairing (device-flow) — Mission 18
     # Optional explicit Fernet key (urlsafe base64, 32 bytes) for payload
     # encryption at rest. When empty, a key is derived from AI_API_KEY.

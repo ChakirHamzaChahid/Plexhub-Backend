@@ -5,7 +5,7 @@ import os
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
@@ -371,6 +371,11 @@ app = FastAPI(
     title="PlexHub Backend",
     version=APP_VERSION,
     lifespan=lifespan,
+    # Public tunnel — hide the interactive docs and the OpenAPI schema so the
+    # API surface isn't advertised. /docs, /redoc and /openapi.json -> 404.
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
 
 app.add_middleware(
@@ -384,21 +389,29 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.add_middleware(RequestIdMiddleware)
 
 # Routes
-app.include_router(health.router, prefix="/api")
-app.include_router(accounts.router, prefix="/api")
-app.include_router(categories.router, prefix="/api")
-app.include_router(live.router, prefix="/api")
-app.include_router(media.router, prefix="/api")
-app.include_router(stream.router, prefix="/api")
-app.include_router(sync.router, prefix="/api")
-app.include_router(plex.router, prefix="/api")
+from app.api.deps import verify_admin_basic_auth, verify_backend_secret  # noqa: E402
+
+# Shared X-API-Key guard for the JSON API (fail-closed, constant-time).
+_guard = [Depends(verify_backend_secret)]
+
+app.include_router(health.router, prefix="/api")  # public — monitoring
+app.include_router(accounts.router, prefix="/api", dependencies=_guard)
+app.include_router(categories.router, prefix="/api", dependencies=_guard)
+app.include_router(live.router, prefix="/api", dependencies=_guard)
+app.include_router(media.router, prefix="/api", dependencies=_guard)
+app.include_router(stream.router, prefix="/api", dependencies=_guard)
+app.include_router(sync.router, prefix="/api", dependencies=_guard)
+app.include_router(plex.router, prefix="/api", dependencies=_guard)
+# Device pairing stays public at router level (the TV has no key yet); /approve
+# is individually protected inside tv_auth via verify_pairing_api_key.
 app.include_router(tv_auth.router, prefix="/api")
 
-# Admin web UI (HTML / HTMX) — no /api prefix
-app.include_router(admin.router)
+# Admin web UI (HTML / HTMX) — no /api prefix. Browser-facing, so HTTP Basic
+# Auth instead of the X-API-Key header (a navigation can't carry custom headers).
+app.include_router(admin.router, dependencies=[Depends(verify_admin_basic_auth)])
 
-# AI recommendation API — router defines its own /api/ai prefix.
-# Must be appended after all existing /api routers (no prefix here).
+# AI recommendation API — router defines its own /api/ai prefix and already has
+# a module-level verify_api_key dependency, so no extra guard here.
 app.include_router(ai.router)
 
 # Prometheus /metrics + per-request HTTP metrics

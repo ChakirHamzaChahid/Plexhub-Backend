@@ -1,0 +1,20 @@
+{% if error %}
+<div class="rounded border border-red-300 bg-red-50 text-red-700 px-3 py-2 text-sm">
+  {{ error }}
+</div>
+{% else %}
+<div class="rounded border border-emerald-300 bg-emerald-50 px-3 py-3 text-sm">
+  <p class="font-medium text-emerald-800 mb-1">
+    Clé créée pour « {{ label }} » — copiez-la maintenant, elle ne sera plus affichée.
+  </p>
+  <div class="flex items-center gap-2">
+    <code id="new-key"
+          class="font-mono text-xs bg-white border border-emerald-200 rounded px-2 py-1 break-all select-all flex-1">{{ plaintext }}</code>
+    <button type="button"
+            onclick="navigator.clipboard.writeText(document.getElementById('new-key').textContent)"
+            class="bg-emerald-600 hover:bg-emerald-700 text-white text-xs px-3 py-1.5 rounded shrink-0">
+      Copier
+    </button>
+  </div>
+</div>
+{% endif %}

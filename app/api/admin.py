@@ -20,13 +20,29 @@ from app.config import settings
 from app.db.database import get_db
 from app.models.schemas import MediaUpdate
 from app.services.media_service import media_service
-from app.services import nfo_import_service
+from app.services import api_key_service, nfo_import_service
+from app.utils.time import now_ms
 
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 _TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+
+
+def _fmt_ms(ms: Optional[int]) -> str:
+    """Epoch-ms -> local 'YYYY-MM-DD HH:MM' for templates ({{ value | ms }})."""
+    if not ms:
+        return "—"
+    from datetime import datetime, timezone
+    return (
+        datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
+        .astimezone()
+        .strftime("%Y-%m-%d %H:%M")
+    )
+
+
+templates.env.filters["ms"] = _fmt_ms
 
 
 async def _load_movies_page(
@@ -286,6 +302,86 @@ async def admin_import_nfo_run(
             "error": error,
         },
         headers={"HX-Trigger": "refresh-stats"} if reports and not dry_run else None,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# API keys — create / list / revoke (Basic-Auth protected like the rest of /admin)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+async def _keys_ctx(db: AsyncSession) -> dict:
+    rows = await api_key_service.list_keys(db)
+    now = now_ms()
+    keys = [
+        {
+            "id": r.id,
+            "label": r.label,
+            "key_prefix": r.key_prefix,
+            "status": api_key_service.status_of(r, at=now),
+            "created_at": r.created_at,
+            "expires_at": r.expires_at,
+            "last_used_at": r.last_used_at,
+            "last_used_ip": r.last_used_ip,
+        }
+        for r in rows
+    ]
+    return {"keys": keys, "now": now}
+
+
+@router.get("/keys", response_class=HTMLResponse)
+async def admin_keys(request: Request, db: AsyncSession = Depends(get_db)):
+    return templates.TemplateResponse(
+        request, "admin/keys.html", await _keys_ctx(db)
+    )
+
+
+@router.get("/keys/table", response_class=HTMLResponse)
+async def admin_keys_table(request: Request, db: AsyncSession = Depends(get_db)):
+    return templates.TemplateResponse(
+        request, "admin/_keys_table.html", await _keys_ctx(db)
+    )
+
+
+@router.post("/keys", response_class=HTMLResponse)
+async def admin_keys_create(
+    request: Request,
+    label: str = Form(...),
+    expires_in_days: Optional[str] = Form(None),
+    db: AsyncSession = Depends(get_db),
+):
+    label = (label or "").strip()
+    if not label:
+        return templates.TemplateResponse(
+            request,
+            "admin/_key_created.html",
+            {"error": "Le label (utilisateur) est obligatoire.", "plaintext": None},
+            status_code=422,
+        )
+    expires_at = None
+    if expires_in_days and expires_in_days.strip():
+        try:
+            days = int(expires_in_days)
+            if days > 0:
+                expires_at = now_ms() + days * 86_400_000
+        except ValueError:
+            pass
+    row, plaintext = await api_key_service.create_key(db, label=label, expires_at=expires_at)
+    return templates.TemplateResponse(
+        request,
+        "admin/_key_created.html",
+        {"plaintext": plaintext, "label": row.label, "error": None},
+        headers={"HX-Trigger": "refresh-keys"},
+    )
+
+
+@router.post("/keys/{key_id}/revoke", response_class=HTMLResponse)
+async def admin_keys_revoke(
+    key_id: str, request: Request, db: AsyncSession = Depends(get_db),
+):
+    await api_key_service.revoke_key(db, key_id)
+    return templates.TemplateResponse(
+        request, "admin/_keys_table.html", await _keys_ctx(db)
     )
 
 

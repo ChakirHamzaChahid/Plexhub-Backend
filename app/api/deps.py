@@ -1,76 +1,104 @@
 """FastAPI dependencies for protected endpoints.
 
-verify_api_key:
-  503 'AI service not configured' when settings.AI_API_KEY is empty.
-  503 'AI vector storage unavailable' when sqlite-vec failed to load.
-  401 'Invalid API key' when X-API-Key header is missing or wrong.
+Authentication accepts EITHER:
+  * the permanent master secret ``settings.AI_API_KEY`` (constant-time compare), or
+  * any active (non-revoked, non-expired) per-user key from the ``api_keys`` table
+    (see ``app.services.api_key_service``).
 
-Comparison uses a constant-time digest check to avoid timing oracles — see
-critical correction C2 from the orchestrator. Plain `==` on the configured
-secret is forbidden and gated by a grep-based acceptance test.
+Dependencies:
+  verify_backend_secret — guards the JSON API (accounts/media/stream/…). 401 on a
+    missing/invalid key. No sqlite-vec dependency.
+  verify_api_key — same auth, plus the AI-specific sqlite-vec check (503 when the
+    vector extension failed to load). Used by the AI router.
+  verify_master_key — accepts ONLY the master secret; guards key-management
+    endpoints so a per-user key cannot mint or revoke other keys.
+  verify_admin_basic_auth — HTTP Basic Auth for the browser /admin UI.
+
+Constant-time comparison on the master secret avoids timing oracles — plain `==`
+is forbidden and gated by a grep-based acceptance test.
 """
 from __future__ import annotations
 
 import secrets
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Request, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 from app.config import settings
 from app.db.database import _VEC_LOADED
+from app.services import api_key_service
+
+
+def _client_ip(request: Request | None) -> str | None:
+    """Best-effort real client IP (behind the Cloudflare tunnel)."""
+    if request is None:
+        return None
+    xff = request.headers.get("cf-connecting-ip") or request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else None
+
+
+def _is_master(x_api_key: str | None) -> bool:
+    master = settings.AI_API_KEY
+    if not master or not x_api_key:
+        return False
+    return secrets.compare_digest(x_api_key.encode("utf-8"), master.encode("utf-8"))
+
+
+async def _authenticate(x_api_key: str | None, request: Request | None) -> bool:
+    """True when x_api_key is the master secret OR an active per-user key."""
+    if not x_api_key:
+        return False
+    if _is_master(x_api_key):
+        return True
+    row = await api_key_service.resolve(x_api_key, client_ip=_client_ip(request))
+    return row is not None
+
+
+async def verify_backend_secret(
+    request: Request,
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+) -> None:
+    """Guard the JSON API. Master secret or any active per-user key. Fail-closed."""
+    if not await _authenticate(x_api_key, request):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid API key",
+        )
 
 
 async def verify_api_key(
+    request: Request,
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
 ) -> None:
-    """Validate the X-API-Key header against settings.AI_API_KEY.
-
-    Order matters:
-      1. AI configuration absent -> 503 (service-wide unavailable).
-      2. Vector extension missing -> 503 (storage-wide unavailable).
-      3. Header missing or mismatched -> 401.
-    """
-    if not settings.AI_API_KEY:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="AI service not configured",
-        )
+    """Guard the AI router: same auth as the JSON API + sqlite-vec availability."""
     if not _VEC_LOADED.get("ok"):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="AI vector storage unavailable",
         )
-    if x_api_key is None or not secrets.compare_digest(
-        x_api_key.encode("utf-8"),
-        settings.AI_API_KEY.encode("utf-8"),
-    ):
+    if not await _authenticate(x_api_key, request):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid API key",
         )
 
 
-async def verify_backend_secret(
+async def verify_master_key(
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
 ) -> None:
-    """Generic backend-secret guard for the JSON API (no sqlite-vec check).
-
-    Same shared secret (settings.AI_API_KEY) as verify_api_key, but without the
-    AI-specific vector-storage dependency — protecting accounts/media/stream/etc.
-    must not 503 just because the AI vector extension failed to load. Fail-closed.
-    """
+    """Guard key-management endpoints — ONLY the master secret is accepted, so a
+    per-user key cannot create or revoke other keys."""
     if not settings.AI_API_KEY:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Backend secret not configured",
         )
-    if x_api_key is None or not secrets.compare_digest(
-        x_api_key.encode("utf-8"),
-        settings.AI_API_KEY.encode("utf-8"),
-    ):
+    if not _is_master(x_api_key):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid API key",
+            detail="Master key required",
         )
 
 

@@ -11,7 +11,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 
 from app.config import settings
 from app.db.database import init_db
-from app.api import accounts, admin, ai, categories, health, live, media, plex, stream, sync, tv_auth
+from app.api import accounts, admin, ai, api_keys, categories, health, live, media, plex, stream, sync, tv_auth
 from app.utils.request_context import RequestIdLogFilter, RequestIdMiddleware
 
 APP_VERSION = "1.1.5"
@@ -413,6 +413,10 @@ app.include_router(admin.router, dependencies=[Depends(verify_admin_basic_auth)]
 # AI recommendation API — router defines its own /api/ai prefix and already has
 # a module-level verify_api_key dependency, so no extra guard here.
 app.include_router(ai.router)
+
+# API-key management (JSON) — defines its own /api/admin/keys prefix and a
+# module-level verify_master_key guard (master secret only).
+app.include_router(api_keys.router)
 
 # Prometheus /metrics + per-request HTTP metrics
 from app.utils.metrics import setup_instrumentator  # noqa: E402

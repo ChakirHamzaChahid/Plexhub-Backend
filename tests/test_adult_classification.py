@@ -27,6 +27,11 @@ from app.utils.server_id import build_server_id
 
 # pytest-asyncio runs in auto mode (pyproject.toml) — async tests need no mark.
 
+# The JSON API is X-API-Key gated (fail-closed); the API tests set this as the
+# master secret and send it as the header.
+API_KEY = "test-master-key"
+API_HEADERS = {"X-API-Key": API_KEY}
+
 
 # ─── Seed helpers ────────────────────────────────────────────────────────
 
@@ -200,6 +205,7 @@ class TestAdultApi:
         factory = async_sessionmaker(db_engine, class_=AsyncSession,
                                      expire_on_commit=False)
         monkeypatch.setattr(db_module, "async_session_factory", factory)
+        monkeypatch.setattr(settings, "AI_API_KEY", API_KEY)
         async with factory() as s:
             adult = _movie("a", "vod_adult.mp4", "Naughty Film (2020)", "1555",
                            content_rating=settings.ADULT_CONTENT_RATING)
@@ -210,7 +216,7 @@ class TestAdultApi:
         return factory
 
     async def test_unified_movies_prefixed_and_flagged(self, api_client, seeded):
-        resp = await api_client.get("/api/media/movies/unified")
+        resp = await api_client.get("/api/media/movies/unified", headers=API_HEADERS)
         assert resp.status_code == 200
         items = {i["title"]: i for i in resp.json()["items"]}
         assert "[XXX] Naughty Film" in items
@@ -220,7 +226,7 @@ class TestAdultApi:
         assert items["Action Hero"]["isAdult"] is False
 
     async def test_non_unified_movies_prefixed(self, api_client, seeded):
-        resp = await api_client.get("/api/media/movies")
+        resp = await api_client.get("/api/media/movies", headers=API_HEADERS)
         assert resp.status_code == 200
         titles = {i["title"]: i for i in resp.json()["items"]}
         assert any(t.startswith("[XXX] ") and i["isAdult"] for t, i in titles.items())

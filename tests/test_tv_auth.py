@@ -344,7 +344,12 @@ async def test_user_code_normalization(tv_client):
 
 async def test_unconfigured_returns_503(tv_client, monkeypatch):
     """No encryption key resolvable (no TV_AUTH_ENCRYPTION_KEY, no AI_API_KEY)
-    -> pairing unavailable, never a crash."""
+    -> pairing unavailable, never a crash.
+
+    /start is public, so it reaches the encryption check and returns 503.
+    /approve is auth-gated: with AI_API_KEY nulled the AUTH key no longer
+    matches the master secret, so it fails closed with 401 before the handler
+    (still never a crash)."""
     monkeypatch.setattr(settings, "AI_API_KEY", "")
     monkeypatch.setattr(settings, "TV_AUTH_ENCRYPTION_KEY", "")
 
@@ -356,7 +361,7 @@ async def test_unconfigured_returns_503(tv_client, monkeypatch):
         json={"userCode": "ABCD-EFGH", "payload": PAYLOAD},
         headers=AUTH,
     )
-    assert resp.status_code == 503
+    assert resp.status_code == 401
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -146,6 +146,38 @@ class MediaService:
         total = len(groups)
         return groups[offset:offset + limit], total
 
+    async def get_unified_group(
+        self,
+        db: AsyncSession,
+        media_type: str,
+        unification_id: str,
+    ) -> Optional[MovieGroup]:
+        """Return the single MovieGroup whose key matches *unification_id* exactly.
+
+        Queries all category-allowed rows of *media_type* that carry this
+        unification_id, runs them through the same ``aggregate_movies`` pass used
+        by the list endpoint (so convergence / _converge logic fires identically),
+        and returns the first (and only expected) group — or None when no row is
+        found.
+
+        This mirrors the pattern of ``get_unified_episodes`` for an exact-id
+        look-up, keeping the response shape (versions[], version_count, best-row
+        metadata) byte-identical to the paginated list.
+        """
+        rows = list((await db.execute(
+            select(Media).where(
+                Media.type == media_type,
+                Media.unification_id == unification_id,
+                Media.is_in_allowed_categories == True,  # noqa: E712
+            )
+        )).scalars().all())
+        if not rows:
+            return None
+        groups = aggregate_movies(rows)
+        # All rows share the same unification_id → exactly one group after
+        # convergence (or the strongest representative when ids diverge slightly).
+        return groups[0]
+
     async def get_unified_episodes(
         self, db: AsyncSession, unification_id: str,
     ) -> Optional[tuple[list[Media], SeriesGroup]]:

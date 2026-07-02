@@ -154,14 +154,43 @@ async def list_movies_unified(
     search: Optional[str] = Query(None),
     genre: Optional[str] = Query(None),
     year: Optional[int] = Query(None),
+    unification_id: Optional[str] = Query(None, description="When set, return only the group matching this unification_id (total=1 or 0)."),
     db: AsyncSession = Depends(get_db),
 ):
-    """Movies deduped across ALL accounts: one entry per title + its versions."""
+    """Movies deduped across ALL accounts: one entry per title + its versions.
+
+    When *unification_id* is provided, only the matching group is returned
+    (total=1 if found, 0 if not found) — the list/search/pagination path is
+    **not** exercised (byte-identical to today when the param is absent).
+    """
+    labels = await media_service.account_labels(db)
+
+    if unification_id is not None:
+        g = await media_service.get_unified_group(db, "movie", unification_id)
+        if g is None:
+            return UnifiedMediaListResponse(items=[], total=0, has_more=False)
+        best = g.best
+        clean_title, clean_year = canonical_title_year(best)
+        is_adult = bool(getattr(best, "is_adult", False))
+        item = UnifiedMediaResponse(
+            unification_id=g.key, type="movie",
+            title=apply_adult_prefix(clean_title, is_adult), year=clean_year,
+            summary=best.summary, genres=best.genres, content_rating=best.content_rating,
+            thumb_url=best.resolved_thumb_url or best.thumb_url,
+            art_url=best.resolved_art_url or best.art_url,
+            imdb_id=best.imdb_id, tmdb_id=_tmdb_str(best.tmdb_id),
+            rating=best.display_rating or best.scraped_rating, cast=best.cast,
+            is_adult=is_adult,
+            versions=_build_versions(g.members, labels),
+            version_count=len(g.members),
+            **_nfo_metadata(best),
+        )
+        return UnifiedMediaListResponse(items=[item], total=1, has_more=False)
+
     groups, total = await media_service.get_unified_list(
         db, media_type="movie", limit=limit, offset=offset,
         search=search, genre=genre, year=year,
     )
-    labels = await media_service.account_labels(db)
     items = []
     for g in groups:
         best = g.best
@@ -192,14 +221,40 @@ async def list_shows_unified(
     search: Optional[str] = Query(None),
     genre: Optional[str] = Query(None),
     year: Optional[int] = Query(None),
+    unification_id: Optional[str] = Query(None, description="When set, return only the group matching this unification_id (total=1 or 0)."),
     db: AsyncSession = Depends(get_db),
 ):
-    """Shows deduped across ALL accounts. Episodes via /shows/{id}/episodes."""
+    """Shows deduped across ALL accounts. Episodes via /shows/{id}/episodes.
+
+    When *unification_id* is provided, only the matching group is returned
+    (total=1 if found, 0 if not found) — the list/search/pagination path is
+    **not** exercised (byte-identical to today when the param is absent).
+    """
+    labels = await media_service.account_labels(db)
+
+    if unification_id is not None:
+        g = await media_service.get_unified_group(db, "show", unification_id)
+        if g is None:
+            return UnifiedMediaListResponse(items=[], total=0, has_more=False)
+        best = g.best
+        clean_title, clean_year = canonical_title_year(best)
+        item = UnifiedMediaResponse(
+            unification_id=g.key, type="show", title=clean_title, year=clean_year,
+            summary=best.summary, genres=best.genres, content_rating=best.content_rating,
+            thumb_url=best.resolved_thumb_url or best.thumb_url,
+            art_url=best.resolved_art_url or best.art_url,
+            imdb_id=best.imdb_id, tmdb_id=_tmdb_str(best.tmdb_id),
+            rating=best.display_rating or best.scraped_rating, cast=best.cast,
+            versions=_build_versions(g.members, labels),
+            version_count=len(g.members),
+            **_nfo_metadata(best),
+        )
+        return UnifiedMediaListResponse(items=[item], total=1, has_more=False)
+
     groups, total = await media_service.get_unified_list(
         db, media_type="show", limit=limit, offset=offset,
         search=search, genre=genre, year=year,
     )
-    labels = await media_service.account_labels(db)
     items = []
     for g in groups:
         best = g.best

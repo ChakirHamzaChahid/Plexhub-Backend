@@ -387,8 +387,17 @@ def _parse_llm_response(response: str, expected_count: int) -> list[str] | None:
 
 
 def _restore_newlines(text: str) -> str:
-    """Replace _NEWLINE_SENTINEL back to real newlines."""
-    return text.replace(_NEWLINE_SENTINEL, "\n")
+    """Replace the newline sentinel back to real newlines.
+
+    The LLM is asked to keep the sentinel verbatim, but smaller models often
+    reproduce it with altered surrounding whitespace (or none at all), and may
+    even append a stray one at the end of a line. Match the ``⏎`` glyph with any
+    surrounding horizontal whitespace so those variants don't leak into the
+    output, then trim stray leading/trailing whitespace/newlines the model may
+    have introduced at the cue boundary (internal newlines are preserved).
+    """
+    text = re.sub(r"[ \t]*⏎[ \t]*", "\n", text)
+    return text.strip()
 
 
 # ---------------------------------------------------------------------------

@@ -14,12 +14,10 @@ def _build_app():
 
 
 async def _get_openapi() -> dict:
-    app = _build_app()
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.get("/openapi.json")
-    assert resp.status_code == 200, resp.text
-    return resp.json()
+    # /openapi.json is intentionally served only behind Basic Auth (the public
+    # tunnel must not advertise the schema), so validate the generated schema
+    # directly rather than over HTTP.
+    return _build_app().openapi()
 
 
 async def test_openapi_contains_5_ai_routes():

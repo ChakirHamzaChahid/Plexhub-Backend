@@ -16,29 +16,38 @@ from fastapi import HTTPException
 from app.api.deps import verify_api_key
 from app.config import settings
 from app.db.database import _VEC_LOADED
+from app.services import api_key_service
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+async def _resolve_none(*args, **kwargs):
+    """Stub api_key_service.resolve → no matching per-user key (hermetic, no DB)."""
+    return None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # verify_api_key behaviour
 # ──────────────────────────────────────────────────────────────────────────────
 
-async def test_503_when_ai_api_key_empty(monkeypatch):
+async def test_401_when_ai_api_key_empty_and_no_user_key(monkeypatch):
+    # An empty master secret is no longer a 503 "not configured": per-user keys
+    # may still exist, so an unknown key just fails auth with 401.
     monkeypatch.setattr(settings, "AI_API_KEY", "")
     monkeypatch.setitem(_VEC_LOADED, "ok", True)
+    monkeypatch.setattr(api_key_service, "resolve", _resolve_none)
     with pytest.raises(HTTPException) as exc:
-        await verify_api_key(x_api_key="anything")
-    assert exc.value.status_code == 503
-    assert exc.value.detail == "AI service not configured"
+        await verify_api_key(request=None, x_api_key="anything")
+    assert exc.value.status_code == 401
+    assert exc.value.detail == "Invalid API key"
 
 
 async def test_503_when_vec_unavailable(monkeypatch):
     monkeypatch.setattr(settings, "AI_API_KEY", "secret")
     monkeypatch.setitem(_VEC_LOADED, "ok", False)
     with pytest.raises(HTTPException) as exc:
-        await verify_api_key(x_api_key="secret")
+        await verify_api_key(request=None, x_api_key="secret")
     assert exc.value.status_code == 503
     assert exc.value.detail == "AI vector storage unavailable"
 
@@ -47,7 +56,7 @@ async def test_401_when_header_missing(monkeypatch):
     monkeypatch.setattr(settings, "AI_API_KEY", "secret")
     monkeypatch.setitem(_VEC_LOADED, "ok", True)
     with pytest.raises(HTTPException) as exc:
-        await verify_api_key(x_api_key=None)
+        await verify_api_key(request=None, x_api_key=None)
     assert exc.value.status_code == 401
     assert exc.value.detail == "Invalid API key"
 
@@ -55,15 +64,16 @@ async def test_401_when_header_missing(monkeypatch):
 async def test_401_when_header_wrong(monkeypatch):
     monkeypatch.setattr(settings, "AI_API_KEY", "secret")
     monkeypatch.setitem(_VEC_LOADED, "ok", True)
+    monkeypatch.setattr(api_key_service, "resolve", _resolve_none)
     with pytest.raises(HTTPException) as exc:
-        await verify_api_key(x_api_key="wrong")
+        await verify_api_key(request=None, x_api_key="wrong")
     assert exc.value.status_code == 401
 
 
 async def test_pass_when_key_correct(monkeypatch):
     monkeypatch.setattr(settings, "AI_API_KEY", "secret")
     monkeypatch.setitem(_VEC_LOADED, "ok", True)
-    result = await verify_api_key(x_api_key="secret")
+    result = await verify_api_key(request=None, x_api_key="secret")
     assert result is None
 
 

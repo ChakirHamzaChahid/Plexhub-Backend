@@ -355,3 +355,36 @@ class TmdbScrapeCache(Base):
     __table_args__ = (
         Index("ix_scrape_cache_fetched_at", "fetched_at"),
     )
+
+
+class ApiKey(Base):
+    """Backend API key issued to a user/device.
+
+    The plaintext token (format ``phk_<random>``) is shown ONCE at creation and
+    never stored — only its SHA-256 hex digest lives in ``key_hash`` (unique,
+    indexed for O(1) lookup on each request). ``key_prefix`` keeps the first few
+    plaintext chars for display so a key is recognisable in the admin list.
+
+    A key is valid when ``revoked_at IS NULL`` and (``expires_at IS NULL`` or
+    ``expires_at`` is in the future). Revoking = setting ``revoked_at`` — takes
+    effect immediately since verification hits this table per request.
+
+    The legacy shared secret ``settings.AI_API_KEY`` stays a permanent master
+    key handled separately in ``app.api.deps`` and is NOT stored here.
+    """
+
+    __tablename__ = "api_keys"
+
+    id = Column(Text, primary_key=True)          # short uuid4 hex
+    key_hash = Column(Text, nullable=False, unique=True)  # sha256 hex of the token
+    key_prefix = Column(Text, nullable=False)    # e.g. "phk_a1b2c3" for display
+    label = Column(Text, nullable=False)         # assignee (user / device name)
+    created_at = Column(BigInteger, nullable=False)  # epoch ms
+    expires_at = Column(BigInteger)              # epoch ms, NULL = never expires
+    revoked_at = Column(BigInteger)              # epoch ms, NULL = active
+    last_used_at = Column(BigInteger)            # epoch ms, NULL = never used
+    last_used_ip = Column(Text)                  # last client IP seen
+
+    __table_args__ = (
+        Index("ix_api_keys_key_hash", "key_hash"),
+    )

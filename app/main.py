@@ -371,8 +371,9 @@ app = FastAPI(
     title="PlexHub Backend",
     version=APP_VERSION,
     lifespan=lifespan,
-    # Public tunnel — hide the interactive docs and the OpenAPI schema so the
-    # API surface isn't advertised. /docs, /redoc and /openapi.json -> 404.
+    # Public tunnel — disable the *unauthenticated* default docs so the API
+    # surface isn't advertised. /docs + /openapi.json are re-added below behind
+    # Basic Auth; /redoc stays off (404).
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
@@ -409,6 +410,24 @@ app.include_router(tv_auth.router, prefix="/api")
 # Admin web UI (HTML / HTMX) — no /api prefix. Browser-facing, so HTTP Basic
 # Auth instead of the X-API-Key header (a navigation can't carry custom headers).
 app.include_router(admin.router, dependencies=[Depends(verify_admin_basic_auth)])
+
+# Interactive API docs — kept off the public default URLs above (docs_url=None …)
+# and re-exposed here behind the SAME HTTP Basic Auth as /admin, so they're
+# reachable for debugging on the LAN but never advertised to the public tunnel.
+# The browser reuses the /admin Basic-Auth credentials for the Swagger UI's
+# same-origin fetch of /openapi.json.
+from fastapi.openapi.docs import get_swagger_ui_html  # noqa: E402
+from fastapi.responses import JSONResponse  # noqa: E402
+
+
+@app.get("/docs", include_in_schema=False, dependencies=[Depends(verify_admin_basic_auth)])
+async def protected_swagger_ui():
+    return get_swagger_ui_html(openapi_url="/openapi.json", title="PlexHub Backend — API docs")
+
+
+@app.get("/openapi.json", include_in_schema=False, dependencies=[Depends(verify_admin_basic_auth)])
+async def protected_openapi():
+    return JSONResponse(app.openapi())
 
 # AI recommendation API — router defines its own /api/ai prefix and already has
 # a module-level verify_api_key dependency, so no extra guard here.

@@ -132,8 +132,13 @@ async def hydrate_client(
 # Tests
 # ──────────────────────────────────────────────────────────────────────────────
 
-async def test_rank_503_when_ai_api_key_empty(bare_client, monkeypatch):
-    """POST /rank with AI_API_KEY="" -> 503 "AI service not configured"."""
+async def test_rank_401_when_ai_api_key_empty(bare_client, monkeypatch):
+    """POST /rank with AI_API_KEY="" and a bogus key -> 401.
+
+    With fail-closed auth an empty master secret is no longer a 503 "not
+    configured" state: per-user keys may still exist, so an unknown key just
+    fails authentication.
+    """
     monkeypatch.setattr(settings, "AI_API_KEY", "")
     monkeypatch.setitem(_VEC_LOADED, "ok", True)
 
@@ -142,8 +147,8 @@ async def test_rank_503_when_ai_api_key_empty(bare_client, monkeypatch):
         headers={"X-API-Key": "whatever"},
         json={"ref": {"tmdbId": 1}, "candidates": [{"tmdbId": 2}]},
     )
-    assert resp.status_code == 503
-    assert resp.json()["detail"] == "AI service not configured"
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "Invalid API key"
 
 
 async def test_rank_multi_503_when_vec_unavailable(bare_client, monkeypatch):

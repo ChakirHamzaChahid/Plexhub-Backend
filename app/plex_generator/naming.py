@@ -3,8 +3,6 @@ import re
 
 # Characters invalid on Windows and/or problematic for Plex path parsing
 _INVALID_CHARS = re.compile(r'[\\/:*?"<>|]')
-# Braces would break Plex's "{edition-...}" parsing if they appear inside a label.
-_EDITION_INVALID_CHARS = re.compile(r'[\\/:*?"<>|{}]')
 
 
 def sanitize_for_filesystem(name: str) -> str:
@@ -19,17 +17,6 @@ def sanitize_for_filesystem(name: str) -> str:
     name = re.sub(r"\s+", " ", name).strip()
     name = name.rstrip(".")
     return name.strip() or "Unknown"
-
-
-def sanitize_edition_label(label: str) -> str:
-    """Sanitize a label used inside a Plex ``{edition-LABEL}`` tag.
-
-    Same rules as :func:`sanitize_for_filesystem` but also strips braces so a
-    label can never close the edition tag prematurely."""
-    label = _EDITION_INVALID_CHARS.sub(" ", label)
-    label = re.sub(r"\s+", " ", label).strip()
-    label = label.rstrip(".")
-    return label.strip() or "v"
 
 
 def _decorate_with_disambiguator(

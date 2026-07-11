@@ -516,7 +516,6 @@ async def search(
       4. Return ranked results with camelCase aliases.
     """
     from app.services import ollama_service as _ollama
-    from app.config import settings as _cfg
 
     # 1. Query reformulation (best-effort, never 503 on LLM failure).
     query_used = payload.query
@@ -638,11 +637,9 @@ async def assistant(
       4. Call ollama_service.chat. Ollama failure -> 503.
       5. Return reply, sources (grounding titles), model name.
     """
-    from app.services import ollama_service as _ollama
     from app.services.embedding_service import (
         EmbeddingUnavailableError as _EmbUnavail,
         embed_query as _embed_query,
-        DEFAULT_MODEL_NAME,
     )
 
     # 1. Embed user message — propagates EmbeddingUnavailableError -> 503.

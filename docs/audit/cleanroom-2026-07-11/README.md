@@ -30,7 +30,18 @@ empirically · **56 findings** across 6 dimensions (**1 P0, 17 P1, 26 P2, 12 deb
 | CR-S06 | P2 | CORS explicit methods/headers + wildcard-origin warning (`main.py`) | `X-API-Key` preserved. |
 | CR-P02 | P1 | Migration 015 backfills 16 missing `media` indexes idempotently (chain 001→015) | Non-destructive schema migration. |
 
-**Round 2 — in progress** (greenlit Risky): CR-S03 (encrypt Xtream creds at rest), CR-C06 (wire ruff/black/mypy/pytest-cov), CR-T10 (CI on `develop`).
+**Round 2 — RESOLVED** (fix + tests + security-review gate + full suite `533 passed`, `ruff` green):
+
+| ID | Sev | Fix | Note |
+|---|:--:|---|---|
+| CR-S03 | P2 | `EncryptedString` `TypeDecorator` on `XtreamAccount.password` (Fernet) + migration 016 to encrypt existing rows | Dedicated `XTREAM_ENCRYPTION_KEY` (domain-separated `AI_API_KEY` fallback); **fail-open** if no key (documented). Security-review APPROVED. Backups now ciphertext. |
+| CR-C06 | debt | Wired `ruff`+`black`+`mypy`+`pytest-cov` (`pyproject.toml`, `requirements-dev.txt`) | Conservative ruleset → `ruff check` green with no mass reformat; coverage report-only. |
+| CR-T10 | debt | CI (`tests.yml`) now triggers on `develop` + a `ruff`/`black` lint job | — |
+| CR-C07 | debt | Removed unused `pydantic-settings` from `requirements.txt` | — |
+| CR-C08 | debt | Deleted dead `sanitize_edition_label`/`_EDITION_INVALID_CHARS` (`naming.py`) | — |
+| CR-T11 | debt | Removed stray `@pytest.mark.asyncio` marks (`test_embedding_worker.py`) | — |
+
+**CR-C09 — WON'T FIX (blocked by pinned stack):** `HTTP_422_UNPROCESSABLE_CONTENT` does not exist in the pinned Starlette 0.46.2 (`fastapi>=0.115,<0.116`, deliberately pinned). The rename was attempted and **reverted** after it caused `AttributeError`/500 on the 422 paths. The deprecation warning is benign and can only be resolved by a stack bump (forbidden by the fastapi/instrumentator pin coupling).
 
 **Follow-ups noted (not yet done):** CR-P01 full SQL-side pagination redesign · `/api/plex/generate` behind `verify_master_key` (defense-in-depth, security-review note) · CR-F01/F03/F05–F11 · CR-S02/S04/S05/S07/S08 · CR-A0x · CR-C03/C04/C05/C07–C10 · CR-P03–P08 · CR-T03–T09/T11.
 

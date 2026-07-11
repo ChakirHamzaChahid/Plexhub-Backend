@@ -21,7 +21,6 @@ from app.workers.embedding_worker import (
 )
 
 
-pytestmark = pytest.mark.asyncio
 pytest_plugins = ["tests.conftest_ai"]
 
 

@@ -5,6 +5,8 @@ import logging
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.utils.crypto_fields import get_xtream_fernet, looks_encrypted
+
 logger = logging.getLogger(__name__)
 
 
@@ -35,6 +37,7 @@ async def run_migrations(engine: AsyncEngine) -> None:
     await _migration_013_add_media_is_adult(engine)
     await _migration_014_add_nfo_metadata(engine)
     await _migration_015_add_missing_media_indexes(engine)
+    await _migration_016_encrypt_xtream_passwords(engine)
 
     logger.info("All migrations completed successfully")
 
@@ -569,3 +572,66 @@ async def _migration_008_ai_embeddings(conn) -> None:
         await conn.execute(text(stmt))
 
     logger.info("Migration 008: AI embeddings tables created")
+
+
+async def _migration_016_encrypt_xtream_passwords(engine: AsyncEngine) -> None:
+    """One-time, idempotent encryption of pre-existing xtream_accounts.password
+    rows (CR-S03 — Xtream provider passwords were stored in plaintext).
+
+    ``XtreamAccount.password`` is now mapped through
+    ``app.utils.crypto_fields.EncryptedString`` (models/database.py), which
+    transparently encrypts on write / decrypts on read for every ORM/Core
+    access going forward. This migration handles the DATA that already
+    exists on disk: rows written before this fix landed (and any DB backup
+    snapshot taken since) are still plaintext.
+
+    Uses raw ``text()`` SQL deliberately (bypassing the ORM type decorator)
+    so it can inspect the byte-for-byte stored value and decide per-row
+    whether encryption is needed — the exact same key resolution
+    (`get_xtream_fernet`) as the column type, so what this migration writes
+    round-trips correctly through the ORM afterwards.
+
+    Idempotent / re-runnable:
+    - A value already recognized as a Fernet token (`looks_encrypted`) is
+      skipped -> re-running on an already-encrypted database is a no-op.
+    - NULL/empty passwords are skipped.
+    - Fail-open, consistent with `EncryptedString`: if no key is configured
+      (`get_xtream_fernet()` returns None), this migration logs a warning
+      and leaves rows untouched rather than failing the whole migration
+      chain — safe to re-run once an operator sets a key and restarts.
+    """
+    logger.info("Migration 016: Encrypting existing xtream_accounts.password rows")
+
+    fernet = get_xtream_fernet()
+    if fernet is None:
+        logger.warning(
+            "Migration 016: no XTREAM_ENCRYPTION_KEY/AI_API_KEY configured — "
+            "leaving existing Xtream passwords in plaintext (CR-S03 residual). "
+            "Set one of those env vars and restart to encrypt them (safe to re-run)."
+        )
+        return
+
+    async with engine.begin() as conn:
+        try:
+            result = await conn.execute(text("SELECT id, password FROM xtream_accounts"))
+            rows = result.fetchall()
+        except Exception as e:
+            logger.warning("Migration 016: could not read xtream_accounts: %s", e)
+            return
+
+        encrypted_count = 0
+        for account_id, password in rows:
+            if not password or looks_encrypted(password):
+                continue
+            token = fernet.encrypt(password.encode("utf-8")).decode("ascii")
+            await conn.execute(
+                text("UPDATE xtream_accounts SET password = :token WHERE id = :account_id"),
+                {"token": token, "account_id": account_id},
+            )
+            encrypted_count += 1
+
+        logger.info(
+            "Migration 016: encrypted %d pre-existing plaintext password row(s) "
+            "out of %d total (rest already encrypted, empty, or missing)",
+            encrypted_count, len(rows),
+        )

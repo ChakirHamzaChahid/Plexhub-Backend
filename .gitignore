@@ -6,3 +6,11 @@ data/
 *.db
 .env
 .venv/
+
+# Tooling artifacts (ruff / pytest-cov / mypy)
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/

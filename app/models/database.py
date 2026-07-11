@@ -3,6 +3,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase
 
+from app.utils.crypto_fields import EncryptedString
+
 
 class Base(DeclarativeBase):
     pass
@@ -133,7 +135,7 @@ class XtreamAccount(Base):
     base_url = Column(Text, nullable=False)
     port = Column(Integer, nullable=False, default=80)
     username = Column(Text, nullable=False)
-    password = Column(Text, nullable=False)
+    password = Column(EncryptedString(), nullable=False)  # encrypted at rest, CR-S03
     status = Column(Text, nullable=False, default="Unknown")
     expiration_date = Column(BigInteger)
     max_connections = Column(Integer, nullable=False, default=1)

@@ -2,10 +2,14 @@
 import asyncio
 
 import pytest
+import pytest_asyncio
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.models.database import Media, EnrichmentQueue
+from app.models.database import Media, EnrichmentQueue, XtreamAccount
+from app.services.xtream_service import xtream_service
+from app.workers import sync_worker as sync_worker_module
 from app.workers.sync_worker import (
     _parse_duration_ms,
     _safe_duration,
@@ -15,6 +19,7 @@ from app.workers.sync_worker import (
     get_sync_job,
     get_all_sync_jobs,
     cleanup_orphan_enrichment_queue,
+    differential_cleanup_episodes,
     upsert_media_batch,
 )
 from app.utils.server_id import parse_server_id, build_server_id
@@ -434,3 +439,341 @@ class TestUpsertMediaBatchPaginationSlots:
         offsets = {by_key["vod_A.mp4"].page_offset, by_key["vod_new1.mp4"].page_offset}
         assert len(offsets) == 2
         assert 0 not in offsets
+
+
+# ─── Episode differential cleanup (CR-F01) ──────────────────────
+
+
+def _episode(
+    rating_key: str, server_id: str, grandparent: str, title: str = "Ep",
+    page_offset: int = 0,
+) -> Media:
+    return Media(
+        rating_key=rating_key, server_id=server_id, library_section_id="xtream_series",
+        title=title, type="episode", grandparent_rating_key=grandparent,
+        page_offset=page_offset,
+    )
+
+
+class TestDifferentialCleanupEpisodes:
+    """CR-F01 regression: `differential_cleanup*` covered movie/show/live but
+    never `type='episode'` -- a delisted/renumbered episode only ever got its
+    `is_in_allowed_categories` flag flipped hidden
+    (`category_service.update_media_category_visibility`), never actually
+    removed, so it orphaned in the DB forever."""
+
+    async def test_removes_delisted_keeps_listed(self, db_session):
+        sid = "xtream_acc1"
+        show = "series_1"
+        db_session.add_all([
+            _episode("ep_1.mp4", sid, show, page_offset=0),   # still listed this sync
+            _episode("ep_2.mp4", sid, show, page_offset=1),   # delisted this sync
+        ])
+        await db_session.commit()
+
+        removed = await differential_cleanup_episodes(db_session, sid, show, {"ep_1.mp4"})
+        await db_session.commit()
+
+        assert removed == 1
+        remaining = (await db_session.execute(
+            select(Media.rating_key).where(Media.type == "episode")
+        )).scalars().all()
+        assert remaining == ["ep_1.mp4"]
+
+    async def test_never_deletes_a_still_listed_episode(self, db_session):
+        """A fully-unchanged listing must remove nothing (idempotent no-op)."""
+        sid = "xtream_acc1"
+        show = "series_1"
+        db_session.add(_episode("ep_1.mp4", sid, show))
+        await db_session.commit()
+
+        removed = await differential_cleanup_episodes(db_session, sid, show, {"ep_1.mp4"})
+        await db_session.commit()
+
+        assert removed == 0
+        remaining = (await db_session.execute(
+            select(Media.rating_key).where(Media.type == "episode")
+        )).scalars().all()
+        assert remaining == ["ep_1.mp4"]
+
+    async def test_scoped_to_show_and_server(self, db_session):
+        """A show's cleanup pass must never delete another show's episodes,
+        nor another server's episodes, even one sharing the same rating_key."""
+        sid = "xtream_acc1"
+        db_session.add_all([
+            _episode("ep_1.mp4", sid, "series_1", page_offset=0),            # target: delisted
+            _episode("ep_9.mp4", sid, "series_2", page_offset=1),             # different show, same server
+            _episode("ep_1.mp4", "xtream_acc2", "series_1", page_offset=0),   # same show key, different server
+        ])
+        await db_session.commit()
+
+        # series_1 on xtream_acc1 now genuinely has zero episodes listed.
+        removed = await differential_cleanup_episodes(db_session, sid, "series_1", set())
+        await db_session.commit()
+
+        assert removed == 1
+        remaining = {
+            (r.server_id, r.grandparent_rating_key, r.rating_key)
+            for r in (await db_session.execute(select(Media))).scalars().all()
+        }
+        assert remaining == {
+            (sid, "series_2", "ep_9.mp4"),
+            ("xtream_acc2", "series_1", "ep_1.mp4"),
+        }
+
+
+# ─── Episode sync freshness — full `sync_account` integration ──
+# CR-F01 (delisted episode cleanup) + CR-F11 (episode refresh decoupled from
+# the show-level dto_hash), exercised end-to-end through the real sync flow.
+
+
+def _account(account_id: str) -> XtreamAccount:
+    return XtreamAccount(
+        id=account_id, label="Test", base_url="http://x.example", port=80,
+        username="u", password="p", is_active=True, created_at=0,
+    )
+
+
+_SERIES_DTO = {
+    "series_id": 100, "name": "Show A", "category_id": "1",
+    "cover": None, "plot": "plot", "genre": "Drama", "rating": "8.0",
+    "backdrop_path": None, "episode_run_time": "30", "last_modified": "1",
+}
+
+
+def _ep_dto(ep_id: int, ep_num: int) -> dict:
+    return {
+        "id": str(ep_id), "episode_num": ep_num, "title": f"Episode {ep_num}",
+        "container_extension": "mp4", "info": {},
+    }
+
+
+@pytest_asyncio.fixture
+async def wired_sync_db(db_engine, monkeypatch):
+    """Wire `sync_account` onto the in-memory test DB and stub out VOD/Live +
+    category listing (kept empty -- these tests only exercise Series/Episodes;
+    `category_filter_mode` defaults to "all" so no XtreamCategory row is needed).
+    """
+    factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
+    monkeypatch.setattr(sync_worker_module, "async_session_factory", factory)
+
+    async def _empty(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(xtream_service, "get_vod_categories", _empty)
+    monkeypatch.setattr(xtream_service, "get_series_categories", _empty)
+    monkeypatch.setattr(xtream_service, "get_live_categories", _empty)
+    monkeypatch.setattr(xtream_service, "get_vod_streams", _empty)
+    monkeypatch.setattr(xtream_service, "get_live_streams", _empty)
+
+    return factory
+
+
+async def _episode_keys(factory) -> set[str]:
+    async with factory() as s:
+        rows = (await s.execute(
+            select(Media.rating_key).where(Media.type == "episode")
+        )).scalars().all()
+    return set(rows)
+
+
+class TestEpisodeSyncFreshnessIntegration:
+    """NOTE: each test uses its OWN account_id. `sync_worker._account_locks`
+    is a process-global dict of `asyncio.Lock` keyed by account_id, and
+    pytest-asyncio gives each test function a fresh event loop -- reusing an
+    account_id (and therefore its Lock) across tests would bind the same lock
+    to two different loops and raise. A distinct id per test sidesteps that
+    pre-existing global-state footgun; it is not part of either fix."""
+
+    async def test_f11_episodes_refreshed_when_series_hash_unchanged(
+        self, wired_sync_db, monkeypatch,
+    ):
+        """CR-F11: the show's own dto_hash is byte-identical across both
+        syncs (nothing in its Xtream metadata changed), yet the provider added
+        a second episode -- it must still be picked up."""
+        account_id = "f11_acc"
+        async with wired_sync_db() as s:
+            s.add(_account(account_id))
+            await s.commit()
+
+        async def _get_series(*a, **kw):
+            return [dict(_SERIES_DTO)]
+
+        calls = {"n": 0}
+
+        async def _get_series_info(*a, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                episodes = {"1": [_ep_dto(1, 1)]}
+            else:
+                episodes = {"1": [_ep_dto(1, 1), _ep_dto(2, 2)]}
+            return {"episodes": episodes}
+
+        monkeypatch.setattr(xtream_service, "get_series", _get_series)
+        monkeypatch.setattr(xtream_service, "get_series_info", _get_series_info)
+
+        await sync_worker_module.sync_account(account_id)
+        assert await _episode_keys(wired_sync_db) == {"ep_1.mp4"}
+
+        await sync_worker_module.sync_account(account_id)
+
+        # Pre-fix, episodes were only ever (re)fetched for series whose own
+        # dto_hash changed -- since Show A's metadata is unchanged, the old
+        # code never called get_series_info again and ep_2 was never seen.
+        assert calls["n"] == 2, "get_series_info must be called again despite an unchanged series hash"
+        assert await _episode_keys(wired_sync_db) == {"ep_1.mp4", "ep_2.mp4"}
+
+    async def test_f01_delisted_episode_removed_on_resync(
+        self, wired_sync_db, monkeypatch,
+    ):
+        """CR-F01: an episode dropped from the provider's listing must be
+        removed; one still listed must survive."""
+        account_id = "f01_acc"
+        async with wired_sync_db() as s:
+            s.add(_account(account_id))
+            await s.commit()
+
+        async def _get_series(*a, **kw):
+            return [dict(_SERIES_DTO)]
+
+        calls = {"n": 0}
+
+        async def _get_series_info(*a, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                episodes = {"1": [_ep_dto(1, 1), _ep_dto(2, 2)]}
+            else:
+                episodes = {"1": [_ep_dto(1, 1)]}  # ep 2 delisted
+            return {"episodes": episodes}
+
+        monkeypatch.setattr(xtream_service, "get_series", _get_series)
+        monkeypatch.setattr(xtream_service, "get_series_info", _get_series_info)
+
+        await sync_worker_module.sync_account(account_id)
+        assert await _episode_keys(wired_sync_db) == {"ep_1.mp4", "ep_2.mp4"}
+
+        await sync_worker_module.sync_account(account_id)
+        assert await _episode_keys(wired_sync_db) == {"ep_1.mp4"}
+
+    async def test_f01_never_deletes_a_genuinely_listed_episode(
+        self, wired_sync_db, monkeypatch,
+    ):
+        """Regression guard: repeated syncs of an IDENTICAL episode listing
+        must never drop a still-listed episode (idempotent)."""
+        account_id = "f01_idem_acc"
+        async with wired_sync_db() as s:
+            s.add(_account(account_id))
+            await s.commit()
+
+        async def _get_series(*a, **kw):
+            return [dict(_SERIES_DTO)]
+
+        async def _get_series_info(*a, **kw):
+            return {"episodes": {"1": [_ep_dto(1, 1), _ep_dto(2, 2)]}}
+
+        monkeypatch.setattr(xtream_service, "get_series", _get_series)
+        monkeypatch.setattr(xtream_service, "get_series_info", _get_series_info)
+
+        await sync_worker_module.sync_account(account_id)
+        await sync_worker_module.sync_account(account_id)
+        await sync_worker_module.sync_account(account_id)
+
+        assert await _episode_keys(wired_sync_db) == {"ep_1.mp4", "ep_2.mp4"}
+
+    async def test_f01_soft_failure_empty_episodes_dict_does_not_delete(
+        self, wired_sync_db, monkeypatch,
+    ):
+        """CR-F01 regression (code review, cycle 1): a well-known Xtream
+        soft failure returns HTTP 200 with `{"episodes": {}}` instead of
+        erroring -- `success=True` but genuinely no rows. A real series
+        essentially never legitimately has zero episodes, so this must NOT be
+        trusted as authoritative and must NOT delete the show's existing
+        episodes."""
+        account_id = "f01_soft_empty_dict"
+        async with wired_sync_db() as s:
+            s.add(_account(account_id))
+            await s.commit()
+
+        async def _get_series(*a, **kw):
+            return [dict(_SERIES_DTO)]
+
+        calls = {"n": 0}
+
+        async def _get_series_info(*a, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return {"episodes": {"1": [_ep_dto(1, 1), _ep_dto(2, 2)]}}
+            return {"episodes": {}}  # soft failure: HTTP 200, empty payload
+
+        monkeypatch.setattr(xtream_service, "get_series", _get_series)
+        monkeypatch.setattr(xtream_service, "get_series_info", _get_series_info)
+
+        await sync_worker_module.sync_account(account_id)
+        assert await _episode_keys(wired_sync_db) == {"ep_1.mp4", "ep_2.mp4"}
+
+        await sync_worker_module.sync_account(account_id)  # soft failure this run
+        assert await _episode_keys(wired_sync_db) == {"ep_1.mp4", "ep_2.mp4"}, (
+            "a 200-with-empty-payload soft failure must not wipe out the show's episodes"
+        )
+
+    async def test_f01_soft_failure_missing_episodes_key_does_not_delete(
+        self, wired_sync_db, monkeypatch,
+    ):
+        """Same soft-failure guard, for the `{}` (no `episodes` key at all)
+        shape -- also coerced to an empty dict by
+        `series_info.get("episodes") or {}` in `fetch_series_episodes`."""
+        account_id = "f01_soft_missing_key"
+        async with wired_sync_db() as s:
+            s.add(_account(account_id))
+            await s.commit()
+
+        async def _get_series(*a, **kw):
+            return [dict(_SERIES_DTO)]
+
+        calls = {"n": 0}
+
+        async def _get_series_info(*a, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return {"episodes": {"1": [_ep_dto(1, 1), _ep_dto(2, 2)]}}
+            return {}  # soft failure: HTTP 200, no `episodes` key at all
+
+        monkeypatch.setattr(xtream_service, "get_series", _get_series)
+        monkeypatch.setattr(xtream_service, "get_series_info", _get_series_info)
+
+        await sync_worker_module.sync_account(account_id)
+        assert await _episode_keys(wired_sync_db) == {"ep_1.mp4", "ep_2.mp4"}
+
+        await sync_worker_module.sync_account(account_id)
+        assert await _episode_keys(wired_sync_db) == {"ep_1.mp4", "ep_2.mp4"}
+
+    async def test_f01_transport_failure_does_not_delete(
+        self, wired_sync_db, monkeypatch,
+    ):
+        """A transport failure (get_series_info raises) must also leave the
+        show's existing episodes untouched, same as the soft-failure 200
+        case."""
+        account_id = "f01_transport_fail"
+        async with wired_sync_db() as s:
+            s.add(_account(account_id))
+            await s.commit()
+
+        async def _get_series(*a, **kw):
+            return [dict(_SERIES_DTO)]
+
+        calls = {"n": 0}
+
+        async def _get_series_info(*a, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return {"episodes": {"1": [_ep_dto(1, 1), _ep_dto(2, 2)]}}
+            raise ConnectionError("provider unreachable")
+
+        monkeypatch.setattr(xtream_service, "get_series", _get_series)
+        monkeypatch.setattr(xtream_service, "get_series_info", _get_series_info)
+
+        await sync_worker_module.sync_account(account_id)
+        assert await _episode_keys(wired_sync_db) == {"ep_1.mp4", "ep_2.mp4"}
+
+        await sync_worker_module.sync_account(account_id)  # transport failure this run
+        assert await _episode_keys(wired_sync_db) == {"ep_1.mp4", "ep_2.mp4"}

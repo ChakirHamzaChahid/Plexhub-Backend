@@ -116,6 +116,11 @@ class TMDBService:
         self._imdb_find_cache: TTLCache[tuple[str, str], int | None] = TTLCache(
             max_size=5000, ttl_seconds=7 * 24 * 3600,
         )
+        # Real outbound HTTP attempts made by `_request` (every retry counts,
+        # not just the logical search/details call). `enrichment_worker` reads
+        # this to budget against `ENRICHMENT_DAILY_LIMIT` — a single logical
+        # item can cost 1-4 real TMDB calls when 429/5xx-retried (CR-F03).
+        self.real_request_count: int = 0
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -138,6 +143,23 @@ class TMDBService:
     def is_configured(self) -> bool:
         return bool(settings.TMDB_API_KEY)
 
+    def get_request_count(self) -> int:
+        """Real TMDB HTTP attempts made so far (every retry inside `_request`
+        counts). Used by `enrichment_worker.run()` to enforce
+        `ENRICHMENT_DAILY_LIMIT` against actual HTTP spend (CR-F03)."""
+        return self.real_request_count
+
+    def reset_request_count(self) -> None:
+        """Reset the real-call counter. Call once at the start of an
+        enrichment run so the budget reflects only that run's spend.
+
+        NOTE (residual, CR-F03): this counter is in-process only and resets
+        on worker/process restart — it is a per-run budget, not a persisted
+        24h quota. A cross-run/cross-process persistent daily counter would
+        need a DB-backed store; that is a larger change and is left as a
+        documented residual rather than bundled into this fix."""
+        self.real_request_count = 0
+
     @staticmethod
     def _metric_kind(path: str) -> str:
         """Map a TMDB path to a coarse `kind` label for metrics."""
@@ -159,6 +181,11 @@ class TMDBService:
         rate_limited = False
         last_exc: Exception | None = None
         for attempt, delay in enumerate((*_RETRY_DELAYS, None)):
+            # Every loop iteration is a real outbound HTTP attempt (initial +
+            # up to 3 retries) — count it here, not once per logical
+            # `_request()` call, so a rate-limited/5xx-retried item consumes
+            # its real TMDB spend from the enrichment budget (CR-F03).
+            self.real_request_count += 1
             try:
                 resp = await client.get(url, params=params)
                 # Handle 429 rate limit with Retry-After header

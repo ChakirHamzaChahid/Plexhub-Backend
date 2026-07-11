@@ -43,6 +43,20 @@ empirically · **56 findings** across 6 dimensions (**1 P0, 17 P1, 26 P2, 12 deb
 
 **CR-C09 — WON'T FIX (blocked by pinned stack):** `HTTP_422_UNPROCESSABLE_CONTENT` does not exist in the pinned Starlette 0.46.2 (`fastapi>=0.115,<0.116`, deliberately pinned). The rename was attempted and **reverted** after it caused `AttributeError`/500 on the 422 paths. The deprecation warning is benign and can only be resolved by a stack bump (forbidden by the fastapi/instrumentator pin coupling).
 
+**Vague A — RESOLVED** (`/incident` bugs de flux ; full suite `570 passed`, ruff vert, code-review OK) :
+
+| ID | Sev | Fix | Note |
+|---|:--:|---|---|
+| CR-F01 | P1 | `differential_cleanup_episodes` (scopé show+serveur) ; prune seulement si `success and rows` | Empty-200 soft-failure ne supprime plus (garde ajoutée en review). |
+| CR-F11 | P2 | Fetch épisodes découplé du hash show (toutes séries actives) | ⚠️ +1 appel `get_series_info`/série/sync — charge Xtream accrue (à monitorer). |
+| CR-F03 | P1 | `tmdb_service._request` compte chaque tentative HTTP réelle ; budget piloté par appels réels | Persistance quotidienne = résidu documenté. |
+| CR-F06 | P2 | `/tv-auth/status` accepte `deviceCode` (+ `device_code` legacy) | — |
+| CR-F07 | P2 | Livraison one-shot atomique (`UPDATE … WHERE payload_delivered=false` + `rowcount==1`) | — |
+| CR-F08 | P2 | Circuit breaker roulant (min-sample 10, ratio à chaque check) + fix collatéral `expunge_all` (MissingGreenlet) | — |
+| CR-P06 | P2 | Sampling health par plage `rowid` (fini `ORDER BY random()`) | — |
+| CR-F09 | P2 | Convergence Passe B déterministe (`min(_key_rank)`) | — |
+| CR-T05 | P2 | 20 tests health-check (breaker + `_check_one` + sampling) | — |
+
 **Follow-ups noted (not yet done):** CR-P01 full SQL-side pagination redesign · `/api/plex/generate` behind `verify_master_key` (defense-in-depth, security-review note) · CR-F01/F03/F05–F11 · CR-S02/S04/S05/S07/S08 · CR-A0x · CR-C03/C04/C05/C07–C10 · CR-P03–P08 · CR-T03–T09/T11.
 
 ---

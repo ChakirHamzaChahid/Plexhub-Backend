@@ -811,6 +811,60 @@ async def differential_cleanup(
         )
 
 
+async def differential_cleanup_episodes(
+    db, server_id: str, grandparent_rating_key: str, api_rating_keys: set[str],
+) -> int:
+    """Remove DB episodes of ONE show that are no longer in its current listing.
+
+    CR-F01: unlike movie/show/live, `type='episode'` was never covered by any
+    differential_cleanup* path -- a delisted or renumbered episode only ever
+    got its `is_in_allowed_categories` flag flipped hidden
+    (`category_service.update_media_category_visibility`), never actually
+    removed, so it orphaned in the DB forever.
+
+    Scoped tightly to (server_id, grandparent_rating_key) -- i.e. ONE show on
+    ONE server -- so a fetch for one show can never delete another show's
+    episodes. Callers MUST only invoke this with the FULL episode listing for
+    that show this sync, and only when that listing is non-empty: an empty
+    `api_rating_keys` -- whether from a transport failure OR from a "soft"
+    Xtream failure (HTTP 200 with an empty/missing `episodes` payload, which
+    some mirrors return instead of erroring) -- is indistinguishable from a
+    genuine empty listing, and a real series essentially never legitimately
+    has zero episodes. Trusting an empty listing here would wipe out every
+    episode of that show; callers must skip invoking this function in that
+    case (see `fetch_series_episodes`'s `if success and rows:` gate).
+
+    Returns the number of rows removed.
+    """
+    result = await db.execute(
+        select(Media.rating_key).where(
+            Media.server_id == server_id,
+            Media.type == "episode",
+            Media.grandparent_rating_key == grandparent_rating_key,
+        )
+    )
+    existing_keys = {row[0] for row in result}
+    stale_keys = existing_keys - api_rating_keys
+
+    if not stale_keys:
+        return 0
+
+    stale_list = list(stale_keys)
+    chunk_size = 500  # SQLite limit is 999 bind variables
+    for i in range(0, len(stale_list), chunk_size):
+        chunk = stale_list[i : i + chunk_size]
+        await db.execute(
+            delete(Media).where(
+                Media.rating_key.in_(chunk),
+                Media.server_id == server_id,
+                Media.type == "episode",
+                Media.grandparent_rating_key == grandparent_rating_key,
+            )
+        )
+    logger.info(
+        f"Removed {len(stale_keys)} stale episodes from {server_id}/{grandparent_rating_key}"
+    )
+    return len(stale_keys)
 
 
 async def cleanup_orphan_enrichment_queue(db, server_id: str) -> int:
@@ -1233,6 +1287,7 @@ async def sync_account(account_id: str):
                 existing_series_hashes = {row[0]: row[1] for row in hash_result}
 
                 all_series_keys = set()
+                all_series_dtos = []  # every dto that passed category filtering, changed or not
                 changed_series = []  # (dto, index, dto_hash)
                 unchanged_count = 0
 
@@ -1260,6 +1315,7 @@ async def sync_account(account_id: str):
                         continue
                     rating_key = f"series_{series_id}"
                     all_series_keys.add(rating_key)
+                    all_series_dtos.append(dto)
 
                     dto_hash = _compute_series_dto_hash(dto)
                     if existing_series_hashes.get(rating_key) == dto_hash:
@@ -1300,25 +1356,51 @@ async def sync_account(account_id: str):
                 total_synced += len(all_series_keys)
                 logger.info(f"Series sync: {len(series_rows)} updated, {unchanged_count} unchanged")
 
-                # --- Episodes Sync (only for changed series) ---
-                changed_series_dtos = [dto for dto, _, _ in changed_series]
-                logger.info(f"Fetching episodes for {len(changed_series_dtos)} changed series "
-                           f"(skipping {unchanged_count} unchanged)")
+                # --- Episodes Sync ---
+                # CR-F11: fetched for EVERY currently-synced series each run,
+                # decoupled from the show-level dto_hash. A show's own metadata
+                # (name/cover/plot/genre/rating/category_id/backdrop_path/
+                # episode_run_time/last_modified) can stay byte-identical while
+                # its episode list gains/loses/renumbers entries -- there is no
+                # cheap, provider-agnostic signal for that (some Xtream mirrors
+                # never bump `last_modified` on episode changes), and the only
+                # accurate signal is the episode listing itself, which requires
+                # calling get_series_info regardless of the show-level hash.
+                logger.info(f"Fetching episodes for {len(all_series_dtos)} synced series "
+                           f"({len(changed_series)} changed, {unchanged_count} show-hash-unchanged)")
 
-                async def fetch_series_episodes(series_dto):
-                    """Fetch series info and map episodes."""
+                async def fetch_series_episodes(series_dto) -> tuple[bool, list[dict]]:
+                    """Fetch series info and map episodes.
+
+                    Returns (success, rows). `success=False` on any fetch/parse
+                    failure -- the caller must NEVER treat "provider unreachable
+                    this run" the same as "show genuinely has zero episodes".
+                    Note `success=True` alone does NOT guarantee `rows` is
+                    authoritative: some Xtream mirrors return HTTP 200 with an
+                    empty/missing `episodes` payload as a soft failure, so the
+                    caller additionally requires non-empty `rows` before
+                    trusting a listing enough to run CR-F01 differential
+                    cleanup on it.
+                    """
+                    if not isinstance(series_dto, dict):
+                        return False, []
                     try:
-                        if not isinstance(series_dto, dict):
-                            return []
                         async with semaphore:  # Only hold semaphore during API call
                             series_info = await xtream_service.get_series_info(
                                 account_snapshot, series_id=series_dto["series_id"]
                             )
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to fetch series_info for series {series_dto.get('series_id')}: {e}"
+                        )
+                        return False, []
+
+                    try:
                         # Mapping happens outside semaphore
                         episodes_data = series_info.get("episodes") or {} if isinstance(series_info, dict) else {}
                         if not isinstance(episodes_data, dict):
                             logger.warning(f"Unexpected episodes_data type for series {series_dto.get('series_id')}: {type(episodes_data).__name__}")
-                            return []
+                            return False, []
                         rows = []
                         for season_str, episodes in episodes_data.items():
                             try:
@@ -1332,35 +1414,65 @@ async def sync_account(account_id: str):
                                     )
                                     ep_row["is_in_allowed_categories"] = True
                                     rows.append(ep_row)
-                        return rows
+                        return True, rows
                     except Exception as e:
                         sid = series_dto.get('series_id') if isinstance(series_dto, dict) else '?'
                         logger.error(f"Failed to sync series {sid}: {e}", exc_info=True)
-                        return []
+                        return False, []
 
                 episode_count = 0
+                episodes_removed = 0
                 batch_size = 50
-                for batch_start in range(0, len(changed_series_dtos), batch_size):
-                    batch_end = min(batch_start + batch_size, len(changed_series_dtos))
-                    batch_series = changed_series_dtos[batch_start:batch_end]
+                for batch_start in range(0, len(all_series_dtos), batch_size):
+                    batch_end = min(batch_start + batch_size, len(all_series_dtos))
+                    batch_series = all_series_dtos[batch_start:batch_end]
 
                     tasks = [fetch_series_episodes(s) for s in batch_series]
                     batch_results = await asyncio.gather(*tasks)
 
-                    episode_batch = [ep for result in batch_results for ep in result]
-                    if episode_batch:
-                        try:
-                            async with db.begin_nested():  # SAVEPOINT
+                    episode_batch = []
+                    # CR-F01: (grandparent_rating_key, live rating_keys) scopes
+                    # eligible for differential cleanup this batch -- only for
+                    # shows whose episode listing was successfully fetched AND
+                    # non-empty. A well-known Xtream flakiness returns HTTP 200
+                    # with an empty/missing/null `episodes` payload instead of
+                    # erroring (soft failure) -- `fetch_series_episodes` cannot
+                    # tell that apart from a genuinely empty listing via
+                    # `success` alone (no exception is raised), and a real
+                    # series essentially never legitimately has zero episodes.
+                    # Requiring `rows` to be non-empty before trusting it as
+                    # authoritative for deletion means a soft-failure 200 never
+                    # wipes out a still-listed show's episodes. The tradeoff --
+                    # a show whose episodes ALL genuinely vanished isn't pruned
+                    # that run -- is negligible: the show itself is removed by
+                    # the show-level differential_cleanup, and an empty show
+                    # has nothing streamable anyway.
+                    cleanup_scopes: list[tuple[str, set[str]]] = []
+                    for series_dto, (success, rows) in zip(batch_series, batch_results):
+                        episode_batch.extend(rows)
+                        if success and rows:
+                            grandparent_rating_key = f"series_{series_dto['series_id']}"
+                            cleanup_scopes.append(
+                                (grandparent_rating_key, {r["rating_key"] for r in rows})
+                            )
+
+                    try:
+                        async with db.begin_nested():  # SAVEPOINT
+                            if episode_batch:
                                 await upsert_media_batch(db, episode_batch)
-                            await commit_with_retry(db)
-                            episode_count += len(episode_batch)
-                            logger.info(f"Synced {episode_count} episodes ({batch_end}/{len(changed_series_dtos)} changed series)")
-                        except Exception as e:
-                            logger.error(f"Episode batch {batch_start}-{batch_end} failed, rolling back: {e}")
-                            await db.rollback()
+                            for grandparent_rating_key, live_keys in cleanup_scopes:
+                                episodes_removed += await differential_cleanup_episodes(
+                                    db, server_id, grandparent_rating_key, live_keys
+                                )
+                        await commit_with_retry(db)
+                        episode_count += len(episode_batch)
+                        logger.info(f"Synced {episode_count} episodes ({batch_end}/{len(all_series_dtos)} series)")
+                    except Exception as e:
+                        logger.error(f"Episode batch {batch_start}-{batch_end} failed, rolling back: {e}")
+                        await db.rollback()
 
                 total_synced += episode_count
-                logger.info(f"Synced {episode_count} episodes")
+                logger.info(f"Synced {episode_count} episodes, removed {episodes_removed} stale episodes")
 
                 # --- Live Channels Sync (incremental) ---
                 logger.info(f"Syncing Live channels for account {account_id}")

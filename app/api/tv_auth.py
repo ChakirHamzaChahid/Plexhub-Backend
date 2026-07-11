@@ -33,7 +33,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,6 +41,7 @@ from app.api.deps import verify_backend_secret as verify_pairing_api_key
 from app.config import settings
 from app.db.database import get_db
 from app.models.database import TvAuthSession
+from app.utils.db_retry import commit_with_retry
 from app.utils.payload_crypto import (
     PayloadDecryptError,
     decrypt_payload,
@@ -295,12 +296,27 @@ async def approve(
 
 @router.get("/status", response_model=StatusResponse, response_model_by_alias=True)
 async def get_status(
-    device_code: str = Query(..., min_length=16, max_length=128),
+    # CR-F06: accept `deviceCode` (camelCase, preferred — consistent with the
+    # rest of the API) while keeping the legacy snake_case `device_code` alive
+    # for back-compat. Either may be supplied; deviceCode wins if both are.
+    device_code: str | None = Query(
+        default=None, alias="deviceCode", min_length=16, max_length=128
+    ),
+    device_code_legacy: str | None = Query(
+        default=None, alias="device_code", min_length=16, max_length=128
+    ),
     db: AsyncSession = Depends(get_db),
 ) -> StatusResponse:
     """Return the session status; deliver the decrypted payload exactly once."""
+    code = device_code or device_code_legacy
+    if not code:
+        raise HTTPException(
+            status_code=422,
+            detail="deviceCode (or device_code) query parameter is required",
+        )
+
     result = await db.execute(
-        select(TvAuthSession).where(TvAuthSession.device_code == device_code)
+        select(TvAuthSession).where(TvAuthSession.device_code == code)
     )
     session = result.scalars().first()
     if session is None:
@@ -323,12 +339,34 @@ async def get_status(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Pairing payload unavailable",
             ) from exc
-        session.payload_delivered = True  # single delivery
-        await db.commit()
-        logger.info("tv-auth session %s payload delivered", session.id)
-        return StatusResponse(
-            status=STATUS_APPROVED, expires_in=int(expires_in), payload=payload
+
+        # CR-F07: the read-then-mark-delivered above is NOT atomic across two
+        # concurrent pollers (both could observe payload_delivered=False and
+        # both decrypt+return). Make the actual "claim" atomic with a single
+        # conditional UPDATE: SQLite serializes writers, so of two concurrent
+        # claims only one UPDATE can match `payload_delivered IS FALSE` and
+        # report rowcount == 1 — only that request is allowed to return the
+        # payload. `decrypt_payload` above is pure (no side effect), so
+        # computing it twice under contention is harmless; only the DELIVERY
+        # is guarded.
+        claim_result = await db.execute(
+            update(TvAuthSession)
+            .where(
+                TvAuthSession.id == session.id,
+                TvAuthSession.payload_delivered.is_(False),
+            )
+            .values(payload_delivered=True)
         )
+        await commit_with_retry(db)
+
+        if claim_result.rowcount == 1:
+            session.payload_delivered = True  # keep the ORM object in sync
+            logger.info("tv-auth session %s payload delivered", session.id)
+            return StatusResponse(
+                status=STATUS_APPROVED, expires_in=int(expires_in), payload=payload
+            )
+        # Lost the race: another concurrent poll already claimed delivery —
+        # fall through to the normal (payload-less) status response below.
 
     return StatusResponse(
         status=session.status,

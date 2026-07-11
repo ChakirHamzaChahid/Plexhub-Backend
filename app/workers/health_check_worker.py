@@ -1,8 +1,9 @@
 import asyncio
 import logging
+import random
 
 import httpx
-from sqlalchemy import select, update, func, or_
+from sqlalchemy import select, update, or_, text
 
 from app.config import settings
 from app.db.database import async_session_factory
@@ -236,6 +237,62 @@ async def run():
         await _run_health_check_batch()
 
 
+def _stream_candidate_filters(cutoff: int) -> tuple:
+    """Shared WHERE clauses for stale/unchecked movie+episode streams."""
+    return (
+        Media.server_id.like("xtream_%"),
+        Media.type.in_(["movie", "episode"]),
+        or_(
+            Media.last_stream_check.is_(None),
+            Media.last_stream_check < cutoff,
+        ),
+    )
+
+
+async def _sample_stream_candidates(db, batch_size: int, cutoff: int) -> list:
+    """Randomly sample up to `batch_size` stale/unchecked streams.
+
+    CR-P06: the previous `ORDER BY random()` assigns a random key to and
+    fully sorts *every* candidate row just to take the top `batch_size` — a
+    full scan + filesort on every cron run. Instead, pick a random `rowid`
+    anchor and scan forward from it: SQLite's implicit rowid is the table's
+    natural B-tree order, so `rowid >= :anchor ORDER BY rowid` is an index
+    range scan, not a sort. Wrap around to the start of the table when the
+    forward scan doesn't yield enough matches (e.g. anchor lands near the
+    end), so small/late candidate sets are still filled. A fresh anchor is
+    picked every call, so the sample rotates across runs — good-enough
+    randomness for a background sampler; coverage matters more than perfect
+    uniformity.
+    """
+    filters = _stream_candidate_filters(cutoff)
+
+    max_rowid = (await db.execute(text("SELECT MAX(rowid) FROM media"))).scalar()
+    if not max_rowid:
+        return []
+
+    anchor = random.randint(0, max_rowid)
+
+    fwd_stmt = (
+        select(Media)
+        .where(*filters, text("media.rowid >= :anchor").bindparams(anchor=anchor))
+        .order_by(text("media.rowid ASC"))
+        .limit(batch_size)
+    )
+    items = list((await db.execute(fwd_stmt)).scalars().all())
+
+    if len(items) < batch_size:
+        remaining = batch_size - len(items)
+        wrap_stmt = (
+            select(Media)
+            .where(*filters, text("media.rowid < :anchor").bindparams(anchor=anchor))
+            .order_by(text("media.rowid ASC"))
+            .limit(remaining)
+        )
+        items.extend((await db.execute(wrap_stmt)).scalars().all())
+
+    return items
+
+
 async def _run_health_check_batch():
     """Check a batch of stream URLs for availability (cron job, random sample)."""
     batch_size = settings.HEALTH_CHECK_BATCH_SIZE
@@ -249,21 +306,7 @@ async def _run_health_check_batch():
     )
 
     async with async_session_factory() as db:
-        # Get random batch of streams not checked in 7 days
-        result = await db.execute(
-            select(Media)
-            .where(
-                Media.server_id.like("xtream_%"),
-                Media.type.in_(["movie", "episode"]),
-                or_(
-                    Media.last_stream_check.is_(None),
-                    Media.last_stream_check < cutoff,
-                ),
-            )
-            .order_by(func.random())
-            .limit(batch_size)
-        )
-        items = list(result.scalars().all())
+        items = await _sample_stream_candidates(db, batch_size, cutoff)
 
         if not items:
             logger.info("No streams to check")
@@ -404,10 +447,33 @@ async def _run_pipeline_validation_impl():
         )
         accounts = {acc.id: acc for acc in acc_result.scalars().all()}
 
+        # Detach now: `items`/`accounts` are only ever read from here on
+        # (URL building, concurrency clamp, before/after values) — the actual
+        # writes go through separate `update(Media)` Core statements, never
+        # through these ORM instances. If left attached, a later circuit
+        # breaker trip on one account calls `db.rollback()`, which expires
+        # every instance still tracked by the session (all accounts' and all
+        # remaining items', not just the tripped account's) — and the very
+        # next plain attribute read (e.g. the next account's
+        # `.max_connections`) would then try to lazily refresh from the DB,
+        # which raises `MissingGreenlet` outside an explicit await. Detaching
+        # keeps the already-loaded values usable no matter how many accounts
+        # trip later in this run (CR-F08: rolling re-evaluation makes trips
+        # far more likely than the old one-shot-at-50 check).
+        db.expunge_all()
+
         commit_interval = 200  # Commit and log every N results
         log_interval = 50  # Log progress every N results
-        circuit_breaker_sample = 50  # Check failure rate after N results
-        circuit_breaker_threshold = 0.90  # Abort if > 90% broken
+        # CR-F08: the breaker used to evaluate the failure rate a single time,
+        # at exactly the 50th check — accounts with fewer than 50 streams
+        # never tripped it, and an outage starting *after* the 50th check was
+        # invisible to it. Instead, evaluate on a rolling basis (every check,
+        # once a minimum sample has been gathered) so it reacts to outages at
+        # any point in the run and covers small accounts too, while still
+        # requiring enough samples to avoid over-tripping on a handful of
+        # unlucky checks.
+        circuit_breaker_min_sample = 10  # don't evaluate below this many checks
+        circuit_breaker_threshold = 0.90  # abort if failure rate >= this
         circuit_tripped = False
 
         # Group items by account for per-account circuit breaking
@@ -454,12 +520,11 @@ async def _run_pipeline_validation_impl():
                 diag_reasons[reason] = diag_reasons.get(reason, 0) + 1
                 account_checked += 1
 
-                # Circuit breaker: after N checks, if failure rate > threshold,
-                # the server is likely down — abort this account
-                if (
-                    account_checked == circuit_breaker_sample
-                    and account_checked > 0
-                ):
+                # Circuit breaker: once enough checks have accumulated for this
+                # account, re-evaluate the failure rate after *every* check
+                # (rolling, not a one-shot sample at a fixed count) — the
+                # server is likely down if it stays at/above threshold.
+                if account_checked >= circuit_breaker_min_sample:
                     failure_rate = account_broken / account_checked
                     if failure_rate >= circuit_breaker_threshold:
                         logger.warning(

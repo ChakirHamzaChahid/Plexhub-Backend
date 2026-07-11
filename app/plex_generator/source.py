@@ -12,8 +12,7 @@ from app.plex_generator.models import (
     PlexSeries,
 )
 from app.services.aggregation_service import (
-    aggregate_movies, aggregate_series, canonical_title_year,
-    dedup_labels, version_label,
+    aggregate_movies, aggregate_series, build_versions, canonical_title_year,
 )
 from app.services.stream_service import build_stream_url
 from app.utils.server_id import build_server_id
@@ -58,26 +57,43 @@ class DatabaseSource(MediaSource):
     def _build_versions(self, members, accounts):
         """Turn group member rows into (row, url, unique-label) triples.
 
-        Members are sorted by a STABLE identity (server_id, rating_key) before
-        labelling so `dedup_labels` assigns the same ``#n`` suffix to the same
-        physical version on every run. Otherwise rows arrive in SQLite physical
-        (rowid) order, which shifts whenever a sync/enrichment rewrites rows —
-        flipping a version's label and therefore its .strm filename, which the
-        generator then records as a spurious Moved every generation (the rename
-        oscillation that erodes downstream Jellyfin/Plex metadata)."""
-        raw_labels: list[str] = []
-        pending: list[tuple[Media, str]] = []
-        for row in sorted(members, key=lambda r: (r.server_id or "", r.rating_key or "")):
+        Filters out members whose stream is marked broken (when
+        `settings.STREAM_FILTER_BROKEN` is on) and members whose account can't
+        resolve to a stream URL — so a broken/unreachable source is never
+        published as a playable `.strm` (CR-F10). This filtering happens here,
+        AFTER `aggregate_movies`/`aggregate_series` (`get_movies`/`get_series`
+        below) already grouped on the FULL member set: `is_broken` is
+        intentionally NOT filtered at the row-SELECTION stage anymore, so the
+        generator's dedup grouping (best_row / convergence) now sees the same
+        row predicate as the REST `/unified` endpoints
+        (`media_service.get_unified_list` never excludes broken rows before
+        grouping either) — only which versions get PUBLISHED still differs,
+        by design.
+
+        The remaining sort/label/dedup sequence is delegated to the shared
+        `aggregation_service.build_versions` helper (CR-A07) — see its
+        docstring for why the stable-identity sort must happen before
+        labelling."""
+        resolved: list[tuple[Media, str]] = []
+        for row in members:
+            if settings.STREAM_FILTER_BROKEN and row.is_broken:
+                continue
             account = accounts.get(row.server_id)
             if account is None:
                 continue
             url = build_stream_url(account, row.rating_key)
             if not url:
                 continue
-            raw_labels.append(version_label(row, account.label or account.id))
-            pending.append((row, url))
-        labels = dedup_labels(raw_labels)
-        return [(row, url, label) for (row, url), label in zip(pending, labels)]
+            resolved.append((row, url))
+        url_by_key = {(row.server_id, row.rating_key): url for row, url in resolved}
+        labelled = build_versions(
+            [row for row, _ in resolved],
+            lambda r: accounts[r.server_id].label or accounts[r.server_id].id,
+        )
+        return [
+            (row, url_by_key[(row.server_id, row.rating_key)], label)
+            for row, label in labelled
+        ]
 
     async def get_movies(self) -> list[PlexMovie]:
         async with async_session_factory() as db:
@@ -91,8 +107,13 @@ class DatabaseSource(MediaSource):
                 Media.type == "movie",
                 Media.is_in_allowed_categories == True,  # noqa: E712
             )
-            if settings.STREAM_FILTER_BROKEN:
-                query = query.where(Media.is_broken == False)  # noqa: E712
+            # CR-F10: `is_broken` is intentionally NOT filtered here anymore —
+            # aggregate_movies/_converge below now groups over the SAME row
+            # predicate the REST `/unified` endpoints use (`media_service.
+            # get_unified_list` never excludes broken rows before grouping),
+            # so best_row/convergence agree across both consumers. Broken
+            # members are excluded later, from what gets PUBLISHED, in
+            # `_build_versions` (per-group, post-aggregation).
             # CR-P05 (constrained-by-design): `db.stream(execution_options(yield_per=1000))`
             # already avoids buffering the whole driver-side result set at once
             # (server-side cursor, batched fetch) — that part IS the streaming
@@ -171,8 +192,9 @@ class DatabaseSource(MediaSource):
                 Media.server_id.in_(server_ids),
                 Media.type == "episode",
             )
-            if settings.STREAM_FILTER_BROKEN:
-                ep_query = ep_query.where(Media.is_broken == False)  # noqa: E712
+            # CR-F10: see get_movies — is_broken filtering moved to
+            # `_build_versions` (post-aggregation) so episode-slot grouping
+            # also matches the REST API's row predicate.
             ep_stream = await db.stream(ep_query.execution_options(yield_per=1000))
             episodes = [e async for e in ep_stream.scalars()]
 

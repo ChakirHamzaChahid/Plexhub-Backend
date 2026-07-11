@@ -17,6 +17,7 @@ from app.services.category_service import (
     bulk_update_categories,
 )
 from app.services.xtream_service import xtream_service
+from app.utils.db_retry import commit_with_retry
 
 logger = logging.getLogger("plexhub.api.categories")
 router = APIRouter(prefix="/accounts", tags=["categories"])
@@ -146,7 +147,9 @@ async def refresh_categories(
                 is_allowed=True,
             )
 
-        await db.commit()
+        # CR-C04: retry on "database is locked" — refresh can race a
+        # concurrent sync/validation cycle holding the single WAL writer.
+        await commit_with_retry(db)
 
         total_count = len(vod_categories) + len(series_categories)
         logger.info(f"Refreshed {total_count} categories for account {account_id}")

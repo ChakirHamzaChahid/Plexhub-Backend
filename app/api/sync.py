@@ -1,14 +1,24 @@
 import logging
 
 from fastapi import APIRouter, HTTPException
-from app.models.schemas import SyncRequest, SyncStatusResponse
+from app.models.schemas import (
+    SyncRequest,
+    SyncStatusResponse,
+    JobIdResponse,
+    MessageResponse,
+    SyncJobResponse,
+    SyncJobListResponse,
+)
 from app.utils.tasks import create_background_task, cancel_task_by_name
 
 logger = logging.getLogger("plexhub.api.sync")
 router = APIRouter(prefix="/sync", tags=["sync"])
 
 
-@router.post("/xtream", status_code=202)
+@router.post(
+    "/xtream", status_code=202,
+    response_model=JobIdResponse, response_model_by_alias=True,
+)
 async def trigger_sync(body: SyncRequest):
     """Trigger sync for a specific account."""
     from app.workers.sync_worker import sync_account
@@ -17,47 +27,62 @@ async def trigger_sync(body: SyncRequest):
         sync_account(body.account_id), name=f"sync_{body.account_id}"
     )
     job_id = f"sync_{body.account_id}_{id(task)}"
-    return {"jobId": job_id}
+    return JobIdResponse(job_id=job_id)
 
 
-@router.post("/xtream/all", status_code=202)
+@router.post(
+    "/xtream/all", status_code=202,
+    response_model=JobIdResponse, response_model_by_alias=True,
+)
 async def trigger_sync_all():
     """Trigger sync for all active accounts."""
     from app.workers.sync_worker import run_all_accounts
 
     task = create_background_task(run_all_accounts(), name="sync_all")
     job_id = f"sync_all_{id(task)}"
-    return {"jobId": job_id}
+    return JobIdResponse(job_id=job_id)
 
 
-@router.delete("/cancel/{task_name}", status_code=200)
+@router.delete(
+    "/cancel/{task_name}", status_code=200,
+    response_model=MessageResponse, response_model_by_alias=True,
+)
 async def cancel_sync(task_name: str):
     """Cancel a running sync task by name (e.g., 'sync_abc123' or 'sync_all')."""
     cancelled = cancel_task_by_name(task_name)
     if not cancelled:
         raise HTTPException(404, f"No running task named '{task_name}'")
-    return {"message": f"Task '{task_name}' cancelled"}
+    return MessageResponse(message=f"Task '{task_name}' cancelled")
 
 
-@router.post("/enrichment", status_code=202)
+@router.post(
+    "/enrichment", status_code=202,
+    response_model=JobIdResponse, response_model_by_alias=True,
+)
 async def trigger_enrichment():
     """Trigger TMDB enrichment manually."""
     from app.workers.enrichment_worker import run
 
     task = create_background_task(run(), name="enrichment_manual")
-    return {"jobId": f"enrichment_{id(task)}"}
+    return JobIdResponse(job_id=f"enrichment_{id(task)}")
 
 
-@router.post("/validate-streams", status_code=202)
+@router.post(
+    "/validate-streams", status_code=202,
+    response_model=JobIdResponse, response_model_by_alias=True,
+)
 async def trigger_stream_validation():
     """Trigger stream validation manually (checks unchecked/stale streams)."""
     from app.workers.health_check_worker import run_pipeline_validation
 
     task = create_background_task(run_pipeline_validation(), name="stream_validation")
-    return {"jobId": f"validation_{id(task)}"}
+    return JobIdResponse(job_id=f"validation_{id(task)}")
 
 
-@router.post("/full-pipeline", status_code=202)
+@router.post(
+    "/full-pipeline", status_code=202,
+    response_model=JobIdResponse, response_model_by_alias=True,
+)
 async def trigger_full_pipeline():
     """Trigger the full pipeline: sync -> enrichment -> validation -> Plex generation."""
     from app.workers.sync_worker import run_all_accounts
@@ -76,7 +101,7 @@ async def trigger_full_pipeline():
         logger.info("Full pipeline: complete")
 
     task = create_background_task(_full_pipeline(), name="full_pipeline")
-    return {"jobId": f"pipeline_{id(task)}"}
+    return JobIdResponse(job_id=f"pipeline_{id(task)}")
 
 
 @router.get("/status/{job_id}", response_model=SyncStatusResponse)
@@ -89,8 +114,9 @@ async def get_sync_status(job_id: str):
     return SyncStatusResponse(status=job.get("status", "unknown"))
 
 
-@router.get("/jobs")
+@router.get("/jobs", response_model=SyncJobListResponse, response_model_by_alias=True)
 async def list_sync_jobs():
     """List all recent sync jobs with their status."""
     from app.workers.sync_worker import get_all_sync_jobs
-    return {"jobs": get_all_sync_jobs()}
+    jobs = get_all_sync_jobs()
+    return SyncJobListResponse(jobs=[SyncJobResponse(**j) for j in jobs])

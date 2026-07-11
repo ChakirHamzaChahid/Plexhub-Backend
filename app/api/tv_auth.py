@@ -168,7 +168,11 @@ async def _expire_if_needed(db: AsyncSession, session: TvAuthSession) -> bool:
         return False
     session.status = STATUS_EXPIRED
     session.payload_encrypted = None  # never deliver a stale payload
-    await db.commit()
+    # CR-C04: this lazy expiry write can race a long-running sync/validation
+    # holding the single WAL writer — retry on "database is locked" like the
+    # workers do, instead of surfacing a raw 500 to every caller (approve/
+    # status/complete all funnel through this helper).
+    await commit_with_retry(db)
     return True
 
 
@@ -218,7 +222,10 @@ async def start(
         )
         db.add(candidate)
         try:
-            await db.commit()
+            # CR-C04: retry on lock contention; IntegrityError (user_code
+            # collision) is a different exception and still falls through to
+            # the except clause below unchanged.
+            await commit_with_retry(db)
             session = candidate
             break
         except IntegrityError:
@@ -284,7 +291,7 @@ async def approve(
     session.payload_encrypted = encrypt_payload(body.payload)
     session.status = STATUS_APPROVED
     session.approved_at = _now_ms()
-    await db.commit()
+    await commit_with_retry(db)  # CR-C04: lock-retry on the request path
 
     logger.info("tv-auth session %s approved", session.id)
     return ApproveResponse(status=STATUS_APPROVED)
@@ -401,7 +408,7 @@ async def complete(
     session.status = STATUS_COMPLETED
     session.completed_at = _now_ms()
     session.payload_encrypted = None  # scrub the sensitive blob at rest
-    await db.commit()
+    await commit_with_retry(db)  # CR-C04: lock-retry on the request path
 
     logger.info("tv-auth session %s completed", session.id)
     return CompleteResponse(status=STATUS_COMPLETED)

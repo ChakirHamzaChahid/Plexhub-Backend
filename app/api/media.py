@@ -17,7 +17,7 @@ from app.models.schemas import (
     apply_adult_prefix,
 )
 from app.services.aggregation_service import (
-    canonical_title_year, dedup_labels, version_label,
+    build_versions, canonical_title_year,
 )
 from app.services.media_service import media_service
 
@@ -29,19 +29,17 @@ def _build_versions(
 ) -> list[MediaVersionResponse]:
     """Turn group member rows into unique-labelled version entries.
 
-    Members are sorted by a STABLE identity (server_id, rating_key) first so the
-    ``#n`` collision suffix from `dedup_labels` always lands on the same physical
-    version, regardless of DB row order — matching the generator's
-    `DatabaseSource._build_versions` so the API and the on-disk library label
-    versions identically and deterministically."""
-    members = sorted(members, key=lambda m: (m.server_id or "", m.rating_key or ""))
-    raw = [version_label(m, labels.get(m.server_id, m.server_id)) for m in members]
+    CR-A07: delegates the sort/label/dedup sequence to the shared
+    `aggregation_service.build_versions` helper so the API and the on-disk
+    library (`DatabaseSource._build_versions`) label versions identically and
+    deterministically — see that helper's docstring for why the stable-identity
+    sort must happen before labelling."""
     return [
         MediaVersionResponse(
             server_id=m.server_id, rating_key=m.rating_key,
             title=m.title, label=label, is_broken=m.is_broken,
         )
-        for m, label in zip(members, dedup_labels(raw))
+        for m, label in build_versions(members, lambda m: labels.get(m.server_id, m.server_id))
     ]
 
 

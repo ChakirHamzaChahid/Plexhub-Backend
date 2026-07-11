@@ -82,3 +82,41 @@ async def test_refresh_categories_unknown_account_returns_404(api_client, seeded
         "/api/accounts/does-not-exist/categories/refresh", headers=API_HEADERS,
     )
     assert resp.status_code == 404
+
+
+async def test_refresh_categories_commits_via_retry_helper(
+    monkeypatch, api_client, seeded_account,
+):
+    """CR-C04: the refresh endpoint's write must go through commit_with_retry
+    (lock-retry) instead of a bare db.commit(), same as the workers, so a
+    transient 'database is locked' during a concurrent sync/validation is
+    retried instead of surfacing as a raw 500. Wraps (doesn't replace) the
+    real helper, so behavior is unchanged — only observed via the counter.
+    """
+
+    async def _fake_vod_categories(*args, **kwargs):
+        return [{"category_id": "1", "category_name": "Action"}]
+
+    async def _fake_series_categories(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(xtream_service, "get_vod_categories", _fake_vod_categories)
+    monkeypatch.setattr(xtream_service, "get_series_categories", _fake_series_categories)
+
+    import app.api.categories as categories_module
+
+    calls = {"n": 0}
+    real_commit_with_retry = categories_module.commit_with_retry
+
+    async def _spy(db, **kwargs):
+        calls["n"] += 1
+        return await real_commit_with_retry(db, **kwargs)
+
+    monkeypatch.setattr(categories_module, "commit_with_retry", _spy)
+
+    resp = await api_client.post(
+        "/api/accounts/a/categories/refresh", headers=API_HEADERS,
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert calls["n"] == 1  # the write committed through the lock-retry helper

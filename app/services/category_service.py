@@ -8,6 +8,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.models.database import XtreamCategory, XtreamAccount, Media, LiveChannel
+from app.utils.db_retry import commit_with_retry
 from app.utils.server_id import build_server_id
 
 logger = logging.getLogger(__name__)
@@ -231,7 +232,9 @@ async def bulk_update_categories(
                 )
             )
         result = await db.execute(base_stmt)
-        await db.commit()
+        # CR-C04: retry on "database is locked" — bulk category writes can
+        # race a concurrent sync/validation cycle holding the WAL writer.
+        await commit_with_retry(db)
         logger.info(
             f"Set {result.rowcount} unlisted categories to is_allowed={default_allowed} "
             f"(filter_mode={filter_mode})"
@@ -282,7 +285,8 @@ async def update_media_category_visibility(
             .where(LiveChannel.server_id == server_id)
             .values(is_in_allowed_categories=True)
         )
-        await db.commit()
+        # CR-C04: retry on "database is locked" — request-path write.
+        await commit_with_retry(db)
         logger.info(f"Visibility update [{account_id}]: mode=all, all media + live channels set to visible")
         return
 
@@ -396,7 +400,8 @@ async def update_media_category_visibility(
                 .values(is_in_allowed_categories=True)
             )
 
-    await db.commit()
+    # CR-C04: retry on "database is locked" — request-path write.
+    await commit_with_retry(db)
 
     logger.info(
         f"Visibility update [{account_id}]: mode={filter_mode}, "

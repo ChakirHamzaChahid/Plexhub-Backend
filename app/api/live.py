@@ -17,6 +17,7 @@ from app.models.schemas import (
     StreamResponse,
 )
 from app.services.xtream_service import xtream_service
+from app.utils.db_retry import commit_with_retry
 
 logger = logging.getLogger("plexhub.live")
 
@@ -249,7 +250,10 @@ async def get_channel_epg(
         new_entries.append(entry)
 
     if new_entries:
-        await db.commit()  # Persist EPG entries (no per-entry refresh needed)
+        # CR-C04: this write can race a long-running sync/validation holding
+        # the single WAL writer — retry on "database is locked" instead of
+        # surfacing a raw 500 to the client (no per-entry refresh needed).
+        await commit_with_retry(db)  # Persist EPG entries
 
     return EpgListResponse(
         items=[EpgEntryResponse.model_validate(e) for e in new_entries],

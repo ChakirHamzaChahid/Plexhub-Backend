@@ -10,6 +10,7 @@ Pure functions on `Media` rows — no DB, no I/O — so they're trivially testab
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Callable
 
 from app.models.database import Media
 from app.utils.string_normalizer import parse_title_year_and_suffix
@@ -76,6 +77,40 @@ def dedup_labels(labels: list[str]) -> list[str]:
         seen[label] = n
         out.append(label if n == 1 else f"{label} #{n}")
     return out
+
+
+def build_versions(
+    members: list[Media],
+    label_for: Callable[[Media], str],
+) -> list[tuple[Media, str]]:
+    """Sort members by stable identity, label each, then dedup-suffix collisions.
+
+    CR-A07: this is the determinism-critical sequence that USED to be
+    copy-pasted between the REST `/unified` endpoints (`api/media.py`) and the
+    Plex/Jellyfin generator (`plex_generator/source.py.DatabaseSource`), with
+    in-code comments in both requiring them to stay byte-identical. It now
+    lives here ONCE, and both callers delegate to it.
+
+    Members are sorted by ``(server_id, rating_key)`` BEFORE labelling so
+    `dedup_labels`' ``#n`` collision suffix always lands on the same physical
+    version regardless of DB row order — otherwise a version's label (and
+    therefore its `.strm` filename in the generator) could flip between runs
+    whenever a sync/enrichment pass rewrites rows in a different physical
+    order.
+
+    `label_for(row)` resolves the account-level label component for a member
+    row — a `server_id -> label` dict lookup for the API, an `XtreamAccount`
+    attribute for the generator. Callers differ only in that lookup and in
+    what output type they map the returned ``(row, label)`` pairs to
+    (`MediaVersionResponse` vs a stream-URL triple); they may also filter
+    `members` differently before/after calling this (e.g. the generator drops
+    unresolvable/broken sources) — but the sort/label/dedup sequence itself
+    must stay identical, and this function is the single source of truth for
+    it.
+    """
+    ordered = sorted(members, key=lambda m: (m.server_id or "", m.rating_key or ""))
+    raw_labels = [version_label(m, label_for(m)) for m in ordered]
+    return list(zip(ordered, dedup_labels(raw_labels)))
 
 
 @dataclass

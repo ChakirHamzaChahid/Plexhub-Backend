@@ -119,7 +119,7 @@ commit-vs-flush convention in the accounts/categories routers.
 
 ---
 
-### CR-C05 — Schema truth duplicated between ORM model and migrations (P2)
+### CR-C05 — Schema truth duplicated between ORM model and migrations (P2) — **RÉSOLU 2026-07-11**
 
 **Where:** `Base.metadata.create_all` (`app/db/database.py:92`) builds the full ORM schema first, including
 columns declared in `app/models/database.py` — `is_adult:102`, `is_in_allowed_categories:101`,
@@ -139,6 +139,23 @@ hand.
 **Fix direction:** Pick one source of truth. Either keep additive columns out of the ORM model and let
 migrations own them, or (simpler) probe `PRAGMA table_info(media)` before `ADD COLUMN` so the idempotency is
 an explicit no-op instead of an exception-swallow, and downgrade the "already exists" log to DEBUG.
+
+**Résolution (2026-07-11) :** ajout d'un helper `_column_exists(conn, table, column)` (`app/db/migrations.py:49`,
+`PRAGMA table_info`) sondé **avant** chaque `ALTER TABLE … ADD COLUMN` — migrations 002 (`category_filter_mode`),
+003 (`is_in_allowed_categories`), 004 (`existing_tmdb_id`/`existing_imdb_id`), 005 (`cast`), 010
+(`existing_summary`), 013 (`is_adult`) et 014 (13 colonnes NFO). Sur une DB fraîche (colonnes déjà créées par
+`create_all`), la colonne est détectée présente → **aucun** `ALTER` tenté, **aucun** WARNING ; sur une DB
+existante (colonne manquante), l'`ADD COLUMN` s'exécute normalement. Le `try/except` autour de l'`ALTER` est
+conservé comme filet de sécurité (course possible avec un autre process — `init_db()` tourne dans chaque
+worker, cf. CLAUDE.md piège 7), mais ne se déclenche plus jamais dans le cas nominal. Les `CREATE INDEX IF NOT
+EXISTS` associés (003/013) sont désormais exécutés inconditionnellement (déjà silencieusement idempotents,
+ne changent pas le schéma final). **Preuve** : script one-shot chargeant l'ancien (`git show HEAD:…`) vs le
+nouveau `migrations.py` sur une DB fraîche identique → ancien = **20** WARNINGs `duplicate column name`,
+nouveau = **0** (fail-pre/pass-post confirmé). Test de garde :
+`tests/test_migrations_no_duplicate_warning.py` (4 tests : chaîne complète silencieuse sur DB fraîche,
+re-run idempotent toujours silencieux, helper `_column_exists` correct, chaque migration formerly-noisy
+prend le court-circuit). Schéma final **inchangé** (mêmes colonnes/index, DB fraîche ⇆ DB migrée convergent
+toujours) — uniquement la façon dont l'idempotence est sondée/loggée a changé, conformément au fix direction.
 
 ---
 
@@ -205,15 +222,18 @@ new constant name; drop the stray `@pytest.mark.asyncio` from the sync tests.
 
 ---
 
-### CR-C10 — Ad-hoc anonymous attribute-bags for auth + migration-008 out-of-file-order definition (debt)
+### CR-C10 — Ad-hoc anonymous attribute-bags for auth + migration-008 out-of-file-order definition (debt) — **migration-008 half RÉSOLU 2026-07-11**
 
 **Where:**
 - `app/api/accounts.py:50-56` builds a throwaway `class TempAccount: pass` then bolts on
   `.base_url/.port/.username/.password` to pass to `xtream_service.authenticate`; `app/main.py:143-150`
   duplicates the exact same pattern with `class _Acc:`. Both stand in for a typed account object.
-- `_migration_008_ai_embeddings` is **defined** at the bottom of `app/db/migrations.py:467`, ~200 lines
+  **Still open** — out of scope for the migration-focused fix below (separate `TempAccount`/`_Acc` dedup
+  concern, cf. task scoping).
+- ~~`_migration_008_ai_embeddings` is **defined** at the bottom of `app/db/migrations.py:467`, ~200 lines
   after `_migration_014`, while being **executed** mid-chain (`migrations.py:28-29`) on a dedicated
-  connection. A maintainer reading top-to-bottom sees the chain jump 007 → 009 with 008 far below 014.
+  connection. A maintainer reading top-to-bottom sees the chain jump 007 → 009 with 008 far below 014.~~
+  **Fixed** — see résolution below.
 
 **What:** Untyped dynamic attribute bags defeat the "type hints at boundaries" intent and duplicate a shape
 that a small `@dataclass` (or a Pydantic `AuthTarget`) would express once. The migration definition ordering
@@ -221,6 +241,21 @@ is a readability trap (execution order is correct; file order is not).
 
 **Fix direction:** Extract a tiny typed `XtreamCredentials` dataclass shared by both call sites; move the
 `_migration_008` definition up between 007 and 009 (keep its dedicated-connection execution).
+
+**Résolution (2026-07-11, migration-008 half only) :** `_migration_008_ai_embeddings`'s **definition** moved
+from the tail of `app/db/migrations.py` to its numeric position, right between `_migration_007_add_stream_validation_index`
+and `_migration_009_create_tv_auth_sessions`. This is a pure textual move — Python resolves function names at
+call time, and every `_migration_*` function is already defined by the time `run_migrations()` runs, so the
+**execution order in `run_migrations()` is byte-identical** (008 still runs on its own dedicated
+`engine.begin()` connection, at the same point in the call sequence, right after 007's `await` and before
+009's). A clarifying comment was added at both the definition (why it takes a raw `conn` instead of an
+`AsyncEngine`, and why it needs sqlite-vec loaded on that connection) and the call site in `run_migrations()`
+(why it's on its own transaction block instead of joining the `await _migration_NNN(engine)` list). Verified:
+all migration-008-dependent tests (`test_ai_migration.py`, `test_ai_rank*.py`, `test_ai_jobs.py`,
+`test_ai_explain.py`, `test_ai_blurb.py`, `test_ai_search.py`, `test_ai_503_detail.py`, `test_ai_status.py`,
+`test_ai_assistant.py`, `test_subtitle_translate.py`, `conftest_ai.py`) still import
+`_migration_008_ai_embeddings` and pass unchanged (import is by name, not by file position).
+**The `TempAccount`/`_Acc` dedup half of this finding remains open** (explicitly out of scope here).
 
 ---
 

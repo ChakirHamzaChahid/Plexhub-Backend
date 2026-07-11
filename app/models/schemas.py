@@ -327,6 +327,56 @@ class SyncStatusResponse(BaseModel):
     progress: Optional[dict] = None
 
 
+class JobIdResponse(BaseModel):
+    """Returned by fire-and-forget sync/enrichment/validation/pipeline triggers.
+
+    CR-C03: these endpoints used to return a raw ``{"jobId": ...}`` dict (no
+    ``response_model`` — missing from the OpenAPI schema). Wire shape is
+    unchanged (``jobId`` was already camelCase).
+    """
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    job_id: str
+
+
+class MessageResponse(BaseModel):
+    """Simple ``{"message": ...}`` acknowledgement (e.g. task cancellation).
+
+    CR-C03: wire shape unchanged (single-word key — no camelCase transform).
+    """
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    message: str
+
+
+class SyncJobResponse(BaseModel):
+    """One tracked sync job entry from the in-memory job tracker
+    (``sync_worker.get_all_sync_jobs``).
+
+    ``progress`` intentionally stays an opaque dict: its shape genuinely
+    varies by job state (``{}`` while processing, ``{"total":.., "synced":..}``
+    on success, ``{"error": ...}`` on failure) — same pattern already used by
+    ``SyncStatusResponse.progress`` above.
+    """
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    job_id: str
+    status: str
+    progress: Optional[dict] = None
+
+
+class SyncJobListResponse(BaseModel):
+    """CR-C03: GET /api/sync/jobs used to return a raw ``{"jobs": [...]}``
+    dict, each entry a snake_case dict (``job_id``/``status``/``progress``).
+    Now typed. Wire change: each job entry's ``job_id`` key becomes
+    ``jobId`` (camelCase) — ``status``/``progress`` are unchanged (already
+    single-word).
+    """
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    jobs: list[SyncJobResponse]
+
+
 # --- Category Schemas ---
 
 class CategoryResponse(BaseModel):

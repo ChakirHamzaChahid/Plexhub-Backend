@@ -95,6 +95,21 @@ async def _start(client: AsyncClient, device_name: str = "Mi Box S test") -> dic
     return resp.json()
 
 
+async def _spy_commit_with_retry(monkeypatch, calls: dict) -> None:
+    """Wrap app.api.tv_auth.commit_with_retry with a call-counting passthrough
+    (still delegates to the real helper, so retry/commit semantics are
+    unchanged — only observed)."""
+    import app.api.tv_auth as tv_auth_module
+
+    real = tv_auth_module.commit_with_retry
+
+    async def _spy(db, **kwargs):
+        calls["n"] += 1
+        return await real(db, **kwargs)
+
+    monkeypatch.setattr(tv_auth_module, "commit_with_retry", _spy)
+
+
 async def _force_expire(tv_factory, device_code: str) -> None:
     """Rewind expires_at into the past for a given session."""
     async with tv_factory() as s:
@@ -405,6 +420,38 @@ async def test_approve_twice_conflict(tv_client):
     assert first.status_code == 200
     second = await tv_client.post("/api/tv-auth/approve", json=body, headers=AUTH)
     assert second.status_code == 409
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CR-C04: request-path writes commit via commit_with_retry (lock-retry)
+# ──────────────────────────────────────────────────────────────────────────────
+
+async def test_approve_and_complete_commit_via_retry_helper(tv_client, monkeypatch):
+    """CR-C04: /approve and /complete must commit through commit_with_retry
+    (not a bare db.commit()), same as the workers, so a transient 'database
+    is locked' during a concurrent sync/validation is retried instead of
+    surfacing as a raw 500. Wraps (doesn't replace) the real helper, so
+    behavior is unchanged — only observed via the call counter."""
+    calls = {"n": 0}
+    await _spy_commit_with_retry(monkeypatch, calls)
+
+    started = await _start(tv_client)  # also goes through commit_with_retry
+
+    before_approve = calls["n"]
+    approve_resp = await tv_client.post(
+        "/api/tv-auth/approve",
+        json={"userCode": started["userCode"], "payload": PAYLOAD},
+        headers=AUTH,
+    )
+    assert approve_resp.status_code == 200, approve_resp.text
+    assert calls["n"] > before_approve
+
+    before_complete = calls["n"]
+    complete_resp = await tv_client.post(
+        "/api/tv-auth/complete", json={"deviceCode": started["deviceCode"]}
+    )
+    assert complete_resp.status_code == 200, complete_resp.text
+    assert calls["n"] > before_complete
 
 
 # ──────────────────────────────────────────────────────────────────────────────

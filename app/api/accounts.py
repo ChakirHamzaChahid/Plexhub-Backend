@@ -15,6 +15,7 @@ from app.models.schemas import (
     AccountTestResponse,
 )
 from app.services.xtream_service import xtream_service
+from app.utils.db_retry import commit_with_retry
 from app.utils.tasks import create_background_task
 from app.utils.time import now_ms
 
@@ -85,7 +86,9 @@ async def create_account(
     )
 
     db.add(account)
-    await db.commit()
+    # CR-C04: retry on "database is locked" — a sync/validation cycle can be
+    # holding the single WAL writer when a new account is created.
+    await commit_with_retry(db)
 
     # Trigger initial sync in background (after commit so the task can find the account)
     from app.workers.sync_worker import sync_account
@@ -118,7 +121,12 @@ async def update_account(
     result = await db.execute(
         select(XtreamAccount).where(XtreamAccount.id == account_id)
     )
-    return result.scalars().first()
+    updated = result.scalars().first()
+    # CR-C04: this endpoint previously relied on get_db's implicit commit on
+    # successful return (db/database.py get_db), which is NOT retried. Commit
+    # explicitly here so the write gets the same lock-retry as the workers.
+    await commit_with_retry(db)
+    return updated
 
 
 @router.delete("/{account_id}", status_code=204)
@@ -153,6 +161,10 @@ async def delete_account(
     await db.execute(
         delete(XtreamAccount).where(XtreamAccount.id == account_id)
     )
+    # CR-C04: this endpoint previously relied on get_db's implicit commit on
+    # successful return (db/database.py get_db), which is NOT retried. This
+    # is a multi-table cascade delete — commit explicitly with lock-retry.
+    await commit_with_retry(db)
 
 
 @router.post("/{account_id}/test", response_model=AccountTestResponse)

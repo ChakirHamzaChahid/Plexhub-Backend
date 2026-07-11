@@ -69,7 +69,18 @@ empirically · **56 findings** across 6 dimensions (**1 P0, 17 P1, 26 P2, 12 deb
 
 **Résiduels perf (dans `api/media.py`, non traités) :** CR-P04 (deep OFFSET → keyset = changement de contrat), CR-P07 (double-passe Pydantic grande page).
 
-**Follow-ups noted (not yet done):** CR-P01 full SQL-side pagination redesign · `/api/plex/generate` behind `verify_master_key` (defense-in-depth, security-review note) · CR-F01/F03/F05–F11 · CR-S02/S04/S05/S07/S08 · CR-A0x · CR-C03/C04/C05/C07–C10 · CR-P03–P08 · CR-T03–T09/T11.
+**Vague C1 — RESOLVED** (`/refacto` contenu ; full suite `601 passed`, ruff vert, code-review APPROVED) :
+
+| ID | Sev | Fix | Note |
+|---|:--:|---|---|
+| CR-C03 | P2 | 7 endpoints `sync.py` typés (`JobIdResponse`/`MessageResponse`/`SyncJobResponse`/`SyncJobListResponse`) | ⚠️ `GET /sync/jobs` : `job_id`→`jobId` (endpoint ops). `media.py:353` = résidu. |
+| CR-C04 | P2 | `commit_with_retry` sur ~13 writes du chemin requête (tv-auth/live/accounts/categories + service) | Sémantique inchangée (retry lock only). |
+| CR-C05 | P2 | Probe `_column_exists` avant `ADD COLUMN` → 0 warning duplicate-column (contre 20) | — |
+| CR-C10 *(migration)* | debt | `_migration_008` remis à sa position numérique (ordre d'exécution inchangé) | Dédup `TempAccount`/`_Acc` = reste à faire. |
+| CR-A07 | debt | `build_versions` unifié dans `aggregation_service` (media + generator) | — |
+| CR-F10 | debt | Filtre `is_broken` déplacé **après** l'agrégation (générateur groupe comme l'API ; seules versions saines publiées) | ⚠️ 1ʳᵉ génération après ce commit : re-pick possible du `best_row` → renommage dossier/NFO one-shot. |
+
+**Follow-ups noted (not yet done):** CR-P01 full SQL-side pagination redesign · `/api/plex/generate` behind `verify_master_key` (defense-in-depth) · CR-S02/S04/S05/S07/S08 (sécurité) · **CR-A01/A02/A03/A04/A05/A06 (refacto structurel lourd — god-files, orchestration, main)** · CR-C10 (dédup TempAccount/_Acc) · CR-P04/P07 (api/media.py) · CR-T03–T09.
 
 ---
 
@@ -113,7 +124,9 @@ Severity mix: **1 P0 · 17 P1 · 26 P2 · 12 debt** (56 total). Benchmark & meth
 - **Heavy work on the event loop** — `CR-P01` (perf) + `CR-C01` (conventions) hit the same root from two lanes:
   the unified-browse and library-generation paths do Python-side aggregation / fsync I/O on the loop.
 - **Schema truth duplicated ORM↔migrations** — `CR-P02` (missing indexes on upgraded DBs, **RÉSOLU 2026-07-11** via migration 015) + `CR-C05`
-  (duplicate-column warnings on fresh boot) are two symptoms of the same duplication (also seen live in the benchmark).
+  (duplicate-column warnings on fresh boot, **RÉSOLU 2026-07-11** via `_column_exists` probing) are two symptoms of the same
+  duplication (also seen live in the benchmark) — both now converge create_all (fresh DB) and the migration chain (upgraded DB)
+  on the identical schema without noise.
 - **The auth model is right but unguarded by tests** — Security confirmed fail-closed & constant-time
   (eliminating the old auth-bypass P0 class), while Tests found **zero** rejection tests protecting it
   (`CR-T02`) and the `outputDir` FS-write path untested (`CR-S01` + `CR-T07`).
@@ -145,7 +158,11 @@ Severity mix: **1 P0 · 17 P1 · 26 P2 · 12 debt** (56 total). Benchmark & meth
 ### Batch 4 — Tooling & debt (foundation for everything above)
 - **CR-C06 / CR-T09 / CR-T10** — wire **ruff + black + mypy + pytest-cov** and a coverage gate; run CI on **`develop`** (not just `main`).
 - **CR-A01/A02/A03/A05** — extract router business logic into services, unify the triplicated Plex-gen orchestration, break up the god-files.
-- **CR-C05/C07/C08/C09/C10, CR-P07/P08, CR-F10, CR-T11** — schema-dedup, dead code, deprecated `HTTP_422`, misc.
+- ~~**CR-C05**~~ (**RÉSOLU 2026-07-11** — `_column_exists` probe before every `ADD COLUMN`; 0 duplicate-column
+  warnings on fresh boot, proof in `tests/test_migrations_no_duplicate_warning.py`) · ~~**CR-C10** (migration-008
+  ordering half)~~ (**RÉSOLU 2026-07-11** — definition moved to its numeric position, execution order unchanged;
+  `TempAccount`/`_Acc` dedup half still open) · **CR-C07/C08/C09, CR-P07/P08, CR-F10, CR-T11** — remaining
+  dead code, deprecated `HTTP_422`, misc.
 
 ---
 

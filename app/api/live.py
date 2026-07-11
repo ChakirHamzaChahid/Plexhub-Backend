@@ -66,8 +66,15 @@ async def list_channels(
         safe_search = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         query = query.where(LiveChannel.name.ilike(f"%{safe_search}%", escape="\\"))
 
-    # Count
-    count_query = select(func.count()).select_from(query.subquery())
+    # Count.
+    # CR-P03: narrow func.count() over the base table with the SAME filters,
+    # instead of wrapping a `SELECT *` subquery — avoids materializing every
+    # matched channel's columns just to count them (still a full scan because
+    # of the leading-wildcard ILIKE search — see CR-P03 residual note, an
+    # FTS5/trigram index would be the real fix).
+    count_query = select(func.count()).select_from(LiveChannel)
+    if query.whereclause is not None:
+        count_query = count_query.where(query.whereclause)
     total = (await db.execute(count_query)).scalar() or 0
 
     # Sort

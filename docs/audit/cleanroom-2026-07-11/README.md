@@ -57,6 +57,18 @@ empirically · **56 findings** across 6 dimensions (**1 P0, 17 P1, 26 P2, 12 deb
 | CR-F09 | P2 | Convergence Passe B déterministe (`min(_key_rank)`) | — |
 | CR-T05 | P2 | 20 tests health-check (breaker + `_check_one` + sampling) | — |
 
+**Vague B — RESOLVED** (`/incident` perf ; full suite `585 passed`, ruff vert, code-review APPROVED) :
+
+| ID | Sev | Fix | Note |
+|---|:--:|---|---|
+| CR-P01 *(résidu)* | P0 | Cache TTL (45 s, cap 12) du groupement unifié, invalidé par empreinte `COUNT+MAX(updated_at)` | Le stall event-loop était déjà réglé (offload). Reste résiduel : windowing SQL vrai + writes enrichment/is_broken sans bump `updated_at` (staleness ≤ TTL). |
+| CR-F05 | P2 | `get_unified_group` charge un pool de candidats borné + `_converge` → renvoie toutes les versions convergées | Garde homonyme intacte. |
+| CR-P03 | P1 | COUNT via `select(func.count()).select_from(...)` (fini le COUNT sur sous-requête `SELECT *`) (media + live) | ILIKE leading-wildcard = résidu (FTS). |
+| CR-P05 | P2 | `run_pipeline_validation` streame **par compte** (`yield_per`) | `source.py` : matérialisation by-design (groupement whole-set), documentée. |
+| CR-P08 | debt | Over-fetch KNN escaladé 200→2000 (≤2 requêtes) robuste au skew de type | Résidu : skew extrême > 2000. |
+
+**Résiduels perf (dans `api/media.py`, non traités) :** CR-P04 (deep OFFSET → keyset = changement de contrat), CR-P07 (double-passe Pydantic grande page).
+
 **Follow-ups noted (not yet done):** CR-P01 full SQL-side pagination redesign · `/api/plex/generate` behind `verify_master_key` (defense-in-depth, security-review note) · CR-F01/F03/F05–F11 · CR-S02/S04/S05/S07/S08 · CR-A0x · CR-C03/C04/C05/C07–C10 · CR-P03–P08 · CR-T03–T09/T11.
 
 ---

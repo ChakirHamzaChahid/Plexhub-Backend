@@ -10,6 +10,7 @@ Two things are asserted per aggregation path (movies list, unified episodes):
 import threading
 
 import pytest
+from sqlalchemy.ext.asyncio import create_async_engine
 
 import app.services.media_service as media_service_module
 from app.models.database import Media, XtreamAccount
@@ -175,3 +176,179 @@ class TestUnifiedEpisodesOffload:
         assert seen["thread_id"] != caller_thread_id, (
             "aggregation ran on the event-loop thread — CR-P01 offload not engaged"
         )
+
+
+# ─── CR-P01 residual: short-TTL cache of the grouped result ────────────────
+
+
+class TestUnifiedGroupsCache:
+    """Guard tests for the CR-P01 residual mitigation: get_unified_list caches
+    the expensive SORTED GROUPS list (keyed by filter tuple + freshness
+    fingerprint), so repeated pages / calls with the same filters reuse one
+    load+aggregate instead of redoing it per request."""
+
+    @pytest.mark.asyncio
+    async def test_same_filters_hit_cache_aggregate_called_once(
+        self, db_session, monkeypatch,
+    ):
+        """Two calls with identical filters (different offset/limit) must
+        only aggregate once — the second is served from the cache — and
+        pagination sliced from the cache must still be correct."""
+        from app.services.media_service import media_service
+
+        db_session.add_all([
+            _account("a", "Compte 1"),
+            _movie("a", "vod_1.mp4", "Movie One", "tmdb://1", added_at=100, page_offset=0),
+            _movie("a", "vod_2.mp4", "Movie Two", "tmdb://2", added_at=300, page_offset=1),
+            _movie("a", "vod_3.mp4", "Movie Three", "tmdb://3", added_at=200, page_offset=2),
+        ])
+        await db_session.commit()
+
+        calls = {"n": 0}
+        original = media_service_module.aggregate_movies
+
+        def spy(rows):
+            calls["n"] += 1
+            return original(rows)
+
+        monkeypatch.setattr(media_service_module, "aggregate_movies", spy)
+
+        page1, total1 = await media_service.get_unified_list(
+            db_session, "movie", limit=2, offset=0,
+        )
+        page2, total2 = await media_service.get_unified_list(
+            db_session, "movie", limit=2, offset=2,
+        )
+
+        assert calls["n"] == 1, "second call with identical filters should hit the cache"
+        assert total1 == 3 and total2 == 3
+        # Pagination sliced from the cached list must match the pre-cache
+        # (byte-identical) sort order asserted in TestUnifiedListOffload.
+        assert [g.key for g in page1] == ["tmdb://2", "tmdb://3"]
+        assert [g.key for g in page2] == ["tmdb://1"]
+
+    @pytest.mark.asyncio
+    async def test_different_filters_do_not_share_cache_entry(
+        self, db_session, monkeypatch,
+    ):
+        """A different filter tuple (e.g. a `year` filter) must NOT reuse the
+        other filter combination's cached entry — each distinct filter tuple
+        aggregates independently."""
+        from app.services.media_service import media_service
+
+        db_session.add_all([
+            _account("a", "Compte 1"),
+            _movie("a", "vod_1.mp4", "Movie One", "tmdb://1", added_at=100, page_offset=0),
+            _movie("a", "vod_2.mp4", "Movie Two", "tmdb://2", added_at=300, page_offset=1),
+        ])
+        await db_session.commit()
+
+        calls = {"n": 0}
+        original = media_service_module.aggregate_movies
+
+        def spy(rows):
+            calls["n"] += 1
+            return original(rows)
+
+        monkeypatch.setattr(media_service_module, "aggregate_movies", spy)
+
+        await media_service.get_unified_list(db_session, "movie", limit=200, offset=0)
+        await media_service.get_unified_list(
+            db_session, "movie", limit=200, offset=0, year=1984,
+        )
+
+        assert calls["n"] == 2, "a different filter tuple must not reuse the cache"
+
+    @pytest.mark.asyncio
+    async def test_cache_busts_when_underlying_data_changes(
+        self, db_session, monkeypatch,
+    ):
+        """The cache is keyed with a COUNT+MAX(updated_at) freshness
+        fingerprint over the same filters — inserting a new matching row
+        must produce a cache MISS (fresh aggregation), not a stale hit."""
+        from app.services.media_service import media_service
+
+        db_session.add_all([
+            _account("a", "Compte 1"),
+            _movie("a", "vod_1.mp4", "Movie One", "tmdb://1", added_at=100),
+        ])
+        await db_session.commit()
+
+        calls = {"n": 0}
+        original = media_service_module.aggregate_movies
+
+        def spy(rows):
+            calls["n"] += 1
+            return original(rows)
+
+        monkeypatch.setattr(media_service_module, "aggregate_movies", spy)
+
+        _, total1 = await media_service.get_unified_list(db_session, "movie", limit=200)
+        assert total1 == 1
+
+        db_session.add(
+            _movie("a", "vod_2.mp4", "Movie Two", "tmdb://2", added_at=200, page_offset=1),
+        )
+        await db_session.commit()
+
+        _, total2 = await media_service.get_unified_list(db_session, "movie", limit=200)
+        assert total2 == 2
+        assert calls["n"] == 2, "data change must bust the cache, not return a stale total"
+
+    @pytest.mark.asyncio
+    async def test_cache_does_not_leak_across_independent_databases(
+        self, db_engine, monkeypatch,
+    ):
+        """Two independent DB engines (as in two isolated tests) with a
+        coincidentally-identical filter tuple + fingerprint (same row count,
+        same default updated_at=0) must NOT share a cache entry — the cache
+        key is scoped by the bound Engine's identity precisely to guarantee
+        this, since production has exactly one long-lived Engine but each
+        test gets its own fresh in-memory DB."""
+        from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+        from app.services.media_service import media_service
+
+        factory_a = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
+        async with factory_a() as session_a:
+            session_a.add_all([
+                _account("a", "Compte 1"),
+                _movie("a", "vod_1.mp4", "Movie One", "tmdb://1"),
+            ])
+            await session_a.commit()
+
+            groups_a, total_a = await media_service.get_unified_list(
+                session_a, "movie", limit=200,
+            )
+            assert total_a == 1
+            assert groups_a[0].key == "tmdb://1"
+
+        # A second, completely independent engine/db — same row COUNT (1) and
+        # same default updated_at (0), i.e. an identical fingerprint, but a
+        # DIFFERENT title/unification_id. Must not return session_a's group.
+        from sqlalchemy import text
+        from app.models.database import Base
+
+        engine_b = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+        try:
+            async with engine_b.begin() as conn:
+                await conn.execute(text("PRAGMA journal_mode=WAL"))
+                await conn.run_sync(Base.metadata.create_all)
+
+            factory_b = async_sessionmaker(engine_b, class_=AsyncSession, expire_on_commit=False)
+            async with factory_b() as session_b:
+                session_b.add_all([
+                    _account("z", "Compte Z"),
+                    _movie("z", "vod_9.mp4", "Totally Different Movie", "tmdb://999"),
+                ])
+                await session_b.commit()
+
+                groups_b, total_b = await media_service.get_unified_list(
+                    session_b, "movie", limit=200,
+                )
+                assert total_b == 1
+                assert groups_b[0].key == "tmdb://999", (
+                    "cache leaked a result from an unrelated database/engine"
+                )
+        finally:
+            await engine_b.dispose()

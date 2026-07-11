@@ -3,7 +3,7 @@ import logging
 import random
 
 import httpx
-from sqlalchemy import select, update, or_, text
+from sqlalchemy import select, update, or_, text, func
 
 from app.config import settings
 from app.db.database import async_session_factory
@@ -417,49 +417,67 @@ async def _run_pipeline_validation_impl():
     total_recovered = 0
     diag_reasons: dict[str, int] = {}
 
-    async with async_session_factory() as db:
-        # Find all unchecked or stale streams (movies + episodes only)
-        result = await db.execute(
-            select(Media)
-            .where(
-                Media.server_id.like("xtream_%"),
-                Media.type.in_(["movie", "episode"]),
-                Media.is_in_allowed_categories == True,
-                or_(
-                    Media.last_stream_check.is_(None),
-                    Media.last_stream_check < recheck_cutoff,
-                ),
-            )
-            .order_by(Media.last_stream_check.asc().nullsfirst())
-        )
-        items = list(result.scalars().all())
+    # Shared WHERE for the stale/unchecked candidate set (movies + episodes).
+    candidate_filters = (
+        Media.server_id.like("xtream_%"),
+        Media.type.in_(["movie", "episode"]),
+        Media.is_in_allowed_categories == True,  # noqa: E712
+        or_(
+            Media.last_stream_check.is_(None),
+            Media.last_stream_check < recheck_cutoff,
+        ),
+    )
 
-        if not items:
+    async with async_session_factory() as db:
+        # CR-P05: the previous version selected EVERY stale/unchecked row for
+        # ALL accounts with `.scalars().all()` into one Python list before
+        # grouping by account — at hundreds of thousands of movie/episode
+        # rows that's a large transient memory spike against the 2 GB
+        # container cap. Processing is already sequential per account (one
+        # account's tasks in flight at a time), so the full multi-account set
+        # never needs to be resident at once: a narrow COUNT (for the log)
+        # and a DISTINCT server_id projection (no row hydration) are enough
+        # to know *what* to validate, and each account's rows are then
+        # streamed (`yield_per`) and processed one account at a time — peak
+        # memory is bounded by the largest single account's batch, not the
+        # whole candidate set.
+        total_result = await db.execute(
+            select(func.count()).select_from(Media).where(*candidate_filters)
+        )
+        total_candidates = total_result.scalar_one()
+
+        if not total_candidates:
             logger.info("No streams need validation")
             return
 
-        logger.info(f"Found {len(items)} streams to validate")
+        logger.info(f"Found {total_candidates} streams to validate")
+
+        distinct_result = await db.execute(
+            select(Media.server_id).where(*candidate_filters).distinct()
+        )
+        candidate_server_ids = [row[0] for row in distinct_result.all()]
 
         # Pre-load all needed accounts
-        account_ids = {item.server_id.replace("xtream_", "") for item in items}
+        account_ids = {sid.replace("xtream_", "") for sid in candidate_server_ids}
         acc_result = await db.execute(
             select(XtreamAccount).where(XtreamAccount.id.in_(list(account_ids)))
         )
         accounts = {acc.id: acc for acc in acc_result.scalars().all()}
 
-        # Detach now: `items`/`accounts` are only ever read from here on
-        # (URL building, concurrency clamp, before/after values) — the actual
-        # writes go through separate `update(Media)` Core statements, never
-        # through these ORM instances. If left attached, a later circuit
-        # breaker trip on one account calls `db.rollback()`, which expires
-        # every instance still tracked by the session (all accounts' and all
-        # remaining items', not just the tripped account's) — and the very
-        # next plain attribute read (e.g. the next account's
-        # `.max_connections`) would then try to lazily refresh from the DB,
-        # which raises `MissingGreenlet` outside an explicit await. Detaching
-        # keeps the already-loaded values usable no matter how many accounts
-        # trip later in this run (CR-F08: rolling re-evaluation makes trips
-        # far more likely than the old one-shot-at-50 check).
+        # Detach now: `accounts` (and, per account below, its streamed rows)
+        # are only ever read from here on (URL building, concurrency clamp,
+        # before/after values) — the actual writes go through separate
+        # `update(Media)` Core statements, never through these ORM instances.
+        # If left attached, a later circuit breaker trip on one account calls
+        # `db.rollback()`, which expires every instance still tracked by the
+        # session (all accounts' and all remaining items', not just the
+        # tripped account's) — and the very next plain attribute read (e.g.
+        # the next account's `.max_connections`) would then try to lazily
+        # refresh from the DB, which raises `MissingGreenlet` outside an
+        # explicit await. Detaching keeps the already-loaded values usable no
+        # matter how many accounts trip later in this run (CR-F08: rolling
+        # re-evaluation makes trips far more likely than the old
+        # one-shot-at-50 check).
         db.expunge_all()
 
         commit_interval = 200  # Commit and log every N results
@@ -476,17 +494,30 @@ async def _run_pipeline_validation_impl():
         circuit_breaker_threshold = 0.90  # abort if failure rate >= this
         circuit_tripped = False
 
-        # Group items by account for per-account circuit breaking
-        items_by_account: dict[str, list] = {}
-        for item in items:
-            account_id = item.server_id.replace("xtream_", "")
-            items_by_account.setdefault(account_id, []).append(item)
-
         client = await _get_client()
-        for account_id, account_items in items_by_account.items():
+        for server_id in candidate_server_ids:
+            account_id = server_id.replace("xtream_", "")
             account = accounts.get(account_id)
             if not account:
                 continue
+
+            # Stream just THIS account's candidates (server-side cursor,
+            # yield_per batches) instead of slicing a pre-loaded, all-account
+            # list — bounds peak memory to one account's batch rather than
+            # every account's combined candidate set.
+            acc_stream = await db.stream(
+                select(Media)
+                .where(*candidate_filters, Media.server_id == server_id)
+                .order_by(Media.last_stream_check.asc().nullsfirst())
+                .execution_options(yield_per=1000)
+            )
+            account_items = [row async for row in acc_stream.scalars()]
+            if not account_items:
+                continue
+            # See detach note above — this account's freshly streamed rows
+            # must also be detached before its own commits (or a later
+            # account's rollback) expire them.
+            db.expunge_all()
 
             # Per-account semaphore clamped to the provider's max_connections —
             # checking wider than the provider allows only yields 503/timeout
@@ -580,7 +611,7 @@ async def _run_pipeline_validation_impl():
                 # Log progress frequently
                 if total_checked % log_interval == 0:
                     logger.info(
-                        f"Validation progress: {total_checked}/{len(items)} "
+                        f"Validation progress: {total_checked}/{total_candidates} "
                         f"({total_broken} broken so far) | "
                         f"reasons: {diag_reasons}"
                     )

@@ -208,6 +208,105 @@ async def hydrate_misses(
 # Semantic KNN search over ai_embeddings + join ai_tmdb_cache
 # ──────────────────────────────────────────────────────────────────────────────
 
+# CR-P08 — adaptive over-fetch tuning.
+#
+# vec0 has no media_type column, so a type-filtered search must over-fetch
+# neighbors from the KNN index and post-filter by joining ai_tmdb_cache. A
+# single fixed over-fetch factor can under-return under a skewed type mix:
+# when the nearest-neighbor cloud is dominated by the *other* media type,
+# the post-filter can drop enough rows that fewer than `limit` survive even
+# though more matching rows exist further down the neighbor list.
+#
+# Mitigation: try the KNN at an initial ceiling (200 — unchanged from the
+# prior fixed behaviour, so the common/unskewed case pays no extra cost); if
+# the post-filter still comes up short of `limit` *and* the KNN returned a
+# full page at that ceiling (meaning more neighbors may exist beyond it),
+# escalate once to a hard cap of 2000 and re-query. This bounds every call
+# to at most two index-scan round-trips (never a full-table scan) while
+# making the result count robust to moderate/heavy skew. Extreme skew
+# beyond the hard cap (fewer than `limit` matches of the requested type
+# within the nearest 2000 neighbors) can still under-return — an accepted
+# residual, tracked as CR-P08.
+KNN_OVERFETCH_FACTOR = 4
+KNN_OVERFETCH_CEILINGS = (200, 2000)  # escalation ladder; last value = hard cap
+
+
+async def _knn_search_filtered(
+    db: AsyncSession,
+    vec_blob: bytes,
+    media_type: str | None,
+    limit: int,
+    want_overview: bool,
+) -> list[tuple[int, str | None, str, float, str | None]]:
+    """Adaptive-over-fetch KNN + post-hoc media_type filter (CR-P08).
+
+    Shared core for semantic_search / semantic_search_with_overview. Runs the
+    native sqlite-vec KNN query (index scan, never a full table scan) at an
+    escalating ladder of `k` ceilings (see KNN_OVERFETCH_CEILINGS above),
+    stopping as soon as the post-filter yields >= limit rows of the
+    requested media_type, or the KNN itself returns fewer rows than asked
+    (the whole vec table has already been scanned, escalating further would
+    be a wasted round-trip).
+
+    Returns (tmdb_id, title, media_type, score, overview) tuples sorted by
+    score descending, truncated to `limit`. `overview` is always None when
+    want_overview=False.
+    """
+    knn_sql = text(
+        "SELECT tmdb_id, distance "
+        "FROM ai_embeddings "
+        "WHERE embedding MATCH :vec AND k = :k "
+        "ORDER BY distance"
+    )
+    overview_select = ", overview" if want_overview else ""
+
+    if media_type is None:
+        # No type filter -> no over-fetch needed, exactly `limit` rows.
+        attempt_ks = [limit]
+    else:
+        first_k = min(limit * KNN_OVERFETCH_FACTOR, KNN_OVERFETCH_CEILINGS[0])
+        # Escalation tiers beyond the first attempt are used as absolute k
+        # values (not re-multiplied by limit) so each retry is strictly
+        # larger than the previous one, even for small `limit`.
+        attempt_ks = [first_k] + [c for c in KNN_OVERFETCH_CEILINGS[1:] if c > first_k]
+
+    results: list[tuple[int, str | None, str, float, str | None]] = []
+    for k in attempt_ks:
+        knn_rows = (await db.execute(knn_sql, {"vec": vec_blob, "k": k})).fetchall()
+        if not knn_rows:
+            return []
+
+        knn_ids = [row[0] for row in knn_rows]
+        dist_by_id = {row[0]: row[1] for row in knn_rows}
+
+        placeholders = ",".join(f":id{i}" for i in range(len(knn_ids)))
+        params: dict = {f"id{i}": tid for i, tid in enumerate(knn_ids)}
+        cache_sql = text(
+            f"SELECT tmdb_id, title, media_type{overview_select} "
+            f"FROM ai_tmdb_cache "
+            f"WHERE tmdb_id IN ({placeholders})"
+        )
+        cache_rows = (await db.execute(cache_sql, params)).fetchall()
+
+        results = []
+        for row in cache_rows:
+            tmdb_id, title, row_media_type = row[0], row[1], row[2]
+            if media_type is not None and row_media_type != media_type:
+                continue
+            dist = dist_by_id[tmdb_id]
+            # L2-norm vectors: cosine_sim = 1 - dist^2 / 2
+            score = round(1.0 - (dist ** 2) / 2.0, 6)
+            overview = row[3] if want_overview else None
+            results.append((tmdb_id, title, row_media_type, score, overview))
+
+        if len(results) >= limit or len(knn_rows) < k:
+            break
+
+    # Re-sort by score descending (join may have reordered) and truncate.
+    results.sort(key=lambda x: x[3], reverse=True)
+    return results[:limit]
+
+
 async def semantic_search(
     db: AsyncSession,
     query_vec: list[float],
@@ -225,7 +324,9 @@ async def semantic_search(
         cosine_sim = 1.0 - (l2_distance ** 2) / 2.0
 
     When media_type is given the vec0 table has no media_type column, so we
-    over-fetch (limit * 4, capped at 200) from the KNN query, then filter by
+    over-fetch from the KNN query using an adaptive ladder (initial ceiling
+    200, escalating once to a hard cap of 2000 if still short of `limit`
+    after filtering — see KNN_OVERFETCH_CEILINGS / CR-P08), then filter by
     joining ai_tmdb_cache and truncate to limit.  When media_type is None no
     extra filtering is needed and we fetch exactly limit rows.
 
@@ -234,51 +335,8 @@ async def semantic_search(
     (they cannot be hydrated into a usable result).
     """
     vec_blob = _serialize_vec(query_vec)
-
-    # Determine how many rows to fetch from the KNN index before filtering.
-    if media_type is not None:
-        # Over-fetch to account for the type filter; cap to avoid runaway queries.
-        knn_k = min(limit * 4, 200)
-    else:
-        knn_k = limit
-
-    # Phase 1 — KNN over the vec0 virtual table (index scan, no full table scan).
-    knn_sql = text(
-        "SELECT tmdb_id, distance "
-        "FROM ai_embeddings "
-        "WHERE embedding MATCH :vec AND k = :k "
-        "ORDER BY distance"
-    )
-    knn_rows = (await db.execute(knn_sql, {"vec": vec_blob, "k": knn_k})).fetchall()
-    if not knn_rows:
-        return []
-
-    # Phase 2 — join ai_tmdb_cache for title / media_type.
-    knn_ids = [row[0] for row in knn_rows]
-    dist_by_id = {row[0]: row[1] for row in knn_rows}
-
-    placeholders = ",".join(f":id{i}" for i in range(len(knn_ids)))
-    params: dict = {f"id{i}": tid for i, tid in enumerate(knn_ids)}
-    cache_sql = text(
-        f"SELECT tmdb_id, title, media_type "
-        f"FROM ai_tmdb_cache "
-        f"WHERE tmdb_id IN ({placeholders})"
-    )
-    cache_rows = (await db.execute(cache_sql, params)).fetchall()
-
-    # Build results, optionally filtering by media_type.
-    results: list[tuple[int, str | None, str, float]] = []
-    for tmdb_id, title, row_media_type in cache_rows:
-        if media_type is not None and row_media_type != media_type:
-            continue
-        dist = dist_by_id[tmdb_id]
-        # L2-norm vectors: cosine_sim = 1 - dist^2 / 2
-        score = round(1.0 - (dist ** 2) / 2.0, 6)
-        results.append((tmdb_id, title, row_media_type, score))
-
-    # Re-sort by score descending (join may have reordered) and truncate.
-    results.sort(key=lambda x: x[3], reverse=True)
-    return results[:limit]
+    rows = await _knn_search_filtered(db, vec_blob, media_type, limit, want_overview=False)
+    return [(tmdb_id, title, row_media_type, score) for tmdb_id, title, row_media_type, score, _overview in rows]
 
 
 async def semantic_search_with_overview(
@@ -291,46 +349,10 @@ async def semantic_search_with_overview(
 
     Returns a list of (tmdb_id, title, media_type, score, overview) tuples,
     sorted by score descending.  overview may be None when not yet fetched.
+    Uses the same adaptive over-fetch ladder as semantic_search (CR-P08).
     """
     vec_blob = _serialize_vec(query_vec)
-
-    if media_type is not None:
-        knn_k = min(limit * 4, 200)
-    else:
-        knn_k = limit
-
-    knn_sql = text(
-        "SELECT tmdb_id, distance "
-        "FROM ai_embeddings "
-        "WHERE embedding MATCH :vec AND k = :k "
-        "ORDER BY distance"
-    )
-    knn_rows = (await db.execute(knn_sql, {"vec": vec_blob, "k": knn_k})).fetchall()
-    if not knn_rows:
-        return []
-
-    knn_ids = [row[0] for row in knn_rows]
-    dist_by_id = {row[0]: row[1] for row in knn_rows}
-
-    placeholders = ",".join(f":id{i}" for i in range(len(knn_ids)))
-    params: dict = {f"id{i}": tid for i, tid in enumerate(knn_ids)}
-    cache_sql = text(
-        f"SELECT tmdb_id, title, media_type, overview "
-        f"FROM ai_tmdb_cache "
-        f"WHERE tmdb_id IN ({placeholders})"
-    )
-    cache_rows = (await db.execute(cache_sql, params)).fetchall()
-
-    results: list[tuple[int, str | None, str, float, str | None]] = []
-    for tmdb_id, title, row_media_type, overview in cache_rows:
-        if media_type is not None and row_media_type != media_type:
-            continue
-        dist = dist_by_id[tmdb_id]
-        score = round(1.0 - (dist ** 2) / 2.0, 6)
-        results.append((tmdb_id, title, row_media_type, score, overview))
-
-    results.sort(key=lambda x: x[3], reverse=True)
-    return results[:limit]
+    return await _knn_search_filtered(db, vec_blob, media_type, limit, want_overview=True)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

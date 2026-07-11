@@ -333,6 +333,64 @@ async def test_circuit_breaker_is_scoped_per_account(monkeypatch, db_factory):
     assert all(r.last_stream_check is not None for r in b_rows)  # unaffected
 
 
+# ─── CR-P05: candidate fetch streams per account, not the whole catalog ──
+
+
+@pytest.mark.asyncio
+async def test_pipeline_validation_streams_per_account_not_whole_catalog(
+    monkeypatch, db_factory
+):
+    """CR-P05 guard: the previous implementation loaded EVERY stale/unchecked
+    row for ALL accounts with a single `.execute(...).scalars().all()` before
+    grouping by account — one big in-memory list sized to the whole catalog.
+    It must now issue one `AsyncSession.stream(...)` (server-side cursor) PER
+    account instead, so peak memory is bounded by a single account's batch.
+    With two accounts holding candidates, exactly two `stream()` calls must
+    occur — never a single call spanning both — while the functional result
+    (every stream checked/committed) stays identical."""
+    async with db_factory() as db:
+        db.add(_account("aaaaaaaa", 20))
+        db.add(_account("bbbbbbbb", 20))
+        for m in _streams("xtream_aaaaaaaa", 4):
+            db.add(m)
+        for m in _streams("xtream_bbbbbbbb", 4):
+            db.add(m)
+        await db.commit()
+
+    monkeypatch.setattr(settings, "STREAM_VALIDATION_ENABLED", True)
+    monkeypatch.setattr(hc, "async_session_factory", db_factory)
+
+    async def _fake_client():
+        return None
+
+    monkeypatch.setattr(hc, "_get_client", _fake_client)
+
+    async def _fake_check_one(client, item, account, semaphore):
+        return item, False, "head_ct_video"
+
+    monkeypatch.setattr(hc, "_check_one", _fake_check_one)
+
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    original_stream = AsyncSession.stream
+    calls = {"n": 0}
+
+    async def _counting_stream(self, statement, *args, **kwargs):
+        calls["n"] += 1
+        return await original_stream(self, statement, *args, **kwargs)
+
+    monkeypatch.setattr(AsyncSession, "stream", _counting_stream)
+
+    await hc._run_pipeline_validation_impl()
+
+    assert calls["n"] == 2  # one per distinct account, never one for everything
+
+    a_rows = await _rows_for(db_factory, "xtream_aaaaaaaa")
+    b_rows = await _rows_for(db_factory, "xtream_bbbbbbbb")
+    assert len(a_rows) == 4 and all(r.last_stream_check is not None for r in a_rows)
+    assert len(b_rows) == 4 and all(r.last_stream_check is not None for r in b_rows)
+
+
 # ─── CR-T05: `_check_one` HTTP classification (respx-mocked) ─────────────
 
 

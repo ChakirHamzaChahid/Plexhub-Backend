@@ -93,6 +93,17 @@ class DatabaseSource(MediaSource):
             )
             if settings.STREAM_FILTER_BROKEN:
                 query = query.where(Media.is_broken == False)  # noqa: E712
+            # CR-P05 (constrained-by-design): `db.stream(execution_options(yield_per=1000))`
+            # already avoids buffering the whole driver-side result set at once
+            # (server-side cursor, batched fetch) — that part IS the streaming
+            # fix. The list comprehension below still has to hold every row in
+            # Python, though: `aggregate_movies`/`_converge` (unification-id
+            # grouping, id-based convergence) is a whole-set operation — you
+            # cannot correctly group/dedup a title across accounts from a
+            # partial window of rows without risking split or merged groups in
+            # the generated library. So the residual O(catalog) list here is
+            # inherent to correct dedup, not a missed streaming opportunity;
+            # see `docs/audit/cleanroom-2026-07-11/50-perf.md` (CR-P05).
             result = await db.stream(query.execution_options(yield_per=1000))
             rows = [row async for row in result.scalars()]
 
@@ -139,6 +150,14 @@ class DatabaseSource(MediaSource):
                 return []
             server_ids = list(accounts.keys())
 
+            # CR-P05 (constrained-by-design, same rationale as get_movies
+            # above): both queries below already stream from the driver
+            # (`yield_per=1000`); the resulting `shows`/`episodes` lists must
+            # still hold every row because `aggregate_series` groups shows by
+            # `unification_id` and matches episodes across accounts by
+            # `(season, episode)` — a whole-set operation, not chunkable
+            # without risking incorrect/partial groups in the generated
+            # library.
             show_stream = await db.stream(
                 select(Media).where(
                     Media.server_id.in_(server_ids),

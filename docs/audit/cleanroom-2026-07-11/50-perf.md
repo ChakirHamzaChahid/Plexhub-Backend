@@ -35,6 +35,8 @@ These are the **primary endpoints the Android app uses** to browse the deduped l
 
 ### CR-P02 — ORM-declared `media` indexes are created only by `create_all` on a fresh DB, never re-ensured by a migration (P1, latent)
 
+**Statut : RÉSOLU (2026-07-11, cleanroom-fixer).** Migration **015** ajoutée en fin de chaîne (`app/db/migrations.py`, fonction `_migration_015_add_missing_media_indexes`, appelée dans `run_migrations()` après la 014) : crée en idempotent (`CREATE INDEX IF NOT EXISTS`, un statement par index, chacun dans sa propre transaction/try pour qu'un échec n'en bloque pas d'autres) les 16 index déclarés sur l'ORM `Media.__table_args__` qui n'étaient créés par AUCUNE migration existante — `ix_media_guid`, `ix_media_type_added`, `ix_media_imdb`, `ix_media_tmdb`, `ix_media_server_lib`, `ix_media_unification`, `ix_media_type_rating`, `ix_media_parent`, `ix_media_title_sort`, `ix_media_broken`, `ix_media_updated`, `ix_media_server_type`, `ix_media_server_visible`, `ix_media_parent_visible`, `ix_media_grandparent`, `uix_media_pagination` (unique — isolée dans sa propre transaction : sur une DB avec des doublons de pagination préexistants, seul cet index serait sauté avec un warning, sans bloquer les autres). `ix_media_category_visible`/`ix_media_adult`/`ix_media_tvdb` restent gérés par les migrations 003/013/014 (déjà OK, hors périmètre). Additif pur, aucune colonne/donnée touchée. Preuve : `tests/test_media_indexes_migration.py` (4 tests — création complète sur une table "DB longue durée" simulée sans les index ORM, idempotence par double run, correspondance exacte nom+colonnes+flag unique via `PRAGMA index_info`/`index_list`, et tolérance à des lignes de pagination dupliquées préexistantes) + vérification manuelle : chaîne `run_migrations()` exécutée deux fois sur une DB fraîche (`create_all` + migrations) → 21 index sur `media` (19 ORM + `ix_media_stream_validation`/007 + l'auto-index de la PK), aucune erreur, chaîne désormais **001→015**. `pytest tests/test_media_indexes_migration.py tests/test_api_health.py tests/test_ai_migration.py` : 10 passed.
+
 **Where.** `app/db/database.py:92` (`Base.metadata.create_all`), `app/models/database.py:104-125` (index declarations), `app/db/migrations.py:20-36` (migration chain).
 
 **What.** `init_db` provisions schema in two ways: (1) `Base.metadata.create_all`, and (2) `run_migrations`. `create_all` runs with `checkfirst=True` semantics — if the `media` table **already exists**, SQLAlchemy skips its `CREATE TABLE` DDL block, and the `CREATE INDEX` statements for that table are emitted *inside* that skipped block, so **indexes are not added to a pre-existing table**. The migrations only create this subset of `media` indexes: `ix_media_category_visible` (`migrations.py:101-104`), `ix_media_stream_validation` (`:229-232`, note: not even declared on the ORM), `ix_media_adult` (`:405-408`), `ix_media_tvdb` (`:459-461`).
@@ -138,6 +140,6 @@ Because the measured floor uses a **fresh** empty DB, `create_all` created every
 ## Finding count
 
 - **P0:** 1 (CR-P01)
-- **P1:** 2 (CR-P02, CR-P03)
+- **P1:** 2 (CR-P02 — **RÉSOLU 2026-07-11**, CR-P03)
 - **P2:** 4 (CR-P04, CR-P05, CR-P06, CR-P07)
 - **debt:** 1 (CR-P08)

@@ -9,7 +9,30 @@ read-only dimension auditors + CI-equivalent `pytest` + in-process ASGI latency 
 empirically · **56 findings** across 6 dimensions (**1 P0, 17 P1, 26 P2, 12 debt**).
 
 > This report set is a fresh cartography. It is the intended input for the later `ARCHITECTURE.md` / `CLAUDE.md`
-> refresh (separate step — not performed here). No code was changed; this run is read-only + reports only.
+> refresh (separate step — not performed here). The audit itself was read-only; remediation status is tracked below.
+
+---
+
+## Remediation status (`/fix-cleanroom`, updated 2026-07-11)
+
+**Round 1 — RESOLVED** (fix + guard test + code-review & security-review gate + full suite `528 passed`):
+
+| ID | Sev | Fix | Note |
+|---|:--:|---|---|
+| CR-P01 | P0 | `aggregate_movies`/`aggregate_series`+sort → `asyncio.to_thread` (`media_service.py`) | **Partial**: event-loop stall removed; full-catalog-load SQL-pagination redesign still open (tracked in-code). |
+| CR-S01 | P1 | `outputDir` confined to `PLEX_LIBRARY_DIR` via `Path.parents` check (`plex.py`) | Security-reviewer verified no bypass. |
+| CR-F02 | P1 | Slot-conflicting rows **relocated** (per-partition `MAX+1`), not deleted (`sync_worker.py`) | Collision-free across syncs (revised after review). |
+| CR-T01 | P1 | `_try_base64_decode` rejects `U+FFFD` (`live.py`); CI `--deselect` removed | Real EPG bug; test now runs. |
+| CR-T02 | P1 | New `tests/test_auth_guard.py` — 401 net over 6 guarded routers + public `/health` | Regression net for fail-closed auth. |
+| CR-F04 | P1 | `_PIPELINE_LOCK` (skip-if-locked) on boot + interval pipeline (`main.py`) | — |
+| CR-C01 | P1 | Generator write/prune/`mapping.save` → `asyncio.to_thread` (`generator.py`) | Ordering preserved. |
+| CR-C02 | P1 | Typed `CategoryRefreshResponse` camelCase (`categories.py`/`schemas.py`) | ⚠️ **Breaking wire change** — Android must read `vodCount`/`seriesCount`. |
+| CR-S06 | P2 | CORS explicit methods/headers + wildcard-origin warning (`main.py`) | `X-API-Key` preserved. |
+| CR-P02 | P1 | Migration 015 backfills 16 missing `media` indexes idempotently (chain 001→015) | Non-destructive schema migration. |
+
+**Round 2 — in progress** (greenlit Risky): CR-S03 (encrypt Xtream creds at rest), CR-C06 (wire ruff/black/mypy/pytest-cov), CR-T10 (CI on `develop`).
+
+**Follow-ups noted (not yet done):** CR-P01 full SQL-side pagination redesign · `/api/plex/generate` behind `verify_master_key` (defense-in-depth, security-review note) · CR-F01/F03/F05–F11 · CR-S02/S04/S05/S07/S08 · CR-A0x · CR-C03/C04/C05/C07–C10 · CR-P03–P08 · CR-T03–T09/T11.
 
 ---
 
@@ -39,7 +62,7 @@ Severity mix: **1 P0 · 17 P1 · 26 P2 · 12 debt** (56 total). Benchmark & meth
 | 4 | **CR-T02** | P1† | The fail-closed guard on the **entire** JSON catalogue/sync/plex API has **zero rejection tests** (`grep verify_backend_secret tests/` = 0) | `main.py:396-405` | The whole security posture rests on one `dependencies=_guard`; dropping it **ships green**. Cheapest highest-leverage fix. (†borderline P0.) |
 | 5 | **CR-T01** | P1 | The permanently-deselected "flaky" base64 test masks a **real live bug**: `_try_base64_decode` mangles common EPG titles (`News/Test/Info/Kids` → garbage) — rejects control chars but not `U+FFFD` | `api/live.py` `_try_base64_decode` (used `:221,224`) | **Reproduced this session.** CI hides a real bug and mislabels it flaky. |
 | 6 | **CR-F04** | P1 | Boot pipeline run and interval job share **no mutual exclusion** (`max_instances=1` governs only the interval) | `main.py:328-338` vs `:249-274` | Slow first boot → concurrent enrichment/generation → **double TMDB spend** + race on the generated tree / `.plex_mapping.json`. |
-| 7 | **CR-P02** | P1 | Most ORM-declared `media` indexes are created only by `create_all` on a **fresh** table; migrations ensure just 4 → **upgraded DBs silently lack** hot list/sort indexes | `models/database.py:105-124` vs `db/migrations.py`, `db/database.py:92` | Full scans + filesorts on the hot list/sort queries in prod; invisible in the empty-DB floor. |
+| 7 | **CR-P02** | P1 — **RÉSOLU 2026-07-11** | Most ORM-declared `media` indexes are created only by `create_all` on a **fresh** table; migrations ensure just 4 → **upgraded DBs silently lack** hot list/sort indexes | `models/database.py:105-124` vs `db/migrations.py`, `db/database.py:92` | Full scans + filesorts on the hot list/sort queries in prod; invisible in the empty-DB floor. **Fix:** migration 015 (`db/migrations.py`) backfills all 16 missing indexes idempotently; chain now 001→015; proof in `tests/test_media_indexes_migration.py`. |
 | 8 | **CR-F03** | P1 | `ENRICHMENT_DAILY_LIMIT` counts **logical** items, not `_request` retries (≤4×), and resets every run | `workers/enrichment_worker.py`, `tmdb_service._request` | Real TMDB spend can exceed the "limit" **2–4×** under rate-limiting → quota/ban risk. |
 | 9 | **CR-F01** | P1 | **Episodes are never differential-cleaned** (`differential_cleanup*` = movie/show/live only) | `workers/sync_worker.py`, `category_service.py:348-377` | Delisted/renumbered episodes **orphan forever** → unbounded drift. |
 | 10 | **CR-C01** | P1 | `PlexLibraryGenerator.generate()` runs fsync `.strm`/`.nfo` writes + `mapping.save()` + orphan `rglob`/`rmtree` **directly on the event loop** (only images offloaded) | `plex_generator/generator.py` | **Event-loop starvation** at boot and on every scheduled pipeline. Same root as CR-P01: heavy work on the loop. |
@@ -52,7 +75,7 @@ Severity mix: **1 P0 · 17 P1 · 26 P2 · 12 debt** (56 total). Benchmark & meth
 
 - **Heavy work on the event loop** — `CR-P01` (perf) + `CR-C01` (conventions) hit the same root from two lanes:
   the unified-browse and library-generation paths do Python-side aggregation / fsync I/O on the loop.
-- **Schema truth duplicated ORM↔migrations** — `CR-P02` (missing indexes on upgraded DBs) + `CR-C05`
+- **Schema truth duplicated ORM↔migrations** — `CR-P02` (missing indexes on upgraded DBs, **RÉSOLU 2026-07-11** via migration 015) + `CR-C05`
   (duplicate-column warnings on fresh boot) are two symptoms of the same duplication (also seen live in the benchmark).
 - **The auth model is right but unguarded by tests** — Security confirmed fail-closed & constant-time
   (eliminating the old auth-bypass P0 class), while Tests found **zero** rejection tests protecting it
@@ -73,7 +96,7 @@ Severity mix: **1 P0 · 17 P1 · 26 P2 · 12 debt** (56 total). Benchmark & meth
 - **CR-F02** (fix reorder-eviction: key on identity, not page slot) · **CR-F01** (episode differential cleanup) ·
   **CR-F03** (count real HTTP calls incl. retries; persist daily counter) · **CR-F04** (single mutex across boot + interval pipeline) ·
   **CR-T01** (fix `_try_base64_decode` to reject `U+FFFD`, then un-deselect the test) ·
-  **CR-P02** (migration to create the missing composite indexes; make ORM↔migration the single source) ·
+  ~~**CR-P02**~~ (**RÉSOLU 2026-07-11** — migration 015 creates the missing composite indexes; ORM↔migration converge) ·
   **CR-C01** (offload generator fsync/rmtree via `asyncio.to_thread`) · **CR-P03** (search: trigram/FTS or prefix; avoid `COUNT(SELECT *)`).
 
 ### Batch 3 — Security hardening & contract hygiene (P2)

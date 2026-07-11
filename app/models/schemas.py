@@ -369,6 +369,21 @@ class CategoryListResponse(BaseModel):
     filter_mode: str
 
 
+class CategoryRefreshResponse(BaseModel):
+    """Response for POST /accounts/{account_id}/categories/refresh.
+
+    CR-C02: was a raw dict with snake_case ``vod_count``/``series_count`` keys
+    (bypassing the camelCase-on-the-wire convention). Now typed + aliased —
+    wire fields are ``vodCount``/``seriesCount``.
+    """
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    message: str
+    vod_count: int
+    series_count: int
+    total: int
+
+
 # --- Live Channel Schemas ---
 
 class LiveChannelResponse(BaseModel):

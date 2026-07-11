@@ -26,8 +26,5 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Run pytest
-        # The base64 heuristic test is a pre-existing flaky case unrelated to current work;
-        # excluded here to keep CI signal actionable. Drop --deselect once that test is fixed.
         run: |
-          pytest -v \
-            --deselect tests/test_utilities.py::TestBase64Decode::test_text_that_looks_like_base64_but_decodes_to_garbage
+          pytest -v

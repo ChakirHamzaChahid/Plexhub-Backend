@@ -6,7 +6,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_db
-from app.models.schemas import CategoryListResponse, CategoryUpdateRequest, CategoryResponse
+from app.models.schemas import (
+    CategoryListResponse,
+    CategoryRefreshResponse,
+    CategoryUpdateRequest,
+    CategoryResponse,
+)
 from app.services.category_service import (
     get_categories,
     bulk_update_categories,
@@ -72,19 +77,23 @@ async def update_categories(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/{account_id}/categories/refresh")
+@router.post(
+    "/{account_id}/categories/refresh",
+    response_model=CategoryRefreshResponse,
+    response_model_by_alias=True,
+)
 async def refresh_categories(
     account_id: str,
     db: AsyncSession = Depends(get_db),
 ):
     """
     Force refresh categories from Xtream provider.
-    
+
     Fetches current categories from Xtream and updates the database.
     Preserves existing is_allowed settings.
-    
+
     Returns:
-        Count of categories fetched
+        CategoryRefreshResponse (camelCase on the wire: vodCount/seriesCount)
     """
     from app.models.database import XtreamAccount
     from sqlalchemy import select
@@ -142,12 +151,12 @@ async def refresh_categories(
         total_count = len(vod_categories) + len(series_categories)
         logger.info(f"Refreshed {total_count} categories for account {account_id}")
         
-        return {
-            "message": "Categories refreshed successfully",
-            "vod_count": len(vod_categories),
-            "series_count": len(series_categories),
-            "total": total_count,
-        }
+        return CategoryRefreshResponse(
+            message="Categories refreshed successfully",
+            vod_count=len(vod_categories),
+            series_count=len(series_categories),
+            total=total_count,
+        )
     except HTTPException:
         raise
     except Exception as e:

@@ -30,6 +30,10 @@ def _try_base64_decode(value: str) -> str:
         # Reject if decoded text contains control chars (likely not real text)
         if any(ord(c) < 32 and c not in "\n\r\t" for c in decoded):
             return value
+        # Reject if decoding produced the Unicode replacement char: the bytes
+        # were not valid UTF-8, so this wasn't real base64-encoded text either.
+        if "�" in decoded:
+            return value
         return decoded
     except Exception:
         return value  # not base64, use as-is

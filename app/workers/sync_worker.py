@@ -539,11 +539,19 @@ def _compute_content_hash(row: dict) -> str:
     return hashlib.md5(json.dumps(hashable, default=str).encode()).hexdigest()
 
 
-async def upsert_media_batch(db, rows: list[dict]):
+async def upsert_media_batch(db, rows: list[dict], current_rating_keys: set[str] | None = None):
     """Bulk upsert media rows, skipping UPDATE when content unchanged.
 
     Uses chunked multi-row INSERT..ON CONFLICT for much better throughput
     than row-by-row execution.
+
+    `current_rating_keys`: the FULL set of rating_keys the provider currently
+    lists for this sync's scope (e.g. `all_vod_keys`/`all_series_keys` in
+    `sync_account`, built from the whole listing before per-batch filtering).
+    Used by Phase 1 (see below) to tell a genuinely delisted row apart from
+    one that merely shifted position. Pass `None` when no such full listing
+    is available at the call site (e.g. per-series episode batches) — Phase 1
+    then never deletes on a slot collision alone (see below).
     """
     if not rows:
         return
@@ -554,12 +562,34 @@ async def upsert_media_batch(db, rows: list[dict]):
 
     logger.debug(f"Upserting {len(rows)} media items to database")
 
-    # Phase 1: Batch evict shifted pagination slots (one DELETE per chunk)
-    # Group by (server_id, library_section_id) to batch efficiently
-    from sqlalchemy import or_, and_, tuple_
-    eviction_conditions = []
+    # Phase 1: Resolve pagination-slot collisions caused by provider reordering.
+    #
+    # `uix_media_pagination` (server_id, library_section_id, filter, sort_order,
+    # page_offset) is a UNIQUE index distinct from the row's real identity/PK
+    # (rating_key, server_id, filter, sort_order). When a provider reorders a
+    # category listing, an incoming row's new `page_offset` can collide with
+    # whatever OTHER rating_key currently occupies that slot from a previous
+    # sync. That other row is very often STILL LISTED (just shifted to a
+    # different page_offset) — since its content is unchanged its dto_hash
+    # still matches, so it is never re-fetched/re-upserted this run.
+    # Deleting it here would silently drop its enrichment (tmdb_id,
+    # unification_id, scraped metadata) and force a fresh, unenriched
+    # re-insert on some future sync (regression CR-F02).
+    #
+    # Fix: first find which existing row (if any) actually occupies each
+    # incoming row's target slot under a different rating_key. Only DELETE it
+    # when we can prove — via `current_rating_keys`, the current sync's full
+    # listing — that it is genuinely no longer listed. Otherwise (still
+    # listed, or unknown because the caller has no listing to compare
+    # against) we RELOCATE it to a `page_offset` that is provably free (see
+    # the per-partition MAX(page_offset)+1 scheme below) so the incoming row
+    # can take the slot without violating the unique index, while the
+    # relocated row and all of its enrichment survive untouched.
+    from sqlalchemy import or_, and_
+
+    slot_conditions = []
     for row in rows:
-        eviction_conditions.append(
+        slot_conditions.append(
             and_(
                 Media.server_id == row["server_id"],
                 Media.library_section_id == row["library_section_id"],
@@ -569,11 +599,97 @@ async def upsert_media_batch(db, rows: list[dict]):
                 Media.rating_key != row["rating_key"],
             )
         )
-    # Execute evictions in chunks to stay within SQLite limits
+
     chunk_size = 50  # Each condition has ~6 bind vars → 50 × 6 = 300 < 999
-    for i in range(0, len(eviction_conditions), chunk_size):
-        chunk = eviction_conditions[i:i + chunk_size]
-        await db.execute(delete(Media).where(or_(*chunk)))
+    seen_conflicts: set[tuple] = set()
+    conflicts: list[tuple] = []
+    for i in range(0, len(slot_conditions), chunk_size):
+        chunk = slot_conditions[i:i + chunk_size]
+        result = await db.execute(
+            select(
+                Media.rating_key, Media.server_id, Media.library_section_id,
+                Media.filter, Media.sort_order,
+            ).where(or_(*chunk))
+        )
+        for identity in result.all():
+            key = tuple(identity)
+            if key not in seen_conflicts:
+                seen_conflicts.add(key)
+                conflicts.append(key)
+
+    if conflicts:
+        to_delete = []    # provably absent from the current sync's listing
+        to_relocate = []  # still listed (or unknown) — must survive
+
+        for rating_key, server_id, library_section_id, filter_val, sort_order in conflicts:
+            if current_rating_keys is not None and rating_key not in current_rating_keys:
+                to_delete.append((rating_key, server_id, filter_val, sort_order))
+            else:
+                to_relocate.append((rating_key, server_id, library_section_id, filter_val, sort_order))
+
+        def _pk_condition(rating_key, server_id, filter_val, sort_order):
+            return and_(
+                Media.rating_key == rating_key,
+                Media.server_id == server_id,
+                Media.filter == filter_val,
+                Media.sort_order == sort_order,
+            )
+
+        for i in range(0, len(to_delete), chunk_size):
+            conds = [_pk_condition(*c) for c in to_delete[i:i + chunk_size]]
+            await db.execute(delete(Media).where(or_(*conds)))
+
+        if to_relocate:
+            # Group relocations by pagination partition -- (server_id,
+            # library_section_id, filter, sort_order), the exact scope of
+            # the `uix_media_pagination` UNIQUE index -- and hand each
+            # relocated row a value strictly above BOTH:
+            #  (a) the partition's current MAX(page_offset) in the DB, so it
+            #      can never collide with an existing row -- including one
+            #      relocated by an EARLIER sync. A fixed additive sentinel
+            #      does NOT guarantee this: repeatedly relocating the same
+            #      slot across syncs eventually reuses the same bumped value
+            #      and violates the unique index (cross-sync collision).
+            #  (b) the highest page_offset any OTHER row in *this* batch
+            #      targets in the same partition, so it can never collide
+            #      with one of this sync's own new/changed rows either.
+            # page_offset is never read for ordering/business logic
+            # (grep-verified) so this incremental, purely-internal growth is
+            # harmless.
+            batch_partition_max: dict[tuple, int] = {}
+            for row in rows:
+                part_key = (
+                    row["server_id"], row["library_section_id"],
+                    row["filter"], row["sort_order"],
+                )
+                batch_partition_max[part_key] = max(
+                    batch_partition_max.get(part_key, 0), row["page_offset"]
+                )
+
+            relocate_by_partition: dict[tuple, list[str]] = {}
+            for rating_key, server_id, library_section_id, filter_val, sort_order in to_relocate:
+                part_key = (server_id, library_section_id, filter_val, sort_order)
+                relocate_by_partition.setdefault(part_key, []).append(rating_key)
+
+            for part_key, rating_keys in relocate_by_partition.items():
+                server_id, library_section_id, filter_val, sort_order = part_key
+                db_max_result = await db.execute(
+                    select(func.max(Media.page_offset)).where(
+                        Media.server_id == server_id,
+                        Media.library_section_id == library_section_id,
+                        Media.filter == filter_val,
+                        Media.sort_order == sort_order,
+                    )
+                )
+                db_max = db_max_result.scalar() or 0
+                next_offset = max(db_max, batch_partition_max.get(part_key, 0)) + 1
+                for rating_key in rating_keys:
+                    await db.execute(
+                        update(Media)
+                        .where(_pk_condition(rating_key, server_id, filter_val, sort_order))
+                        .values(page_offset=next_offset)
+                    )
+                    next_offset += 1
 
     # Phase 2: Multi-row INSERT..ON CONFLICT in chunks
     _SKIP_UPDATE_KEYS = frozenset((
@@ -1064,7 +1180,7 @@ async def sync_account(account_id: str):
 
                     try:
                         async with db.begin_nested():  # SAVEPOINT
-                            await upsert_media_batch(db, batch_rows)
+                            await upsert_media_batch(db, batch_rows, current_rating_keys=all_vod_keys)
                         vod_rows.extend(batch_rows)
                         await commit_with_retry(db)
                     except Exception as e:
@@ -1167,7 +1283,7 @@ async def sync_account(account_id: str):
                 if series_rows:
                     try:
                         async with db.begin_nested():
-                            await upsert_media_batch(db, series_rows)
+                            await upsert_media_batch(db, series_rows, current_rating_keys=all_series_keys)
                             await enqueue_for_enrichment(db, series_rows)
                     except Exception as e:
                         logger.error(f"Series batch failed, rolling back: {e}")

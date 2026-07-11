@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 from dataclasses import dataclass
@@ -196,16 +197,75 @@ class PlexLibraryGenerator:
         # Collect image download futures for non-blocking I/O
         self._image_futures: list[Future] = []
 
-        self.mapping.load()
+        # mapping.load() does synchronous file I/O (read + json.loads) — offload
+        # so it never blocks the event loop, even on a large mapping file.
+        await asyncio.to_thread(self.mapping.load)
+
+        # --- Movies ---
+        movies = await self.source.get_movies()
+        movie_names = _resolve_movie_names(movies)
+
+        # --- Series ---
+        series_list = await self.source.get_series()
+        series_names = _resolve_series_names(series_list)
+
+        # Everything from here on is blocking disk I/O: per-title .strm/.nfo
+        # writes (each does f.flush()+os.fsync()), waiting on queued
+        # image-download futures, the stale-version delete pass, the
+        # orphan-dir rglob/rmtree sweep and the final mapping.save() (also
+        # fsync-backed). For a catalogue of thousands of titles this is tens
+        # of thousands of syscalls — running it inline on the event loop
+        # would starve it (concurrent requests, including /api/health, stall
+        # for the whole write phase). Offload the whole sequential phase to a
+        # worker thread: ordering/consistency semantics are unchanged because
+        # it all still runs on a single thread, in the same order as before
+        # (movies, then series, then image-future wait, then delete, then
+        # prune, then mapping.save()).
+        await asyncio.to_thread(
+            self._write_and_finalize,
+            movies, movie_names, series_list, series_names, report,
+        )
+
+        report.duration_seconds = round(time.monotonic() - start, 2)
+
+        logger.info(
+            f"Plex library sync complete: "
+            f"{report.created} created, {report.updated} updated, "
+            f"{report.deleted} deleted, {report.unchanged} unchanged, "
+            f"{report.pruned} pruned, "
+            f"{report.image_failures} image failures, "
+            f"{len(report.errors)} errors "
+            f"({report.duration_seconds}s)"
+        )
+        if report.image_failures:
+            # Single aggregated WARNING — keeps the INFO log readable but still
+            # surfaces the breakdown so flapping hosts / TMDB stale paths are visible.
+            reasons_str = ", ".join(
+                f"{k}={v}" for k, v in sorted(report.image_failure_reasons.items())
+            )
+            logger.warning(
+                "Plex generation: %d image downloads failed (%s)",
+                report.image_failures, reasons_str,
+            )
+        return report
+
+    def _write_and_finalize(
+        self, movies, movie_names, series_list, series_names, report: SyncReport,
+    ) -> None:
+        """Synchronous disk-writing phase for `generate()`.
+
+        Runs off the event loop via `asyncio.to_thread` (see caller). Everything
+        here does blocking fsync/rmtree syscalls; the sequence below is byte-for-byte
+        the same order the code used to run inline on the event loop, so ordering
+        and consistency semantics (mapping saved after writes, prune after the
+        live-set is known) are preserved.
+        """
         # Mapping keys are version keys: f"{server_id}:{source_id}". seen_paths
         # tracks every .strm path written this run so we can tell, on deletion,
         # whether a folder still holds a live version (shared NFO must survive).
         seen_keys: set[str] = set()
         seen_paths: set[str] = set()
 
-        # --- Movies ---
-        movies = await self.source.get_movies()
-        movie_names = _resolve_movie_names(movies)
         for movie in movies:
             try:
                 self._sync_movie(movie, movie_names[movie.source_id], report, seen_keys, seen_paths)
@@ -214,9 +274,6 @@ class PlexLibraryGenerator:
                 logger.error(msg, exc_info=True)
                 report.errors.append(msg)
 
-        # --- Series ---
-        series_list = await self.source.get_series()
-        series_names = _resolve_series_names(series_list)
         for series in series_list:
             try:
                 self._sync_series(series, series_names[series.source_id], report, seen_keys, seen_paths)
@@ -280,28 +337,6 @@ class PlexLibraryGenerator:
         report.pruned = self.storage.prune_orphan_dirs(live_dirs)
 
         self.mapping.save()
-        report.duration_seconds = round(time.monotonic() - start, 2)
-
-        logger.info(
-            f"Plex library sync complete: "
-            f"{report.created} created, {report.updated} updated, "
-            f"{report.deleted} deleted, {report.unchanged} unchanged, "
-            f"{report.pruned} pruned, "
-            f"{report.image_failures} image failures, "
-            f"{len(report.errors)} errors "
-            f"({report.duration_seconds}s)"
-        )
-        if report.image_failures:
-            # Single aggregated WARNING — keeps the INFO log readable but still
-            # surfaces the breakdown so flapping hosts / TMDB stale paths are visible.
-            reasons_str = ", ".join(
-                f"{k}={v}" for k, v in sorted(report.image_failure_reasons.items())
-            )
-            logger.warning(
-                "Plex generation: %d image downloads failed (%s)",
-                report.image_failures, reasons_str,
-            )
-        return report
 
     def _sync_strm(
         self, key: str, path: str, stream_url: str, report: SyncReport,

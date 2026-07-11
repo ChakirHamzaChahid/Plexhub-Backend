@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import Optional
 
@@ -12,6 +13,18 @@ from app.utils.server_id import build_server_id
 from app.utils.time import now_ms
 
 logger = logging.getLogger("plexhub.media")
+
+
+def _aggregate_and_sort_movies(rows: list[Media]) -> list[MovieGroup]:
+    """CPU-bound grouping + sort, run off the event loop (see CR-P01).
+
+    Pure function operating only on scalar columns of already-loaded `Media`
+    rows (no relationships/lazy attributes on this model, no session/DB access)
+    — safe to execute in a worker thread via ``asyncio.to_thread``.
+    """
+    groups = aggregate_movies(rows)  # generic: groups by key + picks best row
+    groups.sort(key=lambda g: (g.best.added_at or 0), reverse=True)
+    return groups
 
 
 class MediaService:
@@ -141,8 +154,16 @@ class MediaService:
             query = query.where(Media.is_broken == False)  # noqa: E712
 
         rows = list((await db.execute(query)).scalars().all())
-        groups = aggregate_movies(rows)  # generic: groups by key + picks best row
-        groups.sort(key=lambda g: (g.best.added_at or 0), reverse=True)
+        # CR-P01 (P0): the grouping + sort below is CPU-bound Python running
+        # over every category-allowed row — offloaded via asyncio.to_thread so
+        # a large catalog no longer stalls the event loop (and every other
+        # in-flight request) for the duration of the aggregation.
+        # Residual follow-up (NOT fixed here, tracked as CR-P01 follow-up): the
+        # SELECT above still loads/hydrates the ENTIRE category-allowed catalog
+        # every call, with limit/offset applied only after grouping — still
+        # O(catalog) memory + DB read per request. Needs a SQL-side windowed
+        # page or a cached/denormalized grouping, not just off-loop execution.
+        groups = await asyncio.to_thread(_aggregate_and_sort_movies, rows)
         total = len(groups)
         return groups[offset:offset + limit], total
 
@@ -204,7 +225,11 @@ class MediaService:
             )
         )).scalars().all())
 
-        groups = aggregate_series(shows, episodes)
+        # Same CPU-bound-on-event-loop pattern as get_unified_list (CR-P01) —
+        # offloaded identically. Scoped to one show's members/episodes here
+        # (not the whole catalog), but the grouping itself is pure Python work
+        # over already-loaded rows, so it's just as safe to run off-thread.
+        groups = await asyncio.to_thread(aggregate_series, shows, episodes)
         # All member shows share unification_id => exactly one group.
         return shows, groups[0]
 

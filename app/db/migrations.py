@@ -34,6 +34,7 @@ async def run_migrations(engine: AsyncEngine) -> None:
     await _migration_012_create_media_blurb(engine)
     await _migration_013_add_media_is_adult(engine)
     await _migration_014_add_nfo_metadata(engine)
+    await _migration_015_add_missing_media_indexes(engine)
 
     logger.info("All migrations completed successfully")
 
@@ -462,6 +463,75 @@ async def _migration_014_add_nfo_metadata(engine: AsyncEngine) -> None:
             logger.info("Migration 014: ix_media_tvdb index created")
         except Exception as e:
             logger.warning("Migration 014: index may already exist: %s", e)
+
+
+async def _migration_015_add_missing_media_indexes(engine: AsyncEngine) -> None:
+    """Backfill the media indexes declared on the ORM model (CR-P02).
+
+    On a FRESH database, ``Base.metadata.create_all`` (db/database.py:92)
+    creates EVERY ``Index(...)`` declared on ``Media`` (models/database.py)
+    in one shot. But this hand-rolled migration chain only ever issued
+    ``CREATE INDEX`` for three of them (ix_media_category_visible/003,
+    ix_media_adult/013, ix_media_tvdb/014) — any database that existed
+    before those migrations landed silently lacks the rest, causing full
+    scans / filesorts on the hot list/sort/filter queries (invisible on a
+    fresh DB because create_all builds them all).
+
+    This migration creates every remaining ORM-declared index, with the
+    exact same name and column tuple as ``Media.__table_args__``, so
+    create_all (fresh DB) and this chain (upgraded DB) converge on the
+    identical index set — no divergence, no duplicate-name conflict.
+
+    Idempotent: every statement uses ``IF NOT EXISTS`` and is individually
+    guarded so one failure can't block the others.
+    """
+    logger.info("Migration 015: Backfilling missing media indexes")
+
+    # Non-unique indexes: safe to (re)create even if the table already
+    # holds rows that would violate a uniqueness constraint.
+    index_statements = [
+        ("ix_media_guid", "CREATE INDEX IF NOT EXISTS ix_media_guid ON media(guid)"),
+        ("ix_media_type_added", "CREATE INDEX IF NOT EXISTS ix_media_type_added ON media(type, added_at)"),
+        ("ix_media_imdb", "CREATE INDEX IF NOT EXISTS ix_media_imdb ON media(imdb_id)"),
+        ("ix_media_tmdb", "CREATE INDEX IF NOT EXISTS ix_media_tmdb ON media(tmdb_id)"),
+        ("ix_media_server_lib", "CREATE INDEX IF NOT EXISTS ix_media_server_lib ON media(server_id, library_section_id)"),
+        ("ix_media_unification", "CREATE INDEX IF NOT EXISTS ix_media_unification ON media(unification_id)"),
+        ("ix_media_type_rating", "CREATE INDEX IF NOT EXISTS ix_media_type_rating ON media(type, display_rating)"),
+        ("ix_media_parent", "CREATE INDEX IF NOT EXISTS ix_media_parent ON media(parent_rating_key)"),
+        ("ix_media_title_sort", "CREATE INDEX IF NOT EXISTS ix_media_title_sort ON media(title_sortable)"),
+        ("ix_media_broken", "CREATE INDEX IF NOT EXISTS ix_media_broken ON media(is_broken)"),
+        ("ix_media_updated", "CREATE INDEX IF NOT EXISTS ix_media_updated ON media(updated_at)"),
+        ("ix_media_server_type", "CREATE INDEX IF NOT EXISTS ix_media_server_type ON media(server_id, type)"),
+        ("ix_media_server_visible", "CREATE INDEX IF NOT EXISTS ix_media_server_visible ON media(server_id, is_in_allowed_categories)"),
+        ("ix_media_parent_visible", "CREATE INDEX IF NOT EXISTS ix_media_parent_visible ON media(parent_rating_key, is_in_allowed_categories)"),
+        ("ix_media_grandparent", "CREATE INDEX IF NOT EXISTS ix_media_grandparent ON media(grandparent_rating_key)"),
+    ]
+
+    for name, stmt in index_statements:
+        async with engine.begin() as conn:
+            try:
+                await conn.execute(text(stmt))
+                logger.info("Migration 015: %s index created", name)
+            except Exception as e:
+                logger.warning("Migration 015: %s may already exist: %s", name, e)
+
+    # uix_media_pagination is UNIQUE: on an upgraded DB that never enforced
+    # it, pre-existing duplicate (server_id, library_section_id, filter,
+    # sort_order, page_offset) rows would make CREATE UNIQUE INDEX fail.
+    # Isolated in its own transaction/try so that can't take down the
+    # (non-unique) indexes created above.
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uix_media_pagination "
+                "ON media(server_id, library_section_id, filter, sort_order, page_offset)"
+            ))
+            logger.info("Migration 015: uix_media_pagination index created")
+        except Exception as e:
+            logger.warning(
+                "Migration 015: uix_media_pagination not created (likely duplicate "
+                "pagination rows on an upgraded DB, needs manual dedup): %s", e
+            )
 
 
 async def _migration_008_ai_embeddings(conn) -> None:

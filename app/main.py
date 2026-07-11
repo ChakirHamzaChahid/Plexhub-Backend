@@ -73,6 +73,15 @@ root_logger.addHandler(file_handler)
 
 logger.info("Logging configured: plexhub=DEBUG, third-party=WARNING")
 
+# Mutual exclusion between the scheduled interval pipeline and the non-blocking
+# boot-time initial run (CR-F04): APScheduler's max_instances=1 only serialises
+# the interval job against itself, it does NOT know about the boot task started
+# via create_background_task. Without this lock, a slow first sync can overlap
+# with the first interval tick -> double TMDB budget spend + concurrent writers
+# racing on the generated tree / .plex_mapping.json. Plain asyncio.Lock (no loop
+# binding at import time on 3.10+), shared by both runners below.
+_PIPELINE_LOCK = asyncio.Lock()
+
 
 async def _auto_generate_plex_library():
     """Auto-generate Plex library for all active accounts if PLEX_LIBRARY_DIR is set."""
@@ -248,16 +257,23 @@ async def lifespan(app: FastAPI):
 
             async def scheduled_sync_enrich_generate():
                 """Periodic pipeline: sync -> enrichment -> validation -> Plex generation."""
-                try:
-                    await sync_worker.run_all_accounts()
-                    logger.info("Scheduled sync done — starting enrichment")
-                    await enrichment_worker.run()
-                    logger.info("Scheduled enrichment done — starting stream validation")
-                    await health_check_worker.run_pipeline_validation()
-                    logger.info("Scheduled validation done — starting Plex generation")
-                    await _auto_generate_plex_library()
-                except Exception as e:
-                    logger.error(f"Scheduled sync pipeline failed: {e}", exc_info=True)
+                if _PIPELINE_LOCK.locked():
+                    logger.warning(
+                        "Scheduled pipeline skipped — a pipeline run (boot or previous "
+                        "interval tick) is already in progress"
+                    )
+                    return
+                async with _PIPELINE_LOCK:
+                    try:
+                        await sync_worker.run_all_accounts()
+                        logger.info("Scheduled sync done — starting enrichment")
+                        await enrichment_worker.run()
+                        logger.info("Scheduled enrichment done — starting stream validation")
+                        await health_check_worker.run_pipeline_validation()
+                        logger.info("Scheduled validation done — starting Plex generation")
+                        await _auto_generate_plex_library()
+                    except Exception as e:
+                        logger.error(f"Scheduled sync pipeline failed: {e}", exc_info=True)
 
             scheduler = AsyncIOScheduler()
             # max_instances=1 prevents pipeline overlap if a run exceeds the interval.
@@ -326,13 +342,19 @@ async def lifespan(app: FastAPI):
 
             # Non-blocking initial sync, then enrichment, then Plex generation
             async def initial_sync_then_enrich():
-                await sync_worker.run_all_accounts()
-                logger.info("Initial sync done — starting enrichment")
-                await enrichment_worker.run()
-                logger.info("Enrichment done — starting stream validation")
-                await health_check_worker.run_pipeline_validation()
-                logger.info("Validation done — starting Plex library generation")
-                await _auto_generate_plex_library()
+                if _PIPELINE_LOCK.locked():
+                    logger.warning(
+                        "Initial sync skipped — a pipeline run is already in progress"
+                    )
+                    return
+                async with _PIPELINE_LOCK:
+                    await sync_worker.run_all_accounts()
+                    logger.info("Initial sync done — starting enrichment")
+                    await enrichment_worker.run()
+                    logger.info("Enrichment done — starting stream validation")
+                    await health_check_worker.run_pipeline_validation()
+                    logger.info("Validation done — starting Plex library generation")
+                    await _auto_generate_plex_library()
 
             from app.utils.tasks import create_background_task
             create_background_task(initial_sync_then_enrich(), name="initial_sync")
@@ -379,11 +401,21 @@ app = FastAPI(
     openapi_url=None,
 )
 
+if settings.CORS_ORIGINS == ["*"]:
+    logger.warning(
+        "CORS_ORIGINS is '*' (default) — restrict to explicit origins in production "
+        "deployments via the CORS_ORIGINS env var"
+    )
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    # Explicit lists (CR-S06) instead of wildcards: covers the JSON API's real
+    # verbs (GET/POST/PUT/PATCH/DELETE + the CORS preflight OPTIONS) and the
+    # headers actually sent — X-API-Key (Android client + per-user keys),
+    # Content-Type (JSON bodies), Authorization (admin/docs Basic Auth).
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["X-API-Key", "Content-Type", "Authorization"],
 )
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 # Added last so it wraps the others — request_id is set before any other middleware runs.

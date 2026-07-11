@@ -583,3 +583,51 @@ class TestAdultTagging:
 
         assert (tmp_path / "Films" / "[XXX] Twins (2020)" / "[XXX] Twins (2020).strm").exists()
         assert (tmp_path / "Films" / "Twins (2020)" / "Twins (2020).strm").exists()
+
+
+class TestGenerateOffloadsBlockingIO:
+    """CR-C01 guard: generate()'s fsync/rmtree-heavy write phase must run off
+    the event loop (asyncio.to_thread), not inline, or a concurrent coroutine
+    (e.g. the /api/health handler) stalls for the whole write phase."""
+
+    def test_event_loop_stays_responsive_during_generate(self, tmp_path):
+        import time
+
+        class SlowStorage(LocalStorage):
+            """Same as LocalStorage but each write sleeps briefly to simulate
+            the fsync cost of a large library, so a blocked loop is measurable."""
+
+            def write_strm(self, rel_path: str, url: str) -> None:
+                time.sleep(0.02)
+                super().write_strm(rel_path, url)
+
+        movies = [
+            _make_movie(sid=f"vod_{i}.mp4", title=f"Movie {i}", year=2020)
+            for i in range(20)
+        ]
+        source = MockSource(movies=movies)
+        storage = SlowStorage(tmp_path)
+        gen = PlexLibraryGenerator(source, storage, tmp_path, strm_only=True)
+
+        async def _run():
+            ticks = {"n": 0}
+            stop = asyncio.Event()
+
+            async def ticker():
+                while not stop.is_set():
+                    ticks["n"] += 1
+                    await asyncio.sleep(0.01)
+
+            ticker_task = asyncio.create_task(ticker())
+            report = await gen.generate()
+            stop.set()
+            await ticker_task
+            return report, ticks["n"]
+
+        report, tick_count = asyncio.run(_run())
+
+        assert report.created == 20
+        # 20 movies * 0.02s = ~0.4s of blocking work. If it ran inline on the
+        # loop, the ticker would get essentially 0 ticks during that window.
+        # Offloaded via asyncio.to_thread, the loop keeps ticking concurrently.
+        assert tick_count >= 10

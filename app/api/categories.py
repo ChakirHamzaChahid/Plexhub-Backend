@@ -15,8 +15,9 @@ from app.models.schemas import (
 from app.services.category_service import (
     get_categories,
     bulk_update_categories,
+    refresh_categories_from_provider,
+    AccountNotFoundError,
 )
-from app.services.xtream_service import xtream_service
 from app.utils.db_retry import commit_with_retry
 
 logger = logging.getLogger("plexhub.api.categories")
@@ -96,70 +97,24 @@ async def refresh_categories(
     Returns:
         CategoryRefreshResponse (camelCase on the wire: vodCount/seriesCount)
     """
-    from app.models.database import XtreamAccount
-    from sqlalchemy import select
-    from app.services.category_service import upsert_category
-    
     try:
-        # Get account details
-        stmt = select(XtreamAccount).where(XtreamAccount.id == account_id)
-        result = await db.execute(stmt)
-        account = result.scalar_one_or_none()
-        
-        if not account:
-            raise HTTPException(status_code=404, detail="Account not found")
-        
-        # Fetch VOD categories
-        vod_categories = await xtream_service.get_vod_categories(
-            account.base_url,
-            account.port,
-            account.username,
-            account.password,
-        )
-        
-        # Fetch Series categories
-        series_categories = await xtream_service.get_series_categories(
-            account.base_url,
-            account.port,
-            account.username,
-            account.password,
-        )
-        
-        # Upsert VOD categories
-        for cat in vod_categories:
-            await upsert_category(
-                db,
-                account_id,
-                cat.get("category_id", ""),
-                "vod",
-                cat.get("category_name", "Unknown"),
-                is_allowed=True,  # Default to allowed, preserves existing if already exists
-            )
-        
-        # Upsert Series categories
-        for cat in series_categories:
-            await upsert_category(
-                db,
-                account_id,
-                cat.get("category_id", ""),
-                "series",
-                cat.get("category_name", "Unknown"),
-                is_allowed=True,
-            )
+        vod_count, series_count = await refresh_categories_from_provider(db, account_id)
 
         # CR-C04: retry on "database is locked" — refresh can race a
         # concurrent sync/validation cycle holding the single WAL writer.
         await commit_with_retry(db)
 
-        total_count = len(vod_categories) + len(series_categories)
+        total_count = vod_count + series_count
         logger.info(f"Refreshed {total_count} categories for account {account_id}")
-        
+
         return CategoryRefreshResponse(
             message="Categories refreshed successfully",
-            vod_count=len(vod_categories),
-            series_count=len(series_categories),
+            vod_count=vod_count,
+            series_count=series_count,
             total=total_count,
         )
+    except AccountNotFoundError:
+        raise HTTPException(status_code=404, detail="Account not found")
     except HTTPException:
         raise
     except Exception as e:

@@ -42,8 +42,11 @@ class HydrateStats:
 # Vector blob (de)serialization for sqlite-vec FLOAT[384]
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _serialize_vec(values: list[float]) -> bytes:
-    """Little-endian float32 blob, matching sqlite-vec's FLOAT[384] layout."""
+def serialize_vec(values: list[float]) -> bytes:
+    """Little-endian float32 blob, matching sqlite-vec's FLOAT[384] layout.
+
+    Public: also consumed by app.workers.embedding_worker (cross-module reuse).
+    """
     try:
         from sqlite_vec import serialize_float32  # type: ignore
         return serialize_float32(values)
@@ -148,7 +151,7 @@ async def _fetch_and_store_one(
         )
         await session.execute(
             text("INSERT INTO ai_embeddings(tmdb_id, embedding) VALUES(:tid, :v)"),
-            {"tid": tmdb_id, "v": _serialize_vec(vec)},
+            {"tid": tmdb_id, "v": serialize_vec(vec)},
         )
         await session.commit()
 
@@ -334,7 +337,7 @@ async def semantic_search(
     score descending.  Rows with no matching ai_tmdb_cache entry are dropped
     (they cannot be hydrated into a usable result).
     """
-    vec_blob = _serialize_vec(query_vec)
+    vec_blob = serialize_vec(query_vec)
     rows = await _knn_search_filtered(db, vec_blob, media_type, limit, want_overview=False)
     return [(tmdb_id, title, row_media_type, score) for tmdb_id, title, row_media_type, score, _overview in rows]
 
@@ -351,7 +354,7 @@ async def semantic_search_with_overview(
     sorted by score descending.  overview may be None when not yet fetched.
     Uses the same adaptive over-fetch ladder as semantic_search (CR-P08).
     """
-    vec_blob = _serialize_vec(query_vec)
+    vec_blob = serialize_vec(query_vec)
     return await _knn_search_filtered(db, vec_blob, media_type, limit, want_overview=True)
 
 

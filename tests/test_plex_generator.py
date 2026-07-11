@@ -405,20 +405,20 @@ class TestImageErrorClassification:
 
 class TestNamingWithSuffix:
     def test_movie_folder_with_suffix(self):
-        from app.plex_generator.naming import _movie_folder
-        assert _movie_folder("Les Experts", 2000, suffix="HD") == "Les Experts (2000) (HD)"
+        from app.plex_generator.naming import movie_folder
+        assert movie_folder("Les Experts", 2000, suffix="HD") == "Les Experts (2000) (HD)"
 
     def test_movie_folder_with_fallback(self):
-        from app.plex_generator.naming import _movie_folder
-        assert _movie_folder("Foo", 2020, fallback_id="vod_42") == "Foo (2020) [vod_42]"
+        from app.plex_generator.naming import movie_folder
+        assert movie_folder("Foo", 2020, fallback_id="vod_42") == "Foo (2020) [vod_42]"
 
     def test_series_folder_canonical(self):
-        from app.plex_generator.naming import _series_folder
-        assert _series_folder("Les Experts", year=2000) == "Les Experts (2000)"
+        from app.plex_generator.naming import series_folder
+        assert series_folder("Les Experts", year=2000) == "Les Experts (2000)"
 
     def test_series_folder_with_suffix(self):
-        from app.plex_generator.naming import _series_folder
-        assert _series_folder("Les Experts", year=2000, suffix="US") == \
+        from app.plex_generator.naming import series_folder
+        assert series_folder("Les Experts", year=2000, suffix="US") == \
             "Les Experts (2000) (US)"
 
     def test_movie_path_with_suffix(self):

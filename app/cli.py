@@ -32,20 +32,21 @@ async def _run_generate(
     strm_only: bool,
 ) -> None:
     from app.db.database import init_db
-    from app.plex_generator.generator import PlexLibraryGenerator
-    from app.plex_generator.source import DatabaseSource
-    from app.plex_generator.storage import LocalStorage, DryRunStorage
+    # CR-A02: generation wiring shared with app/api/plex.py and app/main.py
+    # instead of being reconstructed inline here.
+    from app.services.plex_generation_service import generate_plex_library
 
     await init_db()
-
-    storage = DryRunStorage() if dry_run else LocalStorage(output)
 
     # Unified library: one flat, deduped tree. `--account-id` restricts the
     # aggregation to one account; `--all` (or neither) merges every active one.
     account_ids = [account_id] if account_id and not all_accounts else None
-    source = DatabaseSource(account_ids)
-    gen = PlexLibraryGenerator(source, storage, output, strm_only)
-    report = await gen.generate()
+    report = await generate_plex_library(
+        account_ids=account_ids,
+        output_dir=output,
+        strm_only=strm_only,
+        dry_run=dry_run,
+    )
     _print_report("all" if account_ids is None else account_id, report)
 
 

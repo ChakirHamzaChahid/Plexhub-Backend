@@ -96,8 +96,12 @@ async def trigger_full_pipeline():
         logger.info("Full pipeline: enrichment done — starting stream validation")
         await run_pipeline_validation()
         logger.info("Full pipeline: validation done — starting Plex generation")
-        from app.main import _auto_generate_plex_library
-        await _auto_generate_plex_library()
+        # CR-A02: was `from app.main import _auto_generate_plex_library` — a
+        # router reaching into a private symbol of the app entrypoint. The
+        # shared generation-wiring + gating now lives in
+        # app.services.plex_generation_service (also used by app.main itself).
+        from app.services.plex_generation_service import generate_plex_library_auto
+        await generate_plex_library_auto()
         logger.info("Full pipeline: complete")
 
     task = create_background_task(_full_pipeline(), name="full_pipeline")

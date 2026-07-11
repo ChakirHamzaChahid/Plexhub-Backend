@@ -1,12 +1,10 @@
-import hashlib
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select, delete, update
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_db
-from app.utils.server_id import build_server_id
 from app.models.database import XtreamAccount
 from app.models.schemas import (
     AccountCreate,
@@ -14,18 +12,12 @@ from app.models.schemas import (
     AccountResponse,
     AccountTestResponse,
 )
-from app.services.xtream_service import xtream_service
+from app.services import account_service
 from app.utils.db_retry import commit_with_retry
 from app.utils.tasks import create_background_task
-from app.utils.time import now_ms
 
 logger = logging.getLogger("plexhub.api.accounts")
 router = APIRouter(prefix="/accounts", tags=["accounts"])
-
-
-def _generate_account_id(base_url: str, username: str) -> str:
-    raw = f"{base_url}{username}"
-    return hashlib.md5(raw.encode()).hexdigest()[:8]
 
 
 @router.get("", response_model=list[AccountResponse])
@@ -38,61 +30,20 @@ async def list_accounts(db: AsyncSession = Depends(get_db)):
 async def create_account(
     body: AccountCreate, db: AsyncSession = Depends(get_db),
 ):
-    account_id = _generate_account_id(body.base_url, body.username)
-
-    # Check if exists
-    existing = await db.execute(
-        select(XtreamAccount).where(XtreamAccount.id == account_id)
-    )
-    if existing.scalars().first():
-        raise HTTPException(409, "Account already exists")
-
-    # Create account object for auth test
-    class TempAccount:
-        pass
-    temp = TempAccount()
-    temp.base_url = body.base_url
-    temp.port = body.port
-    temp.username = body.username
-    temp.password = body.password
-
-    # Authenticate with Xtream
     try:
-        auth_data = await xtream_service.authenticate(temp)
-        user_info = auth_data.get("user_info", {})
-        server_info = auth_data.get("server_info", {})
-    except Exception as e:
+        account = await account_service.create_account(db, body)
+    except account_service.AccountAlreadyExistsError:
+        raise HTTPException(409, "Account already exists")
+    except account_service.AccountAuthenticationError as e:
         raise HTTPException(400, f"Authentication failed: {e}")
 
-    account = XtreamAccount(
-        id=account_id,
-        label=body.label,
-        base_url=body.base_url,
-        port=body.port,
-        username=body.username,
-        password=body.password,
-        status=user_info.get("status", "Unknown"),
-        expiration_date=int(user_info["exp_date"]) * 1000
-        if user_info.get("exp_date")
-        else None,
-        max_connections=int(user_info.get("max_connections", 1)),
-        allowed_formats=",".join(user_info.get("allowed_output_formats", [])),
-        server_url=server_info.get("url"),
-        https_port=int(server_info["https_port"])
-        if server_info.get("https_port")
-        else None,
-        is_active=True,
-        created_at=now_ms(),
-    )
-
-    db.add(account)
     # CR-C04: retry on "database is locked" — a sync/validation cycle can be
     # holding the single WAL writer when a new account is created.
     await commit_with_retry(db)
 
     # Trigger initial sync in background (after commit so the task can find the account)
     from app.workers.sync_worker import sync_account
-    create_background_task(sync_account(account_id), name=f"sync_{account_id}")
+    create_background_task(sync_account(account.id), name=f"sync_{account.id}")
 
     return account
 
@@ -101,27 +52,11 @@ async def create_account(
 async def update_account(
     account_id: str, body: AccountUpdate, db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(
-        select(XtreamAccount).where(XtreamAccount.id == account_id)
-    )
-    account = result.scalars().first()
-    if not account:
+    try:
+        updated = await account_service.update_account(db, account_id, body)
+    except account_service.AccountNotFoundError:
         raise HTTPException(404, "Account not found")
 
-    update_data = body.model_dump(exclude_unset=True)
-    if update_data:
-        await db.execute(
-            update(XtreamAccount)
-            .where(XtreamAccount.id == account_id)
-            .values(**update_data)
-        )
-        await db.flush()
-
-    # Reload
-    result = await db.execute(
-        select(XtreamAccount).where(XtreamAccount.id == account_id)
-    )
-    updated = result.scalars().first()
     # CR-C04: this endpoint previously relied on get_db's implicit commit on
     # successful return (db/database.py get_db), which is NOT retried. Commit
     # explicitly here so the write gets the same lock-retry as the workers.
@@ -133,34 +68,11 @@ async def update_account(
 async def delete_account(
     account_id: str, db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(
-        select(XtreamAccount).where(XtreamAccount.id == account_id)
-    )
-    if not result.scalars().first():
+    try:
+        await account_service.delete_account_cascade(db, account_id)
+    except account_service.AccountNotFoundError:
         raise HTTPException(404, "Account not found")
 
-    # Delete account and all related data
-    from app.models.database import (
-        Media, EnrichmentQueue, XtreamCategory, LiveChannel, EpgEntry,
-    )
-
-    server_id = build_server_id(account_id)
-    await db.execute(delete(Media).where(Media.server_id == server_id))
-    await db.execute(
-        delete(EnrichmentQueue).where(EnrichmentQueue.server_id == server_id)
-    )
-    await db.execute(
-        delete(XtreamCategory).where(XtreamCategory.account_id == account_id)
-    )
-    await db.execute(
-        delete(LiveChannel).where(LiveChannel.server_id == server_id)
-    )
-    await db.execute(
-        delete(EpgEntry).where(EpgEntry.server_id == server_id)
-    )
-    await db.execute(
-        delete(XtreamAccount).where(XtreamAccount.id == account_id)
-    )
     # CR-C04: this endpoint previously relied on get_db's implicit commit on
     # successful return (db/database.py get_db), which is NOT retried. This
     # is a multi-table cascade delete — commit explicitly with lock-retry.
@@ -171,17 +83,17 @@ async def delete_account(
 async def test_account(
     account_id: str, db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(
-        select(XtreamAccount).where(XtreamAccount.id == account_id)
-    )
-    account = result.scalars().first()
-    if not account:
-        raise HTTPException(404, "Account not found")
-
     try:
-        auth_data = await xtream_service.authenticate(account)
-        user_info = auth_data.get("user_info", {})
+        user_info = await account_service.test_account_connection(db, account_id)
+    except account_service.AccountNotFoundError:
+        raise HTTPException(404, "Account not found")
+    except account_service.AccountAuthenticationError as e:
+        raise HTTPException(400, f"Connection test failed: {e}")
 
+    # Building the response parses provider-supplied fields (exp_date,
+    # max_connections, …). Malformed provider data → 400, same as the old
+    # inline try/except that wrapped this block (behavior parity, CR-A01).
+    try:
         return AccountTestResponse(
             status=user_info.get("status", "Unknown"),
             expiration_date=int(user_info["exp_date"]) * 1000
@@ -192,5 +104,5 @@ async def test_account(
                 user_info.get("allowed_output_formats", [])
             ),
         )
-    except Exception as e:
+    except (ValueError, TypeError) as e:
         raise HTTPException(400, f"Connection test failed: {e}")

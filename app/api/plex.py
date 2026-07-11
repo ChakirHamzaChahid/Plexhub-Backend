@@ -79,19 +79,26 @@ async def generate_plex_library(req: GenerateRequest):
     # Determine output directory, confined to settings.PLEX_LIBRARY_DIR (CR-S01).
     output = _resolve_confined_output_dir(req.output_dir)
 
-    from app.plex_generator.generator import PlexLibraryGenerator
-    from app.plex_generator.source import DatabaseSource
-    from app.plex_generator.storage import LocalStorage, DryRunStorage
+    # CR-A02: generation wiring (DatabaseSource -> PlexLibraryGenerator ->
+    # LocalStorage/DryRunStorage -> generate()) lives in one shared service now,
+    # instead of being reconstructed inline here (and independently in
+    # app/main.py and app/cli.py). Aliased to avoid shadowing this endpoint
+    # function's own name.
+    from app.services.plex_generation_service import (
+        generate_plex_library as _run_plex_generation,
+    )
 
     # Unified library: one flat, deduped tree. `accountId` (optional) restricts
     # the aggregation to a single account; otherwise all active accounts are
     # merged. `allAccounts` is kept for backward compatibility (now the default).
     account_ids = [req.account_id] if req.account_id else None
 
-    storage = DryRunStorage() if req.dry_run else LocalStorage(output)
-    source = DatabaseSource(account_ids)
-    gen = PlexLibraryGenerator(source, storage, output, req.strm_only)
-    report = await gen.generate()
+    report = await _run_plex_generation(
+        account_ids=account_ids,
+        output_dir=output,
+        strm_only=req.strm_only,
+        dry_run=req.dry_run,
+    )
 
     return GenerateResponse(
         created=report.created,

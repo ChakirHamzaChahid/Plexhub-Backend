@@ -3,7 +3,7 @@ import asyncio
 
 import pytest
 
-from app.api.live import _try_base64_decode
+from app.services.live_service import _try_base64_decode
 from app.utils.tasks import (
     create_background_task,
     cancel_task_by_name,

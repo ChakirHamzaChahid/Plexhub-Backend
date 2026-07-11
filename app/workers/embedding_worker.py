@@ -15,13 +15,17 @@ from sqlalchemy import text
 
 from app.db.database import async_session_factory
 from app.services.embedding_service import EmbeddingUnavailableError, embed_passages
-from app.services.recommendation_service import _serialize_vec
+from app.services.recommendation_service import serialize_vec
 
 logger = logging.getLogger("plexhub.ai.worker")
 
 PAGE_SIZE = 50
 JOBS_CAP = 100
 
+# NOTE (CR-A06, out of scope for this fix): process-local job store — not
+# shared across master/worker processes (no DB-backed job table). A rebuild
+# started on one process is invisible to GET /embed/jobs/{id} on another.
+# Left as-is; moving job state to the DB is a separate architectural change.
 _ai_jobs: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
 
 
@@ -112,7 +116,7 @@ async def run_embedding_rebuild(job_id: str) -> None:
                     )
                     await session.execute(
                         text("INSERT INTO ai_embeddings(tmdb_id, embedding) VALUES(:t, :v)"),
-                        {"t": tmdb_id, "v": _serialize_vec(vec)},
+                        {"t": tmdb_id, "v": serialize_vec(vec)},
                     )
                     await session.execute(
                         text("UPDATE ai_tmdb_cache SET embedded_at = :n WHERE tmdb_id = :t"),

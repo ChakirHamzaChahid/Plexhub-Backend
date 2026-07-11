@@ -19,12 +19,12 @@ from app.services.embedding_service import EMBEDDING_DIM, EmbeddingUnavailableEr
 from app.services.recommendation_service import (
     HydrateStats,
     _deserialize_vec,
-    _serialize_vec,
     cosine_rank,
     hydrate_misses,
     load_cached_vectors,
     semantic_search,
     semantic_search_with_overview,
+    serialize_vec,
 )
 
 
@@ -64,7 +64,7 @@ async def _insert_cached_embedding(session, tmdb_id: int, vec: list[float], medi
     )
     await session.execute(
         text("INSERT INTO ai_embeddings(tmdb_id, embedding) VALUES(:t, :v)"),
-        {"t": tmdb_id, "v": _serialize_vec(vec)},
+        {"t": tmdb_id, "v": serialize_vec(vec)},
     )
     await session.commit()
 

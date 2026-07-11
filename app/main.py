@@ -84,48 +84,19 @@ _PIPELINE_LOCK = asyncio.Lock()
 
 
 async def _auto_generate_plex_library():
-    """Auto-generate Plex library for all active accounts if PLEX_LIBRARY_DIR is set."""
-    if not settings.PLEX_LIBRARY_DIR:
-        logger.info("PLEX_LIBRARY_DIR not set — skipping Plex library generation")
-        return
+    """Auto-generate Plex library for all active accounts if PLEX_LIBRARY_DIR is set.
 
-    from pathlib import Path
-    from sqlalchemy import select
-    from app.db.database import async_session_factory
-    from app.models.database import XtreamAccount
-    from app.plex_generator.generator import PlexLibraryGenerator
-    from app.plex_generator.source import DatabaseSource
-    from app.plex_generator.storage import LocalStorage
+    Thin wrapper (CR-A02): the generation wiring (`DatabaseSource` ->
+    `PlexLibraryGenerator` -> `LocalStorage` -> `generate()`) plus the
+    boot/schedule-time safety gating (skip if unconfigured / no active
+    accounts) now live in `app.services.plex_generation_service`, shared with
+    `app.api.sync`'s `/full-pipeline` endpoint — which used to reach into this
+    private coroutine directly (layering inversion) and now calls the service
+    instead.
+    """
+    from app.services.plex_generation_service import generate_plex_library_auto
 
-    output = Path(settings.PLEX_LIBRARY_DIR)
-
-    async with async_session_factory() as db:
-        result = await db.execute(
-            select(XtreamAccount.id).where(XtreamAccount.is_active == True)
-        )
-        account_ids = [row[0] for row in result]
-
-    if not account_ids:
-        logger.warning("No active accounts — skipping Plex library generation")
-        return
-
-    # Unified library: one flat tree deduped across ALL active accounts (the same
-    # movie/series from several panels = one folder + one NFO + multiple versions).
-    logger.info(
-        f"Auto-generating unified Plex library across {len(account_ids)} account(s)"
-    )
-    try:
-        storage = LocalStorage(output)
-        source = DatabaseSource()  # None => all active accounts
-        gen = PlexLibraryGenerator(source, storage, output)
-        report = await gen.generate()
-        logger.info(
-            f"Plex generation: {report.created} created, {report.updated} updated, "
-            f"{report.deleted} deleted, {report.unchanged} unchanged, "
-            f"{report.pruned} pruned"
-        )
-    except Exception as e:
-        logger.error(f"Plex generation failed: {e}", exc_info=True)
+    await generate_plex_library_auto()
 
 
 async def _auto_provision_xtream_account():
@@ -134,6 +105,7 @@ async def _auto_provision_xtream_account():
     from sqlalchemy import select
     from app.db.database import async_session_factory
     from app.models.database import XtreamAccount
+    from app.services.xtream_credentials import XtreamCredentials
     from app.services.xtream_service import xtream_service
 
     account_id = hashlib.md5(
@@ -148,15 +120,17 @@ async def _auto_provision_xtream_account():
             logger.info(f"Xtream account {account_id} already exists (from env)")
             return
 
-        # Authenticate to get server info
-        class _Acc:
-            base_url = settings.XTREAM_BASE_URL
-            port = settings.XTREAM_PORT
-            username = settings.XTREAM_USERNAME
-            password = settings.XTREAM_PASSWORD
+        # Authenticate to get server info (CR-C10: shared typed credentials
+        # holder instead of a throwaway anonymous class).
+        credentials = XtreamCredentials(
+            base_url=settings.XTREAM_BASE_URL,
+            port=settings.XTREAM_PORT,
+            username=settings.XTREAM_USERNAME,
+            password=settings.XTREAM_PASSWORD,
+        )
 
         try:
-            auth_data = await xtream_service.authenticate(_Acc())
+            auth_data = await xtream_service.authenticate(credentials)
             user_info = auth_data.get("user_info", {})
             server_info = auth_data.get("server_info", {})
         except Exception as e:
@@ -421,13 +395,24 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 # Added last so it wraps the others — request_id is set before any other middleware runs.
 app.add_middleware(RequestIdMiddleware)
 
-# Routes
+# ─── Routes / auth-per-router (CR-A04) ───────────────────────────────────
+# Three mounting patterns coexist here by necessity (a public health check, a
+# browser-facing admin UI needing Basic Auth instead of a custom header, and
+# two routers that self-guard because they own a broader path prefix than
+# "/api"). They are grouped and labelled explicitly below so the guard for
+# every router is visible in this ONE place, without changing any path or
+# which guard applies to which router. Tracked follow-up (not done here):
+# a startup assertion walking `app.routes` to assert every `/api/*` route
+# carries an auth dependency — see CR-A04,
+# docs/audit/cleanroom-2026-07-11/10-architecture.md.
 from app.api.deps import verify_admin_basic_auth, verify_backend_secret  # noqa: E402
 
 # Shared X-API-Key guard for the JSON API (fail-closed, constant-time).
 _guard = [Depends(verify_backend_secret)]
 
-app.include_router(health.router, prefix="/api")  # public — monitoring
+app.include_router(health.router, prefix="/api")  # Pattern B — public: monitoring
+
+# Pattern A — guard attached at the mount site via `dependencies=_guard`.
 app.include_router(accounts.router, prefix="/api", dependencies=_guard)
 app.include_router(categories.router, prefix="/api", dependencies=_guard)
 app.include_router(live.router, prefix="/api", dependencies=_guard)
@@ -435,12 +420,14 @@ app.include_router(media.router, prefix="/api", dependencies=_guard)
 app.include_router(stream.router, prefix="/api", dependencies=_guard)
 app.include_router(sync.router, prefix="/api", dependencies=_guard)
 app.include_router(plex.router, prefix="/api", dependencies=_guard)
-# Device pairing stays public at router level (the TV has no key yet); /approve
+# Pattern B — public at router level (the TV has no key yet); /approve
 # is individually protected inside tv_auth via verify_pairing_api_key.
 app.include_router(tv_auth.router, prefix="/api")
 
 # Admin web UI (HTML / HTMX) — no /api prefix. Browser-facing, so HTTP Basic
-# Auth instead of the X-API-Key header (a navigation can't carry custom headers).
+# Auth instead of the X-API-Key header (a navigation can't carry custom
+# headers). Same mount-site-guard style as Pattern A, just a different
+# dependency and no "/api" prefix.
 app.include_router(admin.router, dependencies=[Depends(verify_admin_basic_auth)])
 
 # Interactive API docs — kept off the public default URLs above (docs_url=None …)
@@ -461,12 +448,14 @@ async def protected_swagger_ui():
 async def protected_openapi():
     return JSONResponse(app.openapi())
 
-# AI recommendation API — router defines its own /api/ai prefix and already has
-# a module-level verify_api_key dependency, so no extra guard here.
+# Pattern C — bare mount, self-prefixed + self-guarded: the router module
+# itself declares its full path prefix AND a module-level
+# `dependencies=[Depends(...)]`, so no dependency is passed at the mount site
+# (unlike Pattern A). Both already enforce their own auth on every route:
+#   - `ai.router` — its own /api/ai prefix + module-level verify_api_key.
+#   - `api_keys.router` — its own /api/admin/keys prefix + module-level
+#     verify_master_key (master secret only).
 app.include_router(ai.router)
-
-# API-key management (JSON) — defines its own /api/admin/keys prefix and a
-# module-level verify_master_key guard (master secret only).
 app.include_router(api_keys.router)
 
 # Prometheus /metrics + per-request HTTP metrics

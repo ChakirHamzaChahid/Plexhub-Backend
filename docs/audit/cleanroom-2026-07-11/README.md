@@ -80,7 +80,19 @@ empirically · **56 findings** across 6 dimensions (**1 P0, 17 P1, 26 P2, 12 deb
 | CR-A07 | debt | `build_versions` unifié dans `aggregation_service` (media + generator) | — |
 | CR-F10 | debt | Filtre `is_broken` déplacé **après** l'agrégation (générateur groupe comme l'API ; seules versions saines publiées) | ⚠️ 1ʳᵉ génération après ce commit : re-pick possible du `best_row` → renommage dossier/NFO one-shot. |
 
-**Follow-ups noted (not yet done):** CR-P01 full SQL-side pagination redesign · `/api/plex/generate` behind `verify_master_key` (defense-in-depth) · CR-S02/S04/S05/S07/S08 (sécurité) · **CR-A01/A02/A03/A04/A05/A06 (refacto structurel lourd — god-files, orchestration, main)** · CR-C10 (dédup TempAccount/_Acc) · CR-P04/P07 (api/media.py) · CR-T03–T09.
+**Vague C2 — RESOLVED** (`/refacto` moyen ; full suite `631 passed`, ruff vert, code-review APPROVED) :
+
+| ID | Sev | Fix | Note |
+|---|:--:|---|---|
+| CR-A01 | P1 | Logique métier extraite des routers → `account_service`/`live_service`/`category_service` (routers −135 l.) | Frontière transactionnelle gardée au routeur (préserve retry C04). Résidu : `stream.py` server_id, `list_channels`/`get_epg_now` pagination. |
+| CR-A02 | P1 | Orchestration Plex-gen unifiée dans `plex_generation_service` (`generate_plex_library`[+`_auto`]) ; `sync.py` n'importe plus `app.main` | Garde-fous « skip si non configuré / pas de comptes actifs » préservés. |
+| CR-A04 | P2 | Montage routers étiqueté Pattern A/B/C (auth par-routeur explicite) | Centralisation complète (assertion `app.routes`) = follow-up. |
+| CR-A06 | P2 | Symboles privés cross-module rendus publics (`serialize_vec`, `movie_folder`/`series_folder`) | Job stores process-local = limitation archi notée. |
+| CR-C10 | debt | `TempAccount`+`_Acc` → dataclass partagée `XtreamCredentials` ; `_migration_008` déjà remis en ordre (C1) | Résolu en entier. |
+
+**Gardé pour un effort dédié (refacto lourd, approuvé « plus tard ») :** CR-A03 (décomposer god-files `sync_worker` 1390 / `ai` 1228 / `nfo_import` 888) · CR-A05 (slim `main.py`).
+
+**Follow-ups noted (not yet done):** CR-P01 full SQL-side pagination redesign · `/api/plex/generate` behind `verify_master_key` (defense-in-depth) · CR-S02/S04/S05/S07/S08 (sécurité) · **CR-A03/A05 (god-files, main.py)** · CR-P04/P07 (api/media.py) · CR-T03–T09 (tests — Vague D en cours).
 
 ---
 
@@ -157,11 +169,13 @@ Severity mix: **1 P0 · 17 P1 · 26 P2 · 12 debt** (56 total). Benchmark & meth
 
 ### Batch 4 — Tooling & debt (foundation for everything above)
 - **CR-C06 / CR-T09 / CR-T10** — wire **ruff + black + mypy + pytest-cov** and a coverage gate; run CI on **`develop`** (not just `main`).
-- **CR-A01/A02/A03/A05** — extract router business logic into services, unify the triplicated Plex-gen orchestration, break up the god-files.
+- ~~**CR-A01**~~ (**PARTIELLEMENT RÉSOLU 2026-07-12** — `live_service`/`account_service` (nouveaux) + `category_service.refresh_categories_from_provider` extraits de `live.py`/`accounts.py`/`categories.py`, `server_id` parsing dédupliqué via `parse_server_id` ; résiduel : `live.py` listing/pagination inline (faible priorité) + `stream.py:20-32` — hors scope de cette passe ; voir [10-architecture.md](10-architecture.md#cr-a01)) · **CR-A02/A03/A05** — unify the triplicated Plex-gen orchestration, break up the god-files.
 - ~~**CR-C05**~~ (**RÉSOLU 2026-07-11** — `_column_exists` probe before every `ADD COLUMN`; 0 duplicate-column
   warnings on fresh boot, proof in `tests/test_migrations_no_duplicate_warning.py`) · ~~**CR-C10** (migration-008
-  ordering half)~~ (**RÉSOLU 2026-07-11** — definition moved to its numeric position, execution order unchanged;
-  `TempAccount`/`_Acc` dedup half still open) · **CR-C07/C08/C09, CR-P07/P08, CR-F10, CR-T11** — remaining
+  ordering half)~~ (**RÉSOLU 2026-07-11** — definition moved to its numeric position, execution order unchanged) ·
+  **CR-C10 (`TempAccount` half, 2026-07-12)** RÉSOLU — `accounts.py`'s throwaway `TempAccount` replaced by the shared
+  `app.services.xtream_credentials.XtreamCredentials` dataclass (see CR-A01 above); `main.py`'s `_Acc` half still open ·
+  **CR-C07/C08/C09, CR-P07/P08, CR-F10, CR-T11** — remaining
   dead code, deprecated `HTTP_422`, misc.
 
 ---

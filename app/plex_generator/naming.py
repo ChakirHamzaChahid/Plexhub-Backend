@@ -37,10 +37,11 @@ def _decorate_with_disambiguator(
     return base
 
 
-def _movie_folder(
+def movie_folder(
     title: str, year: int | None,
     suffix: str | None = None, fallback_id: str | None = None,
 ) -> str:
+    """Public: also consumed by app.scripts.strip_titles_pollution (cross-module reuse)."""
     safe = sanitize_for_filesystem(title)
     base = f"{safe} ({year})" if year else safe
     return _decorate_with_disambiguator(base, suffix, fallback_id)
@@ -55,7 +56,7 @@ def movie_path(
     Example: Films/Dune (2021)/Dune (2021).strm
     With collision: Films/Dune (2021) (HD)/Dune (2021) (HD).strm
     """
-    folder = _movie_folder(title, year, suffix, fallback_id)
+    folder = movie_folder(title, year, suffix, fallback_id)
     return f"Films/{folder}/{folder}.strm"
 
 
@@ -64,7 +65,7 @@ def movie_nfo_path(
     suffix: str | None = None, fallback_id: str | None = None,
 ) -> str:
     """Relative path for a movie NFO file."""
-    folder = _movie_folder(title, year, suffix, fallback_id)
+    folder = movie_folder(title, year, suffix, fallback_id)
     return f"Films/{folder}/movie.nfo"
 
 
@@ -73,7 +74,7 @@ def movie_poster_path(
     suffix: str | None = None, fallback_id: str | None = None,
 ) -> str:
     """Relative path for a movie poster image."""
-    folder = _movie_folder(title, year, suffix, fallback_id)
+    folder = movie_folder(title, year, suffix, fallback_id)
     return f"Films/{folder}/poster.jpg"
 
 
@@ -82,16 +83,17 @@ def movie_fanart_path(
     suffix: str | None = None, fallback_id: str | None = None,
 ) -> str:
     """Relative path for a movie fanart image."""
-    folder = _movie_folder(title, year, suffix, fallback_id)
+    folder = movie_folder(title, year, suffix, fallback_id)
     return f"Films/{folder}/fanart.jpg"
 
 
-def _series_folder(
+def series_folder(
     series_title: str,
     year: int | None = None,
     suffix: str | None = None,
     fallback_id: str | None = None,
 ) -> str:
+    """Public: also consumed by app.scripts.strip_titles_pollution (cross-module reuse)."""
     safe = sanitize_for_filesystem(series_title)
     base = f"{safe} ({year})" if year else safe
     return _decorate_with_disambiguator(base, suffix, fallback_id)
@@ -106,7 +108,7 @@ def series_episode_path(
 
     Example: Series/The Last of Us (2023)/Season 01/The Last of Us (2023) S01E01.strm
     """
-    safe_title = _series_folder(series_title, year, suffix, fallback_id)
+    safe_title = series_folder(series_title, year, suffix, fallback_id)
     season_str = f"Season {season:02d}"
     ep_str = f"{safe_title} S{season:02d}E{episode:02d}"
     return f"Series/{safe_title}/{season_str}/{ep_str}.strm"
@@ -118,7 +120,7 @@ def series_episode_nfo_path(
     suffix: str | None = None, fallback_id: str | None = None,
 ) -> str:
     """Relative path for an episode .nfo file."""
-    safe_title = _series_folder(series_title, year, suffix, fallback_id)
+    safe_title = series_folder(series_title, year, suffix, fallback_id)
     season_str = f"Season {season:02d}"
     ep_str = f"{safe_title} S{season:02d}E{episode:02d}"
     return f"Series/{safe_title}/{season_str}/{ep_str}.nfo"
@@ -130,7 +132,7 @@ def series_nfo_path(
     suffix: str | None = None, fallback_id: str | None = None,
 ) -> str:
     """Relative path for a series NFO file."""
-    safe_title = _series_folder(series_title, year, suffix, fallback_id)
+    safe_title = series_folder(series_title, year, suffix, fallback_id)
     return f"Series/{safe_title}/tvshow.nfo"
 
 
@@ -140,7 +142,7 @@ def series_poster_path(
     suffix: str | None = None, fallback_id: str | None = None,
 ) -> str:
     """Relative path for a series poster image."""
-    safe_title = _series_folder(series_title, year, suffix, fallback_id)
+    safe_title = series_folder(series_title, year, suffix, fallback_id)
     return f"Series/{safe_title}/poster.jpg"
 
 
@@ -150,7 +152,7 @@ def series_fanart_path(
     suffix: str | None = None, fallback_id: str | None = None,
 ) -> str:
     """Relative path for a series fanart image."""
-    safe_title = _series_folder(series_title, year, suffix, fallback_id)
+    safe_title = series_folder(series_title, year, suffix, fallback_id)
     return f"Series/{safe_title}/fanart.jpg"
 
 
@@ -171,7 +173,7 @@ def movie_version_path(
 
     Example: Films/Terminator (1984)/Terminator (1984) - VF Compte 1.strm
     """
-    folder = _movie_folder(title, year, suffix, fallback_id)
+    folder = movie_folder(title, year, suffix, fallback_id)
     label = sanitize_for_filesystem(version_label)
     return f"Films/{folder}/{folder} - {label}.strm"
 
@@ -185,7 +187,7 @@ def series_episode_version_path(
 
     Example: Series/Show (2020)/Season 01/Show (2020) S01E01 - VF Compte 1.strm
     """
-    folder = _series_folder(series_title, year, suffix, fallback_id)
+    folder = series_folder(series_title, year, suffix, fallback_id)
     season_str = f"Season {season:02d}"
     base = f"{folder} S{season:02d}E{episode:02d}"
     label = sanitize_for_filesystem(version_label)

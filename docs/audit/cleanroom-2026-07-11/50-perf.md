@@ -10,6 +10,8 @@ Summary: the single-item and index-friendly list paths are fine, and the batch w
 
 ### CR-P01 — `/movies/unified` & `/shows/unified` load the WHOLE catalog and aggregate on the event loop, per request (P0)
 
+**Statut : RÉSOLU (2026-07-12, `/refacto` étape 3, commit `c3024e3`).** Atténué en 1ᵉʳ temps (Vague B : offload `asyncio.to_thread` + cache TTL 45 s des groupes triés). **Vrai fix** livré ici : table dénormalisée `media_group` (+ `media_group_member`) construite par `services/unified_group_service.rebuild_all` en **fin de pipeline** (après enrichissement/génération — le `group_key` convergé ne peut pas se calculer par ligne : Pass A union-find + Pass B absorption sont des opérations sur tout le catalogue). Le browse **non-filtré** pagine désormais côté SQL sur `media_group` avec `LIMIT` (O(page)) puis ré-hydrate/ré-agrège **la page seule** → cartes/`versions[]` octet-identiques. Migration **017** (idempotente, additive, fin de chaîne). **Fallback live** si snapshot vide (DB fraîche avant 1er build) ; **requêtes filtrées** (search/genre/year) restent sur le chemin live (le filtre change la composition des groupes). Variant `?unification_id=` inchangé (déjà indexé). Gate `db-migration-specialist` a détecté+reproduit un P1 (item multi-catégorie → 2 lignes `media` même `(server_id, rating_key)` → collision PK `media_group_member`) : corrigé (1 pointeur par `(server_id, rating_key)`, ré-expansion à la lecture avec re-filtre `type`/`is_in_allowed_categories`). Preuve : `tests/test_unified_group_snapshot.py` (parité snapshot↔live, convergence Pass A/B, multi-catégorie, non-allowed, fast-path/fallback) + `tests/test_media_group_migration.py`. ADR `docs/architecture/adr/0001-unified-perf-residuals.md`.
+
 **Where.** `app/services/media_service.py:128-147` (`get_unified_list`) → `app/services/aggregation_service.py:215-221` (`aggregate_movies`) → `app/api/media.py:150-214` / `:217-275`.
 
 **What.** `get_unified_list` builds `select(Media).where(Media.type == …, Media.is_in_allowed_categories == True [+ optional search/genre/year])` with **no `LIMIT`/`OFFSET` at the DB level**, then materializes *every* matching row:
@@ -68,6 +70,8 @@ Because the measured floor uses a **fresh** empty DB, `create_all` created every
 
 ### CR-P04 — OFFSET-based deep pagination scans and discards the skipped prefix (P2)
 
+**Statut : RÉSOLU (2026-07-12, `/refacto` étape 2, commit `b1f5ed6`) — additif/non-cassant.** Curseur keyset **optionnel** ajouté aux listes brutes (`/movies`, `/shows`, `/episodes`) : avec `sort=added_desc|added_asc`, un `cursor` remplace l'OFFSET par un seek `WHERE (added_at, <PK 4 cols>) </> :cursor` (O(page)). `Media` n'ayant pas d'id auto-incrément (PK = `(rating_key, server_id, filter, sort_order)`) et `added_at` n'étant pas unique, l'ordre total — et le curseur — portent `added_at` **+ la PK composite** comme tie-break déterministe. `offset` reste le défaut, `has_more` garde `(offset+limit) < total`, et `next_cursor` (émis sur toute page pleine en tri récence) est purement additif (les clients offset l'ignorent). `/unified` hors périmètre (pagine un slice mémoire), tris non-récence retombent sur OFFSET. Curseur invalide → 400. Preuve : `tests/test_media_keyset_pagination.py` (marche curseur == séquence offset, doublons d'`added_at`, 2 sens, round-trip).
+
 **Where.** `app/api/media.py` list endpoints via `media_service.py:98` (`query.offset(offset).limit(limit)`); `app/api/live.py:81`; `app/api/live.py:268` (EPG).
 
 **What.** SQLite `OFFSET n` walks and throws away the first `n` matching rows before returning the page — cost is O(offset). With `limit` defaulting to 500 (`media.py:76`, `live.py:43`), deep offsets on a large catalog get progressively slower.
@@ -107,6 +111,8 @@ Because the measured floor uses a **fresh** empty DB, `create_all` created every
 
 ### CR-P07 — Large-page serialization: up to 500 (media) / 2000 (unified) / 5000 rows × ~60-field Pydantic validation + FastAPI response_model re-pass (P2 / debt)
 
+**Statut : RÉSOLU (2026-07-12, `/refacto` étape 1, commit `ba6689e`).** Les 6 endpoints liste (`/movies`, `/shows`, `/episodes`, `/movies/unified`, `/shows/unified`, `/episodes/unified`) construisaient leur modèle Pydantic **puis** FastAPI le re-validait + re-sérialisait contre `response_model` (2ᵉ passe complète). Helper `_single_pass_json` (`app/api/media.py`) : le modèle est sérialisé **une seule fois** (`model_dump(mode="json", by_alias=True)`) et renvoyé dans un `JSONResponse` — FastAPI saute alors sa passe. `response_model=` conservé sur chaque route pour l'OpenAPI (contrat inchangé). Sortie **octet-identique** au chemin par défaut (aucun `default_response_class` custom, même défaut `by_alias`, pas d'`exclude_*`). Preuve : `tests/test_media_serialization_singlepass.py` compare `_single_pass_json` à `jsonable_encoder(model, by_alias=True)` + tests HTTP (camelCase, préfixe `[XXX]`, pagination). ADR `docs/architecture/adr/0001-unified-perf-residuals.md`.
+
 **Where.** `app/api/media.py:94`, `:125`, `:144` (`[MediaResponse.model_validate(i) for i in items]`), `:199-211`, `:262-272` (unified item construction); `response_model=…` on the routes triggers FastAPI's serialization pass.
 
 **What.** Each list response builds Pydantic models for every row (default 500, max `le=5000` for raw lists, `le=2000` for unified) and FastAPI then re-serializes them against `response_model`. Pydantic v2 is Rust-backed and fast, but at `limit=5000` this is ~300 k field operations per request, twice (construct + response serialization), all on the event loop.
@@ -142,7 +148,7 @@ Because the measured floor uses a **fresh** empty DB, `create_all` created every
 
 ## Finding count
 
-- **P0:** 1 (CR-P01)
+- **P0:** 1 (CR-P01 — **RÉSOLU 2026-07-12**)
 - **P1:** 2 (CR-P02 — **RÉSOLU 2026-07-11**, CR-P03)
-- **P2:** 4 (CR-P04, CR-P05 — **PARTIELLEMENT RÉSOLU 2026-07-11** (health_check_worker) / résiduel by-design (source.py), CR-P06, CR-P07)
+- **P2:** 4 (CR-P04 — **RÉSOLU 2026-07-12**, CR-P05 — **PARTIELLEMENT RÉSOLU 2026-07-11** (health_check_worker) / résiduel by-design (source.py), CR-P06, CR-P07 — **RÉSOLU 2026-07-12**)
 - **debt:** 1 (CR-P08)

@@ -1,4 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 
@@ -22,6 +24,25 @@ from app.services.aggregation_service import (
 from app.services.media_service import media_service
 
 router = APIRouter(prefix="/media", tags=["media"])
+
+
+def _single_pass_json(model: BaseModel) -> JSONResponse:
+    """CR-P07: serialize the response model ONCE and hand FastAPI a ready
+    ``Response`` so it skips its own re-validation + re-serialization pass.
+
+    The list endpoints build up to ``limit`` (500 raw / 2000 unified) Pydantic
+    models, then FastAPI used to re-validate + re-dump every one of them against
+    ``response_model`` — a second full Pydantic pass over ~60 fields/row on the
+    event loop. Returning a ``Response`` short-circuits that: FastAPI does not
+    re-validate when the return value is already a ``Response``.
+
+    ``response_model=`` is KEPT on every route purely for the OpenAPI schema
+    (the documented contract is therefore unchanged). Output is byte-identical
+    to FastAPI's default path — same ``JSONResponse`` class (no custom
+    ``default_response_class`` on the app), same ``by_alias=True`` default, no
+    ``exclude_*`` — see ADR 0001. Model fields are JSON-native scalars/lists
+    (no ``datetime``), so ``mode="json"`` matches ``jsonable_encoder``."""
+    return JSONResponse(content=model.model_dump(mode="json", by_alias=True))
 
 
 def _build_versions(
@@ -88,11 +109,11 @@ async def list_movies(
         search=search, genre=genre, year=year,
         missing_imdb=missing_imdb, missing_tmdb=missing_tmdb,
     )
-    return MediaListResponse(
+    return _single_pass_json(MediaListResponse(
         items=[MediaResponse.model_validate(i) for i in items],
         total=total,
         has_more=(offset + limit) < total,
-    )
+    ))
 
 
 @router.get("/movies/stats", response_model=MediaStatsResponse)
@@ -119,11 +140,11 @@ async def list_shows(
         sort=sort, server_id=server_id,
         search=search, genre=genre, year=year,
     )
-    return MediaListResponse(
+    return _single_pass_json(MediaListResponse(
         items=[MediaResponse.model_validate(i) for i in items],
         total=total,
         has_more=(offset + limit) < total,
-    )
+    ))
 
 
 @router.get("/episodes", response_model=MediaListResponse)
@@ -138,11 +159,11 @@ async def list_episodes(
         db, media_type="episode", limit=limit, offset=offset,
         server_id=server_id, parent_rating_key=parent_rating_key,
     )
-    return MediaListResponse(
+    return _single_pass_json(MediaListResponse(
         items=[MediaResponse.model_validate(i) for i in items],
         total=total,
         has_more=(offset + limit) < total,
-    )
+    ))
 
 
 @router.get("/movies/unified", response_model=UnifiedMediaListResponse)
@@ -166,7 +187,7 @@ async def list_movies_unified(
     if unification_id is not None:
         g = await media_service.get_unified_group(db, "movie", unification_id)
         if g is None:
-            return UnifiedMediaListResponse(items=[], total=0, has_more=False)
+            return _single_pass_json(UnifiedMediaListResponse(items=[], total=0, has_more=False))
         best = g.best
         clean_title, clean_year = canonical_title_year(best)
         is_adult = bool(getattr(best, "is_adult", False))
@@ -183,7 +204,7 @@ async def list_movies_unified(
             version_count=len(g.members),
             **_nfo_metadata(best),
         )
-        return UnifiedMediaListResponse(items=[item], total=1, has_more=False)
+        return _single_pass_json(UnifiedMediaListResponse(items=[item], total=1, has_more=False))
 
     groups, total = await media_service.get_unified_list(
         db, media_type="movie", limit=limit, offset=offset,
@@ -207,9 +228,9 @@ async def list_movies_unified(
             version_count=len(g.members),
             **_nfo_metadata(best),
         ))
-    return UnifiedMediaListResponse(
+    return _single_pass_json(UnifiedMediaListResponse(
         items=items, total=total, has_more=(offset + limit) < total,
-    )
+    ))
 
 
 @router.get("/shows/unified", response_model=UnifiedMediaListResponse)
@@ -233,7 +254,7 @@ async def list_shows_unified(
     if unification_id is not None:
         g = await media_service.get_unified_group(db, "show", unification_id)
         if g is None:
-            return UnifiedMediaListResponse(items=[], total=0, has_more=False)
+            return _single_pass_json(UnifiedMediaListResponse(items=[], total=0, has_more=False))
         best = g.best
         clean_title, clean_year = canonical_title_year(best)
         item = UnifiedMediaResponse(
@@ -247,7 +268,7 @@ async def list_shows_unified(
             version_count=len(g.members),
             **_nfo_metadata(best),
         )
-        return UnifiedMediaListResponse(items=[item], total=1, has_more=False)
+        return _single_pass_json(UnifiedMediaListResponse(items=[item], total=1, has_more=False))
 
     groups, total = await media_service.get_unified_list(
         db, media_type="show", limit=limit, offset=offset,
@@ -268,9 +289,9 @@ async def list_shows_unified(
             version_count=len(g.members),
             **_nfo_metadata(best),
         ))
-    return UnifiedMediaListResponse(
+    return _single_pass_json(UnifiedMediaListResponse(
         items=items, total=total, has_more=(offset + limit) < total,
-    )
+    ))
 
 
 @router.get("/episodes/unified", response_model=UnifiedEpisodeListResponse)
@@ -298,10 +319,10 @@ async def list_episodes_unified(
         )
         for slot in slots
     ]
-    return UnifiedEpisodeListResponse(
+    return _single_pass_json(UnifiedEpisodeListResponse(
         unification_id=unification_id, series_title=canonical_title_year(group.best)[0],
         items=items, total=len(items),
-    )
+    ))
 
 
 @router.get("/{rating_key}", response_model=MediaResponse)

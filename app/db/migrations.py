@@ -42,6 +42,7 @@ async def run_migrations(engine: AsyncEngine) -> None:
     await _migration_014_add_nfo_metadata(engine)
     await _migration_015_add_missing_media_indexes(engine)
     await _migration_016_encrypt_xtream_passwords(engine)
+    await _migration_017_create_media_group_snapshot(engine)
 
     logger.info("All migrations completed successfully")
 
@@ -701,3 +702,55 @@ async def _migration_016_encrypt_xtream_passwords(engine: AsyncEngine) -> None:
             "out of %d total (rest already encrypted, empty, or missing)",
             encrypted_count, len(rows),
         )
+
+
+async def _migration_017_create_media_group_snapshot(engine: AsyncEngine) -> None:
+    """Create the CR-P01 unified-group snapshot tables (media_group +
+    media_group_member).
+
+    These hold the precomputed output of the whole-catalog unified aggregation
+    (services.unified_group_service), so the UNFILTERED /movies|shows/unified
+    browse endpoints page over already-grouped rows with a DB LIMIT instead of
+    loading + aggregating the entire catalog per request. Purely additive — no
+    existing table/column/data is touched; the snapshot is (re)built by the
+    pipeline, and the read path falls back to live aggregation whenever it is
+    empty (fresh DB before the first build), so an empty/absent snapshot is
+    always safe.
+
+    Idempotent: CREATE TABLE/INDEX IF NOT EXISTS; a fresh DB already has these
+    via Base.metadata.create_all (models/database.py) so this is a silent no-op
+    there, and an upgraded DB gets them here.
+    """
+    logger.info("Migration 017: Creating media_group snapshot tables")
+
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS media_group (
+                    media_type    TEXT    NOT NULL,
+                    group_key     TEXT    NOT NULL,
+                    sort_added_at INTEGER NOT NULL DEFAULT 0,
+                    version_count INTEGER NOT NULL DEFAULT 0,
+                    built_at      INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (media_type, group_key)
+                )
+            """))
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS media_group_member (
+                    media_type TEXT NOT NULL,
+                    group_key  TEXT NOT NULL,
+                    server_id  TEXT NOT NULL,
+                    rating_key TEXT NOT NULL,
+                    PRIMARY KEY (media_type, group_key, server_id, rating_key)
+                )
+            """))
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_media_group_type_sort "
+                "ON media_group(media_type, sort_added_at)"
+            ))
+            # No secondary index on media_group_member: the composite-PK's
+            # implicit index (leading media_type, group_key) already serves the
+            # `WHERE media_type=? AND group_key IN (...)` page lookup.
+            logger.info("Migration 017: media_group snapshot tables created")
+        except Exception as e:
+            logger.warning("Migration 017: tables may already exist: %s", e)

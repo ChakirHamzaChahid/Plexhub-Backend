@@ -99,6 +99,26 @@ async def _auto_generate_plex_library():
     await generate_plex_library_auto()
 
 
+async def _rebuild_unified_groups():
+    """CR-P01: rebuild the precomputed media_group snapshot the unfiltered
+    /movies|shows/unified browse endpoints page over.
+
+    Runs at the end of the pipeline (after enrichment/generation) so the
+    snapshot reflects the fully-enriched catalog — the same freshness as the
+    generated Plex library. Non-fatal: the unified list falls back to live
+    aggregation if this fails or hasn't run yet, so a failure never breaks
+    browsing.
+    """
+    from app.services import unified_group_service
+    from app.db.database import async_session_factory
+
+    try:
+        counts = await unified_group_service.rebuild_all(async_session_factory)
+        logger.info("Unified-group snapshot rebuilt: %s", counts)
+    except Exception as e:
+        logger.error("Unified-group snapshot rebuild failed: %s", e, exc_info=True)
+
+
 async def _auto_provision_xtream_account():
     """Create an Xtream account from env vars if it doesn't already exist."""
     import hashlib
@@ -246,6 +266,8 @@ async def lifespan(app: FastAPI):
                         await health_check_worker.run_pipeline_validation()
                         logger.info("Scheduled validation done — starting Plex generation")
                         await _auto_generate_plex_library()
+                        logger.info("Scheduled generation done — rebuilding unified-group snapshot")
+                        await _rebuild_unified_groups()
                     except Exception as e:
                         logger.error(f"Scheduled sync pipeline failed: {e}", exc_info=True)
 
@@ -329,6 +351,8 @@ async def lifespan(app: FastAPI):
                     await health_check_worker.run_pipeline_validation()
                     logger.info("Validation done — starting Plex library generation")
                     await _auto_generate_plex_library()
+                    logger.info("Generation done — rebuilding unified-group snapshot")
+                    await _rebuild_unified_groups()
 
             from app.utils.tasks import create_background_task
             create_background_task(initial_sync_then_enrich(), name="initial_sync")

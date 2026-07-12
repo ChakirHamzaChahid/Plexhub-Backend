@@ -8,7 +8,9 @@ from typing import Optional
 from sqlalchemy import select, func, delete, update, or_, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.database import Media, EnrichmentQueue, XtreamAccount
+from app.models.database import (
+    Media, EnrichmentQueue, MediaGroup, MediaGroupMember, XtreamAccount,
+)
 from app.services.aggregation_service import (
     MovieGroup, SeriesGroup, aggregate_movies, aggregate_series,
 )
@@ -27,6 +29,11 @@ def _aggregate_and_sort_movies(rows: list[Media]) -> list[MovieGroup]:
     — safe to execute in a worker thread via ``asyncio.to_thread``.
     """
     groups = aggregate_movies(rows)  # generic: groups by key + picks best row
+    # Deterministic order: added_at desc, then group_key asc as a stable
+    # tie-break — identical to the media_group snapshot's
+    # `ORDER BY sort_added_at DESC, group_key ASC`, so the live and snapshot
+    # paths page groups in the exact same sequence (CR-P01 parity).
+    groups.sort(key=lambda g: g.key)
     groups.sort(key=lambda g: (g.best.added_at or 0), reverse=True)
     return groups
 
@@ -257,8 +264,24 @@ class MediaService:
         tuple + a cheap freshness fingerprint — repeated pages and concurrent
         callers for the same filters reuse one load+aggregate; only
         offset/limit slicing (cheap) happens per request on a cache hit.
-        True SQL-side windowed grouping remains a future optimization.
+
+        CR-P01 (true fix, unfiltered browse): when there are no filters, page
+        over the precomputed ``media_group`` snapshot with a DB ``LIMIT``
+        (``_unified_list_from_snapshot``) — O(page), no whole-catalog load. The
+        snapshot is rebuilt at pipeline time; an empty snapshot (fresh DB before
+        the first build) transparently falls back to the live path below.
         """
+        # CR-P01: unfiltered browse pages over the precomputed snapshot. Filtered
+        # / searched queries can't (filtering rows changes group membership +
+        # best-row selection), and include_broken=False is never issued by the
+        # API — both correctly fall through to the live aggregation below.
+        if search is None and genre is None and year is None and include_broken:
+            snapshot = await self._unified_list_from_snapshot(
+                db, media_type, limit, offset,
+            )
+            if snapshot is not None:
+                return snapshot
+
         query = select(Media).where(
             Media.type == media_type,
             Media.is_in_allowed_categories == True,  # noqa: E712
@@ -310,6 +333,83 @@ class MediaService:
         # `groups` is the cached list itself — slicing returns a NEW list and
         # never mutates it, so the cached snapshot stays immutable.
         return groups[offset:offset + limit], total
+
+    async def _unified_list_from_snapshot(
+        self,
+        db: AsyncSession,
+        media_type: str,
+        limit: int,
+        offset: int,
+    ) -> Optional[tuple[list[MovieGroup], int]]:
+        """CR-P01 fast path: page the unfiltered unified list over the
+        precomputed ``media_group`` snapshot instead of loading + aggregating
+        the whole catalog.
+
+        Returns ``None`` when the snapshot is empty for *media_type* (never
+        built, or genuinely no groups) so the caller falls back to the live
+        aggregation — this keeps a fresh DB correct before the first pipeline
+        build. On a hit:
+          1. page the group keys at SQL (``ORDER BY sort_added_at DESC,
+             group_key ASC`` — deterministic, matches the live sort) with
+             ``LIMIT/OFFSET``; ``total`` = the snapshot group count;
+          2. load ONLY that page's member rows (bounded IN-join), then
+             re-run ``aggregate_movies`` over them — reproducing the exact same
+             ``MovieGroup`` (key/best/members) the live path would build, so the
+             card + ``versions[]`` are byte-identical. Re-aggregating COMPLETE
+             groups is safe: convergence only ever merged rows sharing ids /
+             title+year, so distinct snapshot groups stay distinct and each
+             group's representative key is unchanged.
+        """
+        total = (await db.execute(
+            select(func.count()).select_from(MediaGroup).where(
+                MediaGroup.media_type == media_type,
+            )
+        )).scalar() or 0
+        if total == 0:
+            return None  # not built yet (or empty) → live fallback
+
+        page_keys = list((await db.execute(
+            select(MediaGroup.group_key)
+            .where(MediaGroup.media_type == media_type)
+            .order_by(MediaGroup.sort_added_at.desc(), MediaGroup.group_key.asc())
+            .limit(limit).offset(offset)
+        )).scalars().all())
+        if not page_keys:
+            return [], total  # valid empty page (offset past the end)
+
+        member_pks = (await db.execute(
+            select(MediaGroupMember.server_id, MediaGroupMember.rating_key)
+            .where(
+                MediaGroupMember.media_type == media_type,
+                MediaGroupMember.group_key.in_(page_keys),
+            )
+        )).all()
+        pk_pairs = [(sv, rk) for sv, rk in member_pks]
+        if not pk_pairs:
+            return [], total  # stale snapshot: members deleted since build
+
+        # Re-apply the SAME row filter the live path uses (type + allowed
+        # categories) so hydration can't pull an out-of-scope variant of the
+        # same (server_id, rating_key): one physical item can have both an
+        # allowed and a non-allowed category row (same server_id+rating_key,
+        # different `filter`) — only the allowed one is a real version, and the
+        # `(server_id, rating_key)` IN-join alone would otherwise re-inflate the
+        # non-allowed twin and diverge from the live versions[].
+        media_rows = list((await db.execute(
+            select(Media).where(
+                Media.type == media_type,
+                Media.is_in_allowed_categories == True,  # noqa: E712
+                tuple_(Media.server_id, Media.rating_key).in_(pk_pairs),
+            )
+        )).scalars().all())
+
+        groups = await asyncio.to_thread(aggregate_movies, media_rows)
+        by_key = {g.key: g for g in groups}
+        # Emit in the snapshot's paged order; drop any key that didn't
+        # reproduce (only possible on a stale snapshot where key-determining
+        # rows were deleted) — total still reflects the snapshot.
+        ordered = [by_key[k] for k in page_keys if k in by_key]
+        return ordered, total
 
     async def get_unified_group(
         self,

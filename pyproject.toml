@@ -14,11 +14,20 @@ filterwarnings = [
     "ignore::pytest.PytestUnhandledThreadExceptionWarning",
 ]
 
-# CR-T09/CR-C06: coverage is *measured and reported*, not gated — the suite's
-# real coverage is partial (see docs/audit/cleanroom-*/60-tests.md) and a hard
-# --cov-fail-under would red the build on unrelated, pre-existing gaps. Report
-# only; a floor can be added once coverage is deliberately raised.
-addopts = "--cov=app --cov-report=term-missing"
+# CR-T09: enforced coverage floor (safety ratchet, not a target).
+# Measured 2026-07-12 on this tree (`pytest --cov=app --cov-report=term`,
+# full suite, 707 passed, branch coverage on per [tool.coverage.run]):
+#   TOTAL 7798 stmts / 1901 missed / 2082 branches / 319 partial = 73%
+# `--cov-fail-under=70` is set ~3 points BELOW that measured 73% — a floor
+# that fails a real regression (coverage dropping) without being brittle
+# against normal test-suite noise/reruns. Deliberately NOT set at-or-above
+# 73%: several high-risk modules are still only partially covered (see
+# docs/audit/cleanroom-2026-07-11/60-tests.md CR-T03/T04/T05/T06/T07 —
+# sync_worker orchestration, startup/lifespan wiring, api_key_service,
+# several routers) and pinning the gate to today's exact number would red
+# the build on the next unrelated flaky rerun. Raise this floor deliberately
+# as those gaps are closed, not by ratcheting it up opportunistically.
+addopts = "--cov=app --cov-report=term-missing --cov-fail-under=70"
 
 [tool.coverage.run]
 branch = true

@@ -92,7 +92,20 @@ empirically · **56 findings** across 6 dimensions (**1 P0, 17 P1, 26 P2, 12 deb
 
 **Gardé pour un effort dédié (refacto lourd, approuvé « plus tard ») :** CR-A03 (décomposer god-files `sync_worker` 1390 / `ai` 1228 / `nfo_import` 888) · CR-A05 (slim `main.py`).
 
-**Follow-ups noted (not yet done):** CR-P01 full SQL-side pagination redesign · `/api/plex/generate` behind `verify_master_key` (defense-in-depth) · CR-S02/S04/S05/S07/S08 (sécurité) · **CR-A03/A05 (god-files, main.py)** · CR-P04/P07 (api/media.py) · CR-T03–T09 (tests — Vague D en cours).
+**Vague D — RESOLVED** (tests ; full suite `707 passed`, couverture **72.65 %** ≥ gate 70 %, ruff vert) :
+
+| ID | Sev | Fix | Note |
+|---|:--:|---|---|
+| CR-T03 | P1 | `test_sync_worker_orchestration.py` (8) — vrai `sync_account`/`run_all_accounts` (upsert, no-op dto_hash, cleanup, lock, job failed) | — |
+| CR-T04 | P1 | `test_startup_wiring.py` (7) — vrai `lifespan` (faux `fcntl`), élection master/slave, ordre pipeline, `_PIPELINE_LOCK`, auto-provision | Résidu : bodies des crons + extraction module-level = CR-A05. |
+| CR-T06 | P2 | `test_api_key_service.py` (25) — mint/digest-only/resolve/revoke/expiry/last-used | — |
+| CR-T07 | P2 | `test_router_http_coverage.py` (33) — `stream`/`media` PATCH+rescrape/`live` epg+stream/`api_keys` lifecycle/`accounts` CRUD | — |
+| CR-T08 | P2 | `test_db_retry_real_lock.py` — vrai lock WAL fichier (pas d'exception synthétique) | A révélé un défaut, cf. ci-dessous. |
+| CR-T09 | debt | `--cov-fail-under=70` dans `pyproject.toml` (mesuré 72.65 %, ratchet ~3 pts sous) | Relever le plancher au fur et à mesure. |
+
+**🔎 Défaut découvert pendant la remédiation (à traiter, hors board initial) — `commit_with_retry` inefficace sur le chemin requête :** sur `db.add(...)` + `commit_with_retry(db)` (même session), un **vrai** lock invalide la transaction après le 1ᵉʳ flush → la 2ᵉ tentative lève `PendingRollbackError` (pas `OperationalError`), non attrapée par `run_with_retry` → le retry app-level abandonne. Atténué en pratique par `busy_timeout=60 s` (absorbe la contention avant que le retry ne s'engage), donc **pas une régression** de CR-C04, mais la résilience visée n'est que partielle. Correctif propre = re-structurer les call-sites en factory `run_with_retry` (touche `db_retry.py` + tous les writes CR-C04) → **effort dédié**. Test de garde présent (`TestCommitWithRetrySameSessionBoundary`).
+
+**Follow-ups noted (not yet done):** CR-P01 full SQL-side pagination redesign · `/api/plex/generate` behind `verify_master_key` (defense-in-depth) · CR-S02/S04/S05/S07/S08 (sécurité) · **CR-A03/A05 (god-files, main.py)** · CR-P04/P07 (api/media.py) · **`commit_with_retry` same-session (nouveau)** · relever le plancher de couverture.
 
 ---
 

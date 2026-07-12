@@ -1,8 +1,11 @@
 import asyncio
+import base64
+import binascii
+import json
 import logging
 from typing import Optional
 
-from sqlalchemy import select, func, delete, update, or_
+from sqlalchemy import select, func, delete, update, or_, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.database import Media, EnrichmentQueue, XtreamAccount
@@ -66,6 +69,51 @@ _unified_groups_cache: TTLCache[tuple, list[MovieGroup]] = TTLCache(
 )
 
 
+# ─── CR-P04: keyset (seek) pagination cursor for the raw list endpoints ──────
+#
+# `OFFSET n` walks and discards the first n matching rows (cost O(offset)); deep
+# pages on a large catalog degrade linearly. A keyset cursor seeks directly to
+# the page boundary via `WHERE (added_at, <pk>) </> :cursor`, cost O(limit).
+#
+# `Media` has NO single autoincrement id — its PK is the 4-tuple
+# (rating_key, server_id, filter, sort_order) — and `added_at` is not unique, so
+# a correct total order (and therefore a correct cursor) needs added_at PLUS the
+# full composite PK as the deterministic tie-break. The cursor is opaque
+# (base64) so its internal shape is not a public contract.
+_MEDIA_KEYSET_SORTS = ("added_desc", "added_asc")
+
+
+def _media_key_cols():
+    """The total-order columns the keyset sorts by: recency + full composite PK."""
+    return (
+        Media.added_at, Media.rating_key, Media.server_id,
+        Media.filter, Media.sort_order,
+    )
+
+
+def encode_media_cursor(row: Media) -> str:
+    """Opaque keyset cursor pointing AT ``row`` (added_at + composite PK)."""
+    payload = [
+        int(row.added_at or 0), row.rating_key, row.server_id,
+        row.filter, row.sort_order,
+    ]
+    raw = json.dumps(payload, separators=(",", ":"))
+    return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii")
+
+
+def decode_media_cursor(cursor: str) -> tuple[int, str, str, str, str]:
+    """Parse a cursor produced by ``encode_media_cursor``.
+
+    Raises ``ValueError`` on any malformed input so the endpoint can map it to a
+    400 rather than a 500."""
+    try:
+        raw = base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8")
+        added_at, rk, sv, fl, so = json.loads(raw)
+        return int(added_at), str(rk), str(sv), str(fl), str(so)
+    except (ValueError, TypeError, binascii.Error, UnicodeDecodeError) as e:
+        raise ValueError(f"malformed cursor: {e}") from e
+
+
 class MediaService:
 
     async def get_media_list(
@@ -83,12 +131,19 @@ class MediaService:
         year: Optional[int] = None,
         missing_imdb: bool = False,
         missing_tmdb: bool = False,
+        cursor: Optional[str] = None,
     ) -> tuple[list[Media], int]:
         """Get paginated media list with total count.
 
         When both missing_imdb and missing_tmdb are True, the filter is OR (rows
         with imdb_id missing OR tmdb_id missing). When only one is True, only
         that condition applies.
+
+        CR-P04: when *cursor* is provided AND *sort* is a recency sort
+        (added_desc/added_asc), pagination seeks past the cursor with a keyset
+        predicate instead of OFFSET (offset is ignored on that path). For any
+        other sort, or when *cursor* is None, OFFSET pagination is used exactly
+        as before. Invalid cursors raise ``ValueError``.
         """
         logger.debug(f"get_media_list: type={media_type}, limit={limit}, offset={offset}, "
                     f"sort={sort}, server_id={server_id}, parent={parent_rating_key}, "
@@ -135,11 +190,13 @@ class MediaService:
         total_result = await db.execute(count_query)
         total = total_result.scalar() or 0
 
-        # Apply sorting
-        if sort == "added_desc":
-            query = query.order_by(Media.added_at.desc())
-        elif sort == "added_asc":
-            query = query.order_by(Media.added_at.asc())
+        # Apply sorting. The recency sorts order by added_at PLUS the full
+        # composite PK (deterministic tie-break) so pagination is stable across
+        # rows with equal added_at — also a prerequisite for the CR-P04 keyset
+        # cursor to point at a single unambiguous boundary.
+        key_cols = _media_key_cols()
+        if sort == "added_asc":
+            query = query.order_by(*(c.asc() for c in key_cols))
         elif sort == "title_asc":
             query = query.order_by(Media.title_sortable.asc())
         elif sort == "title_desc":
@@ -148,11 +205,20 @@ class MediaService:
             query = query.order_by(Media.display_rating.desc())
         elif sort == "year_desc":
             query = query.order_by(Media.year.desc().nulls_last())
-        else:
-            query = query.order_by(Media.added_at.desc())
+        else:  # added_desc (default) and any unknown sort
+            query = query.order_by(*(c.desc() for c in key_cols))
 
-        # Apply pagination
-        query = query.offset(offset).limit(limit)
+        # Apply pagination — keyset seek when a cursor is supplied on a recency
+        # sort (CR-P04), else OFFSET as before.
+        if cursor is not None and sort in _MEDIA_KEYSET_SORTS:
+            boundary = decode_media_cursor(cursor)
+            if sort == "added_asc":
+                query = query.where(tuple_(*key_cols) > boundary)
+            else:
+                query = query.where(tuple_(*key_cols) < boundary)
+            query = query.limit(limit)
+        else:
+            query = query.offset(offset).limit(limit)
 
         result = await db.execute(query)
         items = list(result.scalars().all())

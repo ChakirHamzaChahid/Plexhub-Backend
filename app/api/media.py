@@ -21,7 +21,7 @@ from app.models.schemas import (
 from app.services.aggregation_service import (
     build_versions, canonical_title_year,
 )
-from app.services.media_service import media_service
+from app.services.media_service import media_service, encode_media_cursor
 
 router = APIRouter(prefix="/media", tags=["media"])
 
@@ -43,6 +43,28 @@ def _single_pass_json(model: BaseModel) -> JSONResponse:
     ``exclude_*`` — see ADR 0001. Model fields are JSON-native scalars/lists
     (no ``datetime``), so ``mode="json"`` matches ``jsonable_encoder``."""
     return JSONResponse(content=model.model_dump(mode="json", by_alias=True))
+
+
+_KEYSET_SORTS = ("added_desc", "added_asc")
+
+
+def _page_meta(items, limit, offset, total, cursor, sort) -> tuple[bool, Optional[str]]:
+    """Compute ``(has_more, next_cursor)`` for a raw list page (CR-P04).
+
+    ``has_more`` ALWAYS keeps the exact ``(offset + limit) < total`` offset
+    formula — unchanged for every existing caller regardless of cursor.
+
+    ``next_cursor`` is emitted on a recency sort (added_desc/added_asc) whenever
+    the page came back FULL (``len(items) == limit``), pointing at the last row
+    — independent of whether an incoming ``cursor`` was supplied, so a keyset
+    client can start paging with no cursor and simply follow ``next_cursor``
+    until it is null (a full final page yields one extra empty request — the
+    standard, correct cursor-pagination boundary). For non-recency sorts it
+    stays null. It is purely additive: offset callers ignore it."""
+    next_cursor = None
+    if sort in _KEYSET_SORTS and items and len(items) == limit:
+        next_cursor = encode_media_cursor(items[-1])
+    return (offset + limit) < total, next_cursor
 
 
 def _build_versions(
@@ -101,18 +123,28 @@ async def list_movies(
     year: Optional[int] = Query(None),
     missing_imdb: bool = Query(False),
     missing_tmdb: bool = Query(False),
+    cursor: Optional[str] = Query(
+        None,
+        description="Opaque keyset cursor (CR-P04). With sort=added_desc/added_asc "
+                    "it seeks past this row and ignores offset; use the response's "
+                    "nextCursor to page. Ignored for other sorts.",
+    ),
     db: AsyncSession = Depends(get_db),
 ):
-    items, total = await media_service.get_media_list(
-        db, media_type="movie", limit=limit, offset=offset,
-        sort=sort, server_id=server_id,
-        search=search, genre=genre, year=year,
-        missing_imdb=missing_imdb, missing_tmdb=missing_tmdb,
-    )
+    try:
+        items, total = await media_service.get_media_list(
+            db, media_type="movie", limit=limit, offset=offset,
+            sort=sort, server_id=server_id,
+            search=search, genre=genre, year=year,
+            missing_imdb=missing_imdb, missing_tmdb=missing_tmdb,
+            cursor=cursor,
+        )
+    except ValueError as e:
+        raise HTTPException(400, f"Invalid cursor: {e}")
+    has_more, next_cursor = _page_meta(items, limit, offset, total, cursor, sort)
     return _single_pass_json(MediaListResponse(
         items=[MediaResponse.model_validate(i) for i in items],
-        total=total,
-        has_more=(offset + limit) < total,
+        total=total, has_more=has_more, next_cursor=next_cursor,
     ))
 
 
@@ -133,17 +165,27 @@ async def list_shows(
     search: Optional[str] = Query(None),
     genre: Optional[str] = Query(None),
     year: Optional[int] = Query(None),
+    cursor: Optional[str] = Query(
+        None,
+        description="Opaque keyset cursor (CR-P04). With sort=added_desc/added_asc "
+                    "it seeks past this row and ignores offset; use the response's "
+                    "nextCursor to page. Ignored for other sorts.",
+    ),
     db: AsyncSession = Depends(get_db),
 ):
-    items, total = await media_service.get_media_list(
-        db, media_type="show", limit=limit, offset=offset,
-        sort=sort, server_id=server_id,
-        search=search, genre=genre, year=year,
-    )
+    try:
+        items, total = await media_service.get_media_list(
+            db, media_type="show", limit=limit, offset=offset,
+            sort=sort, server_id=server_id,
+            search=search, genre=genre, year=year,
+            cursor=cursor,
+        )
+    except ValueError as e:
+        raise HTTPException(400, f"Invalid cursor: {e}")
+    has_more, next_cursor = _page_meta(items, limit, offset, total, cursor, sort)
     return _single_pass_json(MediaListResponse(
         items=[MediaResponse.model_validate(i) for i in items],
-        total=total,
-        has_more=(offset + limit) < total,
+        total=total, has_more=has_more, next_cursor=next_cursor,
     ))
 
 
@@ -153,16 +195,27 @@ async def list_episodes(
     limit: int = Query(500, ge=1, le=5000),
     offset: int = Query(0, ge=0),
     server_id: Optional[str] = Query(None),
+    cursor: Optional[str] = Query(
+        None,
+        description="Opaque keyset cursor (CR-P04). Episodes always sort by "
+                    "added_desc, so a cursor seeks past this row and ignores "
+                    "offset; use the response's nextCursor to page.",
+    ),
     db: AsyncSession = Depends(get_db),
 ):
-    items, total = await media_service.get_media_list(
-        db, media_type="episode", limit=limit, offset=offset,
-        server_id=server_id, parent_rating_key=parent_rating_key,
-    )
+    try:
+        items, total = await media_service.get_media_list(
+            db, media_type="episode", limit=limit, offset=offset,
+            server_id=server_id, parent_rating_key=parent_rating_key,
+            cursor=cursor,
+        )
+    except ValueError as e:
+        raise HTTPException(400, f"Invalid cursor: {e}")
+    # list_episodes has no `sort` param — the service defaults to added_desc.
+    has_more, next_cursor = _page_meta(items, limit, offset, total, cursor, "added_desc")
     return _single_pass_json(MediaListResponse(
         items=[MediaResponse.model_validate(i) for i in items],
-        total=total,
-        has_more=(offset + limit) < total,
+        total=total, has_more=has_more, next_cursor=next_cursor,
     ))
 
 

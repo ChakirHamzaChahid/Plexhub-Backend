@@ -121,6 +121,11 @@ class MediaListResponse(BaseModel):
     items: list[MediaResponse]
     total: int
     has_more: bool
+    # CR-P04: opaque keyset cursor for the NEXT page. Only populated on the raw
+    # list endpoints (/movies, /shows, /episodes) when the caller passes a
+    # `cursor` and sorts by added_desc/added_asc; null otherwise. Additive and
+    # optional — existing clients that page with offset ignore it.
+    next_cursor: Optional[str] = None
 
 
 # --- Unified (deduped) media schemas — one entry per title, N versions ---

@@ -189,7 +189,11 @@ async def test_movies_endpoint_camelcase_and_pagination(api_client, seeded):
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("application/json")
     body = r.json()
-    assert set(body.keys()) == {"items", "total", "hasMore"}
+    # nextCursor (CR-P04) is additive. On a recency sort (default added_desc)
+    # with a FULL page it points at the next page — even without an incoming
+    # cursor — so a keyset client can start paging from here.
+    assert set(body.keys()) == {"items", "total", "hasMore", "nextCursor"}
+    assert body["nextCursor"] is not None  # full page (2 == limit) on added_desc
     assert body["total"] == 3
     assert body["hasMore"] is True  # (offset 0 + limit 2) < 3
     assert len(body["items"]) == 2

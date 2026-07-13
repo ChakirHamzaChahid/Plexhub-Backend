@@ -114,6 +114,19 @@ class Settings:
         if cid.strip()
     ]
 
+    # Physical media download (feature "Télécharger") — separate from
+    # PLEX_LIBRARY_DIR; the .strm catalogue is untouched by this feature.
+    # docs/20-impl-media-download.md §2. "" = feature disabled (config guard
+    # in download_service.enqueue_selection / download_worker.run_drain_loop).
+    DOWNLOAD_DIR: str = os.getenv("DOWNLOAD_DIR", "")
+    DOWNLOAD_CONCURRENCY: int = _safe_int("DOWNLOAD_CONCURRENCY", 1)
+    DOWNLOAD_CHUNK_BYTES: int = _safe_int("DOWNLOAD_CHUNK_BYTES", 1_048_576)        # 1 MiB
+    DOWNLOAD_MAX_RETRIES: int = _safe_int("DOWNLOAD_MAX_RETRIES", 3)               # transient auto-retries
+    DOWNLOAD_MIN_FREE_DISK_MB: int = _safe_int("DOWNLOAD_MIN_FREE_DISK_MB", 2048)  # préflight (P1, not wired yet)
+    DOWNLOAD_POLL_INTERVAL: int = _safe_int("DOWNLOAD_POLL_INTERVAL", 2)           # worker drain poll (s)
+    DOWNLOAD_CONNECT_TIMEOUT: int = _safe_int("DOWNLOAD_CONNECT_TIMEOUT", 30)      # httpx connect (s)
+    DOWNLOAD_READ_TIMEOUT: int = _safe_int("DOWNLOAD_READ_TIMEOUT", 120)           # httpx read/chunk (s)
+
     @property
     def has_xtream_env(self) -> bool:
         return bool(self.XTREAM_BASE_URL and self.XTREAM_USERNAME and self.XTREAM_PASSWORD)
@@ -134,6 +147,14 @@ class Settings:
             f"keywords={self.ADULT_CATEGORY_KEYWORDS}, "
             f"explicit_ids={self.ADULT_CATEGORY_IDS}"
         )
+
+        if self.DOWNLOAD_DIR:
+            logger.info(
+                f"Physical download: dir={self.DOWNLOAD_DIR!r}, "
+                f"concurrency={self.DOWNLOAD_CONCURRENCY}"
+            )
+        else:
+            logger.info("Physical download: DOWNLOAD_DIR not set — feature disabled")
 
 
 settings = Settings()

@@ -131,6 +131,62 @@ class TestResume:
         assert result.resumed is False
         assert result.bytes_downloaded == len(BODY)
 
+    async def test_206_with_mismatched_content_range_start_restarts_instead_of_appending(
+        self, tmp_path, xtream_mock,
+    ):
+        """CR-MIN-2 (review): a 206 response whose `Content-Range` start does
+        NOT match the `Range: bytes=<resume_from>-` we asked for (a
+        non-compliant/misbehaving provider) must be treated like "200, Range
+        ignored" — truncate `.part` and restart — never blindly appended to,
+        which would leave a gap or a duplicated byte range."""
+        dest = tmp_path / "Movies" / "MR" / "MR.mkv"
+        dest.parent.mkdir(parents=True)
+        part = dest.with_name(dest.name + ".part")
+        part.write_bytes(b"X" * 40)  # stale .part -> Range: bytes=40-
+
+        def _responder(request: httpx.Request) -> httpx.Response:
+            assert request.headers.get("range") == "bytes=40-"
+            # Server claims the resumed range starts at byte 5, not the 40
+            # we requested -- simulating a non-compliant provider.
+            return httpx.Response(
+                206, content=BODY,
+                headers={"Content-Range": f"bytes 5-{4 + len(BODY)}/999"},
+            )
+
+        xtream_mock.get(URL).mock(side_effect=_responder)
+
+        result = await download_to_disk(URL, dest)
+
+        assert dest.read_bytes() == BODY, (
+            ".part must be truncated+restarted on a Content-Range offset "
+            "mismatch, never appended to (would corrupt the file)"
+        )
+        assert result.resumed is False
+        assert result.bytes_downloaded == len(BODY)
+
+    async def test_206_with_missing_content_range_header_still_appends(
+        self, tmp_path, xtream_mock,
+    ):
+        """No `Content-Range` header at all on a 206 -> can't prove a mismatch
+        -> falls back to the pre-existing lenient append behaviour (no
+        regression for a minimal/non-standard but genuinely-resuming server)."""
+        dest = tmp_path / "Movies" / "MR2" / "MR2.mkv"
+        dest.parent.mkdir(parents=True)
+        part = dest.with_name(dest.name + ".part")
+        part.write_bytes(BODY[:40])
+
+        def _responder(request: httpx.Request) -> httpx.Response:
+            # No `Content-Range` header at all on this 206 (minimal/non-
+            # standard server) -> nothing to compare against `resume_from`.
+            return httpx.Response(206, content=BODY[40:])
+
+        xtream_mock.get(URL).mock(side_effect=_responder)
+
+        result = await download_to_disk(URL, dest)
+
+        assert dest.read_bytes() == BODY
+        assert result.resumed is True
+
     async def test_416_promotes_part_as_is_without_further_download(self, tmp_path, xtream_mock):
         dest = tmp_path / "Movies" / "T" / "T.mkv"
         dest.parent.mkdir(parents=True)
@@ -203,6 +259,53 @@ class TestPermanentErrors:
 
         with pytest.raises(DownloadPermanentError):
             await download_to_disk(URL, dest)
+
+
+# ─── DL-01: redirects are never followed (SSRF hardening, review fix #2) ───
+
+
+class TestRedirectNeverFollowed:
+    """A malicious/MITM'd provider returning a 3xx must never have its
+    `Location` target fetched or its body written to disk — a direct Xtream
+    stream URL never legitimately redirects, and following one would let a
+    hostile response point at an internal address (loopback/RFC1918/
+    `169.254.169.254`)."""
+
+    @pytest.mark.parametrize("status_code", [301, 302, 303, 307, 308])
+    async def test_redirect_status_raises_permanent_error_without_fetching_target(
+        self, tmp_path, xtream_mock, status_code,
+    ):
+        dest = tmp_path / "Movies" / "RD" / "RD.mkv"
+        redirect_target = "http://169.254.169.254/latest/meta-data/secret.mkv"
+
+        origin_route = xtream_mock.get(URL).mock(
+            return_value=httpx.Response(
+                status_code, headers={"Location": redirect_target},
+            )
+        )
+        target_route = xtream_mock.get(redirect_target).mock(
+            return_value=httpx.Response(200, content=b"internal-secret-payload")
+        )
+
+        with pytest.raises(DownloadPermanentError):
+            await download_to_disk(URL, dest)
+
+        assert origin_route.call_count == 1
+        assert target_route.call_count == 0, "the redirect target must NEVER be fetched"
+        assert not dest.exists()
+        part = dest.with_name(dest.name + ".part")
+        assert not part.exists()
+
+    async def test_302_leaves_no_bytes_written_to_disk(self, tmp_path, xtream_mock):
+        dest = tmp_path / "Movies" / "RD2" / "RD2.mkv"
+        xtream_mock.get(URL).mock(
+            return_value=httpx.Response(302, headers={"Location": "http://10.0.0.1/evil.mkv"})
+        )
+
+        with pytest.raises(DownloadPermanentError) as excinfo:
+            await download_to_disk(URL, dest)
+        assert "302" in str(excinfo.value)
+        assert not dest.parent.exists() or list(dest.parent.iterdir()) == []
 
 
 # ─── DL-057: transient errors -> DownloadTransientError ────────────────────

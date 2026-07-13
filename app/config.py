@@ -122,7 +122,7 @@ class Settings:
     DOWNLOAD_CONCURRENCY: int = _safe_int("DOWNLOAD_CONCURRENCY", 1)
     DOWNLOAD_CHUNK_BYTES: int = _safe_int("DOWNLOAD_CHUNK_BYTES", 1_048_576)        # 1 MiB
     DOWNLOAD_MAX_RETRIES: int = _safe_int("DOWNLOAD_MAX_RETRIES", 3)               # transient auto-retries
-    DOWNLOAD_MIN_FREE_DISK_MB: int = _safe_int("DOWNLOAD_MIN_FREE_DISK_MB", 2048)  # préflight (P1, not wired yet)
+    DOWNLOAD_MIN_FREE_DISK_MB: int = _safe_int("DOWNLOAD_MIN_FREE_DISK_MB", 2048)  # préflight, see download_service.check_free_disk_space (<=0 disables)
     DOWNLOAD_POLL_INTERVAL: int = _safe_int("DOWNLOAD_POLL_INTERVAL", 2)           # worker drain poll (s)
     DOWNLOAD_CONNECT_TIMEOUT: int = _safe_int("DOWNLOAD_CONNECT_TIMEOUT", 30)      # httpx connect (s)
     DOWNLOAD_READ_TIMEOUT: int = _safe_int("DOWNLOAD_READ_TIMEOUT", 120)           # httpx read/chunk (s)

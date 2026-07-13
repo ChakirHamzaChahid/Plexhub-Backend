@@ -33,14 +33,12 @@
             {% if type == 'show' %}
             <input type="hidden" name="scope" value="series_all">
             <button type="submit"
-                    {% if not service_available %}disabled{% endif %}
                     class="px-2 py-1 rounded bg-slate-900 text-slate-100 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed">
               Série complète (toutes saisons)
             </button>
             {% else %}
             <input type="hidden" name="scope" value="movie">
             <button type="submit"
-                    {% if not service_available %}disabled{% endif %}
                     class="px-2 py-1 rounded bg-slate-900 text-slate-100 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed">
               Télécharger
             </button>

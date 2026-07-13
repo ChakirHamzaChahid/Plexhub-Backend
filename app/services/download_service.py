@@ -22,6 +22,7 @@ import asyncio
 import logging
 import os
 import re
+import shutil
 import unicodedata
 import uuid
 from dataclasses import dataclass
@@ -71,6 +72,15 @@ class DownloadPermanentError(Exception):
 
 class DownloadTransientError(Exception):
     """Retryable upstream/disk failure (timeout/connect/5xx) -> auto-retry."""
+
+
+class InsufficientDiskSpaceError(DownloadPermanentError):
+    """`DOWNLOAD_DIR`'s filesystem has less free space than
+    `DOWNLOAD_MIN_FREE_DISK_MB` (préflight, DL-02). A subclass of
+    `DownloadPermanentError` (not `DownloadTransientError`): a full disk
+    won't fix itself within the job's auto-retry budget, so this must not
+    consume one of `DOWNLOAD_MAX_RETRIES` — it fails the job immediately,
+    same as an upstream 404/403."""
 
 
 # --- Path confinement (F-007, security-critical) -----------------------------
@@ -160,6 +170,31 @@ def compute_dest_path(
     raise ValueError(f"unsupported media_type for download: {media_type!r}")
 
 
+async def check_free_disk_space() -> None:
+    """Préflight disk-space guard (DL-02, `DOWNLOAD_MIN_FREE_DISK_MB`).
+
+    Raises `InsufficientDiskSpaceError` if `DOWNLOAD_DIR`'s filesystem has
+    fewer free bytes than the configured threshold. No-op if the threshold
+    is `<= 0` (opt-out) or `DOWNLOAD_DIR` is unset (an unrelated
+    `DownloadDisabledError` is raised elsewhere on that path first).
+
+    `shutil.disk_usage` is a blocking stat syscall — always offloaded via
+    `asyncio.to_thread` (house law §9.11), never called inline on the loop.
+    """
+    threshold_mb = settings.DOWNLOAD_MIN_FREE_DISK_MB
+    if threshold_mb <= 0 or not settings.DOWNLOAD_DIR:
+        return
+
+    def _stat_free_mb() -> float:
+        return shutil.disk_usage(settings.DOWNLOAD_DIR).free / (1024 * 1024)
+
+    free_mb = await asyncio.to_thread(_stat_free_mb)
+    if free_mb < threshold_mb:
+        raise InsufficientDiskSpaceError(
+            f"insufficient free disk space ({free_mb:.0f} MiB free, {threshold_mb} MiB required)"
+        )
+
+
 def resolve_confined(rel_path: str) -> Path:
     """Resolve *rel_path* (as stored on `DownloadJob.dest_path`) to an
     ABSOLUTE path proven to sit under `DOWNLOAD_DIR`, or raise
@@ -206,6 +241,18 @@ def _parse_bytes_total(headers: httpx.Headers, resume_from: int) -> Optional[int
     return None
 
 
+def _parse_content_range_start(headers: httpx.Headers) -> Optional[int]:
+    """Extract the starting offset from a `Content-Range: bytes <start>-<end>/<total>`
+    response header, or `None` if absent/unparseable (CR-MIN-2 — used to prove a
+    206 response actually resumes from the offset we asked for)."""
+    content_range = (headers.get("content-range") or "").strip()
+    if not content_range.lower().startswith("bytes"):
+        return None
+    spec = content_range[len("bytes"):].strip()
+    start_str = spec.split("-", 1)[0].strip()
+    return int(start_str) if start_str.isdigit() else None
+
+
 async def download_to_disk(
     url: str,
     dest: Path,
@@ -217,10 +264,18 @@ async def download_to_disk(
     """GET streaming httpx into `<dest>.part`, atomic promotion on success.
 
     - Skip-if-exists: `dest` present (size>0) and no `.part` -> `already_present`.
-    - Resume: existing `.part` (size n>0) -> `Range: bytes=n-`; 206 appends,
-      200 (Range ignored) truncates/restarts, 416 promotes the `.part` as-is.
-    - UA = `settings.XTREAM_USER_AGENT`; redirects followed (server-derived
-      URL, no new SSRF surface vs. existing stream validation).
+    - Resume: existing `.part` (size n>0) -> `Range: bytes=n-`; 206 with a
+      `Content-Range` start matching the requested offset appends; a 206
+      whose `Content-Range` start does NOT match (non-compliant provider) is
+      treated like Range-ignored and truncates/restarts (CR-MIN-2 — avoids a
+      gap/overlap in `.part`); 200 (Range ignored) truncates/restarts; 416
+      promotes the `.part` as-is.
+    - UA = `settings.XTREAM_USER_AGENT`; `follow_redirects=False` (DL-01,
+      SSRF hardening) — a direct Xtream stream URL never legitimately
+      redirects, so ANY 3xx is treated as a permanent upstream error rather
+      than followed; a malicious/MITM'd provider can otherwise 302 to an
+      internal address (loopback/RFC1918/`169.254.169.254`) and have its
+      body written to disk.
     - `mkdir`/`stat`/`os.replace` are offloaded via `asyncio.to_thread`;
       buffered chunk writes stay inline (accepted I/O, same as elsewhere).
     - On cancel/failure the `.part` is left on disk — never promoted.
@@ -255,7 +310,7 @@ async def download_to_disk(
     )
 
     try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
             async with client.stream("GET", url, headers=headers) as resp:
                 if resp.status_code == 416:
                     # `.part` is already complete per the server -> promote as-is.
@@ -278,8 +333,24 @@ async def download_to_disk(
                     )
 
                 if resp.status_code == 206:
-                    mode = "ab"
-                    resumed = True
+                    range_start = _parse_content_range_start(resp.headers)
+                    if range_start is not None and range_start != resume_from:
+                        # CR-MIN-2: the server's resumed offset doesn't match
+                        # what we asked for (`Range: bytes={resume_from}-`) —
+                        # appending here would leave a gap or duplicate a
+                        # byte range in `.part`. Treat exactly like a "200,
+                        # Range ignored" response: truncate and restart.
+                        logger.warning(
+                            "Download: Content-Range start %d != requested resume offset %d"
+                            " — restarting .part instead of appending",
+                            range_start, resume_from,
+                        )
+                        mode = "wb"
+                        resume_from = 0
+                        resumed = False
+                    else:
+                        mode = "ab"
+                        resumed = True
                 else:
                     mode = "wb"
                     resume_from = 0

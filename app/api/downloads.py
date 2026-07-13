@@ -14,9 +14,7 @@ owns the operator-facing mutations.
 ``download_service`` (PH-DL-03/04) is a parallel lot's file with a figée
 contract this router codes against (``enqueue_selection``/``list_jobs``/
 ``get_job``/``cancel_job``/``retry_job``/``to_download_response`` —
-``docs/20-impl-media-download.md`` §5). Imported defensively so this module
-stays importable even before that lot lands (see ``admin_downloads.py``'s
-docstring for the same rationale) — degrades to 503, never an import crash.
+``docs/20-impl-media-download.md`` §5).
 """
 from __future__ import annotations
 
@@ -28,32 +26,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import verify_master_key
 from app.db.database import get_db
 from app.models.schemas import DownloadJobListResponse, DownloadJobResponse
+from app.services import download_service
 
 logger = logging.getLogger("plexhub.api.downloads")
-
-try:
-    from app.services import download_service
-except ImportError as exc:  # pragma: no cover - transient during parallel dev (PH-DL-03)
-    download_service = None  # type: ignore[assignment]
-    logger.warning(
-        "app.services.download_service not importable yet (PH-DL-03/04 "
-        "pending): %s — /api/admin/downloads will return 503 until it lands.",
-        exc,
-    )
 
 router = APIRouter(
     prefix="/api/admin/downloads",
     tags=["downloads"],
     dependencies=[Depends(verify_master_key)],
 )
-
-
-def _require_service() -> None:
-    if download_service is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="download service unavailable (backend deployment in progress)",
-        )
 
 
 @router.get("", response_model=DownloadJobListResponse, response_model_by_alias=True)
@@ -65,7 +46,6 @@ async def list_downloads(
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
 ):
-    _require_service()
     states = [state] if state else None
     jobs, total = await download_service.list_jobs(db, states=states, limit=limit, offset=offset)
     return DownloadJobListResponse(
@@ -75,7 +55,6 @@ async def list_downloads(
 
 @router.get("/{job_id}", response_model=DownloadJobResponse, response_model_by_alias=True)
 async def get_download(job_id: str, db: AsyncSession = Depends(get_db)):
-    _require_service()
     job = await download_service.get_job(db, job_id)
     if job is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Download job not found")

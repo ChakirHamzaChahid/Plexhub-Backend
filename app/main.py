@@ -367,7 +367,13 @@ async def lifespan(app: FastAPI):
                 from app.workers import download_worker
                 from app.db.database import async_session_factory
 
-                await download_worker.reap_orphans(async_session_factory)
+                # CR-MIN-1 (review): `run_drain_loop` already reaps orphans
+                # itself as its first step — an explicit call here was a
+                # redundant double-reap on every boot. `run_drain_loop`'s own
+                # `DOWNLOAD_DIR` guard makes this coroutine's own check above
+                # technically redundant too, but it's kept so the log line
+                # ("Download worker disabled...") fires without importing
+                # `download_worker`/`async_session_factory` at all.
                 await download_worker.run_drain_loop(async_session_factory)
 
             from app.utils.tasks import create_background_task

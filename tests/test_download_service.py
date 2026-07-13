@@ -7,11 +7,12 @@ from `tests/conftest.py`.
 """
 from __future__ import annotations
 
+import pytest
 from sqlalchemy import select
 
 from app.models.database import DownloadBatch, DownloadJob, Media, XtreamAccount
 from app.services import download_service
-from app.services.download_service import EnqueueResult, enqueue_selection
+from app.services.download_service import enqueue_selection
 from app.utils.server_id import build_server_id
 from app.utils.time import now_ms
 
@@ -286,6 +287,63 @@ class TestEnqueueSeriesAll:
         assert len(result.jobs) == 2  # ep1 reused + ep2 newly created
         batch = await db_session.get(DownloadBatch, result.batch_id)
         assert batch.total_jobs == 1, "reused (deduped) jobs are not counted as NEW for this batch"
+
+
+# ─── DL-02: disk-space préflight (review fix #3, check_free_disk_space) ────
+
+
+class TestCheckFreeDiskSpace:
+    async def test_raises_when_free_space_below_threshold(self, download_dir, monkeypatch):
+        from types import SimpleNamespace
+
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "DOWNLOAD_MIN_FREE_DISK_MB", 2048)
+        monkeypatch.setattr(
+            download_service.shutil, "disk_usage",
+            lambda path: SimpleNamespace(total=0, used=0, free=100 * 1024 * 1024),  # 100 MiB free
+        )
+
+        with pytest.raises(download_service.InsufficientDiskSpaceError) as excinfo:
+            await download_service.check_free_disk_space()
+        assert "insufficient free disk" in str(excinfo.value)
+        # A subclass of DownloadPermanentError -> must NOT consume a retry.
+        assert isinstance(excinfo.value, download_service.DownloadPermanentError)
+
+    async def test_noop_when_free_space_above_threshold(self, download_dir, monkeypatch):
+        from types import SimpleNamespace
+
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "DOWNLOAD_MIN_FREE_DISK_MB", 100)
+        monkeypatch.setattr(
+            download_service.shutil, "disk_usage",
+            lambda path: SimpleNamespace(total=0, used=0, free=5000 * 1024 * 1024),
+        )
+        await download_service.check_free_disk_space()  # must not raise
+
+    async def test_disabled_when_threshold_non_positive(self, download_dir, monkeypatch):
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "DOWNLOAD_MIN_FREE_DISK_MB", 0)
+
+        def _boom(path):
+            raise AssertionError("disk_usage must not be called when the préflight is disabled")
+
+        monkeypatch.setattr(download_service.shutil, "disk_usage", _boom)
+        await download_service.check_free_disk_space()  # must not raise / must not stat
+
+    async def test_noop_when_download_dir_unset(self, monkeypatch):
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "DOWNLOAD_DIR", "")
+        monkeypatch.setattr(settings, "DOWNLOAD_MIN_FREE_DISK_MB", 2048)
+
+        def _boom(path):
+            raise AssertionError("disk_usage must not be called when DOWNLOAD_DIR is unset")
+
+        monkeypatch.setattr(download_service.shutil, "disk_usage", _boom)
+        await download_service.check_free_disk_space()  # must not raise / must not stat
 
 
 # ─── DL-029/029b: compute_dest_path exact shape (spec §5.2) ────────────────

@@ -8,13 +8,6 @@ and delegate ALL business logic to ``app.services.download_service``
 ``app.services.media_service`` (browsing the already-unified catalogue) —
 this router itself contains **no** business logic, per house convention.
 
-``download_service`` (PH-DL-03/04) is owned by a parallel lot with a
-**figée** contract (``docs/20-impl-media-download.md`` §5) that this router
-codes against. It is imported defensively: if that lot hasn't landed yet,
-this module still imports cleanly (browsing routes keep working since they
-only use ``media_service``; the download-mutation routes degrade to a 503
-with a clear message instead of crashing at import time).
-
 Security invariants (house law + spec §0.7/F-007):
   * the upstream Xtream URL (embeds user/password) is NEVER constructed,
     logged, or rendered here — only ``title``/``label``/``serverId``/
@@ -35,63 +28,16 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_db
+from app.services import download_service
 from app.services.aggregation_service import build_versions, canonical_title_year
 from app.services.media_service import media_service
 
 logger = logging.getLogger("plexhub.api.admin_downloads")
 
-# download_service (PH-DL-03) is a parallel lot's file — see the module
-# docstring. Imported defensively so `import app.api.admin_downloads` never
-# fails while that lot is in flight; once it lands this just succeeds with no
-# code change needed here.
-try:
-    from app.services import download_service
-except ImportError as exc:  # pragma: no cover - transient during parallel dev
-    download_service = None  # type: ignore[assignment]
-    logger.warning(
-        "app.services.download_service not importable yet (PH-DL-03/04 "
-        "pending): %s — /admin/downloads mutation routes will return 503 "
-        "until it lands; browsing routes are unaffected.",
-        exc,
-    )
-
 router = APIRouter(prefix="/admin/downloads", tags=["admin-downloads"])
 
 _TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
-
-
-def _fmt_ms(ms: Optional[int]) -> str:
-    """Epoch-ms -> local 'YYYY-MM-DD HH:MM' for templates ({{ value | ms }}).
-
-    Small local copy of ``admin.py``'s filter (not imported from there) to
-    keep this file's dependencies confined to what it owns — avoids a
-    cross-router private-symbol reach-in for one three-line helper.
-    """
-    if not ms:
-        return "—"
-    from datetime import datetime, timezone
-    return (
-        datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
-        .astimezone()
-        .strftime("%Y-%m-%d %H:%M")
-    )
-
-
-templates.env.filters["ms"] = _fmt_ms
-
-
-def _require_service() -> None:
-    """Guard for routes that mutate/read the download queue.
-
-    Browsing routes (list/versions) never call this — they only use
-    ``media_service`` and keep working even before PH-DL-03/04 land.
-    """
-    if download_service is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="download service unavailable (backend deployment in progress)",
-        )
 
 
 def _job_view(job) -> dict:
@@ -132,8 +78,6 @@ def _job_view(job) -> dict:
 async def _queue_context(db: AsyncSession, *, enqueue_error: Optional[str] = None) -> dict:
     """Shared context for every fragment response that re-renders the queue
     panel (queue/enqueue/cancel/retry/clear-finished)."""
-    if download_service is None:
-        return {"jobs": [], "total": 0, "enqueue_error": enqueue_error}
     jobs, total = await download_service.list_jobs(db, limit=200, offset=0)
     return {"jobs": [_job_view(j) for j in jobs], "total": total, "enqueue_error": enqueue_error}
 
@@ -194,7 +138,6 @@ async def admin_downloads_index(
         "page_size": page_size,
         "type": media_type,
         "search": search or "",
-        "service_available": download_service is not None,
     }
     ctx.update(await _queue_context(db))
     return templates.TemplateResponse(request, "admin/downloads.html", ctx)
@@ -272,7 +215,6 @@ async def admin_downloads_versions(
             "title": clean_title,
             "year": clean_year,
             "versions": versions,
-            "service_available": download_service is not None,
         },
     )
 
@@ -293,8 +235,6 @@ async def admin_downloads_enqueue(
     scope: str = Form(...),
     db: AsyncSession = Depends(get_db),
 ):
-    _require_service()
-
     if type not in ("movie", "show") or scope not in ("movie", "series_all"):
         error = "Sélection invalide (type/scope inattendu)."
     else:
@@ -315,7 +255,6 @@ async def admin_downloads_enqueue(
 
 @router.get("/queue", response_class=HTMLResponse)
 async def admin_downloads_queue(request: Request, db: AsyncSession = Depends(get_db)):
-    _require_service()
     return templates.TemplateResponse(
         request, "admin/_downloads_queue.html", await _queue_context(db),
     )
@@ -325,7 +264,6 @@ async def admin_downloads_queue(request: Request, db: AsyncSession = Depends(get
 async def admin_downloads_cancel(
     job_id: str, request: Request, db: AsyncSession = Depends(get_db),
 ):
-    _require_service()
     await download_service.cancel_job(db, job_id)
     return templates.TemplateResponse(
         request, "admin/_downloads_queue.html", await _queue_context(db),
@@ -336,7 +274,6 @@ async def admin_downloads_cancel(
 async def admin_downloads_retry(
     job_id: str, request: Request, db: AsyncSession = Depends(get_db),
 ):
-    _require_service()
     await download_service.retry_job(db, job_id)
     return templates.TemplateResponse(
         request, "admin/_downloads_queue.html", await _queue_context(db),
@@ -347,7 +284,6 @@ async def admin_downloads_retry(
 async def admin_downloads_clear_finished(
     request: Request, db: AsyncSession = Depends(get_db),
 ):
-    _require_service()
     await download_service.clear_finished(db)
     return templates.TemplateResponse(
         request, "admin/_downloads_queue.html", await _queue_context(db),

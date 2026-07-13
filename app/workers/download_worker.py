@@ -112,20 +112,38 @@ async def run_drain_loop(session_factory) -> None:
     logger.info("Download worker: drain loop started (concurrency=%d)", concurrency)
     try:
         while True:
-            for job_id in [jid for jid, task in in_flight.items() if task.done()]:
-                in_flight.pop(job_id, None)
+            try:
+                for job_id in [jid for jid, task in in_flight.items() if task.done()]:
+                    in_flight.pop(job_id, None)
 
-            free_slots = concurrency - len(in_flight)
-            if free_slots > 0:
-                candidates = await _fetch_queued(
-                    session_factory, limit=free_slots, exclude_ids=set(in_flight),
-                )
-                for job_id in candidates:
-                    task = create_background_task(
-                        _run_job(session_factory, job_id, sem),
-                        name=f"download_job_{job_id}",
+                free_slots = concurrency - len(in_flight)
+                if free_slots > 0:
+                    candidates = await _fetch_queued(
+                        session_factory, limit=free_slots, exclude_ids=set(in_flight),
                     )
-                    in_flight[job_id] = task
+                    for job_id in candidates:
+                        task = create_background_task(
+                            _run_job(session_factory, job_id, sem),
+                            name=f"download_job_{job_id}",
+                        )
+                        in_flight[job_id] = task
+            except Exception:
+                # BLOQUANT fix (review): `run_with_retry` only retries
+                # "database is locked" — any OTHER transient `OperationalError`
+                # (WAL checkpoint contention, the nightly `sqlite3.backup`,
+                # "disk image malformed"...) previously propagated straight
+                # out of this loop and killed the coroutine PERMANENTLY, with
+                # every queued job stuck `queued` and no recovery short of a
+                # process restart. `asyncio.CancelledError` is a `BaseException`
+                # in this codebase's supported Python versions (3.12/3.13), so
+                # it is never caught here — shutdown still propagates first,
+                # via the outer `except asyncio.CancelledError` below. Never
+                # logs a URL (this tick never touches one).
+                logger.error(
+                    "Download worker: drain tick failed unexpectedly — will retry"
+                    " next poll",
+                    exc_info=True,
+                )
 
             await asyncio.sleep(max(1, settings.DOWNLOAD_POLL_INTERVAL))
     except asyncio.CancelledError:
@@ -266,10 +284,28 @@ async def _mark_failed(session_factory, job_id: str, message: str) -> None:
 
 
 async def _handle_transient(session_factory, job_id: str, message: str) -> None:
-    """Bump `attempts`; if still within `DOWNLOAD_MAX_RETRIES`, back off and
-    requeue (state stays `running` DURING the sleep so the drain loop can't
-    re-poll it), else mark `failed`. Every terminal write stays conditional
-    on `state='running'` so a concurrent cancel always wins (spec §6.2)."""
+    """Bump `attempts`; if still within `DOWNLOAD_MAX_RETRIES`, requeue
+    IMMEDIATELY (state='queued') and only THEN back off, else mark `failed`.
+    Every terminal/requeue write stays conditional on `state='running'` so a
+    concurrent cancel always wins (spec §6.2).
+
+    Majeur fix (review — HOL blocking): the caller (`_run_job`) invokes this
+    AFTER releasing its concurrency-semaphore slot, and — unlike the prior
+    design — the requeue write now happens BEFORE the exponential back-off
+    sleep, not after. Two consequences:
+      1. the job shows `queued` (not `running`) for the ENTIRE back-off
+         window, so the admin UI/API never lies about a job actively
+         transferring while it's really just waiting to retry;
+      2. because this coroutine keeps running (sleeping) until the delay
+         elapses, the drain loop's `in_flight` bookkeeping (keyed by task,
+         not by DB state) still correctly excludes this `job_id` from
+         `_fetch_queued` until the back-off has genuinely elapsed — true
+         exponential back-off, not just "however long until the next poll
+         tick". Meanwhile, since the semaphore is already released, OTHER
+         queued jobs are free to claim the freed concurrency slot right away
+         (DOWNLOAD_CONCURRENCY=1 no longer head-of-line-blocks the whole
+         queue behind one flaky job).
+    """
     async def _peek_attempts():
         async with session_factory() as db:
             job = await db.get(DownloadJob, job_id)
@@ -287,7 +323,6 @@ async def _handle_transient(session_factory, job_id: str, message: str) -> None:
             "Download job %s: transient error (%s), retry %d/%d in %ds",
             job_id, message, attempts, settings.DOWNLOAD_MAX_RETRIES, delay,
         )
-        await asyncio.sleep(delay)
 
         async def _requeue() -> None:
             async with session_factory() as db:
@@ -302,6 +337,7 @@ async def _handle_transient(session_factory, job_id: str, message: str) -> None:
                 await db.commit()
 
         await run_with_retry(_requeue, op="handle_transient_requeue")
+        await asyncio.sleep(delay)
     else:
         async def _fail() -> None:
             async with session_factory() as db:
@@ -323,6 +359,13 @@ async def _handle_transient(session_factory, job_id: str, message: str) -> None:
 
 
 async def _run_job(session_factory, job_id: str, sem: asyncio.Semaphore) -> None:
+    # Majeur fix (review — HOL blocking, #5): set when the transfer ends in a
+    # transient failure, and only acted on AFTER the `async with sem:` block
+    # below has been exited — see `_handle_transient`'s docstring. Left
+    # `None` on every other exit path (claim miss / not-found / permanent
+    # failure / cancel / success), where no post-semaphore work is needed.
+    transient_message: str | None = None
+
     async with sem:
         if not await _claim(session_factory, job_id):
             return  # already claimed/canceled by another dispatch
@@ -357,10 +400,28 @@ async def _run_job(session_factory, job_id: str, sem: asyncio.Semaphore) -> None
             last_persist["t"] = now
             await _persist_progress(session_factory, job_id, bytes_done, bytes_total)
 
+        # Majeur fix (review — cancel-check throttle, #4): previously called
+        # `_is_canceled` (fresh session + SELECT) on EVERY chunk. Throttled to
+        # the same ~1 SELECT/s gate as `_on_progress` above — cross-process
+        # cancellation is still observed, just not once per (potentially
+        # tiny) chunk.
+        last_cancel_check = {"t": 0.0, "canceled": False}
+
         async def _cancel_check() -> bool:
-            return await _is_canceled(session_factory, job_id)
+            now = time.monotonic()
+            if now - last_cancel_check["t"] < _PROGRESS_PERSIST_INTERVAL_S:
+                return last_cancel_check["canceled"]
+            last_cancel_check["t"] = now
+            last_cancel_check["canceled"] = await _is_canceled(session_factory, job_id)
+            return last_cancel_check["canceled"]
 
         try:
+            # Sécu Moyen fix (review — disk preflight, #3): checked right
+            # before the transfer starts, inside the same try/except as
+            # `download_to_disk` so `InsufficientDiskSpaceError` (a
+            # `DownloadPermanentError` subclass) is handled identically —
+            # `failed` immediately, no retry budget consumed.
+            await download_service.check_free_disk_space()
             result = await download_service.download_to_disk(
                 url, dest, on_progress=_on_progress, cancel_check=_cancel_check,
             )
@@ -371,13 +432,17 @@ async def _run_job(session_factory, job_id: str, sem: asyncio.Semaphore) -> None
             await _mark_failed(session_factory, job_id, _safe_error(exc))
             return
         except DownloadTransientError as exc:
-            await _handle_transient(session_factory, job_id, _safe_error(exc))
-            return
+            transient_message = _safe_error(exc)
         except Exception:
             # Defensive: a bug in the transfer primitive must never crash the
             # drain loop or leave the job stuck `running` forever.
             logger.error("Download job %s: unexpected error", job_id, exc_info=True)
-            await _handle_transient(session_factory, job_id, "erreur inattendue")
-            return
-
-        await _mark_completed(session_factory, job_id, result)
+            transient_message = "erreur inattendue"
+        else:
+            await _mark_completed(session_factory, job_id, result)
+    # `sem` is released here — `_handle_transient` (peek + immediate requeue
+    # + exponential back-off sleep) must NEVER run while still holding the
+    # concurrency slot, or a single flaky job freezes the whole queue at
+    # DOWNLOAD_CONCURRENCY=1 for up to 30s (Majeur #5).
+    if transient_message is not None:
+        await _handle_transient(session_factory, job_id, transient_message)

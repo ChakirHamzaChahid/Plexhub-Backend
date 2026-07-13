@@ -8,9 +8,15 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.models.database import XtreamCategory, XtreamAccount, Media, LiveChannel
+from app.services.xtream_service import xtream_service
+from app.utils.db_retry import commit_with_retry
 from app.utils.server_id import build_server_id
 
 logger = logging.getLogger(__name__)
+
+
+class AccountNotFoundError(Exception):
+    """Raised when account_id doesn't resolve to an existing XtreamAccount."""
 
 
 def _is_adult_category_name(name: Optional[str]) -> bool:
@@ -231,7 +237,9 @@ async def bulk_update_categories(
                 )
             )
         result = await db.execute(base_stmt)
-        await db.commit()
+        # CR-C04: retry on "database is locked" — bulk category writes can
+        # race a concurrent sync/validation cycle holding the WAL writer.
+        await commit_with_retry(db)
         logger.info(
             f"Set {result.rowcount} unlisted categories to is_allowed={default_allowed} "
             f"(filter_mode={filter_mode})"
@@ -282,7 +290,8 @@ async def update_media_category_visibility(
             .where(LiveChannel.server_id == server_id)
             .values(is_in_allowed_categories=True)
         )
-        await db.commit()
+        # CR-C04: retry on "database is locked" — request-path write.
+        await commit_with_retry(db)
         logger.info(f"Visibility update [{account_id}]: mode=all, all media + live channels set to visible")
         return
 
@@ -396,7 +405,8 @@ async def update_media_category_visibility(
                 .values(is_in_allowed_categories=True)
             )
 
-    await db.commit()
+    # CR-C04: retry on "database is locked" — request-path write.
+    await commit_with_retry(db)
 
     logger.info(
         f"Visibility update [{account_id}]: mode={filter_mode}, "
@@ -480,3 +490,73 @@ async def update_media_adult_flags(
         f"Adult flags update [{account_id}]: "
         f"adult VOD categories={len(adult_vod_ids)}"
     )
+
+
+async def refresh_categories_from_provider(
+    db: AsyncSession,
+    account_id: str,
+) -> tuple[int, int]:
+    """Force-refresh VOD + series categories from the Xtream provider.
+
+    Fetches current categories from Xtream and upserts them (preserves
+    existing is_allowed settings — upsert_category only sets is_allowed=True
+    on first insert; already-known categories keep their prior flag).
+
+    Caller commits (CR-C04 lock-retry stays with the caller, unchanged).
+
+    Args:
+        db: Database session
+        account_id: Xtream account ID
+
+    Returns:
+        (vod_count, series_count)
+
+    Raises:
+        AccountNotFoundError: no account with this id.
+    """
+    stmt = select(XtreamAccount).where(XtreamAccount.id == account_id)
+    result = await db.execute(stmt)
+    account = result.scalar_one_or_none()
+
+    if not account:
+        raise AccountNotFoundError(account_id)
+
+    # Fetch VOD categories
+    vod_categories = await xtream_service.get_vod_categories(
+        account.base_url,
+        account.port,
+        account.username,
+        account.password,
+    )
+
+    # Fetch Series categories
+    series_categories = await xtream_service.get_series_categories(
+        account.base_url,
+        account.port,
+        account.username,
+        account.password,
+    )
+
+    # Upsert VOD categories
+    for cat in vod_categories:
+        await upsert_category(
+            db,
+            account_id,
+            cat.get("category_id", ""),
+            "vod",
+            cat.get("category_name", "Unknown"),
+            is_allowed=True,  # Default to allowed, preserves existing if already exists
+        )
+
+    # Upsert Series categories
+    for cat in series_categories:
+        await upsert_category(
+            db,
+            account_id,
+            cat.get("category_id", ""),
+            "series",
+            cat.get("category_name", "Unknown"),
+            is_allowed=True,
+        )
+
+    return len(vod_categories), len(series_categories)

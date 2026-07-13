@@ -19,10 +19,12 @@ from app.services.embedding_service import EMBEDDING_DIM, EmbeddingUnavailableEr
 from app.services.recommendation_service import (
     HydrateStats,
     _deserialize_vec,
-    _serialize_vec,
     cosine_rank,
     hydrate_misses,
     load_cached_vectors,
+    semantic_search,
+    semantic_search_with_overview,
+    serialize_vec,
 )
 
 
@@ -62,7 +64,7 @@ async def _insert_cached_embedding(session, tmdb_id: int, vec: list[float], medi
     )
     await session.execute(
         text("INSERT INTO ai_embeddings(tmdb_id, embedding) VALUES(:t, :v)"),
-        {"t": tmdb_id, "v": _serialize_vec(vec)},
+        {"t": tmdb_id, "v": serialize_vec(vec)},
     )
     await session.commit()
 
@@ -164,3 +166,67 @@ async def test_hydrate_misses_propagates_embedding_unavailable(monkeypatch, ai_s
 
     with pytest.raises(EmbeddingUnavailableError):
         await hydrate_misses([1], "movie", ai_sessionmaker)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CR-P08 — adaptive KNN over-fetch under a skewed type mix
+# ──────────────────────────────────────────────────────────────────────────────
+
+async def test_semantic_search_type_skew_escalates_to_reach_limit(monkeypatch, ai_db_session):
+    """When the nearest neighbors are dominated by the *other* media_type,
+    the post-filter must still reach `limit` matching rows by escalating the
+    KNN over-fetch ceiling, instead of silently under-returning.
+
+    Ceilings are monkeypatched to a small ladder (5, 50) so the test stays
+    fast/deterministic while exercising the exact same escalation code path
+    used in production (only the numeric ceilings differ from the real
+    defaults of 200/2000).
+    """
+    monkeypatch.setattr(recommendation_service, "KNN_OVERFETCH_CEILINGS", (5, 50))
+
+    query = _unit_vec(0)
+    # 40 "tv" rows exactly on the query vector -> distance 0, always ranked
+    # ahead of the movies below. More than the first ceiling (5), so the
+    # initial KNN attempt (k=5) returns 0 movies.
+    for i in range(40):
+        await _insert_cached_embedding(ai_db_session, 1000 + i, query, media_type="tv")
+    # 20 "movie" rows on an orthogonal vector -> fixed distance sqrt(2),
+    # strictly farther than every tv row, but well inside the escalated
+    # ceiling of 50 (40 tv + up to 10 movies fit in k=50).
+    other = _unit_vec(1)
+    for i in range(20):
+        await _insert_cached_embedding(ai_db_session, 2000 + i, other, media_type="movie")
+
+    results = await semantic_search(ai_db_session, query, media_type="movie", limit=5)
+
+    assert len(results) == 5, f"expected escalation to surface 5 movies, got {results}"
+    assert all(mt == "movie" for _, _, mt, _ in results)
+
+
+async def test_semantic_search_with_overview_type_skew_escalates_to_reach_limit(monkeypatch, ai_db_session):
+    """Same CR-P08 escalation guarantee for the overview-returning variant
+    used by /api/ai/assistant."""
+    monkeypatch.setattr(recommendation_service, "KNN_OVERFETCH_CEILINGS", (5, 50))
+
+    query = _unit_vec(0)
+    for i in range(40):
+        await _insert_cached_embedding(ai_db_session, 3000 + i, query, media_type="tv")
+    other = _unit_vec(1)
+    for i in range(20):
+        await _insert_cached_embedding(ai_db_session, 4000 + i, other, media_type="movie")
+
+    results = await semantic_search_with_overview(ai_db_session, query, media_type="movie", limit=5)
+
+    assert len(results) == 5, f"expected escalation to surface 5 movies, got {results}"
+    assert all(mt == "movie" for _, _, mt, _, _ in results)
+
+
+async def test_semantic_search_no_type_filter_unaffected(ai_db_session):
+    """Sanity: media_type=None must still fetch exactly `limit` rows with no
+    escalation ladder involved (regression guard for the shared helper)."""
+    query = _unit_vec(0)
+    for i in range(10):
+        await _insert_cached_embedding(ai_db_session, 5000 + i, query, media_type="movie")
+
+    results = await semantic_search(ai_db_session, query, media_type=None, limit=3)
+    assert len(results) == 3

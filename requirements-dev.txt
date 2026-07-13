@@ -1,4 +1,10 @@
 -r requirements.txt
 pytest>=7.0
 pytest-asyncio>=0.23
+pytest-cov>=5.0,<6.0
 respx>=0.21
+
+# CR-C06: lint / format / type tooling (see pyproject.toml [tool.ruff]/[tool.black]/[tool.mypy])
+ruff>=0.6,<0.9
+black>=24.0,<25.0
+mypy>=1.10,<2.0

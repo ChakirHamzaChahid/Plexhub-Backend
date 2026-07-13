@@ -3,6 +3,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase
 
+from app.utils.crypto_fields import EncryptedString
+
 
 class Base(DeclarativeBase):
     pass
@@ -133,7 +135,7 @@ class XtreamAccount(Base):
     base_url = Column(Text, nullable=False)
     port = Column(Integer, nullable=False, default=80)
     username = Column(Text, nullable=False)
-    password = Column(Text, nullable=False)
+    password = Column(EncryptedString(), nullable=False)  # encrypted at rest, CR-S03
     status = Column(Text, nullable=False, default="Unknown")
     expiration_date = Column(BigInteger)
     max_connections = Column(Integer, nullable=False, default=1)
@@ -388,3 +390,59 @@ class ApiKey(Base):
     __table_args__ = (
         Index("ix_api_keys_key_hash", "key_hash"),
     )
+
+
+class MediaGroup(Base):
+    """CR-P01: precomputed unified-group snapshot for the browse endpoints.
+
+    One row per converged group — the output of the SAME whole-catalog
+    aggregation (`aggregate_movies`/`_converge`) the live `/movies|shows/unified`
+    path uses, materialized at pipeline time by `services.unified_group_service`.
+    The UNFILTERED unified list then pages over THIS table with a DB LIMIT
+    instead of loading + aggregating the entire category-allowed catalog on
+    every request (CR-P01). Filtered/searched queries stay on the live path
+    (filtering rows changes group membership + best-row selection, so a
+    pre-aggregated snapshot can't reproduce them) — see
+    `media_service.get_unified_list`.
+
+    Deliberately minimal: only the grouping identity + recency sort key live
+    here. The per-page card + `versions[]` are rebuilt byte-identically by
+    re-aggregating the page's member rows (`MediaGroupMember`), so this table
+    never mirrors ~60 `Media` columns and cannot drift from them.
+    """
+
+    __tablename__ = "media_group"
+
+    media_type = Column(Text, primary_key=True)          # 'movie' | 'show'
+    group_key = Column(Text, primary_key=True)           # converged aggregate key
+    sort_added_at = Column(BigInteger, nullable=False, default=0)  # best.added_at
+    version_count = Column(Integer, nullable=False, default=0)
+    built_at = Column(BigInteger, nullable=False, default=0)       # epoch ms of the build
+
+    __table_args__ = (
+        Index("ix_media_group_type_sort", "media_type", "sort_added_at"),
+    )
+
+
+class MediaGroupMember(Base):
+    """CR-P01: membership of a `MediaGroup` — one pointer per distinct
+    (server_id, rating_key) in `media`, used to re-hydrate + re-aggregate a
+    page's groups into byte-identical cards / `versions[]`.
+
+    Only (server_id, rating_key) is stored (not `media`'s full 4-column PK):
+    the read path's `(server_id, rating_key) IN (...)` join re-loads every
+    filter/sort_order variant of an item and re-aggregates them, so the
+    builder stores just one pointer per item (see unified_group_service).
+
+    No secondary index: the page lookup ``WHERE media_type=? AND group_key IN
+    (...)`` is already served by the composite-PK's implicit index (leading
+    columns media_type, group_key), so an extra index would only add write cost
+    to the full per-build rewrite.
+    """
+
+    __tablename__ = "media_group_member"
+
+    media_type = Column(Text, primary_key=True)
+    group_key = Column(Text, primary_key=True)
+    server_id = Column(Text, primary_key=True)
+    rating_key = Column(Text, primary_key=True)

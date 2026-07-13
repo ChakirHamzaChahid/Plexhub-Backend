@@ -112,6 +112,36 @@ class TestAbsorbTitleGroups:
         ]
         assert len(aggregate_movies(rows)) == 2
 
+    def test_absorb_target_is_order_independent(self):
+        # CR-F09: two DISTINCT id-based groups — an imdb-based "Rambo" and an
+        # unrelated tmdb-based "Rambo" homonym, same year, no shared external id
+        # (Pass A correctly keeps them apart) — both normalize to the SAME
+        # title+year as an unresolved `title_…` orphan twin. Whichever id-group
+        # absorbs the orphan must be stable no matter what order the rows come
+        # in (DB/query row order is not guaranteed) — it must always be the
+        # strongest id (imdb > tmdb), never flip between runs.
+        imdb_row = _movie("vod_imdb", "Rambo", "imdb://tt0001", imdb="tt0001", year=2008)
+        tmdb_row = _movie("vod_tmdb", "Rambo", "tmdb://9999", tmdb="9999", year=2008)
+        tkey = calculate_unification_id("Rambo", 2008)
+        orphan_row = _movie("vod_orphan", "Rambo", tkey, year=2008)
+
+        order_a = [imdb_row, tmdb_row, orphan_row]
+        order_b = [tmdb_row, imdb_row, orphan_row]
+
+        def _fingerprint(rows):
+            groups = aggregate_movies(rows)
+            return {g.key: frozenset(m.rating_key for m in g.members) for g in groups}
+
+        result_a = _fingerprint(order_a)
+        result_b = _fingerprint(order_b)
+
+        # Same input set, different row order → identical grouping either way.
+        assert result_a == result_b
+        # The orphan always lands with the imdb-based group (strongest id per
+        # _key_rank), never with the tmdb-based homonym.
+        assert result_a["imdb://tt0001"] == frozenset({"vod_imdb", "vod_orphan"})
+        assert result_a["tmdb://9999"] == frozenset({"vod_tmdb"})
+
 
 # ─── Series convergence ─────────────────────────────────────────────────
 

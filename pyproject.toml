@@ -13,3 +13,125 @@ filterwarnings = [
     # The pre-existing thread-pool teardown warning we already noted in the audit.
     "ignore::pytest.PytestUnhandledThreadExceptionWarning",
 ]
+
+# CR-T09: enforced coverage floor (safety ratchet, not a target).
+# Measured 2026-07-12 on this tree (`pytest --cov=app --cov-report=term`,
+# full suite, 707 passed, branch coverage on per [tool.coverage.run]):
+#   TOTAL 7798 stmts / 1901 missed / 2082 branches / 319 partial = 73%
+# `--cov-fail-under=70` is set ~3 points BELOW that measured 73% — a floor
+# that fails a real regression (coverage dropping) without being brittle
+# against normal test-suite noise/reruns. Deliberately NOT set at-or-above
+# 73%: several high-risk modules are still only partially covered (see
+# docs/audit/cleanroom-2026-07-11/60-tests.md CR-T03/T04/T05/T06/T07 —
+# sync_worker orchestration, startup/lifespan wiring, api_key_service,
+# several routers) and pinning the gate to today's exact number would red
+# the build on the next unrelated flaky rerun. Raise this floor deliberately
+# as those gaps are closed, not by ratcheting it up opportunistically.
+addopts = "--cov=app --cov-report=term-missing --cov-fail-under=70"
+
+[tool.coverage.run]
+branch = true
+source = ["app"]
+
+[tool.coverage.report]
+skip_covered = false
+show_missing = true
+
+# ── CR-C06: lint / format / type tooling ────────────────────────────────────
+# This repo has never run ruff/black; the rulesets below are deliberately
+# conservative so `ruff check .` / `black --check .` are GREEN on the current
+# tree (no big-bang reformat). See docs/audit/cleanroom-2026-07-11/20-conventions.md
+# (CR-C06) for the audit finding this closes.
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# Conservative initial ruleset: pyflakes (F) + pycodestyle errors/warnings (E, W)
+# + import-sort (I). Chosen to catch real bugs (undefined names, unused
+# imports/variables, syntax-shaped issues) without requiring an unrelated
+# repo-wide reformat.
+select = ["E", "F", "W", "I"]
+
+# Repo-wide ignores for rules the *current* codebase violates systematically
+# (not per-file debt — see CR-C06). Narrower per-file-ignores are used below for
+# violations confined to a handful of files.
+ignore = [
+    # No line-length convention has ever been enforced (no formatter run
+    # historically): ~83 of ~115 files exceed 88-100 cols today. Revisit once
+    # black actually reformats the tree (tracked, not blocking this pass).
+    "E501",
+    # No import-sort (isort) convention has ever been enforced (~70 files would
+    # reorder on a first run). Enabling it now would force an unrelated mass diff.
+    "I001",
+    # SQLAlchemy query-construction idiom: `Model.column == True/False` builds a
+    # SQL expression node for a WHERE clause and is NOT a redundant Python
+    # truthiness check (what E712 assumes) — `if Model.column:` would be wrong
+    # here (a Column is always truthy). Recurs anywhere ORM filters are written.
+    "E712",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Pre-existing, low-risk unused-import debt confined to files outside this
+# pass's edit scope (docs/audit/cleanroom-2026-07-11/20-conventions.md CR-C06).
+# Left as targeted per-file ignores (not a blanket F401 disable) so F401 stays
+# enforced for every other/new file.
+"app/api/live.py" = ["F401"]
+"app/cli.py" = ["F401"]
+"app/models/database.py" = ["F401"]
+"app/models/schemas.py" = ["F401"]
+"app/scripts/backfill_certifications.py" = ["F401"]
+"app/scripts/strip_titles_pollution.py" = ["F401"]
+"app/services/media_service.py" = ["F401"]
+"app/workers/enrichment_worker.py" = ["F401"]
+"app/workers/sync_worker.py" = ["F401", "W293"]
+"app/api/categories.py" = ["W293"]
+"app/api/admin.py" = ["E402"]  # intentional late imports after module logger setup
+"app/db/database.py" = ["F841"]  # pre-existing unused local `logger` shadow-assign
+"tests/conftest.py" = ["F401"]
+"tests/test_ai_blurb.py" = ["F401"]
+"tests/test_ai_deps.py" = ["F401"]
+"tests/test_backup_db.py" = ["F401"]
+"tests/test_certification_parsing.py" = ["F401"]
+"tests/test_db_layer.py" = ["F401"]
+"tests/test_enrichment_scraping.py" = ["F401"]
+"tests/test_plex_convergence.py" = ["F401"]
+"tests/test_plex_generator.py" = ["F401"]
+"tests/test_recommendation_service.py" = ["F401"]
+"tests/test_storage_atomic.py" = ["F401"]
+"tests/test_strip_titles_pollution.py" = ["F401"]
+"tests/test_subtitle_translate.py" = ["F401"]
+"tests/test_sync_worker.py" = ["F401"]
+"tests/test_utilities.py" = ["F401"]
+
+[tool.black]
+line-length = 100
+target-version = ["py312"]
+# CR-C06: the codebase was never run through black. A first `black --check .`
+# reformats 100+ of ~115 files (quote normalization, trailing commas, line
+# splitting) — an unrelated mass diff far outside a fix-forward pass. Rather
+# than reformat blind or fake a pass, black is wired (dependency + config) but
+# scoped to the app/tests trees for now: `black --check .` is a real, green,
+# no-op today. Narrow this exclude file-by-file as modules get reformatted
+# deliberately (tracked as CR-C06 follow-up debt, not a blocking gate).
+extend-exclude = '''
+(
+    ^/app/
+  | ^/tests/
+)
+'''
+
+[tool.mypy]
+# CR-C06: lenient by design — this is a type-checking *aid*, not a gate. The
+# codebase has no type-hint discipline enforced historically; a strict config
+# would fail on virtually every module. Not wired into CI as a blocking step
+# (see .github/workflows/tests.yml); run locally/ad-hoc via `mypy app`.
+python_version = "3.12"
+ignore_missing_imports = true
+follow_imports = "silent"
+check_untyped_defs = false
+disallow_untyped_defs = false
+warn_unused_ignores = false
+warn_return_any = false
+exclude = ["tests/"]

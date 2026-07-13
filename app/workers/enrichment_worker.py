@@ -27,6 +27,14 @@ class FetchResult:
     data: TMDBEnrichmentData | None
     confidence: float | None
     result: str            # matched | nomatch | ambiguous | skipped
+    # NOTE (CR-F03): this is a count of *logical* TMDB calls attempted for this
+    # item (searches + details fetch) — informational only, kept for the
+    # per-batch/per-item bookkeeping below. It is NOT used to enforce
+    # `ENRICHMENT_DAILY_LIMIT` anymore: `run()` budgets against
+    # `tmdb_service.get_request_count()`, the count of *real* outbound HTTP
+    # attempts (including every retry inside `tmdb_service._request`), since a
+    # single logical call can cost up to 4 real HTTP attempts under
+    # 429/5xx retries.
     api_used: int
     cache_key: str | None  # set when the outcome should be written to scrape cache
     from_cache: bool = False
@@ -248,8 +256,20 @@ async def _apply_enrichment_results(db, results: list[FetchResult]):
 async def run():
     """Run enrichment batch with parallel TMDB fetching."""
     daily_limit = settings.ENRICHMENT_DAILY_LIMIT
-    used = 0
     semaphore = asyncio.Semaphore(CONCURRENCY)
+
+    # Budget against REAL TMDB HTTP calls (search + details + every retry
+    # inside tmdb_service._request), not logical queue items — a single item
+    # can cost up to 4 real HTTP attempts (1 initial + up to 3 retries) when
+    # TMDB rate-limits (429) or 5xx's, so counting logical items/searches
+    # under-counted real spend by 2-4x (CR-F03). `tmdb_service` exposes a
+    # live counter incremented on every real outbound attempt; reset it here
+    # so `used()` reflects only this run's spend (in-process only — see
+    # `reset_request_count` docstring for the persisted-daily-quota residual).
+    tmdb_service.reset_request_count()
+
+    def used() -> int:
+        return tmdb_service.get_request_count()
 
     logger.info(f"Starting enrichment batch (daily limit: {daily_limit}, concurrency: {CONCURRENCY})")
 
@@ -274,7 +294,8 @@ async def run():
 
         # Process in batches with parallel HTTP, sequential DB writes
         for batch_start in range(0, len(pending_vod), BATCH_SIZE):
-            if used >= daily_limit:
+            if used() >= daily_limit:
+                logger.info(f"Enrichment: real TMDB call budget ({daily_limit}) reached, stopping VOD phase")
                 break
             batch_end = min(batch_start + BATCH_SIZE, len(pending_vod))
             batch = pending_vod[batch_start:batch_end]
@@ -285,15 +306,15 @@ async def run():
             ]
             results = await asyncio.gather(*tasks)
 
-            batch_used = await _apply_enrichment_results(db, results)
-            used += batch_used
+            before = used()
+            await _apply_enrichment_results(db, results)
             await commit_with_retry(db)
 
             logger.info(f"Enrichment VOD {batch_end}/{len(pending_vod)} "
-                       f"({batch_used} API calls, {used} total)")
+                       f"({used() - before} real TMDB calls this batch, {used()} total)")
 
         # Phase 2: Series
-        remaining = daily_limit - used
+        remaining = daily_limit - used()
         if remaining > 0:
             result = await db.execute(
                 select(EnrichmentQueue)
@@ -311,7 +332,8 @@ async def run():
             logger.info(f"Enrichment Phase 2: {len(pending_series)} pending series")
 
             for batch_start in range(0, len(pending_series), BATCH_SIZE):
-                if used >= daily_limit:
+                if used() >= daily_limit:
+                    logger.info(f"Enrichment: real TMDB call budget ({daily_limit}) reached, stopping series phase")
                     break
                 batch_end = min(batch_start + BATCH_SIZE, len(pending_series))
                 batch = pending_series[batch_start:batch_end]
@@ -319,14 +341,14 @@ async def run():
                 tasks = [_fetch_series_data(item, semaphore) for item in batch]
                 results = await asyncio.gather(*tasks)
 
-                batch_used = await _apply_enrichment_results(db, results)
-                used += batch_used
+                before = used()
+                await _apply_enrichment_results(db, results)
                 await commit_with_retry(db)
 
                 logger.info(f"Enrichment Series {batch_end}/{len(pending_series)} "
-                           f"({batch_used} API calls, {used} total)")
+                           f"({used() - before} real TMDB calls this batch, {used()} total)")
 
-    logger.info(f"Enrichment batch complete: {used} TMDB API calls used")
+    logger.info(f"Enrichment batch complete: {used()} real TMDB HTTP calls used")
 
     # Update queue-size gauges so Prometheus reflects post-batch state.
     from app.utils.metrics import enrichment_queue_size

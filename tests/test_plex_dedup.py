@@ -8,6 +8,7 @@ import asyncio
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models.database import Media, XtreamAccount
@@ -298,6 +299,77 @@ class TestUnifiedDatabaseSource:
         assert all(v.server_id == "xtream_a" for v in term.versions)
 
 
+class TestBrokenRowSelectionAlignment:
+    """CR-F10: the generator must GROUP over the same row predicate as the
+    REST API (`media_service.get_unified_list` never excludes broken rows
+    before calling `aggregate_movies`) — a broken-but-enriched row must still
+    influence `best_row`/convergence in the generator, exactly as it does for
+    the API. Only what gets PUBLISHED as a playable `.strm` may still differ
+    (broken versions are dropped, but only after aggregation)."""
+
+    @pytest_asyncio.fixture
+    async def seeded_factory(self, db_engine, monkeypatch):
+        factory = async_sessionmaker(db_engine, class_=AsyncSession,
+                                     expire_on_commit=False)
+        async with factory() as s:
+            # The ONLY imdb-bearing row of the group — but its stream is broken.
+            broken = _movie_row("a", "vod_1.mp4", "Heat (1995) (VF)",
+                                "imdb://tt0113277", 0)
+            broken.imdb_id = "tt0113277"
+            broken.is_broken = True
+            # Healthy sibling, same group, carries no external id of its own.
+            healthy = _movie_row("a", "vod_2.mp4", "Heat (1995) (HD)",
+                                 "imdb://tt0113277", 1)
+            s.add_all([_account("a", "Compte 1"), broken, healthy])
+            await s.commit()
+
+        import app.plex_generator.source as source_mod
+        monkeypatch.setattr(source_mod, "async_session_factory", factory)
+        return factory
+
+    @pytest.mark.asyncio
+    async def test_broken_row_still_shapes_the_group_like_the_api(self, seeded_factory):
+        from app.services.aggregation_service import aggregate_movies
+
+        # API-style grouping: media_service.get_unified_list feeds ALL rows
+        # (broken included) straight into aggregate_movies — reproduced here
+        # directly on the raw rows (no is_broken filter applied anywhere).
+        async with seeded_factory() as s:
+            rows = list((await s.execute(
+                select(Media).where(Media.type == "movie")
+            )).scalars().all())
+        api_groups = aggregate_movies(rows)
+        assert len(api_groups) == 1
+        assert api_groups[0].best.imdb_id == "tt0113277"  # broken row wins best_row
+        assert len(api_groups[0].members) == 2  # both rows are one group
+
+        # Generator-style grouping: DatabaseSource must reach the SAME
+        # best_row decision (imdb_id sourced from the broken row) even though
+        # STREAM_FILTER_BROKEN keeps the broken stream out of what's published.
+        movies = await DatabaseSource().get_movies()
+        assert len(movies) == 1
+        movie = movies[0]
+        assert movie.imdb_id == "tt0113277"  # metadata still comes from the broken row
+        # Only the healthy version is actually published as a playable .strm.
+        assert len(movie.versions) == 1
+        assert movie.versions[0].source_id == "vod_2.mp4"
+
+    @pytest.mark.asyncio
+    async def test_all_versions_broken_drops_the_group(self, seeded_factory):
+        """If every member of a group is broken, the generator still skips
+        publishing it entirely (no dead `.strm`) — the alignment fix does not
+        reintroduce dead links, it only fixes what feeds best_row/convergence."""
+        async with seeded_factory() as s:
+            row = (await s.execute(
+                select(Media).where(Media.rating_key == "vod_2.mp4")
+            )).scalars().one()
+            row.is_broken = True
+            await s.commit()
+
+        movies = await DatabaseSource().get_movies()
+        assert movies == []
+
+
 # ─── API-level dedup (media_service) ────────────────────────────────────
 
 
@@ -400,3 +472,75 @@ def test_version_label_assignment_is_order_independent():
     # The bare label deterministically lands on the lexicographically smaller key.
     assert forward["vod_1.mp4"] == "VF · Compte 1"
     assert forward["vod_2.mp4"] == "VF · Compte 1 #2"
+
+
+# ─── CR-A07: single shared build_versions() used by BOTH callers ────────────
+
+
+class TestSharedBuildVersionsHelper:
+    """CR-A07: `aggregation_service.build_versions` is now the ONE place the
+    sort/label/dedup sequence lives; `api.media._build_versions` and
+    `DatabaseSource._build_versions` both delegate to it instead of each
+    re-implementing a "byte-identical" copy."""
+
+    def test_media_api_matches_the_shared_helper_directly(self):
+        from app.api.media import _build_versions as api_build_versions
+        from app.services.aggregation_service import build_versions
+
+        labels = {build_server_id("a"): "Compte 1"}
+        m1 = _movie_row("a", "vod_1.mp4", "Heat (1995) (VF)", "tmdb://949")
+        m2 = _movie_row("a", "vod_2.mp4", "Heat (1995) (VF)", "tmdb://949")
+
+        expected = build_versions(
+            [m1, m2], lambda m: labels.get(m.server_id, m.server_id),
+        )
+        actual = api_build_versions([m1, m2], labels)
+
+        assert [(v.rating_key, v.label) for v in actual] == \
+               [(m.rating_key, label) for m, label in expected]
+
+    def test_generator_source_matches_the_shared_helper_directly(self):
+        from app.services.aggregation_service import build_versions
+
+        account = _account("a", "Compte 1")
+        accounts = {build_server_id("a"): account}
+        m1 = _movie_row("a", "vod_1.mp4", "Heat (1995) (VF)", "tmdb://949")
+        m2 = _movie_row("a", "vod_2.mp4", "Heat (1995) (VF)", "tmdb://949")
+
+        expected = build_versions(
+            [m1, m2],
+            lambda r: accounts[r.server_id].label or accounts[r.server_id].id,
+        )
+        triples = DatabaseSource()._build_versions([m1, m2], accounts)
+
+        assert [(row.rating_key, label) for row, _url, label in triples] == \
+               [(m.rating_key, label) for m, label in expected]
+
+    def test_both_callers_agree_on_labels_for_the_same_members(self):
+        """The API card and the on-disk `.strm` for the SAME group must show
+        the SAME label for the SAME physical version — the whole point of
+        hoisting one shared helper (CR-A07)."""
+        from app.api.media import _build_versions as api_build_versions
+
+        labels = {build_server_id("a"): "Compte 1"}
+        account = _account("a", "Compte 1")
+        accounts = {build_server_id("a"): account}
+        m1 = _movie_row("a", "vod_1.mp4", "Heat (1995) (VF)", "tmdb://949")
+        m2 = _movie_row("a", "vod_2.mp4", "Heat (1995) (VF)", "tmdb://949")
+
+        api_labels = {v.rating_key: v.label for v in api_build_versions([m1, m2], labels)}
+        gen_labels = {
+            row.rating_key: label
+            for row, _url, label in DatabaseSource()._build_versions([m1, m2], accounts)
+        }
+
+        assert api_labels == gen_labels
+
+        # And order-independence holds identically for both callers.
+        api_reverse = {v.rating_key: v.label for v in api_build_versions([m2, m1], labels)}
+        gen_reverse = {
+            row.rating_key: label
+            for row, _url, label in DatabaseSource()._build_versions([m2, m1], accounts)
+        }
+        assert api_labels == api_reverse
+        assert gen_labels == gen_reverse

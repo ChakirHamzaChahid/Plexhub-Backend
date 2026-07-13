@@ -22,7 +22,7 @@ from app.config import settings
 from app.db.database import async_session_factory
 from app.models.database import EnrichmentQueue, Media, XtreamAccount
 from app.plex_generator.mapping import MappingStore
-from app.plex_generator.naming import _movie_folder, _series_folder
+from app.plex_generator.naming import movie_folder, series_folder
 from app.utils.server_id import build_server_id
 from app.utils.string_normalizer import (
     normalize_for_sorting, parse_title_and_year, parse_title_year_and_suffix,
@@ -87,8 +87,8 @@ def _build_movie_rename(
     effective_year = db_year if db_year is not None else parsed_year
     # Caller may pre-decide suffix/fallback after collision resolution; otherwise
     # default to None (singleton = canonical Jellyfin name).
-    old_folder = _movie_folder(old_title, db_year)
-    new_folder = _movie_folder(new_title, effective_year, suffix, fallback_id)
+    old_folder = movie_folder(old_title, db_year)
+    new_folder = movie_folder(new_title, effective_year, suffix, fallback_id)
     if old_folder == new_folder:
         return None
     return FolderRename(
@@ -108,8 +108,8 @@ def _build_series_rename(
     if new_title == "Unknown":
         return None
     effective_year = db_year if db_year is not None else parsed_year
-    old_folder = _series_folder(old_title)
-    new_folder = _series_folder(new_title, effective_year, suffix, fallback_id)
+    old_folder = series_folder(old_title)
+    new_folder = series_folder(new_title, effective_year, suffix, fallback_id)
     if old_folder == new_folder:
         return None
     return FolderRename(

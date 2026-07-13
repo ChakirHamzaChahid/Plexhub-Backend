@@ -539,11 +539,19 @@ def _compute_content_hash(row: dict) -> str:
     return hashlib.md5(json.dumps(hashable, default=str).encode()).hexdigest()
 
 
-async def upsert_media_batch(db, rows: list[dict]):
+async def upsert_media_batch(db, rows: list[dict], current_rating_keys: set[str] | None = None):
     """Bulk upsert media rows, skipping UPDATE when content unchanged.
 
     Uses chunked multi-row INSERT..ON CONFLICT for much better throughput
     than row-by-row execution.
+
+    `current_rating_keys`: the FULL set of rating_keys the provider currently
+    lists for this sync's scope (e.g. `all_vod_keys`/`all_series_keys` in
+    `sync_account`, built from the whole listing before per-batch filtering).
+    Used by Phase 1 (see below) to tell a genuinely delisted row apart from
+    one that merely shifted position. Pass `None` when no such full listing
+    is available at the call site (e.g. per-series episode batches) — Phase 1
+    then never deletes on a slot collision alone (see below).
     """
     if not rows:
         return
@@ -554,12 +562,34 @@ async def upsert_media_batch(db, rows: list[dict]):
 
     logger.debug(f"Upserting {len(rows)} media items to database")
 
-    # Phase 1: Batch evict shifted pagination slots (one DELETE per chunk)
-    # Group by (server_id, library_section_id) to batch efficiently
-    from sqlalchemy import or_, and_, tuple_
-    eviction_conditions = []
+    # Phase 1: Resolve pagination-slot collisions caused by provider reordering.
+    #
+    # `uix_media_pagination` (server_id, library_section_id, filter, sort_order,
+    # page_offset) is a UNIQUE index distinct from the row's real identity/PK
+    # (rating_key, server_id, filter, sort_order). When a provider reorders a
+    # category listing, an incoming row's new `page_offset` can collide with
+    # whatever OTHER rating_key currently occupies that slot from a previous
+    # sync. That other row is very often STILL LISTED (just shifted to a
+    # different page_offset) — since its content is unchanged its dto_hash
+    # still matches, so it is never re-fetched/re-upserted this run.
+    # Deleting it here would silently drop its enrichment (tmdb_id,
+    # unification_id, scraped metadata) and force a fresh, unenriched
+    # re-insert on some future sync (regression CR-F02).
+    #
+    # Fix: first find which existing row (if any) actually occupies each
+    # incoming row's target slot under a different rating_key. Only DELETE it
+    # when we can prove — via `current_rating_keys`, the current sync's full
+    # listing — that it is genuinely no longer listed. Otherwise (still
+    # listed, or unknown because the caller has no listing to compare
+    # against) we RELOCATE it to a `page_offset` that is provably free (see
+    # the per-partition MAX(page_offset)+1 scheme below) so the incoming row
+    # can take the slot without violating the unique index, while the
+    # relocated row and all of its enrichment survive untouched.
+    from sqlalchemy import or_, and_
+
+    slot_conditions = []
     for row in rows:
-        eviction_conditions.append(
+        slot_conditions.append(
             and_(
                 Media.server_id == row["server_id"],
                 Media.library_section_id == row["library_section_id"],
@@ -569,11 +599,97 @@ async def upsert_media_batch(db, rows: list[dict]):
                 Media.rating_key != row["rating_key"],
             )
         )
-    # Execute evictions in chunks to stay within SQLite limits
+
     chunk_size = 50  # Each condition has ~6 bind vars → 50 × 6 = 300 < 999
-    for i in range(0, len(eviction_conditions), chunk_size):
-        chunk = eviction_conditions[i:i + chunk_size]
-        await db.execute(delete(Media).where(or_(*chunk)))
+    seen_conflicts: set[tuple] = set()
+    conflicts: list[tuple] = []
+    for i in range(0, len(slot_conditions), chunk_size):
+        chunk = slot_conditions[i:i + chunk_size]
+        result = await db.execute(
+            select(
+                Media.rating_key, Media.server_id, Media.library_section_id,
+                Media.filter, Media.sort_order,
+            ).where(or_(*chunk))
+        )
+        for identity in result.all():
+            key = tuple(identity)
+            if key not in seen_conflicts:
+                seen_conflicts.add(key)
+                conflicts.append(key)
+
+    if conflicts:
+        to_delete = []    # provably absent from the current sync's listing
+        to_relocate = []  # still listed (or unknown) — must survive
+
+        for rating_key, server_id, library_section_id, filter_val, sort_order in conflicts:
+            if current_rating_keys is not None and rating_key not in current_rating_keys:
+                to_delete.append((rating_key, server_id, filter_val, sort_order))
+            else:
+                to_relocate.append((rating_key, server_id, library_section_id, filter_val, sort_order))
+
+        def _pk_condition(rating_key, server_id, filter_val, sort_order):
+            return and_(
+                Media.rating_key == rating_key,
+                Media.server_id == server_id,
+                Media.filter == filter_val,
+                Media.sort_order == sort_order,
+            )
+
+        for i in range(0, len(to_delete), chunk_size):
+            conds = [_pk_condition(*c) for c in to_delete[i:i + chunk_size]]
+            await db.execute(delete(Media).where(or_(*conds)))
+
+        if to_relocate:
+            # Group relocations by pagination partition -- (server_id,
+            # library_section_id, filter, sort_order), the exact scope of
+            # the `uix_media_pagination` UNIQUE index -- and hand each
+            # relocated row a value strictly above BOTH:
+            #  (a) the partition's current MAX(page_offset) in the DB, so it
+            #      can never collide with an existing row -- including one
+            #      relocated by an EARLIER sync. A fixed additive sentinel
+            #      does NOT guarantee this: repeatedly relocating the same
+            #      slot across syncs eventually reuses the same bumped value
+            #      and violates the unique index (cross-sync collision).
+            #  (b) the highest page_offset any OTHER row in *this* batch
+            #      targets in the same partition, so it can never collide
+            #      with one of this sync's own new/changed rows either.
+            # page_offset is never read for ordering/business logic
+            # (grep-verified) so this incremental, purely-internal growth is
+            # harmless.
+            batch_partition_max: dict[tuple, int] = {}
+            for row in rows:
+                part_key = (
+                    row["server_id"], row["library_section_id"],
+                    row["filter"], row["sort_order"],
+                )
+                batch_partition_max[part_key] = max(
+                    batch_partition_max.get(part_key, 0), row["page_offset"]
+                )
+
+            relocate_by_partition: dict[tuple, list[str]] = {}
+            for rating_key, server_id, library_section_id, filter_val, sort_order in to_relocate:
+                part_key = (server_id, library_section_id, filter_val, sort_order)
+                relocate_by_partition.setdefault(part_key, []).append(rating_key)
+
+            for part_key, rating_keys in relocate_by_partition.items():
+                server_id, library_section_id, filter_val, sort_order = part_key
+                db_max_result = await db.execute(
+                    select(func.max(Media.page_offset)).where(
+                        Media.server_id == server_id,
+                        Media.library_section_id == library_section_id,
+                        Media.filter == filter_val,
+                        Media.sort_order == sort_order,
+                    )
+                )
+                db_max = db_max_result.scalar() or 0
+                next_offset = max(db_max, batch_partition_max.get(part_key, 0)) + 1
+                for rating_key in rating_keys:
+                    await db.execute(
+                        update(Media)
+                        .where(_pk_condition(rating_key, server_id, filter_val, sort_order))
+                        .values(page_offset=next_offset)
+                    )
+                    next_offset += 1
 
     # Phase 2: Multi-row INSERT..ON CONFLICT in chunks
     _SKIP_UPDATE_KEYS = frozenset((
@@ -695,6 +811,60 @@ async def differential_cleanup(
         )
 
 
+async def differential_cleanup_episodes(
+    db, server_id: str, grandparent_rating_key: str, api_rating_keys: set[str],
+) -> int:
+    """Remove DB episodes of ONE show that are no longer in its current listing.
+
+    CR-F01: unlike movie/show/live, `type='episode'` was never covered by any
+    differential_cleanup* path -- a delisted or renumbered episode only ever
+    got its `is_in_allowed_categories` flag flipped hidden
+    (`category_service.update_media_category_visibility`), never actually
+    removed, so it orphaned in the DB forever.
+
+    Scoped tightly to (server_id, grandparent_rating_key) -- i.e. ONE show on
+    ONE server -- so a fetch for one show can never delete another show's
+    episodes. Callers MUST only invoke this with the FULL episode listing for
+    that show this sync, and only when that listing is non-empty: an empty
+    `api_rating_keys` -- whether from a transport failure OR from a "soft"
+    Xtream failure (HTTP 200 with an empty/missing `episodes` payload, which
+    some mirrors return instead of erroring) -- is indistinguishable from a
+    genuine empty listing, and a real series essentially never legitimately
+    has zero episodes. Trusting an empty listing here would wipe out every
+    episode of that show; callers must skip invoking this function in that
+    case (see `fetch_series_episodes`'s `if success and rows:` gate).
+
+    Returns the number of rows removed.
+    """
+    result = await db.execute(
+        select(Media.rating_key).where(
+            Media.server_id == server_id,
+            Media.type == "episode",
+            Media.grandparent_rating_key == grandparent_rating_key,
+        )
+    )
+    existing_keys = {row[0] for row in result}
+    stale_keys = existing_keys - api_rating_keys
+
+    if not stale_keys:
+        return 0
+
+    stale_list = list(stale_keys)
+    chunk_size = 500  # SQLite limit is 999 bind variables
+    for i in range(0, len(stale_list), chunk_size):
+        chunk = stale_list[i : i + chunk_size]
+        await db.execute(
+            delete(Media).where(
+                Media.rating_key.in_(chunk),
+                Media.server_id == server_id,
+                Media.type == "episode",
+                Media.grandparent_rating_key == grandparent_rating_key,
+            )
+        )
+    logger.info(
+        f"Removed {len(stale_keys)} stale episodes from {server_id}/{grandparent_rating_key}"
+    )
+    return len(stale_keys)
 
 
 async def cleanup_orphan_enrichment_queue(db, server_id: str) -> int:
@@ -1064,7 +1234,7 @@ async def sync_account(account_id: str):
 
                     try:
                         async with db.begin_nested():  # SAVEPOINT
-                            await upsert_media_batch(db, batch_rows)
+                            await upsert_media_batch(db, batch_rows, current_rating_keys=all_vod_keys)
                         vod_rows.extend(batch_rows)
                         await commit_with_retry(db)
                     except Exception as e:
@@ -1117,6 +1287,7 @@ async def sync_account(account_id: str):
                 existing_series_hashes = {row[0]: row[1] for row in hash_result}
 
                 all_series_keys = set()
+                all_series_dtos = []  # every dto that passed category filtering, changed or not
                 changed_series = []  # (dto, index, dto_hash)
                 unchanged_count = 0
 
@@ -1144,6 +1315,7 @@ async def sync_account(account_id: str):
                         continue
                     rating_key = f"series_{series_id}"
                     all_series_keys.add(rating_key)
+                    all_series_dtos.append(dto)
 
                     dto_hash = _compute_series_dto_hash(dto)
                     if existing_series_hashes.get(rating_key) == dto_hash:
@@ -1167,7 +1339,7 @@ async def sync_account(account_id: str):
                 if series_rows:
                     try:
                         async with db.begin_nested():
-                            await upsert_media_batch(db, series_rows)
+                            await upsert_media_batch(db, series_rows, current_rating_keys=all_series_keys)
                             await enqueue_for_enrichment(db, series_rows)
                     except Exception as e:
                         logger.error(f"Series batch failed, rolling back: {e}")
@@ -1184,25 +1356,51 @@ async def sync_account(account_id: str):
                 total_synced += len(all_series_keys)
                 logger.info(f"Series sync: {len(series_rows)} updated, {unchanged_count} unchanged")
 
-                # --- Episodes Sync (only for changed series) ---
-                changed_series_dtos = [dto for dto, _, _ in changed_series]
-                logger.info(f"Fetching episodes for {len(changed_series_dtos)} changed series "
-                           f"(skipping {unchanged_count} unchanged)")
+                # --- Episodes Sync ---
+                # CR-F11: fetched for EVERY currently-synced series each run,
+                # decoupled from the show-level dto_hash. A show's own metadata
+                # (name/cover/plot/genre/rating/category_id/backdrop_path/
+                # episode_run_time/last_modified) can stay byte-identical while
+                # its episode list gains/loses/renumbers entries -- there is no
+                # cheap, provider-agnostic signal for that (some Xtream mirrors
+                # never bump `last_modified` on episode changes), and the only
+                # accurate signal is the episode listing itself, which requires
+                # calling get_series_info regardless of the show-level hash.
+                logger.info(f"Fetching episodes for {len(all_series_dtos)} synced series "
+                           f"({len(changed_series)} changed, {unchanged_count} show-hash-unchanged)")
 
-                async def fetch_series_episodes(series_dto):
-                    """Fetch series info and map episodes."""
+                async def fetch_series_episodes(series_dto) -> tuple[bool, list[dict]]:
+                    """Fetch series info and map episodes.
+
+                    Returns (success, rows). `success=False` on any fetch/parse
+                    failure -- the caller must NEVER treat "provider unreachable
+                    this run" the same as "show genuinely has zero episodes".
+                    Note `success=True` alone does NOT guarantee `rows` is
+                    authoritative: some Xtream mirrors return HTTP 200 with an
+                    empty/missing `episodes` payload as a soft failure, so the
+                    caller additionally requires non-empty `rows` before
+                    trusting a listing enough to run CR-F01 differential
+                    cleanup on it.
+                    """
+                    if not isinstance(series_dto, dict):
+                        return False, []
                     try:
-                        if not isinstance(series_dto, dict):
-                            return []
                         async with semaphore:  # Only hold semaphore during API call
                             series_info = await xtream_service.get_series_info(
                                 account_snapshot, series_id=series_dto["series_id"]
                             )
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to fetch series_info for series {series_dto.get('series_id')}: {e}"
+                        )
+                        return False, []
+
+                    try:
                         # Mapping happens outside semaphore
                         episodes_data = series_info.get("episodes") or {} if isinstance(series_info, dict) else {}
                         if not isinstance(episodes_data, dict):
                             logger.warning(f"Unexpected episodes_data type for series {series_dto.get('series_id')}: {type(episodes_data).__name__}")
-                            return []
+                            return False, []
                         rows = []
                         for season_str, episodes in episodes_data.items():
                             try:
@@ -1216,35 +1414,65 @@ async def sync_account(account_id: str):
                                     )
                                     ep_row["is_in_allowed_categories"] = True
                                     rows.append(ep_row)
-                        return rows
+                        return True, rows
                     except Exception as e:
                         sid = series_dto.get('series_id') if isinstance(series_dto, dict) else '?'
                         logger.error(f"Failed to sync series {sid}: {e}", exc_info=True)
-                        return []
+                        return False, []
 
                 episode_count = 0
+                episodes_removed = 0
                 batch_size = 50
-                for batch_start in range(0, len(changed_series_dtos), batch_size):
-                    batch_end = min(batch_start + batch_size, len(changed_series_dtos))
-                    batch_series = changed_series_dtos[batch_start:batch_end]
+                for batch_start in range(0, len(all_series_dtos), batch_size):
+                    batch_end = min(batch_start + batch_size, len(all_series_dtos))
+                    batch_series = all_series_dtos[batch_start:batch_end]
 
                     tasks = [fetch_series_episodes(s) for s in batch_series]
                     batch_results = await asyncio.gather(*tasks)
 
-                    episode_batch = [ep for result in batch_results for ep in result]
-                    if episode_batch:
-                        try:
-                            async with db.begin_nested():  # SAVEPOINT
+                    episode_batch = []
+                    # CR-F01: (grandparent_rating_key, live rating_keys) scopes
+                    # eligible for differential cleanup this batch -- only for
+                    # shows whose episode listing was successfully fetched AND
+                    # non-empty. A well-known Xtream flakiness returns HTTP 200
+                    # with an empty/missing/null `episodes` payload instead of
+                    # erroring (soft failure) -- `fetch_series_episodes` cannot
+                    # tell that apart from a genuinely empty listing via
+                    # `success` alone (no exception is raised), and a real
+                    # series essentially never legitimately has zero episodes.
+                    # Requiring `rows` to be non-empty before trusting it as
+                    # authoritative for deletion means a soft-failure 200 never
+                    # wipes out a still-listed show's episodes. The tradeoff --
+                    # a show whose episodes ALL genuinely vanished isn't pruned
+                    # that run -- is negligible: the show itself is removed by
+                    # the show-level differential_cleanup, and an empty show
+                    # has nothing streamable anyway.
+                    cleanup_scopes: list[tuple[str, set[str]]] = []
+                    for series_dto, (success, rows) in zip(batch_series, batch_results):
+                        episode_batch.extend(rows)
+                        if success and rows:
+                            grandparent_rating_key = f"series_{series_dto['series_id']}"
+                            cleanup_scopes.append(
+                                (grandparent_rating_key, {r["rating_key"] for r in rows})
+                            )
+
+                    try:
+                        async with db.begin_nested():  # SAVEPOINT
+                            if episode_batch:
                                 await upsert_media_batch(db, episode_batch)
-                            await commit_with_retry(db)
-                            episode_count += len(episode_batch)
-                            logger.info(f"Synced {episode_count} episodes ({batch_end}/{len(changed_series_dtos)} changed series)")
-                        except Exception as e:
-                            logger.error(f"Episode batch {batch_start}-{batch_end} failed, rolling back: {e}")
-                            await db.rollback()
+                            for grandparent_rating_key, live_keys in cleanup_scopes:
+                                episodes_removed += await differential_cleanup_episodes(
+                                    db, server_id, grandparent_rating_key, live_keys
+                                )
+                        await commit_with_retry(db)
+                        episode_count += len(episode_batch)
+                        logger.info(f"Synced {episode_count} episodes ({batch_end}/{len(all_series_dtos)} series)")
+                    except Exception as e:
+                        logger.error(f"Episode batch {batch_start}-{batch_end} failed, rolling back: {e}")
+                        await db.rollback()
 
                 total_synced += episode_count
-                logger.info(f"Synced {episode_count} episodes")
+                logger.info(f"Synced {episode_count} episodes, removed {episodes_removed} stale episodes")
 
                 # --- Live Channels Sync (incremental) ---
                 logger.info(f"Syncing Live channels for account {account_id}")

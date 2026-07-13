@@ -34,6 +34,15 @@ class Settings:
     # When neither is set, tv-auth endpoints return 503.
     TV_AUTH_ENCRYPTION_KEY: str = os.getenv("TV_AUTH_ENCRYPTION_KEY", "")
     TV_AUTH_TTL_SECONDS: int = _safe_int("TV_AUTH_TTL_SECONDS", 900)  # 15 min
+
+    # Xtream credential encryption at rest (CR-S03) — see
+    # app/utils/crypto_fields.py for full key-resolution semantics.
+    # Optional explicit Fernet key (urlsafe base64, 32 bytes) used to encrypt
+    # XtreamAccount.password at rest. When empty, a key is derived from
+    # AI_API_KEY (domain-separated from the tv-auth derivation above). When
+    # neither is set, passwords are stored in PLAINTEXT (fail-open — see
+    # crypto_fields.py docstring) rather than breaking account creation/sync.
+    XTREAM_ENCRYPTION_KEY: str = os.getenv("XTREAM_ENCRYPTION_KEY", "")
     AI_EMBED_CACHE_DIR: str = os.getenv("AI_EMBED_CACHE_DIR", "")
     AI_EMBED_MODEL: str = os.getenv("AI_EMBED_MODEL", "")
     DATA_DIR: Path = Path(os.getenv("DATA_DIR", "./data"))

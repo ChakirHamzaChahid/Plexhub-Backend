@@ -1,9 +1,8 @@
-import base64
 import logging
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select, func, delete
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 
@@ -16,24 +15,12 @@ from app.models.schemas import (
     EpgListResponse,
     StreamResponse,
 )
+from app.services import live_service
 from app.services.xtream_service import xtream_service
+from app.utils.db_retry import commit_with_retry
+from app.utils.server_id import parse_server_id
 
 logger = logging.getLogger("plexhub.live")
-
-
-def _try_base64_decode(value: str) -> str:
-    """Decode base64 only if the result is valid readable UTF-8 text."""
-    if not value:
-        return value
-    try:
-        decoded = base64.b64decode(value, validate=True).decode("utf-8", errors="replace")
-        # Reject if decoded text contains control chars (likely not real text)
-        if any(ord(c) < 32 and c not in "\n\r\t" for c in decoded):
-            return value
-        return decoded
-    except Exception:
-        return value  # not base64, use as-is
-
 
 router = APIRouter(prefix="/live", tags=["live"])
 
@@ -62,8 +49,15 @@ async def list_channels(
         safe_search = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         query = query.where(LiveChannel.name.ilike(f"%{safe_search}%", escape="\\"))
 
-    # Count
-    count_query = select(func.count()).select_from(query.subquery())
+    # Count.
+    # CR-P03: narrow func.count() over the base table with the SAME filters,
+    # instead of wrapping a `SELECT *` subquery — avoids materializing every
+    # matched channel's columns just to count them (still a full scan because
+    # of the leading-wildcard ILIKE search — see CR-P03 residual note, an
+    # FTS5/trigram index would be the real fix).
+    count_query = select(func.count()).select_from(LiveChannel)
+    if query.whereclause is not None:
+        count_query = count_query.where(query.whereclause)
     total = (await db.execute(count_query)).scalar() or 0
 
     # Sort
@@ -115,10 +109,10 @@ async def get_channel_stream(
     db: AsyncSession = Depends(get_db),
 ):
     """Get the live stream URL for a channel."""
-    if not server_id.startswith("xtream_"):
+    account_id = parse_server_id(server_id)
+    if account_id is None:
         raise HTTPException(400, "Invalid server_id format")
 
-    account_id = server_id[7:]
     result = await db.execute(
         select(XtreamAccount).where(XtreamAccount.id == account_id)
     )
@@ -174,71 +168,21 @@ async def get_channel_epg(
             total=len(entries),
         )
 
-    # Fetch from Xtream API
-    if not server_id.startswith("xtream_"):
+    # Fetch from Xtream API + stage new EpgEntry rows (live_service.ingest_short_epg)
+    try:
+        new_entries = await live_service.ingest_short_epg(
+            db, server_id, stream_id, fetched_at=now_ms,
+        )
+    except live_service.InvalidServerIdError:
         raise HTTPException(400, "Invalid server_id format")
-
-    account_id = server_id[7:]
-    acc_result = await db.execute(
-        select(XtreamAccount).where(XtreamAccount.id == account_id)
-    )
-    account = acc_result.scalars().first()
-    if not account:
+    except live_service.AccountNotFoundError:
         raise HTTPException(404, "Account not found")
 
-    try:
-        epg_data = await xtream_service.get_short_epg(account, stream_id=stream_id)
-    except Exception as e:
-        logger.warning(f"Failed to fetch EPG for stream {stream_id}: {e}")
-        return EpgListResponse(items=[], total=0)
-
-    listings = epg_data.get("epg_listings") or []
-    fetched_at = now_ms
-    new_entries = []
-
-    for listing in listings:
-        if not isinstance(listing, dict):
-            continue
-
-        # Parse start/end times (Xtream returns epoch seconds or datetime strings)
-        start = listing.get("start_timestamp") or listing.get("start")
-        end = listing.get("stop_timestamp") or listing.get("end")
-
-        if start and str(start).isdigit():
-            start_ms = int(start) * 1000
-        else:
-            start_ms = 0
-        if end and str(end).isdigit():
-            end_ms = int(end) * 1000
-        else:
-            end_ms = 0
-
-        if not start_ms:
-            continue
-
-        title = listing.get("title") or "Unknown"
-        # Some providers base64 encode the title/description
-        title = _try_base64_decode(title)
-
-        description = listing.get("description") or ""
-        description = _try_base64_decode(description)
-
-        entry = EpgEntry(
-            server_id=server_id,
-            epg_channel_id=listing.get("epg_id") or "",
-            stream_id=stream_id,
-            title=title,
-            description=description or None,
-            start_time=start_ms,
-            end_time=end_ms,
-            lang=listing.get("lang"),
-            fetched_at=fetched_at,
-        )
-        db.add(entry)
-        new_entries.append(entry)
-
     if new_entries:
-        await db.commit()  # Persist EPG entries (no per-entry refresh needed)
+        # CR-C04: this write can race a long-running sync/validation holding
+        # the single WAL writer — retry on "database is locked" instead of
+        # surfacing a raw 500 to the client (no per-entry refresh needed).
+        await commit_with_retry(db)  # Persist EPG entries
 
     return EpgListResponse(
         items=[EpgEntryResponse.model_validate(e) for e in new_entries],

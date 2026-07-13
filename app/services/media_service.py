@@ -1,17 +1,124 @@
+import asyncio
+import base64
+import binascii
+import json
 import logging
 from typing import Optional
 
-from sqlalchemy import select, func, delete, update, or_
+from sqlalchemy import select, func, delete, update, or_, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.database import Media, EnrichmentQueue, XtreamAccount
+from app.models.database import (
+    Media, EnrichmentQueue, MediaGroup, MediaGroupMember, XtreamAccount,
+)
 from app.services.aggregation_service import (
     MovieGroup, SeriesGroup, aggregate_movies, aggregate_series,
 )
 from app.utils.server_id import build_server_id
 from app.utils.time import now_ms
+from app.utils.ttl_cache import TTLCache
 
 logger = logging.getLogger("plexhub.media")
+
+
+def _aggregate_and_sort_movies(rows: list[Media]) -> list[MovieGroup]:
+    """CPU-bound grouping + sort, run off the event loop (see CR-P01).
+
+    Pure function operating only on scalar columns of already-loaded `Media`
+    rows (no relationships/lazy attributes on this model, no session/DB access)
+    — safe to execute in a worker thread via ``asyncio.to_thread``.
+    """
+    groups = aggregate_movies(rows)  # generic: groups by key + picks best row
+    # Deterministic order: added_at desc, then group_key asc as a stable
+    # tie-break — identical to the media_group snapshot's
+    # `ORDER BY sort_added_at DESC, group_key ASC`, so the live and snapshot
+    # paths page groups in the exact same sequence (CR-P01 parity).
+    groups.sort(key=lambda g: g.key)
+    groups.sort(key=lambda g: (g.best.added_at or 0), reverse=True)
+    return groups
+
+
+# ─── CR-P01 residual mitigation (see docs/audit/cleanroom-2026-07-11/50-perf.md) ──
+#
+# get_unified_list still SELECTs + hydrates every category-allowed row and
+# aggregates on EVERY call, with limit/offset applied only after the full
+# load — O(catalog) DB read + memory per request regardless of page. A true
+# fix is SQL-side windowed grouping (denormalized group table refreshed at
+# sync/enrichment time) — out of scope for this contained fix.
+#
+# Mitigation: cache the expensive SORTED GROUPS LIST (never the sliced page)
+# for a short TTL, keyed by:
+#   - the filter tuple (media_type, search, genre, year, include_broken) —
+#     NOT offset/limit, so every page of the same filter reuses one entry;
+#   - a cheap freshness "fingerprint" (COUNT + MAX(updated_at) computed with
+#     the SAME filters, narrow/index-backed — no SELECT * subquery, cf.
+#     CR-P03) so the cache busts as soon as the filtered set gains/loses rows
+#     (COUNT moves) or any row bumps updated_at.
+#     CAVEAT: some in-place writes do NOT bump updated_at (enrichment
+#     `update_values`, `is_broken` flips — column has default=0, no onupdate),
+#     so a freshly-broken/freshly-enriched row can be reflected up to one TTL
+#     window late. Acceptable staleness for a browse endpoint; not a
+#     correctness guarantee of instant invalidation.
+#   - the bound Engine's identity, which is a no-op in production (one
+#     long-lived Engine for the process) but makes the cache structurally
+#     unable to leak results across independent databases (e.g. per-test
+#     isolated in-memory SQLite engines).
+# Bounded LRU (size-capped) so memory stays predictable. Each entry can pin an
+# O(catalog) MovieGroup+Media snapshot, so the cap is deliberately small (a few
+# common filter combos) to stay well under the 2 GB container limit even when
+# fingerprint churn during sync produces several live snapshots.
+_UNIFIED_GROUPS_CACHE_TTL_SECONDS = 45.0
+_UNIFIED_GROUPS_CACHE_MAX_SIZE = 12
+
+_unified_groups_cache: TTLCache[tuple, list[MovieGroup]] = TTLCache(
+    max_size=_UNIFIED_GROUPS_CACHE_MAX_SIZE,
+    ttl_seconds=_UNIFIED_GROUPS_CACHE_TTL_SECONDS,
+)
+
+
+# ─── CR-P04: keyset (seek) pagination cursor for the raw list endpoints ──────
+#
+# `OFFSET n` walks and discards the first n matching rows (cost O(offset)); deep
+# pages on a large catalog degrade linearly. A keyset cursor seeks directly to
+# the page boundary via `WHERE (added_at, <pk>) </> :cursor`, cost O(limit).
+#
+# `Media` has NO single autoincrement id — its PK is the 4-tuple
+# (rating_key, server_id, filter, sort_order) — and `added_at` is not unique, so
+# a correct total order (and therefore a correct cursor) needs added_at PLUS the
+# full composite PK as the deterministic tie-break. The cursor is opaque
+# (base64) so its internal shape is not a public contract.
+_MEDIA_KEYSET_SORTS = ("added_desc", "added_asc")
+
+
+def _media_key_cols():
+    """The total-order columns the keyset sorts by: recency + full composite PK."""
+    return (
+        Media.added_at, Media.rating_key, Media.server_id,
+        Media.filter, Media.sort_order,
+    )
+
+
+def encode_media_cursor(row: Media) -> str:
+    """Opaque keyset cursor pointing AT ``row`` (added_at + composite PK)."""
+    payload = [
+        int(row.added_at or 0), row.rating_key, row.server_id,
+        row.filter, row.sort_order,
+    ]
+    raw = json.dumps(payload, separators=(",", ":"))
+    return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii")
+
+
+def decode_media_cursor(cursor: str) -> tuple[int, str, str, str, str]:
+    """Parse a cursor produced by ``encode_media_cursor``.
+
+    Raises ``ValueError`` on any malformed input so the endpoint can map it to a
+    400 rather than a 500."""
+    try:
+        raw = base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8")
+        added_at, rk, sv, fl, so = json.loads(raw)
+        return int(added_at), str(rk), str(sv), str(fl), str(so)
+    except (ValueError, TypeError, binascii.Error, UnicodeDecodeError) as e:
+        raise ValueError(f"malformed cursor: {e}") from e
 
 
 class MediaService:
@@ -31,12 +138,19 @@ class MediaService:
         year: Optional[int] = None,
         missing_imdb: bool = False,
         missing_tmdb: bool = False,
+        cursor: Optional[str] = None,
     ) -> tuple[list[Media], int]:
         """Get paginated media list with total count.
 
         When both missing_imdb and missing_tmdb are True, the filter is OR (rows
         with imdb_id missing OR tmdb_id missing). When only one is True, only
         that condition applies.
+
+        CR-P04: when *cursor* is provided AND *sort* is a recency sort
+        (added_desc/added_asc), pagination seeks past the cursor with a keyset
+        predicate instead of OFFSET (offset is ignored on that path). For any
+        other sort, or when *cursor* is None, OFFSET pagination is used exactly
+        as before. Invalid cursors raise ``ValueError``.
         """
         logger.debug(f"get_media_list: type={media_type}, limit={limit}, offset={offset}, "
                     f"sort={sort}, server_id={server_id}, parent={parent_rating_key}, "
@@ -73,16 +187,23 @@ class MediaService:
         if not include_filtered:
             query = query.where(Media.is_in_allowed_categories == True)
 
-        # Count total
-        count_query = select(func.count()).select_from(query.subquery())
+        # Count total.
+        # CR-P03: count with a narrow `func.count()` over the base table using
+        # the SAME filters, instead of wrapping a `SELECT *` subquery — avoids
+        # materializing every matched row's ~60 columns just to count them.
+        count_query = select(func.count()).select_from(Media)
+        if query.whereclause is not None:
+            count_query = count_query.where(query.whereclause)
         total_result = await db.execute(count_query)
         total = total_result.scalar() or 0
 
-        # Apply sorting
-        if sort == "added_desc":
-            query = query.order_by(Media.added_at.desc())
-        elif sort == "added_asc":
-            query = query.order_by(Media.added_at.asc())
+        # Apply sorting. The recency sorts order by added_at PLUS the full
+        # composite PK (deterministic tie-break) so pagination is stable across
+        # rows with equal added_at — also a prerequisite for the CR-P04 keyset
+        # cursor to point at a single unambiguous boundary.
+        key_cols = _media_key_cols()
+        if sort == "added_asc":
+            query = query.order_by(*(c.asc() for c in key_cols))
         elif sort == "title_asc":
             query = query.order_by(Media.title_sortable.asc())
         elif sort == "title_desc":
@@ -91,11 +212,20 @@ class MediaService:
             query = query.order_by(Media.display_rating.desc())
         elif sort == "year_desc":
             query = query.order_by(Media.year.desc().nulls_last())
-        else:
-            query = query.order_by(Media.added_at.desc())
+        else:  # added_desc (default) and any unknown sort
+            query = query.order_by(*(c.desc() for c in key_cols))
 
-        # Apply pagination
-        query = query.offset(offset).limit(limit)
+        # Apply pagination — keyset seek when a cursor is supplied on a recency
+        # sort (CR-P04), else OFFSET as before.
+        if cursor is not None and sort in _MEDIA_KEYSET_SORTS:
+            boundary = decode_media_cursor(cursor)
+            if sort == "added_asc":
+                query = query.where(tuple_(*key_cols) > boundary)
+            else:
+                query = query.where(tuple_(*key_cols) < boundary)
+            query = query.limit(limit)
+        else:
+            query = query.offset(offset).limit(limit)
 
         result = await db.execute(query)
         items = list(result.scalars().all())
@@ -124,7 +254,34 @@ class MediaService:
 
         Returns (page_of_groups, total_groups). Grouping is in-memory over the
         filtered, category-allowed rows (the same logic the Plex/Jellyfin
-        generator uses), then groups are sorted by recency and paginated."""
+        generator uses), then groups are sorted by recency and paginated.
+
+        CR-P01 (P0, residual — see module-level comment above
+        ``_unified_groups_cache``): the full load + CPU-bound aggregation
+        (offloaded via asyncio.to_thread, fixing the original event-loop
+        stall) still happens on every call in the worst case. Mitigated with
+        a short-TTL cache of the SORTED GROUPS list, keyed by the filter
+        tuple + a cheap freshness fingerprint — repeated pages and concurrent
+        callers for the same filters reuse one load+aggregate; only
+        offset/limit slicing (cheap) happens per request on a cache hit.
+
+        CR-P01 (true fix, unfiltered browse): when there are no filters, page
+        over the precomputed ``media_group`` snapshot with a DB ``LIMIT``
+        (``_unified_list_from_snapshot``) — O(page), no whole-catalog load. The
+        snapshot is rebuilt at pipeline time; an empty snapshot (fresh DB before
+        the first build) transparently falls back to the live path below.
+        """
+        # CR-P01: unfiltered browse pages over the precomputed snapshot. Filtered
+        # / searched queries can't (filtering rows changes group membership +
+        # best-row selection), and include_broken=False is never issued by the
+        # API — both correctly fall through to the live aggregation below.
+        if search is None and genre is None and year is None and include_broken:
+            snapshot = await self._unified_list_from_snapshot(
+                db, media_type, limit, offset,
+            )
+            if snapshot is not None:
+                return snapshot
+
         query = select(Media).where(
             Media.type == media_type,
             Media.is_in_allowed_categories == True,  # noqa: E712
@@ -140,11 +297,119 @@ class MediaService:
         if not include_broken:
             query = query.where(Media.is_broken == False)  # noqa: E712
 
-        rows = list((await db.execute(query)).scalars().all())
-        groups = aggregate_movies(rows)  # generic: groups by key + picks best row
-        groups.sort(key=lambda g: (g.best.added_at or 0), reverse=True)
+        # Cheap freshness fingerprint over the SAME filters — narrow COUNT +
+        # MAX(updated_at), no SELECT * subquery (cf. CR-P03) — so a cache hit
+        # still costs one small indexed-ish aggregate query, and the cache
+        # busts when the filtered set gains/loses rows or any row bumps
+        # updated_at. (In-place writes that don't touch updated_at — enrichment
+        # / is_broken flips — surface within one TTL window; see module note.)
+        fingerprint_query = select(func.count(), func.max(Media.updated_at)).select_from(Media)
+        if query.whereclause is not None:
+            fingerprint_query = fingerprint_query.where(query.whereclause)
+        fp_count, fp_max_updated = (await db.execute(fingerprint_query)).one()
+
+        # Engine identity scopes the cache to one running app/DB — a no-op in
+        # production (single long-lived Engine) but makes the cache
+        # structurally unable to leak a result across independent databases
+        # (e.g. isolated per-test in-memory SQLite engines) even if their
+        # filtered row sets coincidentally fingerprint the same.
+        cache_key = (
+            id(db.get_bind()), media_type, search, genre, year, include_broken,
+            fp_count or 0, fp_max_updated or 0,
+        )
+
+        groups = _unified_groups_cache.get(cache_key, None)
+        if groups is None:
+            rows = list((await db.execute(query)).scalars().all())
+            # CR-P01 (P0): the grouping + sort below is CPU-bound Python
+            # running over every category-allowed row — offloaded via
+            # asyncio.to_thread so a large catalog no longer stalls the event
+            # loop (and every other in-flight request) for the duration of
+            # the aggregation.
+            groups = await asyncio.to_thread(_aggregate_and_sort_movies, rows)
+            _unified_groups_cache.set(cache_key, groups)
+
         total = len(groups)
+        # `groups` is the cached list itself — slicing returns a NEW list and
+        # never mutates it, so the cached snapshot stays immutable.
         return groups[offset:offset + limit], total
+
+    async def _unified_list_from_snapshot(
+        self,
+        db: AsyncSession,
+        media_type: str,
+        limit: int,
+        offset: int,
+    ) -> Optional[tuple[list[MovieGroup], int]]:
+        """CR-P01 fast path: page the unfiltered unified list over the
+        precomputed ``media_group`` snapshot instead of loading + aggregating
+        the whole catalog.
+
+        Returns ``None`` when the snapshot is empty for *media_type* (never
+        built, or genuinely no groups) so the caller falls back to the live
+        aggregation — this keeps a fresh DB correct before the first pipeline
+        build. On a hit:
+          1. page the group keys at SQL (``ORDER BY sort_added_at DESC,
+             group_key ASC`` — deterministic, matches the live sort) with
+             ``LIMIT/OFFSET``; ``total`` = the snapshot group count;
+          2. load ONLY that page's member rows (bounded IN-join), then
+             re-run ``aggregate_movies`` over them — reproducing the exact same
+             ``MovieGroup`` (key/best/members) the live path would build, so the
+             card + ``versions[]`` are byte-identical. Re-aggregating COMPLETE
+             groups is safe: convergence only ever merged rows sharing ids /
+             title+year, so distinct snapshot groups stay distinct and each
+             group's representative key is unchanged.
+        """
+        total = (await db.execute(
+            select(func.count()).select_from(MediaGroup).where(
+                MediaGroup.media_type == media_type,
+            )
+        )).scalar() or 0
+        if total == 0:
+            return None  # not built yet (or empty) → live fallback
+
+        page_keys = list((await db.execute(
+            select(MediaGroup.group_key)
+            .where(MediaGroup.media_type == media_type)
+            .order_by(MediaGroup.sort_added_at.desc(), MediaGroup.group_key.asc())
+            .limit(limit).offset(offset)
+        )).scalars().all())
+        if not page_keys:
+            return [], total  # valid empty page (offset past the end)
+
+        member_pks = (await db.execute(
+            select(MediaGroupMember.server_id, MediaGroupMember.rating_key)
+            .where(
+                MediaGroupMember.media_type == media_type,
+                MediaGroupMember.group_key.in_(page_keys),
+            )
+        )).all()
+        pk_pairs = [(sv, rk) for sv, rk in member_pks]
+        if not pk_pairs:
+            return [], total  # stale snapshot: members deleted since build
+
+        # Re-apply the SAME row filter the live path uses (type + allowed
+        # categories) so hydration can't pull an out-of-scope variant of the
+        # same (server_id, rating_key): one physical item can have both an
+        # allowed and a non-allowed category row (same server_id+rating_key,
+        # different `filter`) — only the allowed one is a real version, and the
+        # `(server_id, rating_key)` IN-join alone would otherwise re-inflate the
+        # non-allowed twin and diverge from the live versions[].
+        media_rows = list((await db.execute(
+            select(Media).where(
+                Media.type == media_type,
+                Media.is_in_allowed_categories == True,  # noqa: E712
+                tuple_(Media.server_id, Media.rating_key).in_(pk_pairs),
+            )
+        )).scalars().all())
+
+        groups = await asyncio.to_thread(aggregate_movies, media_rows)
+        by_key = {g.key: g for g in groups}
+        # Emit in the snapshot's paged order; drop any key that didn't
+        # reproduce (only possible on a stale snapshot where key-determining
+        # rows were deleted) — total still reflects the snapshot.
+        ordered = [by_key[k] for k in page_keys if k in by_key]
+        return ordered, total
 
     async def get_unified_group(
         self,
@@ -152,31 +417,111 @@ class MediaService:
         media_type: str,
         unification_id: str,
     ) -> Optional[MovieGroup]:
-        """Return the single MovieGroup whose key matches *unification_id* exactly.
+        """Return the MovieGroup the list endpoint would produce for *unification_id*.
 
-        Queries all category-allowed rows of *media_type* that carry this
-        unification_id, runs them through the same ``aggregate_movies`` pass used
-        by the list endpoint (so convergence / _converge logic fires identically),
-        and returns the first (and only expected) group — or None when no row is
-        found.
+        CR-F05: an exact-`unification_id` match alone under-reports for a
+        "split identity" title — `calculate_unification_id`'s imdb>tmdb>title
+        priority means the SAME film can key `imdb://…` on one account's row
+        and `tmdb://…` (or an unresolved `title_…`) on another's, and it's
+        exactly ``aggregation_service._converge`` (Pass A: shared imdb/tmdb id;
+        Pass B: same canonical title+year) that folds those rows into ONE
+        group for the list endpoint. Filtering by ONE exact `unification_id`
+        (the old behaviour) silently drops the twin(s).
 
-        This mirrors the pattern of ``get_unified_episodes`` for an exact-id
-        look-up, keeping the response shape (versions[], version_count, best-row
-        metadata) byte-identical to the paginated list.
+        Fix: load the exact-match "seed" rows, ALSO load the bounded pool of
+        candidate twins that `_converge` could fold them with (shared
+        imdb_id/tmdb_id, or same year — see ``_load_convergence_candidates``),
+        run the seeds+candidates through the SAME ``aggregate_movies``
+        (hence `_converge`) pass the list endpoint uses, and return whichever
+        resulting group still contains a seed row. This never scans the whole
+        catalog (unlike ``get_unified_list``) — only rows plausibly linked to
+        the requested title.
         """
-        rows = list((await db.execute(
+        seed_rows = list((await db.execute(
             select(Media).where(
                 Media.type == media_type,
                 Media.unification_id == unification_id,
                 Media.is_in_allowed_categories == True,  # noqa: E712
             )
         )).scalars().all())
-        if not rows:
+        if not seed_rows:
             return None
-        groups = aggregate_movies(rows)
-        # All rows share the same unification_id → exactly one group after
-        # convergence (or the strongest representative when ids diverge slightly).
-        return groups[0]
+
+        seed_pk = {(r.server_id, r.rating_key) for r in seed_rows}
+        candidates = await self._load_convergence_candidates(db, media_type, seed_rows)
+        all_rows = list(seed_rows) + [
+            r for r in candidates if (r.server_id, r.rating_key) not in seed_pk
+        ]
+
+        groups = aggregate_movies(all_rows)
+        for g in groups:
+            if any((m.server_id, m.rating_key) in seed_pk for m in g.members):
+                return g
+        return groups[0]  # defensive: seed rows always land in some group
+
+    async def _load_convergence_candidates(
+        self,
+        db: AsyncSession,
+        media_type: str,
+        seed_rows: list[Media],
+    ) -> list[Media]:
+        """CR-F05 helper: bounded candidate pool for ``get_unified_group``.
+
+        Two narrow queries (both scoped to *media_type* + allowed categories,
+        never the whole catalog):
+          (a) rows sharing a physical imdb_id/tmdb_id with a seed row —
+              repairs the imdb-vs-tmdb key split (Pass A /
+              ``_merge_by_shared_ids``).
+          (b) rows for the same year(s) as the seed rows — a coarse,
+              cheap pre-filter; the EXACT title-normalization check that
+              decides absorption (Pass B / ``_absorb_title_groups``) still
+              runs unchanged inside ``aggregate_movies``/`_converge`, so
+              widening the candidate pool here can never mis-absorb an
+              unrelated same-year title — it just becomes its own separate
+              group that ``get_unified_group`` ignores.
+        Deduplicated by (server_id, rating_key).
+        """
+        imdb_ids = {
+            str(r.imdb_id).strip() for r in seed_rows
+            if r.imdb_id and str(r.imdb_id).strip()
+        }
+        tmdb_ids = {
+            str(r.tmdb_id).strip() for r in seed_rows
+            if r.tmdb_id is not None and str(r.tmdb_id).strip().isdigit()
+            and str(r.tmdb_id).strip() != "0"
+        }
+        years = {r.year for r in seed_rows if r.year is not None}
+
+        found: dict[tuple[str, str], Media] = {}
+
+        if imdb_ids or tmdb_ids:
+            id_filters = []
+            if imdb_ids:
+                id_filters.append(Media.imdb_id.in_(imdb_ids))
+            if tmdb_ids:
+                id_filters.append(Media.tmdb_id.in_(tmdb_ids))
+            rows = (await db.execute(
+                select(Media).where(
+                    Media.type == media_type,
+                    Media.is_in_allowed_categories == True,  # noqa: E712
+                    or_(*id_filters),
+                )
+            )).scalars().all()
+            for row in rows:
+                found[(row.server_id, row.rating_key)] = row
+
+        if years:
+            rows = (await db.execute(
+                select(Media).where(
+                    Media.type == media_type,
+                    Media.is_in_allowed_categories == True,  # noqa: E712
+                    Media.year.in_(years),
+                )
+            )).scalars().all()
+            for row in rows:
+                found.setdefault((row.server_id, row.rating_key), row)
+
+        return list(found.values())
 
     async def get_unified_episodes(
         self, db: AsyncSession, unification_id: str,
@@ -204,7 +549,11 @@ class MediaService:
             )
         )).scalars().all())
 
-        groups = aggregate_series(shows, episodes)
+        # Same CPU-bound-on-event-loop pattern as get_unified_list (CR-P01) —
+        # offloaded identically. Scoped to one show's members/episodes here
+        # (not the whole catalog), but the grouping itself is pure Python work
+        # over already-loaded rows, so it's just as safe to run off-thread.
+        groups = await asyncio.to_thread(aggregate_series, shows, episodes)
         # All member shows share unification_id => exactly one group.
         return shows, groups[0]
 

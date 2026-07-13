@@ -5,6 +5,8 @@ import logging
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.utils.crypto_fields import get_xtream_fernet, looks_encrypted
+
 logger = logging.getLogger(__name__)
 
 
@@ -25,6 +27,10 @@ async def run_migrations(engine: AsyncEngine) -> None:
     await _migration_006_create_live_tables(engine)
     await _migration_007_add_stream_validation_index(engine)
 
+    # 008 runs on its own dedicated connection/transaction (not the shared
+    # `engine` helper used by every other migration here) because it needs
+    # sqlite-vec loaded on that specific connection to create the vec0
+    # virtual table — see _migration_008_ai_embeddings' docstring (CR-C10).
     async with engine.begin() as conn:
         await _migration_008_ai_embeddings(conn)
 
@@ -34,8 +40,29 @@ async def run_migrations(engine: AsyncEngine) -> None:
     await _migration_012_create_media_blurb(engine)
     await _migration_013_add_media_is_adult(engine)
     await _migration_014_add_nfo_metadata(engine)
+    await _migration_015_add_missing_media_indexes(engine)
+    await _migration_016_encrypt_xtream_passwords(engine)
+    await _migration_017_create_media_group_snapshot(engine)
 
     logger.info("All migrations completed successfully")
+
+
+async def _column_exists(conn, table: str, column: str) -> bool:
+    """Return True if ``column`` is already present on ``table`` (SQLite).
+
+    CR-C05: ``Base.metadata.create_all`` (db/database.py:92) creates every
+    ORM-declared column on a FRESH database *before* ``run_migrations()``
+    runs, so a plain ``ALTER TABLE ... ADD COLUMN`` for that same column
+    always raised "duplicate column name" there — caught by the per-column
+    try/except, but logged as a WARNING on every cold start, masking real
+    migration failures. Probing via ``PRAGMA table_info`` first turns the
+    fresh-DB case into a silent no-op while an upgraded DB (column genuinely
+    missing) still gets the ADD COLUMN. The try/except around the ADD
+    COLUMN itself is kept as a safety net for a race with another process
+    (``init_db()`` runs in every worker, cf. CLAUDE.md piège 7).
+    """
+    rows = (await conn.execute(text(f'PRAGMA table_info("{table}")'))).fetchall()
+    return any(row[1] == column for row in rows)
 
 
 async def _migration_001_add_xtream_categories(engine: AsyncEngine) -> None:
@@ -77,6 +104,9 @@ async def _migration_002_add_category_filter_mode(engine: AsyncEngine) -> None:
     logger.info("Migration 002: Adding category_filter_mode to xtream_accounts")
 
     async with engine.begin() as conn:
+        if await _column_exists(conn, "xtream_accounts", "category_filter_mode"):
+            logger.debug("Migration 002: category_filter_mode already present, skipping ADD COLUMN")
+            return
         try:
             await conn.execute(text("""
                 ALTER TABLE xtream_accounts
@@ -92,20 +122,25 @@ async def _migration_003_add_media_category_visibility(engine: AsyncEngine) -> N
     logger.info("Migration 003: Adding is_in_allowed_categories to media")
 
     async with engine.begin() as conn:
-        try:
-            await conn.execute(text("""
-                ALTER TABLE media
-                ADD COLUMN is_in_allowed_categories INTEGER NOT NULL DEFAULT 1
-            """))
+        if await _column_exists(conn, "media", "is_in_allowed_categories"):
+            logger.debug("Migration 003: is_in_allowed_categories already present, skipping ADD COLUMN")
+        else:
+            try:
+                await conn.execute(text("""
+                    ALTER TABLE media
+                    ADD COLUMN is_in_allowed_categories INTEGER NOT NULL DEFAULT 1
+                """))
+                logger.info("Migration 003: is_in_allowed_categories column added")
+            except Exception as e:
+                logger.warning(f"Migration 003: Column may already exist: {e}")
 
-            await conn.execute(text("""
-                CREATE INDEX IF NOT EXISTS ix_media_category_visible
-                ON media(is_in_allowed_categories)
-            """))
-
-            logger.info("Migration 003: is_in_allowed_categories column added")
-        except Exception as e:
-            logger.warning(f"Migration 003: Column may already exist: {e}")
+        # CREATE INDEX IF NOT EXISTS is already a silent no-op on a fresh DB
+        # (create_all built it too, cf. Media.__table_args__) — safe to run
+        # unconditionally regardless of which branch above was taken.
+        await conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_media_category_visible
+            ON media(is_in_allowed_categories)
+        """))
 
 
 async def _migration_004_add_enrichment_existing_ids(engine: AsyncEngine) -> None:
@@ -113,23 +148,29 @@ async def _migration_004_add_enrichment_existing_ids(engine: AsyncEngine) -> Non
     logger.info("Migration 004: Adding existing ID columns to enrichment_queue")
 
     async with engine.begin() as conn:
-        try:
-            await conn.execute(text("""
-                ALTER TABLE enrichment_queue
-                ADD COLUMN existing_tmdb_id TEXT
-            """))
-            logger.info("Migration 004: existing_tmdb_id column added")
-        except Exception as e:
-            logger.warning(f"Migration 004: existing_tmdb_id may already exist: {e}")
+        if await _column_exists(conn, "enrichment_queue", "existing_tmdb_id"):
+            logger.debug("Migration 004: existing_tmdb_id already present, skipping ADD COLUMN")
+        else:
+            try:
+                await conn.execute(text("""
+                    ALTER TABLE enrichment_queue
+                    ADD COLUMN existing_tmdb_id TEXT
+                """))
+                logger.info("Migration 004: existing_tmdb_id column added")
+            except Exception as e:
+                logger.warning(f"Migration 004: existing_tmdb_id may already exist: {e}")
 
-        try:
-            await conn.execute(text("""
-                ALTER TABLE enrichment_queue
-                ADD COLUMN existing_imdb_id TEXT
-            """))
-            logger.info("Migration 004: existing_imdb_id column added")
-        except Exception as e:
-            logger.warning(f"Migration 004: existing_imdb_id may already exist: {e}")
+        if await _column_exists(conn, "enrichment_queue", "existing_imdb_id"):
+            logger.debug("Migration 004: existing_imdb_id already present, skipping ADD COLUMN")
+        else:
+            try:
+                await conn.execute(text("""
+                    ALTER TABLE enrichment_queue
+                    ADD COLUMN existing_imdb_id TEXT
+                """))
+                logger.info("Migration 004: existing_imdb_id column added")
+            except Exception as e:
+                logger.warning(f"Migration 004: existing_imdb_id may already exist: {e}")
 
 
 async def _migration_005_add_media_cast(engine: AsyncEngine) -> None:
@@ -137,6 +178,9 @@ async def _migration_005_add_media_cast(engine: AsyncEngine) -> None:
     logger.info("Migration 005: Adding cast to media")
 
     async with engine.begin() as conn:
+        if await _column_exists(conn, "media", "cast"):
+            logger.debug("Migration 005: cast already present, skipping ADD COLUMN")
+            return
         try:
             await conn.execute(text("""
                 ALTER TABLE media
@@ -235,6 +279,54 @@ async def _migration_007_add_stream_validation_index(engine: AsyncEngine) -> Non
             logger.warning(f"Migration 007: Index may already exist: {e}")
 
 
+async def _migration_008_ai_embeddings(conn) -> None:
+    """Create ai_embeddings (sqlite-vec virtual table) and ai_tmdb_cache.
+
+    CR-C10: defined here (between 007 and 009) to match its position in the
+    numeric chain for readability. It still takes a raw ``conn`` (not an
+    ``AsyncEngine``) and is still invoked from ``run_migrations()`` on its
+    own dedicated connection/transaction (see the ``async with engine.begin()
+    as conn: await _migration_008_ai_embeddings(conn)`` block just above
+    ``_migration_009``'s call) — moving the *definition* doesn't touch the
+    *execution* order, since Python resolves the name at call time and every
+    function in this module is already defined before ``run_migrations()``
+    ever runs. Kept on its own connection (rather than folded into the
+    ``engine`` migrations list) because it depends on sqlite-vec being loaded
+    on that connection (``register_sqlite_vec_listener``, db/database.py) and
+    is reused as-is by isolated test fixtures that only need the vec0 tables.
+    Idempotent: every DDL uses IF NOT EXISTS.
+    """
+    logger.info("Migration 008: Creating AI embeddings tables")
+
+    statements = [
+        """
+        CREATE VIRTUAL TABLE IF NOT EXISTS ai_embeddings USING vec0(
+            tmdb_id INTEGER PRIMARY KEY,
+            embedding FLOAT[384]
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS ai_tmdb_cache (
+            tmdb_id INTEGER PRIMARY KEY,
+            imdb_id TEXT,
+            media_type TEXT NOT NULL CHECK(media_type IN ('movie','tv')),
+            title TEXT,
+            overview TEXT,
+            genres TEXT,
+            fetched_at INTEGER NOT NULL,
+            embedded_at INTEGER
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS ix_ai_tmdb_cache_imdb_id ON ai_tmdb_cache(imdb_id)",
+        "CREATE INDEX IF NOT EXISTS ix_ai_tmdb_cache_embedded_at ON ai_tmdb_cache(embedded_at)",
+    ]
+
+    for stmt in statements:
+        await conn.execute(text(stmt))
+
+    logger.info("Migration 008: AI embeddings tables created")
+
+
 async def _migration_009_create_tv_auth_sessions(engine: AsyncEngine) -> None:
     """Create tv_auth_sessions table for device-flow TV pairing (Mission 18).
 
@@ -287,13 +379,16 @@ async def _migration_010_scrape_cache(engine: AsyncEngine) -> None:
     # Separate transactions so a guarded ADD COLUMN failure (column already
     # present on a fresh DB created via create_all) can't abort the CREATE TABLE.
     async with engine.begin() as conn:
-        try:
-            await conn.execute(text("""
-                ALTER TABLE enrichment_queue ADD COLUMN existing_summary TEXT
-            """))
-            logger.info("Migration 010: existing_summary column added")
-        except Exception as e:
-            logger.warning(f"Migration 010: existing_summary may already exist: {e}")
+        if await _column_exists(conn, "enrichment_queue", "existing_summary"):
+            logger.debug("Migration 010: existing_summary already present, skipping ADD COLUMN")
+        else:
+            try:
+                await conn.execute(text("""
+                    ALTER TABLE enrichment_queue ADD COLUMN existing_summary TEXT
+                """))
+                logger.info("Migration 010: existing_summary column added")
+            except Exception as e:
+                logger.warning(f"Migration 010: existing_summary may already exist: {e}")
 
     async with engine.begin() as conn:
         try:
@@ -391,25 +486,33 @@ async def _migration_013_add_media_is_adult(engine: AsyncEngine) -> None:
     """Add is_adult flag to media table (adult/X-rated tagging).
 
     Set per-sync by category_service.update_media_adult_flags based on the
-    Xtream category name/id. Idempotent: ADD COLUMN guarded by try/except.
+    Xtream category name/id. Idempotent: column existence is probed first
+    (CR-C05) so a fresh DB (create_all already added it) is a silent no-op;
+    try/except remains as a safety net for a race with another process.
     """
     logger.info("Migration 013: Adding is_adult to media")
 
     async with engine.begin() as conn:
-        try:
-            await conn.execute(text("""
-                ALTER TABLE media
-                ADD COLUMN is_adult INTEGER NOT NULL DEFAULT 0
-            """))
+        if await _column_exists(conn, "media", "is_adult"):
+            logger.debug("Migration 013: is_adult already present, skipping ADD COLUMN")
+        else:
+            try:
+                await conn.execute(text("""
+                    ALTER TABLE media
+                    ADD COLUMN is_adult INTEGER NOT NULL DEFAULT 0
+                """))
+                logger.info("Migration 013: is_adult column added")
+            except Exception as e:
+                logger.warning(f"Migration 013: Column may already exist: {e}")
 
-            await conn.execute(text("""
-                CREATE INDEX IF NOT EXISTS ix_media_adult
-                ON media(is_adult)
-            """))
-
-            logger.info("Migration 013: is_adult column added")
-        except Exception as e:
-            logger.warning(f"Migration 013: Column may already exist: {e}")
+        # CREATE INDEX IF NOT EXISTS is already a silent no-op on a fresh DB
+        # (create_all built it too, cf. Media.__table_args__) — run it
+        # unconditionally so the index always exists even if a previous
+        # run of this migration only got as far as adding the column.
+        await conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_media_adult
+            ON media(is_adult)
+        """))
 
 
 async def _migration_014_add_nfo_metadata(engine: AsyncEngine) -> None:
@@ -423,8 +526,10 @@ async def _migration_014_add_nfo_metadata(engine: AsyncEngine) -> None:
       tmdb_rating/tmdb_votes (feed the IMDb/TMDb badges)
     - structured cast: cast_json (the legacy `cast` CSV is kept untouched)
 
-    Idempotent: each ADD COLUMN is guarded individually so a column already
-    present (fresh DB via create_all) can't abort the others.
+    Idempotent: each column is probed (PRAGMA table_info) before ADD COLUMN
+    is attempted, so a column already present (fresh DB via create_all,
+    CR-C05) is a silent no-op instead of a raise-and-warn; the try/except
+    remains as a safety net for a race with another process's init_db().
     """
     logger.info("Migration 014: Adding NFO metadata columns to media")
 
@@ -446,6 +551,9 @@ async def _migration_014_add_nfo_metadata(engine: AsyncEngine) -> None:
 
     for name, sql_type in columns:
         async with engine.begin() as conn:
+            if await _column_exists(conn, "media", name):
+                logger.debug("Migration 014: %s already present, skipping ADD COLUMN", name)
+                continue
             try:
                 await conn.execute(text(
                     f"ALTER TABLE media ADD COLUMN {name} {sql_type}"
@@ -464,38 +572,185 @@ async def _migration_014_add_nfo_metadata(engine: AsyncEngine) -> None:
             logger.warning("Migration 014: index may already exist: %s", e)
 
 
-async def _migration_008_ai_embeddings(conn) -> None:
-    """Create ai_embeddings (sqlite-vec virtual table) and ai_tmdb_cache.
+async def _migration_015_add_missing_media_indexes(engine: AsyncEngine) -> None:
+    """Backfill the media indexes declared on the ORM model (CR-P02).
 
-    Operates on a connection (not engine) so it can be reused by isolated
-    test fixtures. Idempotent: every DDL uses IF NOT EXISTS.
+    On a FRESH database, ``Base.metadata.create_all`` (db/database.py:92)
+    creates EVERY ``Index(...)`` declared on ``Media`` (models/database.py)
+    in one shot. But this hand-rolled migration chain only ever issued
+    ``CREATE INDEX`` for three of them (ix_media_category_visible/003,
+    ix_media_adult/013, ix_media_tvdb/014) — any database that existed
+    before those migrations landed silently lacks the rest, causing full
+    scans / filesorts on the hot list/sort/filter queries (invisible on a
+    fresh DB because create_all builds them all).
+
+    This migration creates every remaining ORM-declared index, with the
+    exact same name and column tuple as ``Media.__table_args__``, so
+    create_all (fresh DB) and this chain (upgraded DB) converge on the
+    identical index set — no divergence, no duplicate-name conflict.
+
+    Idempotent: every statement uses ``IF NOT EXISTS`` and is individually
+    guarded so one failure can't block the others.
     """
-    logger.info("Migration 008: Creating AI embeddings tables")
+    logger.info("Migration 015: Backfilling missing media indexes")
 
-    statements = [
-        """
-        CREATE VIRTUAL TABLE IF NOT EXISTS ai_embeddings USING vec0(
-            tmdb_id INTEGER PRIMARY KEY,
-            embedding FLOAT[384]
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS ai_tmdb_cache (
-            tmdb_id INTEGER PRIMARY KEY,
-            imdb_id TEXT,
-            media_type TEXT NOT NULL CHECK(media_type IN ('movie','tv')),
-            title TEXT,
-            overview TEXT,
-            genres TEXT,
-            fetched_at INTEGER NOT NULL,
-            embedded_at INTEGER
-        )
-        """,
-        "CREATE INDEX IF NOT EXISTS ix_ai_tmdb_cache_imdb_id ON ai_tmdb_cache(imdb_id)",
-        "CREATE INDEX IF NOT EXISTS ix_ai_tmdb_cache_embedded_at ON ai_tmdb_cache(embedded_at)",
+    # Non-unique indexes: safe to (re)create even if the table already
+    # holds rows that would violate a uniqueness constraint.
+    index_statements = [
+        ("ix_media_guid", "CREATE INDEX IF NOT EXISTS ix_media_guid ON media(guid)"),
+        ("ix_media_type_added", "CREATE INDEX IF NOT EXISTS ix_media_type_added ON media(type, added_at)"),
+        ("ix_media_imdb", "CREATE INDEX IF NOT EXISTS ix_media_imdb ON media(imdb_id)"),
+        ("ix_media_tmdb", "CREATE INDEX IF NOT EXISTS ix_media_tmdb ON media(tmdb_id)"),
+        ("ix_media_server_lib", "CREATE INDEX IF NOT EXISTS ix_media_server_lib ON media(server_id, library_section_id)"),
+        ("ix_media_unification", "CREATE INDEX IF NOT EXISTS ix_media_unification ON media(unification_id)"),
+        ("ix_media_type_rating", "CREATE INDEX IF NOT EXISTS ix_media_type_rating ON media(type, display_rating)"),
+        ("ix_media_parent", "CREATE INDEX IF NOT EXISTS ix_media_parent ON media(parent_rating_key)"),
+        ("ix_media_title_sort", "CREATE INDEX IF NOT EXISTS ix_media_title_sort ON media(title_sortable)"),
+        ("ix_media_broken", "CREATE INDEX IF NOT EXISTS ix_media_broken ON media(is_broken)"),
+        ("ix_media_updated", "CREATE INDEX IF NOT EXISTS ix_media_updated ON media(updated_at)"),
+        ("ix_media_server_type", "CREATE INDEX IF NOT EXISTS ix_media_server_type ON media(server_id, type)"),
+        ("ix_media_server_visible", "CREATE INDEX IF NOT EXISTS ix_media_server_visible ON media(server_id, is_in_allowed_categories)"),
+        ("ix_media_parent_visible", "CREATE INDEX IF NOT EXISTS ix_media_parent_visible ON media(parent_rating_key, is_in_allowed_categories)"),
+        ("ix_media_grandparent", "CREATE INDEX IF NOT EXISTS ix_media_grandparent ON media(grandparent_rating_key)"),
     ]
 
-    for stmt in statements:
-        await conn.execute(text(stmt))
+    for name, stmt in index_statements:
+        async with engine.begin() as conn:
+            try:
+                await conn.execute(text(stmt))
+                logger.info("Migration 015: %s index created", name)
+            except Exception as e:
+                logger.warning("Migration 015: %s may already exist: %s", name, e)
 
-    logger.info("Migration 008: AI embeddings tables created")
+    # uix_media_pagination is UNIQUE: on an upgraded DB that never enforced
+    # it, pre-existing duplicate (server_id, library_section_id, filter,
+    # sort_order, page_offset) rows would make CREATE UNIQUE INDEX fail.
+    # Isolated in its own transaction/try so that can't take down the
+    # (non-unique) indexes created above.
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uix_media_pagination "
+                "ON media(server_id, library_section_id, filter, sort_order, page_offset)"
+            ))
+            logger.info("Migration 015: uix_media_pagination index created")
+        except Exception as e:
+            logger.warning(
+                "Migration 015: uix_media_pagination not created (likely duplicate "
+                "pagination rows on an upgraded DB, needs manual dedup): %s", e
+            )
+
+
+async def _migration_016_encrypt_xtream_passwords(engine: AsyncEngine) -> None:
+    """One-time, idempotent encryption of pre-existing xtream_accounts.password
+    rows (CR-S03 — Xtream provider passwords were stored in plaintext).
+
+    ``XtreamAccount.password`` is now mapped through
+    ``app.utils.crypto_fields.EncryptedString`` (models/database.py), which
+    transparently encrypts on write / decrypts on read for every ORM/Core
+    access going forward. This migration handles the DATA that already
+    exists on disk: rows written before this fix landed (and any DB backup
+    snapshot taken since) are still plaintext.
+
+    Uses raw ``text()`` SQL deliberately (bypassing the ORM type decorator)
+    so it can inspect the byte-for-byte stored value and decide per-row
+    whether encryption is needed — the exact same key resolution
+    (`get_xtream_fernet`) as the column type, so what this migration writes
+    round-trips correctly through the ORM afterwards.
+
+    Idempotent / re-runnable:
+    - A value already recognized as a Fernet token (`looks_encrypted`) is
+      skipped -> re-running on an already-encrypted database is a no-op.
+    - NULL/empty passwords are skipped.
+    - Fail-open, consistent with `EncryptedString`: if no key is configured
+      (`get_xtream_fernet()` returns None), this migration logs a warning
+      and leaves rows untouched rather than failing the whole migration
+      chain — safe to re-run once an operator sets a key and restarts.
+    """
+    logger.info("Migration 016: Encrypting existing xtream_accounts.password rows")
+
+    fernet = get_xtream_fernet()
+    if fernet is None:
+        logger.warning(
+            "Migration 016: no XTREAM_ENCRYPTION_KEY/AI_API_KEY configured — "
+            "leaving existing Xtream passwords in plaintext (CR-S03 residual). "
+            "Set one of those env vars and restart to encrypt them (safe to re-run)."
+        )
+        return
+
+    async with engine.begin() as conn:
+        try:
+            result = await conn.execute(text("SELECT id, password FROM xtream_accounts"))
+            rows = result.fetchall()
+        except Exception as e:
+            logger.warning("Migration 016: could not read xtream_accounts: %s", e)
+            return
+
+        encrypted_count = 0
+        for account_id, password in rows:
+            if not password or looks_encrypted(password):
+                continue
+            token = fernet.encrypt(password.encode("utf-8")).decode("ascii")
+            await conn.execute(
+                text("UPDATE xtream_accounts SET password = :token WHERE id = :account_id"),
+                {"token": token, "account_id": account_id},
+            )
+            encrypted_count += 1
+
+        logger.info(
+            "Migration 016: encrypted %d pre-existing plaintext password row(s) "
+            "out of %d total (rest already encrypted, empty, or missing)",
+            encrypted_count, len(rows),
+        )
+
+
+async def _migration_017_create_media_group_snapshot(engine: AsyncEngine) -> None:
+    """Create the CR-P01 unified-group snapshot tables (media_group +
+    media_group_member).
+
+    These hold the precomputed output of the whole-catalog unified aggregation
+    (services.unified_group_service), so the UNFILTERED /movies|shows/unified
+    browse endpoints page over already-grouped rows with a DB LIMIT instead of
+    loading + aggregating the entire catalog per request. Purely additive — no
+    existing table/column/data is touched; the snapshot is (re)built by the
+    pipeline, and the read path falls back to live aggregation whenever it is
+    empty (fresh DB before the first build), so an empty/absent snapshot is
+    always safe.
+
+    Idempotent: CREATE TABLE/INDEX IF NOT EXISTS; a fresh DB already has these
+    via Base.metadata.create_all (models/database.py) so this is a silent no-op
+    there, and an upgraded DB gets them here.
+    """
+    logger.info("Migration 017: Creating media_group snapshot tables")
+
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS media_group (
+                    media_type    TEXT    NOT NULL,
+                    group_key     TEXT    NOT NULL,
+                    sort_added_at INTEGER NOT NULL DEFAULT 0,
+                    version_count INTEGER NOT NULL DEFAULT 0,
+                    built_at      INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (media_type, group_key)
+                )
+            """))
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS media_group_member (
+                    media_type TEXT NOT NULL,
+                    group_key  TEXT NOT NULL,
+                    server_id  TEXT NOT NULL,
+                    rating_key TEXT NOT NULL,
+                    PRIMARY KEY (media_type, group_key, server_id, rating_key)
+                )
+            """))
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_media_group_type_sort "
+                "ON media_group(media_type, sort_added_at)"
+            ))
+            # No secondary index on media_group_member: the composite-PK's
+            # implicit index (leading media_type, group_key) already serves the
+            # `WHERE media_type=? AND group_key IN (...)` page lookup.
+            logger.info("Migration 017: media_group snapshot tables created")
+        except Exception as e:
+            logger.warning("Migration 017: tables may already exist: %s", e)

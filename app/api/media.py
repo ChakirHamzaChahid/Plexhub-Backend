@@ -1,4 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 
@@ -17,11 +19,52 @@ from app.models.schemas import (
     apply_adult_prefix,
 )
 from app.services.aggregation_service import (
-    canonical_title_year, dedup_labels, version_label,
+    build_versions, canonical_title_year,
 )
-from app.services.media_service import media_service
+from app.services.media_service import media_service, encode_media_cursor
 
 router = APIRouter(prefix="/media", tags=["media"])
+
+
+def _single_pass_json(model: BaseModel) -> JSONResponse:
+    """CR-P07: serialize the response model ONCE and hand FastAPI a ready
+    ``Response`` so it skips its own re-validation + re-serialization pass.
+
+    The list endpoints build up to ``limit`` (500 raw / 2000 unified) Pydantic
+    models, then FastAPI used to re-validate + re-dump every one of them against
+    ``response_model`` — a second full Pydantic pass over ~60 fields/row on the
+    event loop. Returning a ``Response`` short-circuits that: FastAPI does not
+    re-validate when the return value is already a ``Response``.
+
+    ``response_model=`` is KEPT on every route purely for the OpenAPI schema
+    (the documented contract is therefore unchanged). Output is byte-identical
+    to FastAPI's default path — same ``JSONResponse`` class (no custom
+    ``default_response_class`` on the app), same ``by_alias=True`` default, no
+    ``exclude_*`` — see ADR 0001. Model fields are JSON-native scalars/lists
+    (no ``datetime``), so ``mode="json"`` matches ``jsonable_encoder``."""
+    return JSONResponse(content=model.model_dump(mode="json", by_alias=True))
+
+
+_KEYSET_SORTS = ("added_desc", "added_asc")
+
+
+def _page_meta(items, limit, offset, total, cursor, sort) -> tuple[bool, Optional[str]]:
+    """Compute ``(has_more, next_cursor)`` for a raw list page (CR-P04).
+
+    ``has_more`` ALWAYS keeps the exact ``(offset + limit) < total`` offset
+    formula — unchanged for every existing caller regardless of cursor.
+
+    ``next_cursor`` is emitted on a recency sort (added_desc/added_asc) whenever
+    the page came back FULL (``len(items) == limit``), pointing at the last row
+    — independent of whether an incoming ``cursor`` was supplied, so a keyset
+    client can start paging with no cursor and simply follow ``next_cursor``
+    until it is null (a full final page yields one extra empty request — the
+    standard, correct cursor-pagination boundary). For non-recency sorts it
+    stays null. It is purely additive: offset callers ignore it."""
+    next_cursor = None
+    if sort in _KEYSET_SORTS and items and len(items) == limit:
+        next_cursor = encode_media_cursor(items[-1])
+    return (offset + limit) < total, next_cursor
 
 
 def _build_versions(
@@ -29,19 +72,17 @@ def _build_versions(
 ) -> list[MediaVersionResponse]:
     """Turn group member rows into unique-labelled version entries.
 
-    Members are sorted by a STABLE identity (server_id, rating_key) first so the
-    ``#n`` collision suffix from `dedup_labels` always lands on the same physical
-    version, regardless of DB row order — matching the generator's
-    `DatabaseSource._build_versions` so the API and the on-disk library label
-    versions identically and deterministically."""
-    members = sorted(members, key=lambda m: (m.server_id or "", m.rating_key or ""))
-    raw = [version_label(m, labels.get(m.server_id, m.server_id)) for m in members]
+    CR-A07: delegates the sort/label/dedup sequence to the shared
+    `aggregation_service.build_versions` helper so the API and the on-disk
+    library (`DatabaseSource._build_versions`) label versions identically and
+    deterministically — see that helper's docstring for why the stable-identity
+    sort must happen before labelling."""
     return [
         MediaVersionResponse(
             server_id=m.server_id, rating_key=m.rating_key,
             title=m.title, label=label, is_broken=m.is_broken,
         )
-        for m, label in zip(members, dedup_labels(raw))
+        for m, label in build_versions(members, lambda m: labels.get(m.server_id, m.server_id))
     ]
 
 
@@ -82,19 +123,29 @@ async def list_movies(
     year: Optional[int] = Query(None),
     missing_imdb: bool = Query(False),
     missing_tmdb: bool = Query(False),
+    cursor: Optional[str] = Query(
+        None,
+        description="Opaque keyset cursor (CR-P04). With sort=added_desc/added_asc "
+                    "it seeks past this row and ignores offset; use the response's "
+                    "nextCursor to page. Ignored for other sorts.",
+    ),
     db: AsyncSession = Depends(get_db),
 ):
-    items, total = await media_service.get_media_list(
-        db, media_type="movie", limit=limit, offset=offset,
-        sort=sort, server_id=server_id,
-        search=search, genre=genre, year=year,
-        missing_imdb=missing_imdb, missing_tmdb=missing_tmdb,
-    )
-    return MediaListResponse(
+    try:
+        items, total = await media_service.get_media_list(
+            db, media_type="movie", limit=limit, offset=offset,
+            sort=sort, server_id=server_id,
+            search=search, genre=genre, year=year,
+            missing_imdb=missing_imdb, missing_tmdb=missing_tmdb,
+            cursor=cursor,
+        )
+    except ValueError as e:
+        raise HTTPException(400, f"Invalid cursor: {e}")
+    has_more, next_cursor = _page_meta(items, limit, offset, total, cursor, sort)
+    return _single_pass_json(MediaListResponse(
         items=[MediaResponse.model_validate(i) for i in items],
-        total=total,
-        has_more=(offset + limit) < total,
-    )
+        total=total, has_more=has_more, next_cursor=next_cursor,
+    ))
 
 
 @router.get("/movies/stats", response_model=MediaStatsResponse)
@@ -114,18 +165,28 @@ async def list_shows(
     search: Optional[str] = Query(None),
     genre: Optional[str] = Query(None),
     year: Optional[int] = Query(None),
+    cursor: Optional[str] = Query(
+        None,
+        description="Opaque keyset cursor (CR-P04). With sort=added_desc/added_asc "
+                    "it seeks past this row and ignores offset; use the response's "
+                    "nextCursor to page. Ignored for other sorts.",
+    ),
     db: AsyncSession = Depends(get_db),
 ):
-    items, total = await media_service.get_media_list(
-        db, media_type="show", limit=limit, offset=offset,
-        sort=sort, server_id=server_id,
-        search=search, genre=genre, year=year,
-    )
-    return MediaListResponse(
+    try:
+        items, total = await media_service.get_media_list(
+            db, media_type="show", limit=limit, offset=offset,
+            sort=sort, server_id=server_id,
+            search=search, genre=genre, year=year,
+            cursor=cursor,
+        )
+    except ValueError as e:
+        raise HTTPException(400, f"Invalid cursor: {e}")
+    has_more, next_cursor = _page_meta(items, limit, offset, total, cursor, sort)
+    return _single_pass_json(MediaListResponse(
         items=[MediaResponse.model_validate(i) for i in items],
-        total=total,
-        has_more=(offset + limit) < total,
-    )
+        total=total, has_more=has_more, next_cursor=next_cursor,
+    ))
 
 
 @router.get("/episodes", response_model=MediaListResponse)
@@ -134,17 +195,28 @@ async def list_episodes(
     limit: int = Query(500, ge=1, le=5000),
     offset: int = Query(0, ge=0),
     server_id: Optional[str] = Query(None),
+    cursor: Optional[str] = Query(
+        None,
+        description="Opaque keyset cursor (CR-P04). Episodes always sort by "
+                    "added_desc, so a cursor seeks past this row and ignores "
+                    "offset; use the response's nextCursor to page.",
+    ),
     db: AsyncSession = Depends(get_db),
 ):
-    items, total = await media_service.get_media_list(
-        db, media_type="episode", limit=limit, offset=offset,
-        server_id=server_id, parent_rating_key=parent_rating_key,
-    )
-    return MediaListResponse(
+    try:
+        items, total = await media_service.get_media_list(
+            db, media_type="episode", limit=limit, offset=offset,
+            server_id=server_id, parent_rating_key=parent_rating_key,
+            cursor=cursor,
+        )
+    except ValueError as e:
+        raise HTTPException(400, f"Invalid cursor: {e}")
+    # list_episodes has no `sort` param — the service defaults to added_desc.
+    has_more, next_cursor = _page_meta(items, limit, offset, total, cursor, "added_desc")
+    return _single_pass_json(MediaListResponse(
         items=[MediaResponse.model_validate(i) for i in items],
-        total=total,
-        has_more=(offset + limit) < total,
-    )
+        total=total, has_more=has_more, next_cursor=next_cursor,
+    ))
 
 
 @router.get("/movies/unified", response_model=UnifiedMediaListResponse)
@@ -168,7 +240,7 @@ async def list_movies_unified(
     if unification_id is not None:
         g = await media_service.get_unified_group(db, "movie", unification_id)
         if g is None:
-            return UnifiedMediaListResponse(items=[], total=0, has_more=False)
+            return _single_pass_json(UnifiedMediaListResponse(items=[], total=0, has_more=False))
         best = g.best
         clean_title, clean_year = canonical_title_year(best)
         is_adult = bool(getattr(best, "is_adult", False))
@@ -185,7 +257,7 @@ async def list_movies_unified(
             version_count=len(g.members),
             **_nfo_metadata(best),
         )
-        return UnifiedMediaListResponse(items=[item], total=1, has_more=False)
+        return _single_pass_json(UnifiedMediaListResponse(items=[item], total=1, has_more=False))
 
     groups, total = await media_service.get_unified_list(
         db, media_type="movie", limit=limit, offset=offset,
@@ -209,9 +281,9 @@ async def list_movies_unified(
             version_count=len(g.members),
             **_nfo_metadata(best),
         ))
-    return UnifiedMediaListResponse(
+    return _single_pass_json(UnifiedMediaListResponse(
         items=items, total=total, has_more=(offset + limit) < total,
-    )
+    ))
 
 
 @router.get("/shows/unified", response_model=UnifiedMediaListResponse)
@@ -235,7 +307,7 @@ async def list_shows_unified(
     if unification_id is not None:
         g = await media_service.get_unified_group(db, "show", unification_id)
         if g is None:
-            return UnifiedMediaListResponse(items=[], total=0, has_more=False)
+            return _single_pass_json(UnifiedMediaListResponse(items=[], total=0, has_more=False))
         best = g.best
         clean_title, clean_year = canonical_title_year(best)
         item = UnifiedMediaResponse(
@@ -249,7 +321,7 @@ async def list_shows_unified(
             version_count=len(g.members),
             **_nfo_metadata(best),
         )
-        return UnifiedMediaListResponse(items=[item], total=1, has_more=False)
+        return _single_pass_json(UnifiedMediaListResponse(items=[item], total=1, has_more=False))
 
     groups, total = await media_service.get_unified_list(
         db, media_type="show", limit=limit, offset=offset,
@@ -270,9 +342,9 @@ async def list_shows_unified(
             version_count=len(g.members),
             **_nfo_metadata(best),
         ))
-    return UnifiedMediaListResponse(
+    return _single_pass_json(UnifiedMediaListResponse(
         items=items, total=total, has_more=(offset + limit) < total,
-    )
+    ))
 
 
 @router.get("/episodes/unified", response_model=UnifiedEpisodeListResponse)
@@ -300,10 +372,10 @@ async def list_episodes_unified(
         )
         for slot in slots
     ]
-    return UnifiedEpisodeListResponse(
+    return _single_pass_json(UnifiedEpisodeListResponse(
         unification_id=unification_id, series_title=canonical_title_year(group.best)[0],
         items=items, total=len(items),
-    )
+    ))
 
 
 @router.get("/{rating_key}", response_model=MediaResponse)

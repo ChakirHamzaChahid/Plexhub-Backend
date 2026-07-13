@@ -328,6 +328,26 @@ class TestMediaServiceSearch:
 
         asyncio.run(_test())
 
+    def test_count_reflects_full_filtered_set_independent_of_limit(self, db_session):
+        """CR-P03 guard: the COUNT query must apply the SAME filters as the
+        page query but stay independent of limit/offset — narrowing the
+        count implementation (func.count().select_from(Media).where(...)
+        instead of wrapping a SELECT * subquery) must not silently change
+        which rows get counted."""
+        self._seed_data(db_session)
+
+        async def _test():
+            from app.services.media_service import MediaService
+            svc = MediaService()
+            async with db_session() as db:
+                items, total = await svc.get_media_list(
+                    db, media_type="movie", genre="Sci-Fi", limit=1, offset=0,
+                )
+                assert total == 3  # Matrix, Matrix Reloaded, Inception
+                assert len(items) == 1  # page capped by limit, count is not
+
+        asyncio.run(_test())
+
 
 class TestEnrichmentQueue:
     """Test enrichment queue query with retry logic."""

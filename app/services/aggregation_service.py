@@ -10,6 +10,7 @@ Pure functions on `Media` rows — no DB, no I/O — so they're trivially testab
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Callable
 
 from app.models.database import Media
 from app.utils.string_normalizer import parse_title_year_and_suffix
@@ -76,6 +77,40 @@ def dedup_labels(labels: list[str]) -> list[str]:
         seen[label] = n
         out.append(label if n == 1 else f"{label} #{n}")
     return out
+
+
+def build_versions(
+    members: list[Media],
+    label_for: Callable[[Media], str],
+) -> list[tuple[Media, str]]:
+    """Sort members by stable identity, label each, then dedup-suffix collisions.
+
+    CR-A07: this is the determinism-critical sequence that USED to be
+    copy-pasted between the REST `/unified` endpoints (`api/media.py`) and the
+    Plex/Jellyfin generator (`plex_generator/source.py.DatabaseSource`), with
+    in-code comments in both requiring them to stay byte-identical. It now
+    lives here ONCE, and both callers delegate to it.
+
+    Members are sorted by ``(server_id, rating_key)`` BEFORE labelling so
+    `dedup_labels`' ``#n`` collision suffix always lands on the same physical
+    version regardless of DB row order — otherwise a version's label (and
+    therefore its `.strm` filename in the generator) could flip between runs
+    whenever a sync/enrichment pass rewrites rows in a different physical
+    order.
+
+    `label_for(row)` resolves the account-level label component for a member
+    row — a `server_id -> label` dict lookup for the API, an `XtreamAccount`
+    attribute for the generator. Callers differ only in that lookup and in
+    what output type they map the returned ``(row, label)`` pairs to
+    (`MediaVersionResponse` vs a stream-URL triple); they may also filter
+    `members` differently before/after calling this (e.g. the generator drops
+    unresolvable/broken sources) — but the sort/label/dedup sequence itself
+    must stay identical, and this function is the single source of truth for
+    it.
+    """
+    ordered = sorted(members, key=lambda m: (m.server_id or "", m.rating_key or ""))
+    raw_labels = [version_label(m, label_for(m)) for m in ordered]
+    return list(zip(ordered, dedup_labels(raw_labels)))
 
 
 @dataclass
@@ -181,10 +216,19 @@ def _absorb_title_groups(groups: dict[str, list[Media]]) -> dict[str, list[Media
 
     Reuses calculate_unification_id for an identical title normalization, and
     skips degenerate (empty) titles — e.g. non-latin titles that normalize to
-    `title__<year>` — so unrelated foreign films never false-merge."""
+    `title__<year>` — so unrelated foreign films never false-merge.
+
+    CR-F09: when TWO (or more) distinct id-based groups normalize to the same
+    title+year, they are all *candidates* to absorb the same `title_…` twin.
+    Collect every candidate first (order in which `groups` is iterated must not
+    matter), then pick the absorbing group with `min(..., key=_key_rank)` — the
+    same total, input-order-independent order Pass A already uses to pick a
+    cluster's representative (imdb > tmdb > title > fallback, then lexicographic
+    key). This makes the resulting grouping reproducible regardless of DB/query
+    row order."""
     if len(groups) < 2:
         return groups
-    remap: dict[str, str] = {}
+    candidates: dict[str, list[str]] = {}
     for k, rows in groups.items():
         if "://" not in k:
             continue  # only id-based groups absorb a title twin
@@ -193,10 +237,13 @@ def _absorb_title_groups(groups: dict[str, list[Media]]) -> dict[str, list[Media
         if not base.startswith("title_") or not any(c.isalnum() for c in base[len("title_"):]):
             continue  # degenerate / Unknown title — don't absorb
         tkey = calculate_unification_id(best.title or "", best.year)
-        if tkey in groups and tkey not in remap:
-            remap[tkey] = k
-    if not remap:
+        if tkey in groups:
+            candidates.setdefault(tkey, []).append(k)
+    if not candidates:
         return groups
+    # Deterministic winner per title-twin key: smallest by _key_rank, independent
+    # of the order `groups`/`candidates` were populated in.
+    remap: dict[str, str] = {tkey: min(ks, key=_key_rank) for tkey, ks in candidates.items()}
     merged: dict[str, list[Media]] = {}
     for k, rows in groups.items():
         merged.setdefault(remap.get(k, k), []).extend(rows)

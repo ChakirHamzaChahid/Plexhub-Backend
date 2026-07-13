@@ -3,10 +3,13 @@
 Covers: full cycle start -> status(pending) -> approve -> status(approved,
 payload delivered once) -> complete -> status(completed); TTL expiration;
 single-use semantics; invalid/unknown codes; approve authentication;
-encryption at rest; migration 009.
+encryption at rest; migration 009; CR-F06 (deviceCode/device_code contract)
+and CR-F07 (atomic one-shot payload delivery under concurrency).
 """
 from __future__ import annotations
 
+import asyncio
+import threading
 from typing import AsyncIterator
 
 import pytest
@@ -90,6 +93,21 @@ async def _start(client: AsyncClient, device_name: str = "Mi Box S test") -> dic
     resp = await client.post("/api/tv-auth/start", json={"deviceName": device_name})
     assert resp.status_code == 201, resp.text
     return resp.json()
+
+
+async def _spy_commit_with_retry(monkeypatch, calls: dict) -> None:
+    """Wrap app.api.tv_auth.commit_with_retry with a call-counting passthrough
+    (still delegates to the real helper, so retry/commit semantics are
+    unchanged — only observed)."""
+    import app.api.tv_auth as tv_auth_module
+
+    real = tv_auth_module.commit_with_retry
+
+    async def _spy(db, **kwargs):
+        calls["n"] += 1
+        return await real(db, **kwargs)
+
+    monkeypatch.setattr(tv_auth_module, "commit_with_retry", _spy)
 
 
 async def _force_expire(tv_factory, device_code: str) -> None:
@@ -179,6 +197,126 @@ async def test_payload_delivered_exactly_once(tv_client):
     body = second.json()
     assert body["status"] == "approved"
     assert body["payload"] is None  # single delivery
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CR-F06: /status accepts deviceCode (camelCase) AND device_code (legacy)
+# ──────────────────────────────────────────────────────────────────────────────
+
+async def test_status_accepts_camelcase_device_code(tv_client):
+    """CR-F06: a consistent client using camelCase everywhere (deviceCode) must
+    not get a 422 on /status — the rest of the API is camelCase."""
+    started = await _start(tv_client)
+
+    resp = await tv_client.get(
+        "/api/tv-auth/status", params={"deviceCode": started["deviceCode"]}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "pending"
+
+
+async def test_status_still_accepts_legacy_snake_case_device_code(tv_client):
+    """CR-F06: existing callers using device_code (snake_case) keep working."""
+    started = await _start(tv_client)
+
+    resp = await tv_client.get(
+        "/api/tv-auth/status", params={"device_code": started["deviceCode"]}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "pending"
+
+
+async def test_status_missing_device_code_returns_422(tv_client):
+    """CR-F06: neither deviceCode nor device_code supplied -> 422, not a 404
+    or a crash."""
+    resp = await tv_client.get("/api/tv-auth/status")
+    assert resp.status_code == 422
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CR-F07: atomic one-shot payload delivery under concurrency
+# ──────────────────────────────────────────────────────────────────────────────
+
+async def test_status_concurrent_polls_deliver_payload_exactly_once(tv_client, tmp_path):
+    """CR-F07: two truly concurrent /status polls racing on the same
+    undelivered payload must not both receive it.
+
+    Plain `asyncio.gather` against a single in-process event loop does not
+    reliably reproduce this race (one coroutine tends to run to completion
+    before the other's first await is even scheduled). To exercise the real
+    race window — two independent requests, each with its own DB connection,
+    genuinely overlapping in time, exactly like two workers/processes hitting
+    the same SQLite file — this drives the actual `get_status` handler from
+    two separate OS threads, each with its own event loop and its own engine
+    connected to the SAME session DB file used by `tv_client`.
+
+    Before the fix: both threads can observe `payload_delivered=False` and
+    both decrypt+return the payload (the mark-delivered write happens only
+    after the read, non-atomically) -> flaky double delivery.
+    After the fix: the read-and-mark-delivered step is a single conditional
+    UPDATE (`payload_delivered` False -> True, guarded by rowcount), so only
+    one of the two threads can ever win the race.
+    """
+    from app.api.tv_auth import get_status
+
+    started = await _start(tv_client)
+    await tv_client.post(
+        "/api/tv-auth/approve",
+        json={"userCode": started["userCode"], "payload": PAYLOAD},
+        headers=AUTH,
+    )
+
+    db_path = tmp_path / "tv_auth_test.db"  # same file tv_engine/tv_factory point at
+    device_code = started["deviceCode"]
+
+    def _poll_in_own_thread(results: list, idx: int) -> None:
+        async def _poll() -> dict | None:
+            engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}", future=True)
+            session_factory = async_sessionmaker(
+                engine, class_=AsyncSession, expire_on_commit=False
+            )
+            try:
+                async with session_factory() as session:
+                    resp = await get_status(
+                        device_code=device_code,
+                        device_code_legacy=None,
+                        db=session,
+                    )
+                return resp.payload
+            finally:
+                await engine.dispose()
+
+        try:
+            results[idx] = asyncio.run(_poll())
+        except Exception as exc:  # pragma: no cover - surfaced via assertion below
+            results[idx] = exc
+
+    results: list = [None, None]
+    t1 = threading.Thread(target=_poll_in_own_thread, args=(results, 0))
+    t2 = threading.Thread(target=_poll_in_own_thread, args=(results, 1))
+    t1.start()
+    t2.start()
+    t1.join(timeout=10)
+    t2.join(timeout=10)
+
+    for r in results:
+        assert not isinstance(r, Exception), f"poll raised: {r!r}"
+
+    delivered = [r for r in results if r is not None]
+    assert len(delivered) == 1, (
+        f"payload must be delivered to exactly one of the two racing polls, got {results!r}"
+    )
+    assert delivered[0] == PAYLOAD
+
+    # A subsequent poll (via the normal HTTP client) confirms the session is
+    # left in a consistent already-delivered state (no third delivery).
+    third = await tv_client.get(
+        "/api/tv-auth/status", params={"deviceCode": device_code}
+    )
+    assert third.status_code == 200
+    body = third.json()
+    assert body["status"] == "approved"
+    assert body["payload"] is None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -282,6 +420,38 @@ async def test_approve_twice_conflict(tv_client):
     assert first.status_code == 200
     second = await tv_client.post("/api/tv-auth/approve", json=body, headers=AUTH)
     assert second.status_code == 409
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CR-C04: request-path writes commit via commit_with_retry (lock-retry)
+# ──────────────────────────────────────────────────────────────────────────────
+
+async def test_approve_and_complete_commit_via_retry_helper(tv_client, monkeypatch):
+    """CR-C04: /approve and /complete must commit through commit_with_retry
+    (not a bare db.commit()), same as the workers, so a transient 'database
+    is locked' during a concurrent sync/validation is retried instead of
+    surfacing as a raw 500. Wraps (doesn't replace) the real helper, so
+    behavior is unchanged — only observed via the call counter."""
+    calls = {"n": 0}
+    await _spy_commit_with_retry(monkeypatch, calls)
+
+    started = await _start(tv_client)  # also goes through commit_with_retry
+
+    before_approve = calls["n"]
+    approve_resp = await tv_client.post(
+        "/api/tv-auth/approve",
+        json={"userCode": started["userCode"], "payload": PAYLOAD},
+        headers=AUTH,
+    )
+    assert approve_resp.status_code == 200, approve_resp.text
+    assert calls["n"] > before_approve
+
+    before_complete = calls["n"]
+    complete_resp = await tv_client.post(
+        "/api/tv-auth/complete", json={"deviceCode": started["deviceCode"]}
+    )
+    assert complete_resp.status_code == 200, complete_resp.text
+    assert calls["n"] > before_complete
 
 
 # ──────────────────────────────────────────────────────────────────────────────

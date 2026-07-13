@@ -446,3 +446,81 @@ class MediaGroupMember(Base):
     group_key = Column(Text, primary_key=True)
     server_id = Column(Text, primary_key=True)
     rating_key = Column(Text, primary_key=True)
+
+
+class DownloadBatch(Base):
+    """PH-DL-01: groups the N jobs of a "download whole series" selection
+    (docs/20-impl-media-download.md §3.1).
+
+    A single-movie download does NOT get a batch row (figée decision, §3.1):
+    the movie's `DownloadJob.batch_id` stays NULL and it is displayed as a
+    standalone job. A series download creates exactly one `DownloadBatch`
+    (`scope='series_all'`) plus one `DownloadJob` per episode, all pointing back
+    here via `batch_id` (soft pointer, no hard FK — see `DownloadJob`).
+    """
+
+    __tablename__ = "download_batch"
+
+    id = Column(Text, primary_key=True)             # uuid4 hex
+    media_type = Column(Text, nullable=False)        # 'movie' | 'show' (selection type)
+    unification_id = Column(Text)                    # back-nav to the unified title
+    title = Column(Text, nullable=False)              # cleaned display title
+    server_id = Column(Text, nullable=False)          # chosen source account
+    rating_key = Column(Text, nullable=False)          # vod_* (movie) / series rk (show)
+    scope = Column(Text, nullable=False)               # 'movie' | 'series_all'
+    total_jobs = Column(Integer, nullable=False, default=0)  # number of jobs created
+    created_at = Column(BigInteger, nullable=False)    # epoch ms
+
+
+class DownloadJob(Base):
+    """PH-DL-01: one physical media download — a movie or a single episode
+    (docs/20-impl-media-download.md §3.2).
+
+    State machine: queued -> running -> completed|failed|canceled (queued/running
+    can also go straight to canceled). All transitions/progress writes go through
+    `run_with_retry` at the service/worker layer (CR-C04, house-law piège 8) —
+    not enforced by the schema itself.
+
+    `dest_path` is ALWAYS relative to `settings.DOWNLOAD_DIR` (never an absolute
+    path, never client-supplied) — confinement is proven at write time via
+    `download_service.resolve_confined` (F-007). `batch_id` is a soft pointer
+    (NULL for a standalone movie job) — deliberately not a hard FK: a
+    `completed` job must remain re-enqueue-able later without a batch existing.
+    No secret/credential column: the upstream Xtream URL (contains user/password)
+    is re-derived at worker time from the stored account and never persisted here
+    (spec §0.7 / house-law piège "secrets jamais loggés").
+    """
+
+    __tablename__ = "download_job"
+
+    id = Column(Text, primary_key=True)               # uuid4 hex
+    batch_id = Column(Text)                             # -> DownloadBatch.id, soft pointer, NULL for a movie
+    server_id = Column(Text, nullable=False)            # source account ("xtream_<id>")
+    rating_key = Column(Text, nullable=False)           # vod_{id}.{ext} (movie) / ep_{id}.{ext} (episode)
+    media_type = Column(Text, nullable=False)           # 'movie' | 'episode' (job granularity = one file)
+    unification_id = Column(Text)                        # for grouping/display only
+    title = Column(Text, nullable=False)                 # cleaned display title
+    season = Column(Integer)                              # episode only
+    episode = Column(Integer)                             # episode only
+    dest_path = Column(Text, nullable=False)             # RELATIVE to DOWNLOAD_DIR, never absolute
+    state = Column(Text, nullable=False, default="queued")  # queued|running|completed|failed|canceled
+    bytes_total = Column(BigInteger)                      # NULL if no upstream Content-Length
+    bytes_done = Column(BigInteger, nullable=False, default=0)  # persisted progress (bytes written)
+    error = Column(Text)                                   # bounded message, NEVER the URL (see _safe_error)
+    attempts = Column(Integer, nullable=False, default=0)  # transient auto-retries consumed
+    created_at = Column(BigInteger, nullable=False)         # epoch ms
+    updated_at = Column(BigInteger, nullable=False)         # epoch ms, bumped on every transition/progress write
+    started_at = Column(BigInteger)                          # epoch ms, first queued->running transition
+    finished_at = Column(BigInteger)                          # epoch ms, completed/failed/canceled
+
+    __table_args__ = (
+        # Drain (`WHERE state='queued'`) + boot reap (`WHERE state='running'`).
+        Index("ix_download_job_state", "state"),
+        # Batch detail view (list a series' jobs).
+        Index("ix_download_job_batch", "batch_id"),
+        # Queue ordering (ORDER BY created_at) for the drain loop + admin list.
+        Index("ix_download_job_created", "created_at"),
+        # Idempotent-enqueue dedup: find a non-terminal job for (server_id, rating_key).
+        # Deliberately NOT unique — a `completed` job must be re-enqueue-able later.
+        Index("ix_download_job_item", "server_id", "rating_key"),
+    )

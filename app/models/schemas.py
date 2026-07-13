@@ -511,3 +511,71 @@ class HealthResponse(BaseModel):
     enriched_media: int
     broken_streams: int
     last_sync_at: Optional[int] = None
+
+
+# --- Download Schemas (physical media download — F-008,
+#     docs/20-impl-media-download.md, PH-DL-01) ---
+
+class DownloadJobResponse(BaseModel):
+    """One ``download_job`` row in camelCase, for both the JSON admin router
+    (``GET /api/admin/downloads``) and any programmatic consumer.
+
+    Wire shape (spec §4, figée): ``{ jobId, batchId?, type, unificationId?,
+    title, season?, episode?, serverId, ratingKey, state, bytesDownloaded,
+    bytesTotal?, percent?, speedBps?, destPath, error?, retries, createdAt,
+    updatedAt, startedAt?, finishedAt? }``.
+
+    ``bytesDownloaded``/``retries`` read different ORM column names
+    (``DownloadJob.bytes_done``/``.attempts``) and ``percent``/``speedBps`` are
+    COMPUTED (not stored) — so, per the spec's figée decision, this schema is
+    deliberately NOT populated via ``from_attributes=True``/``model_validate(job)``.
+    It is built by a single explicit builder (``to_download_response(job)``,
+    owned by ``services.download_service`` alongside its ``compute_percent``/
+    ``compute_speed_bps`` helpers — PH-DL-03) that maps a ``DownloadJob`` row to
+    this response. Kept out of this module deliberately: ``schemas.py`` has a
+    single editor (this ticket, PH-DL-01) per ``docs/31-board.md``'s
+    non-collision rule, so a builder that PH-DL-03/04/05 need to reuse/extend
+    belongs in a file they own, not here.
+    """
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    job_id: str
+    batch_id: Optional[str] = None
+    type: str                                  # 'movie' | 'episode' (== DownloadJob.media_type)
+    unification_id: Optional[str] = None
+    title: str
+    season: Optional[int] = None
+    episode: Optional[int] = None
+    server_id: str
+    rating_key: str
+    state: str                                  # queued|running|completed|failed|canceled
+    bytes_downloaded: int = 0                   # == DownloadJob.bytes_done
+    bytes_total: Optional[int] = None
+    percent: Optional[float] = None             # computed: round(bytes_downloaded/bytes_total*100, 1)
+    speed_bps: Optional[float] = None           # computed: average bytes/sec while state=='running'
+    dest_path: str                              # relative to DOWNLOAD_DIR, never absolute/client-supplied
+    error: Optional[str] = None                 # bounded message, never the upstream URL
+    retries: int = 0                            # == DownloadJob.attempts
+    created_at: int
+    updated_at: int
+    started_at: Optional[int] = None
+    finished_at: Optional[int] = None
+
+
+class DownloadJobListResponse(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    items: list[DownloadJobResponse]
+    total: int
+
+
+class DownloadEnqueueRequest(BaseModel):
+    """JSON body for ``POST /api/admin/downloads`` (P2 — the primary HTMX admin
+    route ``POST /admin/downloads`` takes a Form instead, per spec §7.1)."""
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    type: str                                   # 'movie' | 'show'
+    unification_id: str
+    server_id: str
+    rating_key: str
+    scope: str                                  # 'movie' | 'series_all'

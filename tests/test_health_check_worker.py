@@ -22,7 +22,7 @@ import pytest
 from sqlalchemy import select
 
 from app.config import settings
-from app.models.database import Media, XtreamAccount
+from app.models.database import DownloadJob, Media, XtreamAccount
 from app.utils.time import now_ms
 from app.workers import health_check_worker as hc
 
@@ -331,6 +331,57 @@ async def test_circuit_breaker_is_scoped_per_account(monkeypatch, db_factory):
     assert all(r.last_stream_check is None for r in a_rows)  # tripped, rolled back
     assert len(b_rows) == 30
     assert all(r.last_stream_check is not None for r in b_rows)  # unaffected
+
+
+@pytest.mark.asyncio
+async def test_pipeline_validation_skips_accounts_with_active_downloads(
+    monkeypatch, db_factory,
+):
+    """An account with a queued/running download must be skipped by validation
+    so the (foreground) download keeps the provider's connection slot."""
+    async with db_factory() as db:
+        db.add(_account("aaaaaaaa", 20))
+        db.add(_account("bbbbbbbb", 20))
+        for m in _streams("xtream_aaaaaaaa", 10):
+            db.add(m)
+        for m in _streams("xtream_bbbbbbbb", 10):
+            db.add(m)
+        # An in-flight download on account aaaaaaaa only.
+        db.add(DownloadJob(
+            id="dl-1", batch_id=None, server_id="xtream_aaaaaaaa",
+            rating_key="vod_1.mkv", media_type="movie", unification_id=None,
+            title="X", season=None, episode=None, dest_path="Movies/X/X.mkv",
+            state="running", bytes_total=None, bytes_done=0, attempts=0,
+            created_at=now_ms(), updated_at=now_ms(),
+        ))
+        await db.commit()
+
+    monkeypatch.setattr(settings, "STREAM_VALIDATION_ENABLED", True)
+    monkeypatch.setattr(hc, "worker_session_factory", db_factory)
+
+    async def _fake_client():
+        return None
+
+    monkeypatch.setattr(hc, "_get_client", _fake_client)
+
+    checked_server_ids: set[str] = set()
+
+    async def _spy_check_one(client, item, account, semaphore):
+        checked_server_ids.add(item.server_id)
+        return item, False, "head_ct_video"
+
+    monkeypatch.setattr(hc, "_check_one", _spy_check_one)
+
+    await hc._run_pipeline_validation_impl()
+
+    # aaaaaaaa (active download) skipped entirely; bbbbbbbb validated.
+    assert "xtream_aaaaaaaa" not in checked_server_ids
+    assert "xtream_bbbbbbbb" in checked_server_ids
+
+    a_rows = await _rows_for(db_factory, "xtream_aaaaaaaa")
+    b_rows = await _rows_for(db_factory, "xtream_bbbbbbbb")
+    assert all(r.last_stream_check is None for r in a_rows)      # never touched
+    assert all(r.last_stream_check is not None for r in b_rows)  # validated
 
 
 # ─── CR-P05: candidate fetch streams per account, not the whole catalog ──

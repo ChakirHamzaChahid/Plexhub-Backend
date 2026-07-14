@@ -32,13 +32,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
+from pathlib import Path
 
 from sqlalchemy import func, select, update
 
 from app.config import settings
-from app.models.database import DownloadJob, XtreamAccount
+from app.models.database import DownloadJob, Media, XtreamAccount
 from app.services import download_service
+from app.services.download_nfo import render_media_nfo
 from app.services.download_service import (
     DownloadCanceled,
     DownloadDisabledError,
@@ -177,6 +180,53 @@ async def _load_job(session_factory, job_id: str) -> DownloadJob | None:
             return await db.get(DownloadJob, job_id)
 
     return await run_with_retry(_do, op="load_job")
+
+
+async def _load_media(session_factory, server_id: str, rating_key: str) -> Media | None:
+    async def _do():
+        async with session_factory() as db:
+            result = await db.execute(
+                select(Media).where(
+                    Media.server_id == server_id,
+                    Media.rating_key == rating_key,
+                ).limit(1)
+            )
+            return result.scalars().first()
+
+    return await run_with_retry(_do, op="load_media")
+
+
+def _write_nfo_text(path: Path, text: str) -> None:
+    """Atomically write the sidecar .nfo (tmp in same dir + os.replace). Sync —
+    call via ``asyncio.to_thread``."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+async def _write_sidecar_nfo(session_factory, job: DownloadJob, dest: Path) -> None:
+    """Best-effort: write a ``.nfo`` next to a just-completed download.
+
+    Never raises — a missing/garbled NFO must not fail the download. The NFO
+    sits in the SAME confined directory as ``dest`` (only the suffix changes),
+    so it inherits ``dest``'s path-confinement with no extra check.
+    """
+    try:
+        media = await _load_media(session_factory, job.server_id, job.rating_key)
+        if media is None:
+            return
+        xml = render_media_nfo(media)
+        if not xml:
+            return
+        nfo_path = dest.with_suffix(".nfo")
+        await asyncio.to_thread(_write_nfo_text, nfo_path, xml)
+        logger.info("Download job %s: wrote sidecar NFO %s", job.id, nfo_path.name)
+    except Exception:
+        logger.warning(
+            "Download job %s: sidecar NFO generation failed (non-fatal)",
+            job.id, exc_info=True,
+        )
 
 
 async def _load_account(session_factory, server_id: str) -> XtreamAccount | None:
@@ -440,6 +490,10 @@ async def _run_job(session_factory, job_id: str, sem: asyncio.Semaphore) -> None
             transient_message = "erreur inattendue"
         else:
             await _mark_completed(session_factory, job_id, result)
+            # Sidecar .nfo next to the finished file — best-effort, after the
+            # job is already marked completed so it can never turn a good
+            # download into a failure.
+            await _write_sidecar_nfo(session_factory, job, dest)
     # `sem` is released here — `_handle_transient` (peek + immediate requeue
     # + exponential back-off sleep) must NEVER run while still holding the
     # concurrency slot, or a single flaky job freezes the whole queue at

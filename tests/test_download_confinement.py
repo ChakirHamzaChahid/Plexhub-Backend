@@ -130,11 +130,22 @@ class TestComputeDestPathAttackMatrix:
 # BYPASSING compute_dest_path entirely — simulates a corrupted DB row or a
 # future regression that skips the sanitizer. Must ALWAYS raise, never write.
 
+# `\` and `C:` are path separators / drive anchors ONLY on Windows. On the
+# Linux/Docker deploy target (§1) they are valid filename characters, so these
+# two strings stay CONFINED under DOWNLOAD_DIR and `resolve_confined` correctly
+# does NOT raise (defense-in-depth against odd chars lives in `_sanitize_segment`,
+# exercised via `compute_dest_path`). Run them only where they're real escapes.
+_WINDOWS_ONLY = pytest.mark.skipif(
+    os.name != "nt",
+    reason="backslash/drive-letter traversal is a Windows-only escape; on POSIX "
+    "these are ordinary filename chars that remain confined (see _sanitize_segment)",
+)
+
 DIRECT_ATTACK_PATHS = [
     pytest.param("../../etc/passwd", id="relative-traversal"),
     pytest.param("/etc/passwd", id="posix-absolute"),
-    pytest.param("..\\..\\windows\\system32", id="windows-backslash-traversal"),
-    pytest.param("C:/Windows/system32", id="windows-drive-absolute"),
+    pytest.param("..\\..\\windows\\system32", id="windows-backslash-traversal", marks=_WINDOWS_ONLY),
+    pytest.param("C:/Windows/system32", id="windows-drive-absolute", marks=_WINDOWS_ONLY),
     pytest.param("..", id="bare-parent"),
     pytest.param("../", id="bare-parent-slash"),
     pytest.param("Movies/../../escape.txt", id="nested-double-dotdot-escape"),

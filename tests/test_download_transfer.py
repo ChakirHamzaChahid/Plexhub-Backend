@@ -261,15 +261,15 @@ class TestPermanentErrors:
             await download_to_disk(URL, dest)
 
 
-# ─── DL-01: redirects are never followed (SSRF hardening, review fix #2) ───
+# ─── DL-01: redirects to internal addresses are rejected (SSRF hardening) ───
 
 
-class TestRedirectNeverFollowed:
-    """A malicious/MITM'd provider returning a 3xx must never have its
-    `Location` target fetched or its body written to disk — a direct Xtream
-    stream URL never legitimately redirects, and following one would let a
-    hostile response point at an internal address (loopback/RFC1918/
-    `169.254.169.254`)."""
+class TestRedirectToInternalRejected:
+    """Redirects to a non-public address are rejected before the target is
+    fetched or any body is written — a 3xx whose `Location` resolves to an
+    internal address (loopback/RFC1918/link-local incl. `169.254.169.254`) must
+    never be followed. (Redirects to *public* CDN hosts ARE followed — see
+    ``TestSafeRedirectFollow``.)"""
 
     @pytest.mark.parametrize("status_code", [301, 302, 303, 307, 308])
     async def test_redirect_status_raises_permanent_error_without_fetching_target(
@@ -304,7 +304,9 @@ class TestRedirectNeverFollowed:
 
         with pytest.raises(DownloadPermanentError) as excinfo:
             await download_to_disk(URL, dest)
-        assert "302" in str(excinfo.value)
+        # Rejected by the SSRF guard (target resolves to a private IP) before any
+        # fetch — surfaced as "unsafe redirect", not the generic "upstream 302".
+        assert "unsafe redirect" in str(excinfo.value)
         assert not dest.parent.exists() or list(dest.parent.iterdir()) == []
 
 
@@ -366,3 +368,53 @@ class TestCancelDuringTransfer:
         part = dest.with_name(dest.name + ".part")
         assert part.exists(), "the .part must be left on disk for a later resume"
         assert part.stat().st_size > 0
+
+
+# ─── DL-01: safe provider→CDN redirect following ────────────────────────────
+
+
+class TestSafeRedirectFollow:
+    """Xtream providers 302 a stream URL to their CDN — the download must follow
+    it (regression for "all downloads fail: upstream 302"), but only when the
+    target resolves to a PUBLIC IP; a 302 to an internal address is still
+    rejected, never fetched (DL-01 SSRF hardening).
+    """
+
+    # IP literals: getaddrinfo returns them as-is, so no real DNS is needed.
+    CDN = "http://93.184.216.34/cdn/1.mkv"        # public
+    PRIVATE = "http://10.0.0.5/internal.mkv"      # RFC1918
+
+    async def test_follows_public_redirect_and_downloads(self, tmp_path, xtream_mock):
+        dest = tmp_path / "Movies" / "RD" / "RD.mkv"
+        xtream_mock.get(URL).mock(
+            return_value=httpx.Response(302, headers={"Location": self.CDN})
+        )
+        xtream_mock.get(self.CDN).mock(
+            return_value=httpx.Response(
+                200, content=BODY, headers={"Content-Length": str(len(BODY))}
+            )
+        )
+        result = await download_to_disk(URL, dest)
+        assert dest.exists()
+        assert dest.read_bytes() == BODY
+        assert result.bytes_downloaded == len(BODY)
+
+    async def test_rejects_redirect_to_private_address(self, tmp_path, xtream_mock):
+        dest = tmp_path / "Movies" / "RP" / "RP.mkv"
+        xtream_mock.get(URL).mock(
+            return_value=httpx.Response(302, headers={"Location": self.PRIVATE})
+        )
+        with pytest.raises(DownloadPermanentError):
+            await download_to_disk(URL, dest)
+        assert not dest.exists()
+
+    async def test_strict_when_max_redirects_zero(self, tmp_path, xtream_mock, monkeypatch):
+        from app.config import settings as _settings
+        monkeypatch.setattr(_settings, "DOWNLOAD_MAX_REDIRECTS", 0)
+        dest = tmp_path / "Movies" / "RS" / "RS.mkv"
+        xtream_mock.get(URL).mock(
+            return_value=httpx.Response(302, headers={"Location": self.CDN})
+        )
+        with pytest.raises(DownloadPermanentError):
+            await download_to_disk(URL, dest)
+        assert not dest.exists()

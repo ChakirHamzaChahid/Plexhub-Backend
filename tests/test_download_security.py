@@ -323,3 +323,35 @@ class TestApiAdminDownloadsRequiresMasterKey:
     async def test_get_by_id_401_without_key(self, api_client):
         resp = await api_client.get("/api/admin/downloads/some-job-id")
         assert resp.status_code == 401
+
+
+class TestDownloadRedirectSSRF:
+    """DL-01: downloads follow a provider→CDN 302, but only to PUBLIC targets.
+
+    Regression guard for "all downloads fail (upstream 302)": real Xtream
+    providers 302 stream URLs to their CDN, so `follow_redirects=False` +
+    "any 3xx is permanent failure" broke every download. We now follow, but a
+    redirect to an internal address is still rejected, never fetched.
+    """
+
+    async def test_assert_public_redirect_host_allows_public_ip(self):
+        from app.services.download_service import _assert_public_redirect_host
+        # IP literals resolve to themselves — public ones must not raise.
+        await _assert_public_redirect_host("103.176.90.57")
+        await _assert_public_redirect_host("1.1.1.1")
+
+    @pytest.mark.parametrize(
+        "host",
+        ["127.0.0.1", "10.0.0.1", "192.168.1.10", "172.16.0.1",
+         "169.254.169.254", "0.0.0.0", ""],
+    )
+    async def test_assert_public_redirect_host_rejects_internal(self, host):
+        from app.services.download_service import (
+            _assert_public_redirect_host, DownloadPermanentError,
+        )
+        with pytest.raises(DownloadPermanentError):
+            await _assert_public_redirect_host(host)
+
+    # End-to-end redirect-follow behaviour (public followed, private rejected,
+    # strict when disabled) is covered against the real download_to_disk streaming
+    # path in tests/test_download_transfer.py::TestSafeRedirectFollow.

@@ -19,10 +19,12 @@ it in any exception message.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import os
 import re
 import shutil
+import socket
 import unicodedata
 import uuid
 from dataclasses import dataclass
@@ -253,6 +255,46 @@ def _parse_content_range_start(headers: httpx.Headers) -> Optional[int]:
     return int(start_str) if start_str.isdigit() else None
 
 
+async def _assert_public_redirect_host(host: Optional[str]) -> None:
+    """DL-01 SSRF guard for a followed redirect target.
+
+    Raise ``DownloadPermanentError`` unless *every* address ``host`` resolves to
+    is a public, routable IP. Rejects loopback / RFC1918 / link-local
+    (incl. 169.254.169.254 cloud metadata) / reserved / multicast, so following
+    a provider's 302 can never make us fetch an internal address. The raised
+    message never contains the host or the URL (they can embed Xtream creds).
+
+    Residual caveat: this validates the hostname's *current* resolution; a
+    determined attacker could DNS-rebind between this check and httpx's own
+    connect. That is a far more involved attack than the plain "302 to
+    127.0.0.1" this guards against, and out of scope for a self-hosted puller
+    against an operator-chosen provider.
+    """
+    if not host:
+        raise DownloadPermanentError("unsafe redirect")
+    # A bare IP literal in the Location skips DNS but still must be public.
+    try:
+        infos = await asyncio.to_thread(
+            socket.getaddrinfo, host, None, type=socket.SOCK_STREAM
+        )
+    except OSError:
+        raise DownloadPermanentError("unsafe redirect") from None
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            raise DownloadPermanentError("unsafe redirect") from None
+        if (
+            not ip.is_global
+            or ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+        ):
+            raise DownloadPermanentError("unsafe redirect")
+
+
 async def download_to_disk(
     url: str,
     dest: Path,
@@ -270,12 +312,14 @@ async def download_to_disk(
       treated like Range-ignored and truncates/restarts (CR-MIN-2 — avoids a
       gap/overlap in `.part`); 200 (Range ignored) truncates/restarts; 416
       promotes the `.part` as-is.
-    - UA = `settings.XTREAM_USER_AGENT`; `follow_redirects=False` (DL-01,
-      SSRF hardening) — a direct Xtream stream URL never legitimately
-      redirects, so ANY 3xx is treated as a permanent upstream error rather
-      than followed; a malicious/MITM'd provider can otherwise 302 to an
-      internal address (loopback/RFC1918/`169.254.169.254`) and have its
-      body written to disk.
+    - UA = `settings.XTREAM_USER_AGENT`. `follow_redirects=False` on the client
+      so we vet redirects ourselves (DL-01, SSRF hardening): real Xtream
+      providers 302 a stream URL to their CDN, so up to
+      `settings.DOWNLOAD_MAX_REDIRECTS` hops ARE followed inline, but only after
+      each hop's target is confirmed to resolve to a public IP — a 302 to an
+      internal address (loopback/RFC1918/`169.254.169.254`) is still rejected,
+      never fetched. Set `DOWNLOAD_MAX_REDIRECTS=0` to restore the old strict
+      behaviour (any 3xx is a permanent failure).
     - `mkdir`/`stat`/`os.replace` are offloaded via `asyncio.to_thread`;
       buffered chunk writes stay inline (accepted I/O, same as elsewhere).
     - On cancel/failure the `.part` is left on disk — never promoted.
@@ -311,74 +355,94 @@ async def download_to_disk(
 
     try:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
-            async with client.stream("GET", url, headers=headers) as resp:
-                if resp.status_code == 416:
-                    # `.part` is already complete per the server -> promote as-is.
-                    await asyncio.to_thread(os.replace, part, dest)
-                    return DownloadResult(
-                        bytes_downloaded=resume_from, bytes_total=resume_from,
-                        already_present=False, resumed=True,
-                    )
-                if resp.status_code in (404, 403):
-                    raise DownloadPermanentError(f"upstream {resp.status_code}")
-                if resp.status_code >= 500 or resp.status_code == 429:
-                    raise DownloadTransientError(f"upstream {resp.status_code}")
-                if resp.status_code not in (200, 206):
-                    raise DownloadPermanentError(f"upstream {resp.status_code}")
+            # follow_redirects stays False so we vet each hop ourselves (DL-01).
+            # Real Xtream providers 302 a stream URL to their CDN, so a 3xx is
+            # followed — but only after its target is confirmed to resolve to a
+            # public IP (loopback/RFC1918/link-local/etc. rejected, never
+            # fetched). The redirect is handled inside the streaming request
+            # loop, so a non-redirecting provider still makes exactly one
+            # request. DOWNLOAD_MAX_REDIRECTS=0 restores the old strict "any
+            # 3xx is a permanent failure" behaviour.
+            redirects_left = settings.DOWNLOAD_MAX_REDIRECTS
+            while True:
+                async with client.stream("GET", url, headers=headers) as resp:
+                    if resp.status_code in (301, 302, 303, 307, 308):
+                        location = resp.headers.get("location")
+                        if not location or redirects_left <= 0:
+                            raise DownloadPermanentError(f"upstream {resp.status_code}")
+                        next_url = str(resp.url.join(location))
+                        await _assert_public_redirect_host(httpx.URL(next_url).host)
+                        url = next_url
+                        redirects_left -= 1
+                        continue
 
-                content_type = resp.headers.get("content-type", "")
-                if _is_error_content_type(content_type):
-                    raise DownloadPermanentError(
-                        f"invalid content-type {content_type.split(';')[0].strip()}"
-                    )
-
-                if resp.status_code == 206:
-                    range_start = _parse_content_range_start(resp.headers)
-                    if range_start is not None and range_start != resume_from:
-                        # CR-MIN-2: the server's resumed offset doesn't match
-                        # what we asked for (`Range: bytes={resume_from}-`) —
-                        # appending here would leave a gap or duplicate a
-                        # byte range in `.part`. Treat exactly like a "200,
-                        # Range ignored" response: truncate and restart.
-                        logger.warning(
-                            "Download: Content-Range start %d != requested resume offset %d"
-                            " — restarting .part instead of appending",
-                            range_start, resume_from,
+                    if resp.status_code == 416:
+                        # `.part` is already complete per the server -> promote as-is.
+                        await asyncio.to_thread(os.replace, part, dest)
+                        return DownloadResult(
+                            bytes_downloaded=resume_from, bytes_total=resume_from,
+                            already_present=False, resumed=True,
                         )
+                    if resp.status_code in (404, 403):
+                        raise DownloadPermanentError(f"upstream {resp.status_code}")
+                    if resp.status_code >= 500 or resp.status_code == 429:
+                        raise DownloadTransientError(f"upstream {resp.status_code}")
+                    if resp.status_code not in (200, 206):
+                        raise DownloadPermanentError(f"upstream {resp.status_code}")
+
+                    content_type = resp.headers.get("content-type", "")
+                    if _is_error_content_type(content_type):
+                        raise DownloadPermanentError(
+                            f"invalid content-type {content_type.split(';')[0].strip()}"
+                        )
+
+                    if resp.status_code == 206:
+                        range_start = _parse_content_range_start(resp.headers)
+                        if range_start is not None and range_start != resume_from:
+                            # CR-MIN-2: the server's resumed offset doesn't match
+                            # what we asked for (`Range: bytes={resume_from}-`) —
+                            # appending here would leave a gap or duplicate a
+                            # byte range in `.part`. Treat exactly like a "200,
+                            # Range ignored" response: truncate and restart.
+                            logger.warning(
+                                "Download: Content-Range start %d != requested resume offset %d"
+                                " — restarting .part instead of appending",
+                                range_start, resume_from,
+                            )
+                            mode = "wb"
+                            resume_from = 0
+                            resumed = False
+                        else:
+                            mode = "ab"
+                            resumed = True
+                    else:
                         mode = "wb"
                         resume_from = 0
                         resumed = False
-                    else:
-                        mode = "ab"
-                        resumed = True
-                else:
-                    mode = "wb"
-                    resume_from = 0
-                    resumed = False
 
-                bytes_total = _parse_bytes_total(resp.headers, resume_from)
-                bytes_done = resume_from
+                    bytes_total = _parse_bytes_total(resp.headers, resume_from)
+                    bytes_done = resume_from
 
-                f = open(part, mode)
-                try:
-                    async for chunk in resp.aiter_bytes(chunk_bytes):
-                        if not chunk:
-                            continue
-                        f.write(chunk)
-                        bytes_done += len(chunk)
-                        if on_progress is not None:
-                            await on_progress(bytes_done, bytes_total)
-                        if cancel_check is not None and await cancel_check():
-                            raise DownloadCanceled("canceled")
-                finally:
-                    f.flush()
-                    f.close()
+                    f = open(part, mode)
+                    try:
+                        async for chunk in resp.aiter_bytes(chunk_bytes):
+                            if not chunk:
+                                continue
+                            f.write(chunk)
+                            bytes_done += len(chunk)
+                            if on_progress is not None:
+                                await on_progress(bytes_done, bytes_total)
+                            if cancel_check is not None and await cancel_check():
+                                raise DownloadCanceled("canceled")
+                    finally:
+                        f.flush()
+                        f.close()
 
-                await asyncio.to_thread(os.replace, part, dest)
-                return DownloadResult(
-                    bytes_downloaded=bytes_done, bytes_total=bytes_total,
-                    already_present=False, resumed=resumed,
-                )
+                    await asyncio.to_thread(os.replace, part, dest)
+                    return DownloadResult(
+                        bytes_downloaded=bytes_done, bytes_total=bytes_total,
+                        already_present=False, resumed=resumed,
+                    )
     except DownloadCanceled:
         raise
     except DownloadPermanentError:

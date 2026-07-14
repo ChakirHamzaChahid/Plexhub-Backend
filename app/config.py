@@ -126,6 +126,11 @@ class Settings:
     DOWNLOAD_POLL_INTERVAL: int = _safe_int("DOWNLOAD_POLL_INTERVAL", 2)           # worker drain poll (s)
     DOWNLOAD_CONNECT_TIMEOUT: int = _safe_int("DOWNLOAD_CONNECT_TIMEOUT", 30)      # httpx connect (s)
     DOWNLOAD_READ_TIMEOUT: int = _safe_int("DOWNLOAD_READ_TIMEOUT", 120)           # httpx read/chunk (s)
+    # Max HTTP redirects a download will follow. Xtream stream URLs legitimately
+    # 302 to a CDN host, so downloads must follow — but each hop's target is
+    # verified to resolve to a PUBLIC IP first (DL-01 SSRF guard). Set to 0 to
+    # restore the old strict behaviour (any 3xx = permanent failure).
+    DOWNLOAD_MAX_REDIRECTS: int = _safe_int("DOWNLOAD_MAX_REDIRECTS", 5)
 
     @property
     def has_xtream_env(self) -> bool:

@@ -11,10 +11,25 @@ from fastapi.middleware.gzip import GZipMiddleware
 
 from app.config import settings
 from app.db.database import init_db
-from app.api import accounts, admin, ai, api_keys, categories, health, live, media, plex, stream, sync, tv_auth
+from app.api import (
+    accounts,
+    admin,
+    admin_downloads,
+    ai,
+    api_keys,
+    categories,
+    downloads,
+    health,
+    live,
+    media,
+    plex,
+    stream,
+    sync,
+    tv_auth,
+)
 from app.utils.request_context import RequestIdLogFilter, RequestIdMiddleware
 
-APP_VERSION = "1.1.5"
+APP_VERSION = "1.2.0"
 
 logger = logging.getLogger("plexhub")
 
@@ -336,6 +351,34 @@ async def lifespan(app: FastAPI):
                 )
             scheduler.start()
 
+            # Physical media download queue drain (PH-DL-06) — master-only,
+            # same election as the scheduler above. Reap-then-drain is
+            # combined into ONE coroutine handed to `create_background_task`
+            # (never awaited directly here) so it never blocks lifespan
+            # startup on a DB write, matching the non-blocking
+            # `initial_sync_then_enrich` pattern just below; it also means
+            # nothing touches the DB when `DOWNLOAD_DIR` is unset (feature
+            # disabled — mirrors `run_drain_loop`'s own guard) or while this
+            # coroutine sits unawaited in a test double.
+            async def _run_download_worker():
+                if not settings.DOWNLOAD_DIR:
+                    logger.info("Download worker disabled: DOWNLOAD_DIR is not configured")
+                    return
+                from app.workers import download_worker
+                from app.db.database import async_session_factory
+
+                # CR-MIN-1 (review): `run_drain_loop` already reaps orphans
+                # itself as its first step — an explicit call here was a
+                # redundant double-reap on every boot. `run_drain_loop`'s own
+                # `DOWNLOAD_DIR` guard makes this coroutine's own check above
+                # technically redundant too, but it's kept so the log line
+                # ("Download worker disabled...") fires without importing
+                # `download_worker`/`async_session_factory` at all.
+                await download_worker.run_drain_loop(async_session_factory)
+
+            from app.utils.tasks import create_background_task
+            create_background_task(_run_download_worker(), name="download_worker")
+
             # Non-blocking initial sync, then enrichment, then Plex generation
             async def initial_sync_then_enrich():
                 if _PIPELINE_LOCK.locked():
@@ -453,6 +496,11 @@ app.include_router(tv_auth.router, prefix="/api")
 # headers). Same mount-site-guard style as Pattern A, just a different
 # dependency and no "/api" prefix.
 app.include_router(admin.router, dependencies=[Depends(verify_admin_basic_auth)])
+# Admin "Télécharger" tab (PH-DL-06) — already self-prefixed "/admin/downloads"
+# by the router itself; same Basic Auth guard applied at the same mount site
+# as the rest of /admin (identical convention, separate router module per the
+# feature's disjoint-file-ownership rule, docs/20-impl-media-download.md §7.3).
+app.include_router(admin_downloads.router, dependencies=[Depends(verify_admin_basic_auth)])
 
 # Interactive API docs — kept off the public default URLs above (docs_url=None …)
 # and re-exposed here behind the SAME HTTP Basic Auth as /admin, so they're
@@ -475,12 +523,16 @@ async def protected_openapi():
 # Pattern C — bare mount, self-prefixed + self-guarded: the router module
 # itself declares its full path prefix AND a module-level
 # `dependencies=[Depends(...)]`, so no dependency is passed at the mount site
-# (unlike Pattern A). Both already enforce their own auth on every route:
+# (unlike Pattern A). All three already enforce their own auth on every route:
 #   - `ai.router` — its own /api/ai prefix + module-level verify_api_key.
 #   - `api_keys.router` — its own /api/admin/keys prefix + module-level
 #     verify_master_key (master secret only).
+#   - `downloads.router` (PH-DL-06) — its own /api/admin/downloads prefix +
+#     module-level verify_master_key (JSON read mirror of the download
+#     queue, master secret only — same convention as api_keys.router).
 app.include_router(ai.router)
 app.include_router(api_keys.router)
+app.include_router(downloads.router)
 
 # Prometheus /metrics + per-request HTTP metrics
 from app.utils.metrics import setup_instrumentator  # noqa: E402

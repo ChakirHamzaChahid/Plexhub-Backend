@@ -43,6 +43,7 @@ async def run_migrations(engine: AsyncEngine) -> None:
     await _migration_015_add_missing_media_indexes(engine)
     await _migration_016_encrypt_xtream_passwords(engine)
     await _migration_017_create_media_group_snapshot(engine)
+    await _migration_018_create_download_tables(engine)
 
     logger.info("All migrations completed successfully")
 
@@ -754,3 +755,88 @@ async def _migration_017_create_media_group_snapshot(engine: AsyncEngine) -> Non
             logger.info("Migration 017: media_group snapshot tables created")
         except Exception as e:
             logger.warning("Migration 017: tables may already exist: %s", e)
+
+
+async def _migration_018_create_download_tables(engine: AsyncEngine) -> None:
+    """Create the physical-media-download tables: download_batch + download_job
+    (PH-DL-01, docs/20-impl-media-download.md §3).
+
+    Two purely additive tables backing the new "Télécharger" feature (writes
+    actual media bytes to DOWNLOAD_DIR, distinct from the existing PLEX_LIBRARY_DIR
+    .strm catalog — nothing about /api/media, /api/plex or existing sync/enrichment
+    flows is touched here). Nothing destructive: no ALTER on an existing table, no
+    FK to enforce (batch_id is a soft pointer — a completed job is intentionally
+    re-enqueue-able, and a movie has batch_id=NULL by design, spec §3.1).
+
+    - `download_batch`: one row per "download the whole series" selection (a
+      single movie download does NOT get a batch row — batch_id stays NULL on its
+      job, spec §3.1's figée decision).
+    - `download_job`: one row per downloaded FILE (one movie, or one episode of a
+      series batch). Carries the state machine (queued/running/completed/failed/
+      canceled), byte progress, and a server-relative `dest_path` — never an
+      absolute path and never the upstream Xtream URL (which contains
+      user/password and is re-derived at worker time, never persisted, spec §0.7).
+
+    Idempotent: CREATE TABLE/INDEX IF NOT EXISTS throughout; a fresh DB already
+    has both tables (+ every index below) via Base.metadata.create_all
+    (models/database.py's DownloadBatch/DownloadJob), so this is a silent no-op
+    there, and an upgraded DB gets them here — same convergence invariant as
+    migration 017 (CR-C05/CR-P02).
+    """
+    logger.info("Migration 018: Creating download_batch/download_job tables")
+
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS download_batch (
+                    id              TEXT    PRIMARY KEY,
+                    media_type      TEXT    NOT NULL,
+                    unification_id  TEXT,
+                    title           TEXT    NOT NULL,
+                    server_id       TEXT    NOT NULL,
+                    rating_key      TEXT    NOT NULL,
+                    scope           TEXT    NOT NULL,
+                    total_jobs      INTEGER NOT NULL DEFAULT 0,
+                    created_at      BIGINT  NOT NULL
+                )
+            """))
+
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS download_job (
+                    id              TEXT    PRIMARY KEY,
+                    batch_id        TEXT,
+                    server_id       TEXT    NOT NULL,
+                    rating_key      TEXT    NOT NULL,
+                    media_type      TEXT    NOT NULL,
+                    unification_id  TEXT,
+                    title           TEXT    NOT NULL,
+                    season          INTEGER,
+                    episode         INTEGER,
+                    dest_path       TEXT    NOT NULL,
+                    state           TEXT    NOT NULL DEFAULT 'queued',
+                    bytes_total     BIGINT,
+                    bytes_done      BIGINT  NOT NULL DEFAULT 0,
+                    error           TEXT,
+                    attempts        INTEGER NOT NULL DEFAULT 0,
+                    created_at      BIGINT  NOT NULL,
+                    updated_at      BIGINT  NOT NULL,
+                    started_at      BIGINT,
+                    finished_at     BIGINT
+                )
+            """))
+
+            for idx_sql in [
+                # Drain (`WHERE state='queued'`) + boot reap (`WHERE state='running'`).
+                "CREATE INDEX IF NOT EXISTS ix_download_job_state ON download_job(state)",
+                # Batch detail view (list a series' jobs).
+                "CREATE INDEX IF NOT EXISTS ix_download_job_batch ON download_job(batch_id)",
+                # Queue ordering (ORDER BY created_at) for the drain loop + admin list.
+                "CREATE INDEX IF NOT EXISTS ix_download_job_created ON download_job(created_at)",
+                # Idempotent-enqueue dedup: find a non-terminal job for (server_id, rating_key).
+                "CREATE INDEX IF NOT EXISTS ix_download_job_item ON download_job(server_id, rating_key)",
+            ]:
+                await conn.execute(text(idx_sql))
+
+            logger.info("Migration 018: download_batch/download_job tables created")
+        except Exception as e:
+            logger.warning("Migration 018: tables may already exist: %s", e)

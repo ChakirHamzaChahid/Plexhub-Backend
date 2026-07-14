@@ -89,3 +89,22 @@ def xtream_mock():
     """respx context with no base_url — caller registers full URLs."""
     with respx.mock(assert_all_called=False) as r:
         yield r
+
+
+# ─── Physical media download (PH-DL-07) ─────────────────────────────────
+
+
+@pytest.fixture
+def download_dir(tmp_path, monkeypatch):
+    """A tmp_path-backed `settings.DOWNLOAD_DIR` for download-feature tests.
+
+    Never the real filesystem — every download test that writes bytes does so
+    under this fixture's directory (F-007: 0 write outside DOWNLOAD_DIR is the
+    blocking invariant, docs/40-testplan-media-download.md §3 F-007).
+    """
+    from app.config import settings
+
+    d = tmp_path / "downloads"
+    d.mkdir()
+    monkeypatch.setattr(settings, "DOWNLOAD_DIR", str(d))
+    return d

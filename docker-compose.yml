@@ -21,11 +21,18 @@ services:
       - STREAM_VALIDATION_RECHECK_HOURS=${STREAM_VALIDATION_RECHECK_HOURS:-24}
       - STREAM_FILTER_BROKEN=${STREAM_FILTER_BROKEN:-true}
       - PLEX_LIBRARY_DIR=/app/media
+      # Téléchargement physique de médias (onglet admin « Télécharger ») :
+      # chemin FIXE dans le conteneur (comme PLEX_LIBRARY_DIR). Le dossier
+      # hôte correspondant se règle via DOWNLOAD_HOST_PATH (volume ci-dessous).
+      - DOWNLOAD_DIR=/app/downloads
+      - DOWNLOAD_CONCURRENCY=${DOWNLOAD_CONCURRENCY:-1}
+      - DOWNLOAD_MIN_FREE_DISK_MB=${DOWNLOAD_MIN_FREE_DISK_MB:-2048}
       - TZ=${TZ:-UTC}
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
       - ${PLEX_MEDIA_HOST_PATH:-./media}:/app/media
+      - ${DOWNLOAD_HOST_PATH:-./downloads}:/app/downloads
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:${APP_PORT:-8000}/api/health')"]

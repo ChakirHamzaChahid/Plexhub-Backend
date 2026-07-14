@@ -1,0 +1,81 @@
+{% if enqueue_error %}
+<div class="bg-rose-50 border border-rose-200 text-rose-700 rounded p-2 mb-3 text-xs">{{ enqueue_error }}</div>
+{% endif %}
+<div class="flex items-center justify-between mb-2">
+  <span class="text-xs text-slate-500">{{ total }} job(s)</span>
+  <form hx-post="/admin/downloads/clear-finished" hx-target="#downloads-queue" hx-swap="innerHTML">
+    <button type="submit" class="text-xs text-slate-500 hover:text-slate-800 underline">
+      Nettoyer l'historique
+    </button>
+  </form>
+</div>
+<div class="overflow-x-auto">
+<table class="min-w-full bg-white rounded shadow-sm border border-slate-200 text-xs">
+  <thead class="bg-slate-100 text-slate-600 uppercase">
+    <tr>
+      <th class="text-left px-2 py-1.5">Titre</th>
+      <th class="text-left px-2 py-1.5">État</th>
+      <th class="text-left px-2 py-1.5 w-32">Progression</th>
+      <th class="text-left px-2 py-1.5">Octets</th>
+      <th class="px-2 py-1.5"></th>
+    </tr>
+  </thead>
+  <tbody class="divide-y divide-slate-100">
+    {% for job in jobs %}
+    <tr>
+      <td class="px-2 py-1.5">
+        <div class="font-medium">{{ job.title }}</div>
+        {% if job.season is not none and job.episode is not none %}
+        <div class="text-slate-400">S{{ '%02d' % job.season }}E{{ '%02d' % job.episode }}</div>
+        {% endif %}
+        {% if job.error %}
+        <div class="text-rose-600 mt-0.5">{{ job.error }}</div>
+        {% endif %}
+      </td>
+      <td class="px-2 py-1.5">
+        {% if job.state == 'completed' %}
+        <span class="inline-block px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700">terminé</span>
+        {% elif job.state == 'failed' %}
+        <span class="inline-block px-2 py-0.5 rounded-full bg-rose-100 text-rose-700">échec</span>
+        {% elif job.state == 'canceled' %}
+        <span class="inline-block px-2 py-0.5 rounded-full bg-slate-200 text-slate-600">annulé</span>
+        {% elif job.state == 'running' %}
+        <span class="inline-block px-2 py-0.5 rounded-full bg-sky-100 text-sky-700">en cours</span>
+        {% else %}
+        <span class="inline-block px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">en attente</span>
+        {% endif %}
+      </td>
+      <td class="px-2 py-1.5">
+        {% if job.percent is not none %}
+        <div class="w-full bg-slate-100 rounded h-2 overflow-hidden">
+          <div class="bg-sky-500 h-2" style="width: {{ job.percent }}%"></div>
+        </div>
+        <div class="text-slate-400 mt-0.5">{{ job.percent }}%</div>
+        {% else %}
+        <span class="text-slate-400">—</span>
+        {% endif %}
+      </td>
+      <td class="px-2 py-1.5 text-slate-500 whitespace-nowrap">
+        {{ "%.1f"|format(job.bytes_downloaded / 1048576) }} Mo
+        {% if job.bytes_total %} / {{ "%.1f"|format(job.bytes_total / 1048576) }} Mo{% endif %}
+      </td>
+      <td class="px-2 py-1.5 text-right whitespace-nowrap">
+        {% if job.state in ('queued', 'running') %}
+        <form hx-post="/admin/downloads/{{ job.id }}/cancel" hx-target="#downloads-queue" hx-swap="innerHTML" class="inline">
+          <button type="submit" class="text-rose-600 hover:text-rose-800">Annuler</button>
+        </form>
+        {% elif job.state in ('failed', 'canceled') %}
+        <form hx-post="/admin/downloads/{{ job.id }}/retry" hx-target="#downloads-queue" hx-swap="innerHTML" class="inline">
+          <button type="submit" class="text-sky-600 hover:text-sky-800">Relancer</button>
+        </form>
+        {% else %}
+        <span class="text-slate-300">—</span>
+        {% endif %}
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="5" class="px-2 py-6 text-center text-slate-400 italic">Aucun téléchargement.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>

@@ -609,7 +609,7 @@ async def cleanup_cache(sessionmaker) -> int:
     """Delete ai_subtitle_cache rows older than SUBTITLE_CACHE_RETENTION_DAYS.
 
     If retention is 0, this is a no-op (keep forever) and returns 0.
-    Uses commit_with_retry to handle SQLite write contention.
+    Retries the whole prune on SQLite write contention (see below).
     Returns the number of rows deleted.
     """
     retention_days = settings.SUBTITLE_CACHE_RETENTION_DAYS
@@ -618,17 +618,26 @@ async def cleanup_cache(sessionmaker) -> int:
         return 0
 
     from app.models.database import AiSubtitleCache
-    from app.utils.db_retry import commit_with_retry
+    from app.utils.db_retry import run_with_retry
     from app.utils.time import now_ms
 
     cutoff_ms = now_ms() - retention_days * 24 * 60 * 60 * 1000
 
-    async with sessionmaker() as db:
-        result = await db.execute(
-            delete(AiSubtitleCache).where(AiSubtitleCache.created_at < cutoff_ms)
-        )
-        await commit_with_retry(db)
+    # This cron runs at hour=3, right after the hour=2 stream-validation cron,
+    # whose long write transaction can still hold SQLite's single writer lock.
+    # The DELETE *opens* the write transaction, so contention raises "database
+    # is locked" on the `execute` itself — before the commit — so retrying only
+    # the commit (the previous behaviour) did not help and the job crashed
+    # nightly. Retry the whole open-a-session → delete → commit unit; each
+    # attempt gets a fresh session so a failed one is cleanly rolled back.
+    async def _prune() -> int:
+        async with sessionmaker() as db:
+            result = await db.execute(
+                delete(AiSubtitleCache).where(AiSubtitleCache.created_at < cutoff_ms)
+            )
+            await db.commit()
+            return result.rowcount
 
-    deleted = result.rowcount
+    deleted = await run_with_retry(_prune, op="subtitle_cache_cleanup")
     logger.info("Subtitle cache cleanup: removed %d entries older than %d days", deleted, retention_days)
     return deleted

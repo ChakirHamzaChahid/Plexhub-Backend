@@ -200,14 +200,27 @@ async def _cleanup_stale_epg():
     from sqlalchemy import delete
     from app.db.database import async_session_factory
     from app.models.database import EpgEntry
+    from app.utils.db_retry import run_with_retry
 
     cutoff = int(time.time() * 1000)  # now in ms
-    async with async_session_factory() as db:
-        result = await db.execute(
-            delete(EpgEntry).where(EpgEntry.end_time < cutoff)
-        )
-        await db.commit()
-        logger.info(f"EPG cleanup: removed {result.rowcount} stale entries")
+
+    # This cron runs at hour=3, right after the hour=2 stream-validation cron,
+    # whose long write transaction can still hold SQLite's single writer lock.
+    # The DELETE below *opens* the write transaction, so contention raises
+    # "database is locked" on the `execute` itself — before any commit — which
+    # is why wrapping only the commit was not enough (the job crashed nightly).
+    # Retry the whole open-a-session → delete → commit unit; each attempt gets a
+    # fresh session so a failed attempt is cleanly rolled back and closed.
+    async def _prune() -> int:
+        async with async_session_factory() as db:
+            result = await db.execute(
+                delete(EpgEntry).where(EpgEntry.end_time < cutoff)
+            )
+            await db.commit()
+            return result.rowcount
+
+    rowcount = await run_with_retry(_prune, op="epg_cleanup")
+    logger.info(f"EPG cleanup: removed {rowcount} stale entries")
 
 
 @asynccontextmanager

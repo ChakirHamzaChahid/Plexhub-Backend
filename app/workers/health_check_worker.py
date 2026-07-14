@@ -30,7 +30,20 @@ async def _get_client() -> httpx.AsyncClient:
                     headers={"User-Agent": settings.XTREAM_USER_AGENT},
                     limits=httpx.Limits(
                         max_connections=max(50, settings.STREAM_VALIDATION_CONCURRENCY * 2),
-                        max_keepalive_connections=settings.STREAM_VALIDATION_CONCURRENCY,
+                        # No keep-alive: use a fresh connection per probe, like a
+                        # real player (VLC) does. Some Xtream providers — notably
+                        # low `max_connections` ones — drop reused keep-alive
+                        # connections mid-response, which httpx surfaces as
+                        # `ReadError`. With keep-alive on, that made ~75-98% of a
+                        # such-provider's streams appear broken and tripped the
+                        # circuit breaker on every run (the account was never
+                        # actually validated), while the very same stream URLs
+                        # returned HTTP 206 video when fetched on a fresh
+                        # connection. Reproduced deterministically: 12 sequential
+                        # probes → keep-alive ON = 3/12 ok (9 ReadError), OFF =
+                        # 12/12 ok. Providers that tolerate keep-alive are
+                        # unaffected (fresh connections work everywhere).
+                        max_keepalive_connections=0,
                     ),
                 )
     return _client

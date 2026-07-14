@@ -85,7 +85,7 @@ async def test_pipeline_validation_peak_concurrency_per_account(monkeypatch, db_
     # Global cap deliberately far above both providers so the *clamp* is what
     # limits — not the global setting.
     monkeypatch.setattr(settings, "STREAM_VALIDATION_CONCURRENCY", 20)
-    monkeypatch.setattr(hc, "async_session_factory", db_factory)
+    monkeypatch.setattr(hc, "worker_session_factory", db_factory)
 
     async def _fake_client():
         return None

@@ -163,7 +163,7 @@ async def test_run_health_check_batch_delegates_to_sampling_helper(monkeypatch, 
         await db.commit()
 
     monkeypatch.setattr(settings, "STREAM_VALIDATION_ENABLED", True)
-    monkeypatch.setattr(hc, "async_session_factory", db_factory)
+    monkeypatch.setattr(hc, "worker_session_factory", db_factory)
 
     async def _fake_client():
         return None
@@ -206,7 +206,7 @@ async def test_circuit_breaker_trips_on_small_account_below_old_fixed_50(
         await db.commit()
 
     monkeypatch.setattr(settings, "STREAM_VALIDATION_ENABLED", True)
-    monkeypatch.setattr(hc, "async_session_factory", db_factory)
+    monkeypatch.setattr(hc, "worker_session_factory", db_factory)
 
     async def _fake_client():
         return None
@@ -242,7 +242,7 @@ async def test_circuit_breaker_does_not_trip_below_minimum_sample(
         await db.commit()
 
     monkeypatch.setattr(settings, "STREAM_VALIDATION_ENABLED", True)
-    monkeypatch.setattr(hc, "async_session_factory", db_factory)
+    monkeypatch.setattr(hc, "worker_session_factory", db_factory)
 
     async def _fake_client():
         return None
@@ -272,7 +272,7 @@ async def test_circuit_breaker_does_not_trip_on_low_failure_rate(monkeypatch, db
         await db.commit()
 
     monkeypatch.setattr(settings, "STREAM_VALIDATION_ENABLED", True)
-    monkeypatch.setattr(hc, "async_session_factory", db_factory)
+    monkeypatch.setattr(hc, "worker_session_factory", db_factory)
 
     async def _fake_client():
         return None
@@ -309,7 +309,7 @@ async def test_circuit_breaker_is_scoped_per_account(monkeypatch, db_factory):
         await db.commit()
 
     monkeypatch.setattr(settings, "STREAM_VALIDATION_ENABLED", True)
-    monkeypatch.setattr(hc, "async_session_factory", db_factory)
+    monkeypatch.setattr(hc, "worker_session_factory", db_factory)
 
     async def _fake_client():
         return None
@@ -358,7 +358,7 @@ async def test_pipeline_validation_streams_per_account_not_whole_catalog(
         await db.commit()
 
     monkeypatch.setattr(settings, "STREAM_VALIDATION_ENABLED", True)
-    monkeypatch.setattr(hc, "async_session_factory", db_factory)
+    monkeypatch.setattr(hc, "worker_session_factory", db_factory)
 
     async def _fake_client():
         return None

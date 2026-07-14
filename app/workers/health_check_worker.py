@@ -6,7 +6,7 @@ import httpx
 from sqlalchemy import select, update, or_, text, func
 
 from app.config import settings
-from app.db.database import async_session_factory
+from app.db.database import worker_session_factory
 from app.models.database import Media, XtreamAccount
 from app.services.stream_service import build_stream_url
 from app.utils.time import now_ms
@@ -305,7 +305,7 @@ async def _run_health_check_batch():
         f"concurrency: ≤{concurrency}/account, timeout: {timeout}s)"
     )
 
-    async with async_session_factory() as db:
+    async with worker_session_factory() as db:
         items = await _sample_stream_candidates(db, batch_size, cutoff)
 
         if not items:
@@ -428,7 +428,7 @@ async def _run_pipeline_validation_impl():
         ),
     )
 
-    async with async_session_factory() as db:
+    async with worker_session_factory() as db:
         # CR-P05: the previous version selected EVERY stale/unchecked row for
         # ALL accounts with `.scalars().all()` into one Python list before
         # grouping by account — at hundreds of thousands of movie/episode

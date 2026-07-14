@@ -7,7 +7,7 @@ from sqlalchemy import select, update, or_, text, func
 
 from app.config import settings
 from app.db.database import worker_session_factory
-from app.models.database import Media, XtreamAccount
+from app.models.database import DownloadJob, Media, XtreamAccount
 from app.services.stream_service import build_stream_url
 from app.utils.time import now_ms
 from app.utils.db_retry import commit_with_retry
@@ -306,6 +306,25 @@ async def _sample_stream_candidates(db, batch_size: int, cutoff: int) -> list:
     return items
 
 
+async def _server_ids_with_active_downloads(db) -> set[str]:
+    """Server IDs that currently have a queued/running physical download.
+
+    Stream validation YIELDS to active downloads: on a low ``max_connections``
+    provider (some allow just 1), a validation probe and a download fight over
+    the provider's single connection slot — the provider then freezes/kills the
+    long-lived download connection, stalling the (foreground) transfer to a
+    crawl while the validator hammers thousands of streams. Skipping an account
+    that has downloads in flight keeps those downloads fast; the account is
+    picked up again on the next validation cycle once its queue drains.
+    """
+    rows = (await db.execute(
+        select(DownloadJob.server_id)
+        .where(DownloadJob.state.in_(("queued", "running")))
+        .distinct()
+    )).scalars().all()
+    return set(rows)
+
+
 async def _run_health_check_batch():
     """Check a batch of stream URLs for availability (cron job, random sample)."""
     batch_size = settings.HEALTH_CHECK_BATCH_SIZE
@@ -344,14 +363,28 @@ async def _run_health_check_batch():
 
         client = await _get_client()
 
+        # Validation yields to active downloads (see _server_ids_with_active_downloads).
+        busy_server_ids = await _server_ids_with_active_downloads(db)
+
         # Build tasks for all items
         tasks = []
+        skipped_busy = 0
         for item in items:
+            if item.server_id in busy_server_ids:
+                skipped_busy += 1
+                continue
             account_id = item.server_id.replace("xtream_", "")
             account = accounts.get(account_id)
             if not account:
                 continue
             tasks.append(_check_one(client, item, account, semaphores[account_id]))
+
+        if skipped_busy:
+            logger.info(
+                "Health check: skipped %d stream(s) on account(s) with active "
+                "downloads (validation yields to foreground downloads)",
+                skipped_busy,
+            )
 
         # Run all health checks concurrently
         results = await asyncio.gather(*tasks)
@@ -508,10 +541,19 @@ async def _run_pipeline_validation_impl():
         circuit_tripped = False
 
         client = await _get_client()
+        # Validation yields to active downloads (see _server_ids_with_active_downloads).
+        busy_server_ids = await _server_ids_with_active_downloads(db)
         for server_id in candidate_server_ids:
             account_id = server_id.replace("xtream_", "")
             account = accounts.get(account_id)
             if not account:
+                continue
+            if server_id in busy_server_ids:
+                logger.info(
+                    "Skipping validation of account %s — active download(s) in "
+                    "progress (validation yields to foreground downloads)",
+                    account_id,
+                )
                 continue
 
             # Stream just THIS account's candidates (server-side cursor,

@@ -3,6 +3,10 @@ from app.config import settings
 
 DATABASE_URL = f"sqlite+aiosqlite:///{settings.DB_PATH}"
 
+# API-facing engine — serves request handlers through get_db(). Explicit pool
+# sizing gives a burst of concurrent reads real headroom (WAL readers are cheap
+# and don't block each other), and an explicit, shorter pool_timeout makes a
+# genuinely stuck checkout fail fast (10s) instead of hanging the default 30s.
 engine = create_async_engine(
     DATABASE_URL,
     echo=False,
@@ -13,10 +17,42 @@ engine = create_async_engine(
     # validation held the single WAL writer lock). 60s lets a writer wait for
     # the gap between validation's per-batch commits instead of crashing.
     connect_args={"check_same_thread": False, "timeout": 60},
+    pool_size=20,
+    max_overflow=30,
+    pool_timeout=10,
+    pool_recycle=1800,
+    pool_pre_ping=True,
+)
+
+# Dedicated engine for long-running background workers (stream validation,
+# health check). Physically separate connection pool so a multi-hour
+# validation pass — which holds one session open across thousands of slow
+# per-stream network checks — can NEVER consume the connection slots that
+# serve API requests. This is the root-cause fix for the intermittent
+# `QueuePool limit of size 5 overflow 10 reached` 500s seen on
+# /api/media/episodes while a validation run was in flight. Small pool:
+# SQLite has a single writer, so the workers need only a couple of connections.
+worker_engine = create_async_engine(
+    DATABASE_URL,
+    echo=False,
+    connect_args={"check_same_thread": False, "timeout": 60},
+    pool_size=2,
+    max_overflow=2,
+    pool_timeout=30,
+    pool_recycle=1800,
 )
 
 async_session_factory = async_sessionmaker(
     engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+)
+
+# Session factory bound to the worker engine — import this (instead of
+# async_session_factory) from background workers so their DB work stays off
+# the API pool.
+worker_session_factory = async_sessionmaker(
+    worker_engine,
     class_=AsyncSession,
     expire_on_commit=False,
 )

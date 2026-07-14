@@ -280,7 +280,8 @@ class TestNoClientSuppliedPathField:
         fields = set(DownloadEnqueueRequest.model_fields.keys())
         forbidden = {"path", "dest_path", "destPath", "output_dir", "outputDir", "dir"}
         assert not (fields & forbidden), f"a path-like field leaked into the enqueue schema: {fields}"
-        assert fields == {"type", "unification_id", "server_id", "rating_key", "scope"}
+        # `seasons` (list[int], for scope=series_seasons) is a non-path selector.
+        assert fields == {"type", "unification_id", "server_id", "rating_key", "scope", "seasons"}
 
     def test_admin_downloads_enqueue_form_has_no_path_field(self):
         import inspect

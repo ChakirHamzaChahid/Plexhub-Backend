@@ -196,15 +196,24 @@ async def admin_downloads_versions(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "unificationId inconnu")
 
     labels = await media_service.account_labels(db)
-    versions = [
-        {
+    versions = []
+    for m, label in build_versions(
+        group.members, lambda m: labels.get(m.server_id, m.server_id)
+    ):
+        version = {
             "server_id": m.server_id,
             "rating_key": m.rating_key,
             "label": label,
             "is_broken": bool(m.is_broken),
+            "seasons": [],
         }
-        for m, label in build_versions(group.members, lambda m: labels.get(m.server_id, m.server_id))
-    ]
+        # For a show, list its available seasons so the UI can offer a
+        # per-season download in addition to the whole series.
+        if type == "show":
+            version["seasons"] = await download_service.list_series_seasons(
+                db, m.server_id, m.rating_key
+            )
+        versions.append(version)
     clean_title, clean_year = canonical_title_year(group.best)
     return templates.TemplateResponse(
         request,
@@ -233,10 +242,17 @@ async def admin_downloads_enqueue(
     server_id: str = Form(...),
     rating_key: str = Form(...),
     scope: str = Form(...),
+    # Repeated `seasons` checkbox fields (scope=series_seasons only); ignored
+    # otherwise. FastAPI collects same-named form fields into this list.
+    seasons: list[int] = Form(default=[]),
     db: AsyncSession = Depends(get_db),
 ):
-    if type not in ("movie", "show") or scope not in ("movie", "series_all"):
+    if type not in ("movie", "show") or scope not in (
+        "movie", "series_all", "series_seasons",
+    ):
         error = "Sélection invalide (type/scope inattendu)."
+    elif scope == "series_seasons" and not seasons:
+        error = "Aucune saison sélectionnée."
     else:
         result = await download_service.enqueue_selection(
             db,
@@ -245,6 +261,7 @@ async def admin_downloads_enqueue(
             server_id=server_id,
             rating_key=rating_key,
             scope=scope,
+            seasons=seasons or None,
         )
         error = result.error
 

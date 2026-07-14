@@ -506,6 +506,24 @@ async def _resolve_active_account(db: AsyncSession, server_id: str) -> Optional[
     return result.scalars().first()
 
 
+async def list_series_seasons(
+    db: AsyncSession, server_id: str, rating_key: str
+) -> list[int]:
+    """Distinct season numbers (``parent_index``) of a series' episodes for a
+    given source, ascending. Powers the per-season download picker. A NULL
+    season is normalized to 0 (mirrors ``compute_dest_path``)."""
+    rows = (await db.execute(
+        select(Media.parent_index)
+        .where(
+            Media.type == "episode",
+            Media.server_id == server_id,
+            Media.grandparent_rating_key == rating_key,
+        )
+        .distinct()
+    )).scalars().all()
+    return sorted({(s if s is not None else 0) for s in rows})
+
+
 async def enqueue_selection(
     db: AsyncSession,
     *,
@@ -513,14 +531,17 @@ async def enqueue_selection(
     unification_id: str,
     server_id: str,
     rating_key: str,
-    scope: str,                # 'movie' | 'series_all'
+    scope: str,                # 'movie' | 'series_all' | 'series_seasons'
+    seasons: Optional[list[int]] = None,  # required (non-empty) for series_seasons
 ) -> EnqueueResult:
     """Resolve an operator selection into 1..N persisted `DownloadJob` rows.
 
-    Movie -> exactly one job (`batch_id=None`). Series (`scope=series_all`)
-    -> one `DownloadBatch` + one job per episode of the chosen source. Never
-    raises for a "normal" failure mode (missing config/account/media/episodes)
-    — those come back as `EnqueueResult(jobs=[], error=...)`.
+    Movie -> exactly one job (`batch_id=None`). Series -> one `DownloadBatch` +
+    one job per episode of the chosen source: `scope=series_all` takes every
+    episode, `scope=series_seasons` takes only episodes whose season
+    (`parent_index`) is in `seasons`. Never raises for a "normal" failure mode
+    (missing config/account/media/episodes, empty season selection) — those come
+    back as `EnqueueResult(jobs=[], error=...)`.
     """
     if not settings.DOWNLOAD_DIR:
         return EnqueueResult(jobs=[], batch_id=None, error="DOWNLOAD_DIR n'est pas défini")
@@ -576,7 +597,18 @@ async def enqueue_selection(
         logger.info("Download enqueued: movie job=%s title=%r", job.id, job.title)
         return EnqueueResult(jobs=[job], batch_id=None, error=None)
 
-    if scope == "series_all":
+    if scope in ("series_all", "series_seasons"):
+        # Normalize the season selection up front; series_seasons REQUIRES a
+        # non-empty set, series_all ignores it (takes every season).
+        season_set: Optional[set[int]] = None
+        if scope == "series_seasons":
+            season_set = {int(s) for s in seasons} if seasons else set()
+            if not season_set:
+                return EnqueueResult(
+                    jobs=[], batch_id=None,
+                    error="aucune saison sélectionnée",
+                )
+
         show_row = (await db.execute(
             select(Media)
             .where(Media.server_id == server_id, Media.rating_key == rating_key)
@@ -585,15 +617,23 @@ async def enqueue_selection(
         if show_row is None:
             return EnqueueResult(jobs=[], batch_id=None, error="Série introuvable")
 
+        episode_filters = [
+            Media.type == "episode",
+            Media.server_id == server_id,
+            Media.grandparent_rating_key == rating_key,
+        ]
+        if season_set is not None:
+            episode_filters.append(Media.parent_index.in_(season_set))
+
         episodes = list((await db.execute(
-            select(Media).where(
-                Media.type == "episode",
-                Media.server_id == server_id,
-                Media.grandparent_rating_key == rating_key,
-            )
+            select(Media).where(*episode_filters)
         )).scalars().all())
         if not episodes:
-            return EnqueueResult(jobs=[], batch_id=None, error="aucun épisode disponible")
+            msg = (
+                "aucun épisode pour les saisons sélectionnées"
+                if season_set is not None else "aucun épisode disponible"
+            )
+            return EnqueueResult(jobs=[], batch_id=None, error=msg)
 
         show_title, show_year = canonical_title_year(show_row)
         batch = DownloadBatch(
@@ -603,7 +643,7 @@ async def enqueue_selection(
             title=show_title,
             server_id=server_id,
             rating_key=rating_key,
-            scope="series_all",
+            scope=scope,
             total_jobs=0,
             created_at=now_ms(),
         )

@@ -12,7 +12,7 @@ from sqlalchemy import select
 
 from app.models.database import DownloadBatch, DownloadJob, Media, XtreamAccount
 from app.services import download_service
-from app.services.download_service import enqueue_selection
+from app.services.download_service import enqueue_selection, list_series_seasons
 from app.utils.server_id import build_server_id
 from app.utils.time import now_ms
 
@@ -590,3 +590,81 @@ class TestToDownloadResponse:
         resp = download_service.to_download_response(job)
         assert resp.bytes_downloaded == 0
         assert resp.retries == 0
+
+
+# ─── Feature: enqueue specific season(s) of a series ────────────────────────
+
+
+class TestEnqueueSeriesSeasons:
+    def _seed(self):
+        return [
+            _account(), _show("series_1", page_offset=0),
+            _episode("ep_1.mkv", "series_1", season=1, episode=1, page_offset=1),
+            _episode("ep_2.mkv", "series_1", season=1, episode=2, page_offset=2),
+            _episode("ep_3.mkv", "series_1", season=2, episode=1, page_offset=3),
+            _episode("ep_4.mkv", "series_1", season=3, episode=1, page_offset=4),
+        ]
+
+    async def test_single_season_enqueues_only_that_season(self, db_session, download_dir):
+        db_session.add_all(self._seed())
+        await db_session.commit()
+
+        result = await enqueue_selection(
+            db_session, media_type="show", unification_id="tmdb://series_1",
+            server_id=SERVER_ID, rating_key="series_1",
+            scope="series_seasons", seasons=[1],
+        )
+
+        assert result.error is None
+        assert len(result.jobs) == 2
+        assert sorted((j.season, j.episode) for j in result.jobs) == [(1, 1), (1, 2)]
+        batch = await db_session.get(DownloadBatch, result.batch_id)
+        assert batch.scope == "series_seasons"
+        assert batch.total_jobs == 2
+
+    async def test_multiple_seasons_enqueues_union(self, db_session, download_dir):
+        db_session.add_all(self._seed())
+        await db_session.commit()
+
+        result = await enqueue_selection(
+            db_session, media_type="show", unification_id="tmdb://series_1",
+            server_id=SERVER_ID, rating_key="series_1",
+            scope="series_seasons", seasons=[1, 3],
+        )
+
+        assert result.error is None
+        assert sorted((j.season, j.episode) for j in result.jobs) == [(1, 1), (1, 2), (3, 1)]
+
+    async def test_empty_seasons_is_an_error_and_creates_nothing(self, db_session, download_dir):
+        db_session.add_all(self._seed())
+        await db_session.commit()
+
+        result = await enqueue_selection(
+            db_session, media_type="show", unification_id="x",
+            server_id=SERVER_ID, rating_key="series_1",
+            scope="series_seasons", seasons=[],
+        )
+
+        assert result.jobs == []
+        assert result.error == "aucune saison sélectionnée"
+        assert (await db_session.execute(select(DownloadJob))).scalars().all() == []
+        assert (await db_session.execute(select(DownloadBatch))).scalars().all() == []
+
+    async def test_unknown_season_returns_error(self, db_session, download_dir):
+        db_session.add_all(self._seed())
+        await db_session.commit()
+
+        result = await enqueue_selection(
+            db_session, media_type="show", unification_id="x",
+            server_id=SERVER_ID, rating_key="series_1",
+            scope="series_seasons", seasons=[99],
+        )
+        assert result.jobs == []
+        assert result.error == "aucun épisode pour les saisons sélectionnées"
+
+    async def test_list_series_seasons_returns_sorted_distinct(self, db_session, download_dir):
+        db_session.add_all(self._seed())
+        await db_session.commit()
+
+        seasons = await list_series_seasons(db_session, SERVER_ID, "series_1")
+        assert seasons == [1, 2, 3]

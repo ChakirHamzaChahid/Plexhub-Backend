@@ -578,4 +578,5 @@ class DownloadEnqueueRequest(BaseModel):
     unification_id: str
     server_id: str
     rating_key: str
-    scope: str                                  # 'movie' | 'series_all'
+    scope: str                                  # 'movie' | 'series_all' | 'series_seasons'
+    seasons: Optional[list[int]] = None         # required (non-empty) for series_seasons

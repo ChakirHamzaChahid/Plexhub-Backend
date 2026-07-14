@@ -25,25 +25,54 @@
           {% endif %}
         </td>
         <td class="py-1 text-right">
+          {% if type == 'show' %}
+          <div class="flex flex-col items-end gap-2">
+            <form hx-post="/admin/downloads" hx-target="#downloads-queue" hx-swap="innerHTML">
+              <input type="hidden" name="type" value="{{ type }}">
+              <input type="hidden" name="unification_id" value="{{ unification_id }}">
+              <input type="hidden" name="server_id" value="{{ v.server_id }}">
+              <input type="hidden" name="rating_key" value="{{ v.rating_key }}">
+              <input type="hidden" name="scope" value="series_all">
+              <button type="submit"
+                      class="px-2 py-1 rounded bg-slate-900 text-slate-100 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed">
+                Série complète (toutes saisons)
+              </button>
+            </form>
+            {% if v.seasons %}
+            <form hx-post="/admin/downloads" hx-target="#downloads-queue" hx-swap="innerHTML" class="text-right">
+              <input type="hidden" name="type" value="{{ type }}">
+              <input type="hidden" name="unification_id" value="{{ unification_id }}">
+              <input type="hidden" name="server_id" value="{{ v.server_id }}">
+              <input type="hidden" name="rating_key" value="{{ v.rating_key }}">
+              <input type="hidden" name="scope" value="series_seasons">
+              <div class="flex flex-wrap justify-end gap-x-2 gap-y-1 mb-1 max-w-xs">
+                {% for s in v.seasons %}
+                <label class="inline-flex items-center gap-1 text-slate-600">
+                  <input type="checkbox" name="seasons" value="{{ s }}">
+                  S{{ '%02d'|format(s) }}
+                </label>
+                {% endfor %}
+              </div>
+              <button type="submit"
+                      class="px-2 py-1 rounded bg-slate-700 text-slate-100 hover:bg-slate-600">
+                Télécharger la sélection
+              </button>
+            </form>
+            {% endif %}
+          </div>
+          {% else %}
           <form hx-post="/admin/downloads" hx-target="#downloads-queue" hx-swap="innerHTML" class="inline">
             <input type="hidden" name="type" value="{{ type }}">
             <input type="hidden" name="unification_id" value="{{ unification_id }}">
             <input type="hidden" name="server_id" value="{{ v.server_id }}">
             <input type="hidden" name="rating_key" value="{{ v.rating_key }}">
-            {% if type == 'show' %}
-            <input type="hidden" name="scope" value="series_all">
-            <button type="submit"
-                    class="px-2 py-1 rounded bg-slate-900 text-slate-100 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed">
-              Série complète (toutes saisons)
-            </button>
-            {% else %}
             <input type="hidden" name="scope" value="movie">
             <button type="submit"
                     class="px-2 py-1 rounded bg-slate-900 text-slate-100 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed">
               Télécharger
             </button>
-            {% endif %}
           </form>
+          {% endif %}
         </td>
       </tr>
       {% endfor %}

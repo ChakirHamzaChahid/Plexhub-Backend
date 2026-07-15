@@ -142,14 +142,40 @@ def _account_concurrency(account) -> int:
 _diag_reasons: dict[str, int] = {}
 
 
+def _parse_positive_int(raw: str | None) -> int | None:
+    """Parse a header value to a positive int, or None if absent/invalid/<=0."""
+    if not raw:
+        return None
+    try:
+        value = int(raw.strip())
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _total_size_from_content_range(raw: str | None) -> int | None:
+    """Extract the total resource size from a `Content-Range: bytes 0-8191/<total>`
+    header (as returned on a 206 Partial Content response). The `*` total
+    (unknown length) and malformed headers yield None."""
+    if not raw:
+        return None
+    total = raw.rsplit("/", 1)[-1].strip() if "/" in raw else None
+    return _parse_positive_int(total)
+
+
 async def _check_one(client: httpx.AsyncClient, item, account, semaphore):
     """Check a single stream URL using HEAD first, then Range GET if needed.
 
-    Returns (item, is_broken, reason).
+    Returns (item, is_broken, reason, size_bytes). `size_bytes` is the best
+    available estimate of the stream's total file size in bytes (from the
+    HEAD `Content-Length`, or the `Content-Range` total on a 206 Range GET),
+    or None when no reliable total size could be determined — no extra
+    network calls are made to get it, it's read off the HEAD/GET already
+    performed for liveness checking.
     """
     url = build_stream_url(account, item.rating_key)
     if not url:
-        return item, None, "no_url"
+        return item, None, "no_url", None
 
     async with semaphore:
         try:
@@ -157,7 +183,7 @@ async def _check_one(client: httpx.AsyncClient, item, account, semaphore):
             head_resp = await client.head(url, follow_redirects=True)
 
             if head_resp.status_code >= 400:
-                return item, True, f"head_{head_resp.status_code}"
+                return item, True, f"head_{head_resp.status_code}", None
 
             # If HEAD returns 200/206, check Content-Type
             # Don't trust Content-Type when Content-Length is 0 — Xtream
@@ -165,11 +191,19 @@ async def _check_one(client: httpx.AsyncClient, item, account, semaphore):
             # for dead streams. Fall through to Range GET for verification.
             ct = head_resp.headers.get("content-type", "")
             content_length = head_resp.headers.get("content-length")
+            # Best-effort total size from the HEAD alone. On a 200 response
+            # Content-Length IS the total size; on a 206 (some providers HEAD
+            # with a Range too) fall back to the Content-Range total.
+            head_size = _parse_positive_int(content_length)
+            if head_size is None:
+                head_size = _total_size_from_content_range(
+                    head_resp.headers.get("content-range")
+                )
             if _content_type_is_video(ct) and content_length != "0":
-                return item, False, "head_ct_video"
+                return item, False, "head_ct_video", head_size
 
             if _content_type_is_error(ct):
-                return item, True, f"head_ct_error:{ct.split(';')[0].strip()}"
+                return item, True, f"head_ct_error:{ct.split(';')[0].strip()}", None
 
             # Step 2: Content-Type ambiguous — do Range GET to inspect bytes
             async with client.stream(
@@ -178,12 +212,34 @@ async def _check_one(client: httpx.AsyncClient, item, account, semaphore):
                 headers={"Range": "bytes=0-8191"},
                 follow_redirects=True,
             ) as resp:
+                # A 206 Range response's own Content-Length is just the size
+                # of the returned chunk (~8192 bytes), NOT the total file
+                # size — never use it as such. The total (if known) is in
+                # Content-Range's "/<total>" suffix. A plain 200 (provider
+                # ignored the Range header and sent the whole body) DOES
+                # have a Content-Length equal to the total.
+                get_size = head_size
+                if get_size is None:
+                    if resp.status_code == 206:
+                        get_size = _total_size_from_content_range(
+                            resp.headers.get("content-range")
+                        )
+                    elif resp.status_code == 200:
+                        get_size = _parse_positive_int(
+                            resp.headers.get("content-length")
+                        )
+
                 if resp.status_code in (200, 206):
                     ct = resp.headers.get("content-type", "")
                     if _content_type_is_video(ct):
-                        return item, False, "get_ct_video"
+                        return item, False, "get_ct_video", get_size
                     if _content_type_is_error(ct):
-                        return item, True, f"get_ct_error:{ct.split(';')[0].strip()}"
+                        return (
+                            item,
+                            True,
+                            f"get_ct_error:{ct.split(';')[0].strip()}",
+                            None,
+                        )
 
                     # Read first chunk and check magic bytes
                     content = b""
@@ -193,24 +249,29 @@ async def _check_one(client: httpx.AsyncClient, item, account, semaphore):
                     if len(content) > 0:
                         is_video = _looks_like_video(content)
                         if is_video:
-                            return item, False, "get_magic_ok"
-                        return item, True, f"get_magic_fail:{len(content)}b"
-                    return item, True, "get_empty"
+                            return item, False, "get_magic_ok", get_size
+                        return item, True, f"get_magic_fail:{len(content)}b", None
+                    return item, True, "get_empty", None
                 elif resp.status_code == 416:
                     # Range not satisfiable but HEAD was OK — probably valid
-                    return item, False, "get_416_head_ok"
+                    return item, False, "get_416_head_ok", head_size
                 else:
-                    return item, resp.status_code >= 400, f"get_{resp.status_code}"
+                    return (
+                        item,
+                        resp.status_code >= 400,
+                        f"get_{resp.status_code}",
+                        None,
+                    )
 
         except httpx.TimeoutException:
-            return item, True, "timeout"
+            return item, True, "timeout", None
         except httpx.ConnectError:
-            return item, True, "connect_error"
+            return item, True, "connect_error", None
         except httpx.InvalidURL:
             # Provider answered with a malformed redirect (bad Location header)
             # that httpx can't follow — the stream is effectively broken. Expected
             # provider-side garbage, so classify it without a noisy warning.
-            return item, True, "bad_redirect"
+            return item, True, "bad_redirect", None
         except Exception as e:
             # Many remote-IPTV failures (RemoteProtocolError, ReadError, SSL…)
             # stringify to an empty message — include the type so the log line
@@ -218,7 +279,7 @@ async def _check_one(client: httpx.AsyncClient, item, account, semaphore):
             logger.warning(
                 f"Health check error for {item.rating_key}: {type(e).__name__}: {e}"
             )
-            return item, True, f"exception:{type(e).__name__}"
+            return item, True, f"exception:{type(e).__name__}", None
 
 
 # Serializes the two stream-validation writers (the hour=2 cron run() and the
@@ -391,7 +452,7 @@ async def _run_health_check_batch():
 
         # Apply results to DB
         reasons: dict[str, int] = {}
-        for item, is_broken, reason in results:
+        for item, is_broken, reason, size_bytes in results:
             if is_broken is None:
                 continue
             reasons[reason] = reasons.get(reason, 0) + 1
@@ -405,17 +466,26 @@ async def _run_health_check_batch():
                 and (definitive or new_error_count >= settings.STREAM_BROKEN_THRESHOLD)
             )
 
+            values = {
+                "is_broken": mark_broken,
+                "last_stream_check": now_ms(),
+                "stream_error_count": new_error_count,
+            }
+            # Only overwrite file_size when we actually captured a fresh size
+            # this check — never blank out a previously-known size with NULL
+            # just because this particular probe didn't yield one (e.g. it
+            # short-circuited on an error path before any Content-Length was
+            # read).
+            if size_bytes is not None:
+                values["file_size"] = size_bytes
+
             await db.execute(
                 update(Media)
                 .where(
                     Media.rating_key == item.rating_key,
                     Media.server_id == item.server_id,
                 )
-                .values(
-                    is_broken=mark_broken,
-                    last_stream_check=now_ms(),
-                    stream_error_count=new_error_count,
-                )
+                .values(**values)
             )
             checked += 1
             if mark_broken:
@@ -599,7 +669,7 @@ async def _run_pipeline_validation_impl():
 
             pending_updates = 0
             for coro in asyncio.as_completed(tasks):
-                item, is_broken, reason = await coro
+                item, is_broken, reason, size_bytes = await coro
                 if is_broken is None:
                     continue
 
@@ -644,17 +714,24 @@ async def _run_pipeline_validation_impl():
                 if was_broken and not is_broken:
                     total_recovered += 1
 
+                values = {
+                    "is_broken": mark_broken,
+                    "last_stream_check": now_ms(),
+                    "stream_error_count": new_error_count,
+                }
+                # See _run_health_check_batch: never overwrite a known
+                # file_size with NULL just because this probe didn't
+                # produce a fresh one.
+                if size_bytes is not None:
+                    values["file_size"] = size_bytes
+
                 await db.execute(
                     update(Media)
                     .where(
                         Media.rating_key == item.rating_key,
                         Media.server_id == item.server_id,
                     )
-                    .values(
-                        is_broken=mark_broken,
-                        last_stream_check=now_ms(),
-                        stream_error_count=new_error_count,
-                    )
+                    .values(**values)
                 )
                 total_checked += 1
                 if mark_broken:

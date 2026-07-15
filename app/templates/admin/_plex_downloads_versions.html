@@ -1,0 +1,147 @@
+<div class="text-xs">
+  <div class="mb-3 text-slate-600 font-medium">
+    {{ title }}{% if year %} ({{ year }}){% endif %}
+  </div>
+
+  {% if type == 'movie' %}
+    {% if sources %}
+    <table class="w-full text-xs">
+      <thead class="text-slate-500 uppercase">
+        <tr>
+          <th class="text-left py-1 pr-2">Serveur</th>
+          <th class="text-left py-1 pr-2">Résolution</th>
+          <th class="text-left py-1 pr-2">Taille</th>
+          <th class="text-left py-1 pr-2">Codec</th>
+          <th class="py-1"></th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-slate-100">
+        {% for source in sources %}
+        <tr>
+          <td class="py-1 pr-2">
+            {{ source.server_name }}
+            {% if source.owner_title %}<span class="text-slate-400">· {{ source.owner_title }}</span>{% endif %}
+          </td>
+          <td class="py-1 pr-2">{{ source.resolution or "—" }}</td>
+          <td class="py-1 pr-2">{{ source.size_h }}</td>
+          <td class="py-1 pr-2 text-slate-400">
+            {{ source.video_codec or "—" }}{% if source.container %} / {{ source.container }}{% endif %}
+          </td>
+          <td class="py-1 text-right">
+            <form hx-post="/admin/plex-downloads" hx-target="#downloads-queue" hx-swap="innerHTML" class="inline">
+              <input type="hidden" name="type" value="{{ type }}">
+              <input type="hidden" name="unification_id" value="{{ unification_id }}">
+              <input type="hidden" name="scope" value="movie">
+              <input type="hidden" name="source" value="{{ source.server_id }}|{{ source.rating_key }}">
+              <button type="submit"
+                      class="px-2 py-1 rounded bg-slate-900 text-slate-100 hover:bg-slate-700">
+                Télécharger
+              </button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="text-slate-400 italic">Aucune source disponible.</p>
+    {% endif %}
+
+  {% else %}
+    <div class="mb-4">
+      <h4 class="text-slate-500 uppercase mb-1">Série entière</h4>
+      {% if sources %}
+      <table class="w-full text-xs">
+        <thead class="text-slate-500 uppercase">
+          <tr>
+            <th class="text-left py-1 pr-2">Serveur</th>
+            <th class="py-1"></th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-100">
+          {% for source in sources %}
+          <tr>
+            <td class="py-1 pr-2">
+              {{ source.server_name }}
+              {% if source.owner_title %}<span class="text-slate-400">· {{ source.owner_title }}</span>{% endif %}
+            </td>
+            <td class="py-1 text-right">
+              <form hx-post="/admin/plex-downloads" hx-target="#downloads-queue" hx-swap="innerHTML" class="inline">
+                <input type="hidden" name="type" value="{{ type }}">
+                <input type="hidden" name="unification_id" value="{{ unification_id }}">
+                <input type="hidden" name="scope" value="series_all">
+                <input type="hidden" name="source" value="{{ source.server_id }}|{{ source.rating_key }}">
+                <button type="submit"
+                        class="px-2 py-1 rounded bg-slate-900 text-slate-100 hover:bg-slate-700">
+                  Série complète (toutes saisons)
+                </button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p class="text-slate-400 italic">Aucune source disponible.</p>
+      {% endif %}
+    </div>
+
+    {% if seasons %}
+    <div class="mb-4">
+      <h4 class="text-slate-500 uppercase mb-1">Par saison</h4>
+      <form hx-post="/admin/plex-downloads" hx-target="#downloads-queue" hx-swap="innerHTML">
+        <input type="hidden" name="type" value="{{ type }}">
+        <input type="hidden" name="unification_id" value="{{ unification_id }}">
+        <input type="hidden" name="scope" value="seasons">
+        <table class="w-full text-xs mb-2">
+          <thead class="text-slate-500 uppercase">
+            <tr>
+              <th class="text-left py-1 pr-2">Saison</th>
+              <th class="text-left py-1 pr-2">Source</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100">
+            {% for season in seasons %}
+            <tr>
+              <td class="py-1 pr-2">S{{ '%02d'|format(season.season) }}</td>
+              <td class="py-1 pr-2">
+                <select name="season_pick" class="border border-slate-300 rounded px-1 py-0.5 text-xs">
+                  <option value="">— ne pas télécharger</option>
+                  {% for src in season.sources %}
+                  <option value="{{ season.season }}|{{ src.server_id }}|{{ src.show_rating_key }}">
+                    {{ src.server_name }} · {{ src.resolution or "—" }} · {{ src.size_h }} ({{ src.episode_count }} ép.)
+                  </option>
+                  {% endfor %}
+                </select>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        <button type="submit"
+                class="px-2 py-1 rounded bg-slate-700 text-slate-100 hover:bg-slate-600">
+          Télécharger les saisons
+        </button>
+      </form>
+    </div>
+
+    <div>
+      <h4 class="text-slate-500 uppercase mb-1">Par épisode</h4>
+      {% for season in seasons %}
+      <div class="mb-2">
+        <button type="button"
+                hx-get="/admin/plex-downloads/{{ type }}/{{ unification_id }}/episodes?season={{ season.season }}"
+                hx-target="#plex-episodes-{{ season.season }}"
+                hx-swap="innerHTML"
+                class="px-2 py-1 rounded border border-slate-300 bg-white hover:bg-slate-100">
+          S{{ '%02d'|format(season.season) }}
+        </button>
+        <div id="plex-episodes-{{ season.season }}" class="mt-1"></div>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <p class="text-slate-400 italic">Aucune saison disponible.</p>
+    {% endif %}
+  {% endif %}
+</div>

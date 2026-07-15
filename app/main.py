@@ -15,6 +15,7 @@ from app.api import (
     accounts,
     admin,
     admin_downloads,
+    admin_plex_downloads,
     ai,
     api_keys,
     categories,
@@ -23,6 +24,7 @@ from app.api import (
     live,
     media,
     plex,
+    plex_downloads,
     stream,
     sync,
     tv_auth,
@@ -362,6 +364,39 @@ async def lifespan(app: FastAPI):
                     coalesce=True,
                     misfire_grace_time=3600,
                 )
+
+            # Plex catalogue sync cron (feature "Télécharger Plex", ticket C7)
+            # — OPTIONAL: only registered when BOTH the feature is configured
+            # (`PLEX_ACCOUNT_TOKEN`) AND a periodic interval is requested
+            # (`PLEX_SYNC_INTERVAL_HOURS > 0`, default 0 = manual-only via the
+            # admin UI's "Sync" button, `plex_sync_service.run_full_sync`'s
+            # own default). Master-only: this whole block sits under the
+            # `if is_master:` guard that owns `scheduler` — same election as
+            # every other cron here (house-law piège 7/17). No-op by
+            # construction when the feature is disabled: nothing is added to
+            # `scheduler` at all, so there's no job to skip/no-op at runtime.
+            if settings.PLEX_ACCOUNT_TOKEN and settings.PLEX_SYNC_INTERVAL_HOURS > 0:
+
+                async def _scheduled_plex_sync():
+                    from app.services import plex_sync_service
+                    from app.db.database import async_session_factory
+                    # `run_full_sync` claims `plex_sync_status` itself (idle ->
+                    # running) and returns early with status="already_running"
+                    # if a sync is already in flight — no extra mutex needed
+                    # here even though `max_instances=1` already prevents this
+                    # job's own overlap.
+                    await plex_sync_service.run_full_sync(async_session_factory)
+
+                scheduler.add_job(
+                    _scheduled_plex_sync,
+                    "interval",
+                    hours=settings.PLEX_SYNC_INTERVAL_HOURS,
+                    id="plex_catalogue_sync",
+                    max_instances=1,
+                    coalesce=True,
+                    misfire_grace_time=300,
+                )
+
             scheduler.start()
 
             # Physical media download queue drain (PH-DL-06) — master-only,
@@ -391,6 +426,29 @@ async def lifespan(app: FastAPI):
 
             from app.utils.tasks import create_background_task
             create_background_task(_run_download_worker(), name="download_worker")
+
+            # Plex catalogue sync status reap (feature "Télécharger Plex",
+            # ticket C6) — a `plex_sync_status` row left `running` belongs to
+            # a previous process instance that is definitely dead (mirrors
+            # `plex_sync_service.reap_sync_status`'s own docstring); reap it
+            # to `idle` at master boot so a stale "synchronisation…" badge
+            # never gets stuck in the admin UI. Guarded by `PLEX_ACCOUNT_TOKEN`
+            # so nothing touches the DB when the feature is unconfigured
+            # (mirrors `run_full_sync`'s own no-op guard), and dispatched via
+            # `create_background_task` so it never blocks lifespan startup —
+            # same non-blocking convention as `_run_download_worker` above.
+            # Deliberately independent of `DOWNLOAD_DIR`/`_run_download_worker`
+            # (the Plex sync status can need reaping even when the physical
+            # download queue itself is disabled).
+            async def _reap_plex_sync():
+                if not settings.PLEX_ACCOUNT_TOKEN:
+                    return
+                from app.services import plex_sync_service
+                from app.db.database import async_session_factory
+
+                await plex_sync_service.reap_sync_status(async_session_factory)
+
+            create_background_task(_reap_plex_sync(), name="plex_sync_reap")
 
             # Non-blocking initial sync, then enrichment, then Plex generation
             async def initial_sync_then_enrich():
@@ -514,6 +572,11 @@ app.include_router(admin.router, dependencies=[Depends(verify_admin_basic_auth)]
 # as the rest of /admin (identical convention, separate router module per the
 # feature's disjoint-file-ownership rule, docs/20-impl-media-download.md §7.3).
 app.include_router(admin_downloads.router, dependencies=[Depends(verify_admin_basic_auth)])
+# Admin "Télécharger Plex" tab (ticket C6) — mirror of the block above, same
+# self-prefixed "/admin/plex-downloads" + same Basic Auth guard at the same
+# mount site; separate router module per the feature's disjoint-file-
+# ownership convention.
+app.include_router(admin_plex_downloads.router, dependencies=[Depends(verify_admin_basic_auth)])
 
 # Interactive API docs — kept off the public default URLs above (docs_url=None …)
 # and re-exposed here behind the SAME HTTP Basic Auth as /admin, so they're
@@ -543,9 +606,14 @@ async def protected_openapi():
 #   - `downloads.router` (PH-DL-06) — its own /api/admin/downloads prefix +
 #     module-level verify_master_key (JSON read mirror of the download
 #     queue, master secret only — same convention as api_keys.router).
+#   - `plex_downloads.router` (feature "Télécharger Plex", ticket C7) — its
+#     own /api/admin/plex-downloads prefix + module-level verify_master_key
+#     (JSON read-only mirror of the Plex catalogue/servers, master secret
+#     only — same convention as downloads.router above).
 app.include_router(ai.router)
 app.include_router(api_keys.router)
 app.include_router(downloads.router)
+app.include_router(plex_downloads.router)
 
 # Prometheus /metrics + per-request HTTP metrics
 from app.utils.metrics import setup_instrumentator  # noqa: E402

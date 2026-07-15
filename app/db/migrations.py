@@ -44,6 +44,7 @@ async def run_migrations(engine: AsyncEngine) -> None:
     await _migration_016_encrypt_xtream_passwords(engine)
     await _migration_017_create_media_group_snapshot(engine)
     await _migration_018_create_download_tables(engine)
+    await _migration_019_create_plex_tables(engine)
 
     logger.info("All migrations completed successfully")
 
@@ -840,3 +841,103 @@ async def _migration_018_create_download_tables(engine: AsyncEngine) -> None:
             logger.info("Migration 018: download_batch/download_job tables created")
         except Exception as e:
             logger.warning("Migration 018: tables may already exist: %s", e)
+
+
+async def _migration_019_create_plex_tables(engine: AsyncEngine) -> None:
+    """Create the Plex shared-servers catalogue tables: plex_server,
+    plex_media_item, plex_sync_status (feature "Télécharger Plex",
+    docs/10-prd-media-download.md).
+
+    Purely additive, fully isolated from the existing `media`/Xtream schema:
+    no ALTER on an existing table, no FK to enforce. `plex_media_item` is a
+    lightweight, server-scoped mirror of `Media` used only as a download
+    source (never surfaced by `/api/media` or the .strm/NFO generator).
+    `plex_server` stores one row per discovered Plex Media Server (owned or
+    shared) with its per-server `access_token` Fernet-encrypted at rest
+    (`EncryptedString`, same convention as `XtreamAccount.password`,
+    CR-S03) — never plaintext, never logged. `plex_sync_status` is a
+    singleton (id=1) claimed via conditional UPDATE by the sync service.
+
+    Idempotent: CREATE TABLE/INDEX IF NOT EXISTS throughout; a fresh DB
+    already has all three tables (+ every index below) via
+    Base.metadata.create_all (models/database.py's PlexServer/
+    PlexMediaItem/PlexSyncStatus), so this is a silent no-op there, and an
+    upgraded DB gets them here — same convergence invariant as migrations
+    017/018 (CR-C05/CR-P02).
+    """
+    logger.info("Migration 019: Creating plex_server/plex_media_item/plex_sync_status tables")
+
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS plex_server (
+                    client_identifier TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    owner_title TEXT,
+                    owned INTEGER NOT NULL DEFAULT 0,
+                    access_token TEXT,
+                    base_uri TEXT,
+                    is_reachable INTEGER NOT NULL DEFAULT 0,
+                    last_synced_at BIGINT,
+                    last_sync_error TEXT,
+                    created_at BIGINT NOT NULL,
+                    updated_at BIGINT NOT NULL
+                )
+            """))
+
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS plex_media_item (
+                    server_id TEXT NOT NULL,
+                    rating_key TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    year INTEGER,
+                    parent_rating_key TEXT,
+                    grandparent_rating_key TEXT,
+                    parent_index INTEGER,
+                    "index" INTEGER,
+                    imdb_id TEXT,
+                    tmdb_id TEXT,
+                    tvdb_id TEXT,
+                    unification_id TEXT,
+                    thumb_url TEXT,
+                    added_at BIGINT,
+                    height INTEGER,
+                    width INTEGER,
+                    video_codec TEXT,
+                    audio_codec TEXT,
+                    container TEXT,
+                    bitrate INTEGER,
+                    part_key TEXT,
+                    part_size BIGINT,
+                    duration_ms BIGINT,
+                    synced_at BIGINT NOT NULL,
+                    PRIMARY KEY (server_id, rating_key)
+                )
+            """))
+
+            for idx_sql in [
+                # Resolve a show/movie's unified group for the download-source picker.
+                "CREATE INDEX IF NOT EXISTS ix_plex_item_type_unif ON plex_media_item(type, unification_id)",
+                # List a show's episodes (same server) for "download whole series".
+                "CREATE INDEX IF NOT EXISTS ix_plex_item_show ON plex_media_item(server_id, grandparent_rating_key)",
+                # Recency-ordered browse per type.
+                "CREATE INDEX IF NOT EXISTS ix_plex_item_type_added ON plex_media_item(type, added_at)",
+                # Title search/sort per type.
+                "CREATE INDEX IF NOT EXISTS ix_plex_item_type_title ON plex_media_item(type, title)",
+            ]:
+                await conn.execute(text(idx_sql))
+
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS plex_sync_status (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    state TEXT NOT NULL DEFAULT 'idle',
+                    started_at BIGINT,
+                    finished_at BIGINT,
+                    error TEXT
+                )
+            """))
+
+            logger.info("Migration 019: plex_server/plex_media_item/plex_sync_status tables created")
+        except Exception as e:
+            logger.warning("Migration 019: tables may already exist: %s", e)

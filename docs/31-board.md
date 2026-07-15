@@ -87,4 +87,25 @@ dans l'immédiat.
 
 DoD de ces follow-ups (quand ils seront pris) : même gate que tout ticket de ce board (§ Definition of Done ci-dessus)
 + test de garde dédié à chaque finding.
+
+## Follow-ups post-review (P2/P3) — feature « Télécharger Plex » (tickets C1→C7)
+
+Feature miroir de « Télécharger » (Xtream) mais avec une source de catalogue distincte (serveurs Plex Media
+Server partagés via plex.tv, tables `plex_server`/`plex_media_item`/`plex_sync_status`, migration 019).
+PRD : `docs/10-prd-plex-download.md`. Réutilise intégralement la file `download_job` + le worker
+`download_worker` de la feature Xtream (discriminant `server_id` préfixe `plex_`) — les follow-ups
+ci-dessous concernent **le nouveau périmètre spécifique Plex** (découverte/catalogue/sources), pas le
+worker/la file déjà couverts par les follow-ups DL-03/04/05 ci-dessus.
+
+| ID | Titre | Sévérité | Pourquoi non corrigé maintenant | Owner suggéré |
+|---|---|---|---|---|
+| **DL-PLEX-01** | Pas de re-probe automatique de connexion au moment du téléchargement | P2 | `plex_server.is_reachable`/`base_uri` ne sont rafraîchis qu'au sync catalogue (manuel ou cron `PLEX_SYNC_INTERVAL_HOURS`) ; si le serveur change d'IP/port entre deux syncs, le job échoue proprement (`failed`, retries épuisés) plutôt que de re-probe à la volée — comportement sûr mais pas optimal. Un re-probe ciblé avant `resolve_job_url` ajouterait une latence/risque réseau sur le chemin critique du worker ; à évaluer en fonction du taux d'échec observé en prod avant d'investir. | `backend-developer` (worker), en coordination `sync-specialist` |
+| **DL-PLEX-02** | Pas de sélection multi-versions par serveur (résolution/piste audio) | P2 | MVP retient le **meilleur** élément `Media[]` par item au sync (`plex_media_item` = 1 ligne par `(server_id, rating_key)`) — un PMS qui expose plusieurs qualités du même fichier n'en montre qu'une. Élargir `plex_media_item` à une ligne par élément `Media[]` change la clé primaire effective et la logique de dédup (`source_count` compterait des variantes, pas des serveurs) — refonte non-triviale, hors scope C7. | `db-migration-specialist` + `backend-developer` (effort dédié) |
+| **DL-PLEX-03** | Pas de NFO/poster sidecar écrit à côté du fichier téléchargé | P2 | La feature Xtream sœur a depuis gagné un sidecar `.nfo` best-effort (`download_worker._write_sidecar_nfo`, lit la table `Media` par `(server_id, rating_key)`) — mais il **ne couvre pas** les jobs Plex : un `server_id` préfixé `plex_` ne matche aucune ligne `Media` (catalogue disjoint), donc `_load_media` renvoie `None` et le sidecar est silencieusement sauté. `plex_media_item` porte assez de métadonnées (titre/année/ids) pour un NFO minimal, mais réutiliser `nfo_builder` suppose un adaptateur `PlexMediaItem`→`PlexMovie`/`PlexEpisode` dédié (le mapping existant, `download_nfo.render_media_nfo`, ne consomme que `Media`) — effort P2, pas MVP. | `plex-generator-specialist` |
+| **DL-PLEX-04** | Vignettes non proxifiées (`thumb_url` nécessite le token pour être résolu) | P2 | `PlexMediaItem.thumb_url` est stocké tel quel (chemin relatif PMS, sans token — volontaire, cf. PRD §9) ; aucun endpoint ne le sert en image directement car cela nécessiterait un proxy serveur qui attache le token per-serveur à la volée (nouvelle surface : quel serveur, quelle expiration de token, quel rate-limit) — pas nécessaire au MVP catalogue texte-only. | `backend-developer` (nouvel endpoint proxy, si demande produit) |
+| **DL-PLEX-05** | Pas de protection CSRF sur `POST /admin/plex-downloads*` (sync/enqueue) | P2 (sécu) | **Même dette transverse existante `CR-S07`/`DL-03`** qui couvre déjà tout `/admin` (pas seulement Xtream) — ce nouvel onglet hérite du même gap, pas une régression propre à Plex. À corriger dans le même effort transverse `/admin` mentionné pour DL-03, pas séparément par onglet. | `security-reviewer` puis `backend-developer` (effort dédié `/admin`, même que DL-03) |
+| **DL-PLEX-06** | Pas de métriques Prometheus dédiées à la sync catalogue Plex | P2 | Miroir de **F-103** (métriques download déjà trackées non livrées au MVP Xtream) : aucun `plexhub_plex_sync_*` (durée, serveurs joignables/total, items synchronisés). Le suivi actuel passe par `GET /admin/plex-downloads/sync/status` (polling HTMX) et `GET /api/admin/plex-downloads/servers` (JSON, `isReachable`/`lastSyncedAt`/`lastSyncError`), suffisant pour le MVP ; les métriques HTTP génériques (instrumentator) couvrent déjà les routes elles-mêmes. | `observability-analyst` / `backend-developer` (sprint suivant, avec F-103) |
+
+DoD de ces follow-ups (quand ils seront pris) : même gate que tout ticket de ce board (§ Definition of Done ci-dessus)
++ test de garde dédié à chaque finding.
 </content>

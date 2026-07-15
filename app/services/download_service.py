@@ -493,6 +493,9 @@ async def _find_non_terminal_job(
     return result.scalars().first()
 
 
+find_non_terminal_job = _find_non_terminal_job  # public alias for plex_download_service (C5)
+
+
 async def _resolve_active_account(db: AsyncSession, server_id: str) -> Optional[XtreamAccount]:
     account_id = parse_server_id(server_id)
     if not account_id:

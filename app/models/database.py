@@ -524,3 +524,124 @@ class DownloadJob(Base):
         # Deliberately NOT unique — a `completed` job must be re-enqueue-able later.
         Index("ix_download_job_item", "server_id", "rating_key"),
     )
+
+
+class PlexServer(Base):
+    """PH-PLEX-01: a Plex Media Server reachable via the account's plex.tv
+    token (owned or shared), discovered against plex.tv/api/resources
+    (docs/10-prd-media-download.md — feature "Télécharger Plex").
+
+    `access_token` is a PER-SERVER secret (plex.tv issues a distinct token
+    per resource) and is Fernet-encrypted at rest exactly like
+    `XtreamAccount.password` (CR-S03, `EncryptedString`) — it must NEVER be
+    exposed in an API response, the admin HTML, or a log line (house-law
+    piège "secrets jamais loggés"). `base_uri` is the winning connection
+    picked by the reachability probe and intentionally does NOT carry the
+    token (Plex accepts it as a header/query param separately) so it is safe
+    to display/log for diagnostics. This table is fully isolated from the
+    `media` catalog — Plex items live in `PlexMediaItem` below and never
+    enter `/api/media`, the unified/`.strm` generation, or Android-facing
+    responses (that stays Xtream-only, spec §1).
+    """
+
+    __tablename__ = "plex_server"
+
+    client_identifier = Column(Text, primary_key=True)   # plex.tv machine id, stable across renames
+    name = Column(Text, nullable=False)                    # friendly server name (plex.tv "name")
+    owner_title = Column(Text)                              # sourceTitle (sharer's name); NULL if owned by this account
+    owned = Column(Boolean, nullable=False, default=False)  # True if this account owns the server
+    access_token = Column(EncryptedString())                # per-server secret, encrypted at rest, NEVER exposed
+    base_uri = Column(Text)                                  # winning probed connection URI, WITHOUT token
+    is_reachable = Column(Boolean, nullable=False, default=False)  # last probe result
+    last_synced_at = Column(BigInteger)                      # epoch ms, last successful catalogue sync
+    last_sync_error = Column(Text)                            # bounded message, NEVER a token/URL
+    created_at = Column(BigInteger, nullable=False)            # epoch ms
+    updated_at = Column(BigInteger, nullable=False)            # epoch ms
+
+
+class PlexMediaItem(Base):
+    """PH-PLEX-01: lightweight mirror of `Media` for items pulled from a Plex
+    shared server's catalogue (docs/10-prd-media-download.md).
+
+    Deliberately a SEPARATE table from `media` — this catalogue is a download
+    source only (never surfaced through the existing Xtream-facing
+    `/api/media` endpoints or the .strm/NFO generator), so it carries its own
+    schema rather than overloading `Media`'s composite key/columns. Primary
+    key `(server_id, rating_key)` mirrors `Media`'s convention but is scoped
+    per-server (a `rating_key` is only unique within one Plex server).
+
+    Populated by a mark-and-sweep sync per server: every item touched in a
+    run gets `synced_at` bumped to that run's timestamp; rows left behind
+    (stale `synced_at`) are swept afterwards — same idempotent-upsert spirit
+    as the Xtream `sync_worker`, but simpler (no differential page-offset
+    eviction, CR-F02 does not apply here).
+    """
+
+    __tablename__ = "plex_media_item"
+
+    server_id = Column(Text, primary_key=True)     # "plex_<client_identifier>"
+    rating_key = Column(Text, primary_key=True)     # Plex ratingKey, scoped to this server
+
+    type = Column(Text, nullable=False)              # 'movie' | 'show' | 'episode'
+    title = Column(Text, nullable=False)
+    year = Column(Integer)
+
+    parent_rating_key = Column(Text)                  # episode -> season ratingKey (same server)
+    grandparent_rating_key = Column(Text)              # episode -> show ratingKey (same server)
+    parent_index = Column(Integer)                      # season number
+    index = Column("index", Integer)                     # episode number; "index" is a SQL reserved word,
+                                                           # quoted via the explicit column name below
+
+    imdb_id = Column(Text)
+    tmdb_id = Column(Text)
+    tvdb_id = Column(Text)
+    unification_id = Column(Text)                          # Android rule; populated for movies/shows post-sync, NULL on episodes
+
+    thumb_url = Column(Text)                                 # PMS-relative path (e.g. /library/metadata/123/thumb), no token
+
+    added_at = Column(BigInteger)                             # epoch ms (Plex addedAt)
+
+    # Best Media[] element retained for this item (Plex may list several).
+    height = Column(Integer)
+    width = Column(Integer)
+    video_codec = Column(Text)
+    audio_codec = Column(Text)
+    container = Column(Text)
+    bitrate = Column(Integer)
+
+    part_key = Column(Text)                                    # /library/parts/... — NOT a secret, no token embedded
+    part_size = Column(BigInteger)                               # bytes
+    duration_ms = Column(BigInteger)
+
+    synced_at = Column(BigInteger, nullable=False)                # epoch ms, bumped every sync run (mark-and-sweep)
+
+    __table_args__ = (
+        # Resolve a show/movie's unified group for the download-source picker.
+        Index("ix_plex_item_type_unif", "type", "unification_id"),
+        # List a show's episodes (same server) for "download whole series".
+        Index("ix_plex_item_show", "server_id", "grandparent_rating_key"),
+        # Recency-ordered browse per type.
+        Index("ix_plex_item_type_added", "type", "added_at"),
+        # Title search/sort per type.
+        Index("ix_plex_item_type_title", "type", "title"),
+    )
+
+
+class PlexSyncStatus(Base):
+    """PH-PLEX-01: singleton row (id=1) tracking the Plex catalogue sync
+    state, mirroring the master-only worker convention used by the download
+    feature (house-law piège 7/17).
+
+    Claimed by a conditional `UPDATE ... WHERE id=1 AND state='idle'` at the
+    service layer (idle -> running) so two workers racing to start a sync
+    can't both win; reaped back to idle at master boot if a previous process
+    died mid-run (state left stuck on 'running').
+    """
+
+    __tablename__ = "plex_sync_status"
+
+    id = Column(Integer, primary_key=True)          # always 1 (singleton)
+    state = Column(Text, nullable=False, default="idle")  # 'idle' | 'running'
+    started_at = Column(BigInteger)                          # epoch ms
+    finished_at = Column(BigInteger)                          # epoch ms
+    error = Column(Text)                                       # bounded message, never a token/URL

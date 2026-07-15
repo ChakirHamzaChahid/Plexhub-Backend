@@ -1,5 +1,6 @@
 import os
 import logging
+import uuid
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -132,6 +133,21 @@ class Settings:
     # restore the old strict behaviour (any 3xx = permanent failure).
     DOWNLOAD_MAX_REDIRECTS: int = _safe_int("DOWNLOAD_MAX_REDIRECTS", 5)
 
+    # Plex shared-servers download source (feature "Télécharger Plex").
+    # "" = feature disabled (no plex.tv discovery, no catalogue sync). The
+    # per-server accessTokens fetched from plex.tv are stored encrypted
+    # (PlexServer.access_token, EncryptedString). Isolated from the `media`
+    # table — Plex items never enter the Android API / .strm generation.
+    PLEX_ACCOUNT_TOKEN: str = os.getenv("PLEX_ACCOUNT_TOKEN", "")
+    PLEX_PROBE_TIMEOUT: int = _safe_int("PLEX_PROBE_TIMEOUT", 5)          # per-connection probe (s)
+    PLEX_SYNC_INTERVAL_HOURS: int = _safe_int("PLEX_SYNC_INTERVAL_HOURS", 0)  # 0 = no periodic cron (manual only)
+    # Stable UUID sent as X-Plex-Client-Identifier to plex.tv. Resolved in
+    # __init__: explicit env value wins; otherwise read/generate-and-persist
+    # a uuid4 under DATA_DIR/plex_client_id so it survives restarts (plex.tv
+    # ties resource visibility to this identifier). Class attribute below is
+    # only for typing/defaults — the real value is always set in __init__.
+    PLEX_CLIENT_IDENTIFIER: str = ""
+
     @property
     def has_xtream_env(self) -> bool:
         return bool(self.XTREAM_BASE_URL and self.XTREAM_USERNAME and self.XTREAM_PASSWORD)
@@ -140,6 +156,25 @@ class Settings:
         self.DATA_DIR.mkdir(parents=True, exist_ok=True)
         self.LOG_DIR.mkdir(parents=True, exist_ok=True)
         self.DB_PATH = self.DATA_DIR / "plexhub.db"
+
+        env_client_id = os.getenv("PLEX_CLIENT_IDENTIFIER", "")
+        if env_client_id:
+            self.PLEX_CLIENT_IDENTIFIER = env_client_id
+        else:
+            client_id_path = self.DATA_DIR / "plex_client_id"
+            try:
+                if client_id_path.exists():
+                    self.PLEX_CLIENT_IDENTIFIER = client_id_path.read_text(encoding="utf-8").strip()
+                if not self.PLEX_CLIENT_IDENTIFIER:
+                    self.PLEX_CLIENT_IDENTIFIER = uuid.uuid4().hex
+                    client_id_path.write_text(self.PLEX_CLIENT_IDENTIFIER, encoding="utf-8")
+            except OSError as exc:
+                # DATA_DIR unwritable (read-only mount, permissions, ...):
+                # fall back to a per-process id rather than crashing boot —
+                # the Plex download source stays functional, just without a
+                # stable identifier across restarts.
+                logger.warning("Could not read/persist plex_client_id (%s) — using a transient id", exc)
+                self.PLEX_CLIENT_IDENTIFIER = uuid.uuid4().hex
 
         if self.TMDB_API_KEY:
             logger.info(f"TMDB API Key loaded: {self.TMDB_API_KEY[:4]}****")
@@ -160,6 +195,11 @@ class Settings:
             )
         else:
             logger.info("Physical download: DOWNLOAD_DIR not set — feature disabled")
+
+        if self.PLEX_ACCOUNT_TOKEN:
+            logger.info("Plex download source: enabled (client_id=%s…)", self.PLEX_CLIENT_IDENTIFIER[:8])
+        else:
+            logger.info("Plex download source: PLEX_ACCOUNT_TOKEN not set — feature disabled")
 
 
 settings = Settings()

@@ -1,84 +1,153 @@
 <div class="text-xs">
-  <div class="mb-2 text-slate-600 font-medium">
+  <div class="mb-3 text-slate-600 font-medium">
     {{ title }}{% if year %} ({{ year }}){% endif %}
   </div>
-  {% if versions %}
-  <table class="w-full text-xs">
-    <thead class="text-slate-500 uppercase">
-      <tr>
-        <th class="text-left py-1 pr-2">Version</th>
-        <th class="text-left py-1 pr-2">Compte</th>
-        <th class="text-left py-1 pr-2">État</th>
-        <th class="py-1"></th>
-      </tr>
-    </thead>
-    <tbody class="divide-y divide-slate-100">
-      {% for v in versions %}
-      <tr>
-        <td class="py-1 pr-2">{{ v.label }}</td>
-        <td class="py-1 pr-2 font-mono text-slate-400">{{ v.server_id }}</td>
-        <td class="py-1 pr-2">
-          {% if v.is_broken %}
-          <span class="inline-block px-2 py-0.5 rounded-full bg-rose-100 text-rose-700">cassé</span>
-          {% else %}
-          <span class="inline-block px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700">ok</span>
-          {% endif %}
-        </td>
-        <td class="py-1 text-right">
-          {% if type == 'show' %}
-          <div class="flex flex-col items-end gap-2">
-            <form hx-post="/admin/downloads" hx-target="#downloads-queue" hx-swap="innerHTML">
-              <input type="hidden" name="type" value="{{ type }}">
-              <input type="hidden" name="unification_id" value="{{ unification_id }}">
-              <input type="hidden" name="server_id" value="{{ v.server_id }}">
-              <input type="hidden" name="rating_key" value="{{ v.rating_key }}">
-              <input type="hidden" name="scope" value="series_all">
-              <button type="submit"
-                      class="px-2 py-1 rounded bg-slate-900 text-slate-100 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed">
-                Série complète (toutes saisons)
-              </button>
-            </form>
-            {% if v.seasons %}
-            <form hx-post="/admin/downloads" hx-target="#downloads-queue" hx-swap="innerHTML" class="text-right">
-              <input type="hidden" name="type" value="{{ type }}">
-              <input type="hidden" name="unification_id" value="{{ unification_id }}">
-              <input type="hidden" name="server_id" value="{{ v.server_id }}">
-              <input type="hidden" name="rating_key" value="{{ v.rating_key }}">
-              <input type="hidden" name="scope" value="series_seasons">
-              <div class="flex flex-wrap justify-end gap-x-2 gap-y-1 mb-1 max-w-xs">
-                {% for s in v.seasons %}
-                <label class="inline-flex items-center gap-1 text-slate-600">
-                  <input type="checkbox" name="seasons" value="{{ s }}">
-                  S{{ '%02d'|format(s) }}
-                </label>
-                {% endfor %}
-              </div>
-              <button type="submit"
-                      class="px-2 py-1 rounded bg-slate-700 text-slate-100 hover:bg-slate-600">
-                Télécharger la sélection
-              </button>
-            </form>
+
+  {% if type == 'movie' %}
+    {% if versions %}
+    <table class="w-full text-xs">
+      <thead class="text-slate-500 uppercase">
+        <tr>
+          <th class="text-left py-1 pr-2">Serveur</th>
+          <th class="text-left py-1 pr-2">Taille</th>
+          <th class="text-left py-1 pr-2">État</th>
+          <th class="py-1"></th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-slate-100">
+        {% for v in versions %}
+        <tr>
+          <td class="py-1 pr-2">{{ v.label }}</td>
+          <td class="py-1 pr-2">
+            {{ v.size_h }}{% if v.size_estimated %} <span class="text-slate-400">~</span>{% endif %}
+          </td>
+          <td class="py-1 pr-2">
+            {% if v.is_broken %}
+            <span class="inline-block px-2 py-0.5 rounded-full bg-rose-100 text-rose-700">cassé</span>
+            {% else %}
+            <span class="inline-block px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700">ok</span>
             {% endif %}
-          </div>
-          {% else %}
-          <form hx-post="/admin/downloads" hx-target="#downloads-queue" hx-swap="innerHTML" class="inline">
-            <input type="hidden" name="type" value="{{ type }}">
-            <input type="hidden" name="unification_id" value="{{ unification_id }}">
-            <input type="hidden" name="server_id" value="{{ v.server_id }}">
-            <input type="hidden" name="rating_key" value="{{ v.rating_key }}">
-            <input type="hidden" name="scope" value="movie">
-            <button type="submit"
-                    class="px-2 py-1 rounded bg-slate-900 text-slate-100 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed">
-              Télécharger
-            </button>
-          </form>
-          {% endif %}
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+          </td>
+          <td class="py-1 text-right">
+            <form hx-post="/admin/downloads" hx-target="#downloads-queue" hx-swap="innerHTML" class="inline">
+              <input type="hidden" name="type" value="{{ type }}">
+              <input type="hidden" name="unification_id" value="{{ unification_id }}">
+              <input type="hidden" name="scope" value="movie">
+              <input type="hidden" name="source" value="{{ v.server_id }}|{{ v.rating_key }}">
+              <button type="submit"
+                      class="px-2 py-1 rounded bg-slate-900 text-slate-100 hover:bg-slate-700">
+                Télécharger
+              </button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="text-slate-400 italic">Aucune version disponible.</p>
+    {% endif %}
+
   {% else %}
-  <p class="text-slate-400 italic">Aucune version disponible.</p>
+    <div class="mb-4">
+      <h4 class="text-slate-500 uppercase mb-1">Série entière</h4>
+      {% if versions %}
+      <table class="w-full text-xs">
+        <thead class="text-slate-500 uppercase">
+          <tr>
+            <th class="text-left py-1 pr-2">Serveur</th>
+            <th class="text-left py-1 pr-2">État</th>
+            <th class="py-1"></th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-100">
+          {% for v in versions %}
+          <tr>
+            <td class="py-1 pr-2">{{ v.label }}</td>
+            <td class="py-1 pr-2">
+              {% if v.is_broken %}
+              <span class="inline-block px-2 py-0.5 rounded-full bg-rose-100 text-rose-700">cassé</span>
+              {% else %}
+              <span class="inline-block px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700">ok</span>
+              {% endif %}
+            </td>
+            <td class="py-1 text-right">
+              <form hx-post="/admin/downloads" hx-target="#downloads-queue" hx-swap="innerHTML" class="inline">
+                <input type="hidden" name="type" value="{{ type }}">
+                <input type="hidden" name="unification_id" value="{{ unification_id }}">
+                <input type="hidden" name="scope" value="series_all">
+                <input type="hidden" name="source" value="{{ v.server_id }}|{{ v.rating_key }}">
+                <button type="submit"
+                        class="px-2 py-1 rounded bg-slate-900 text-slate-100 hover:bg-slate-700">
+                  Série complète (toutes saisons)
+                </button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p class="text-slate-400 italic">Aucune version disponible.</p>
+      {% endif %}
+    </div>
+
+    {% if seasons %}
+    <div class="mb-4">
+      <h4 class="text-slate-500 uppercase mb-1">Par saison</h4>
+      <form hx-post="/admin/downloads" hx-target="#downloads-queue" hx-swap="innerHTML">
+        <input type="hidden" name="type" value="{{ type }}">
+        <input type="hidden" name="unification_id" value="{{ unification_id }}">
+        <input type="hidden" name="scope" value="seasons">
+        <table class="w-full text-xs mb-2">
+          <thead class="text-slate-500 uppercase">
+            <tr>
+              <th class="text-left py-1 pr-2">Saison</th>
+              <th class="text-left py-1 pr-2">Source</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100">
+            {% for season in seasons %}
+            <tr>
+              <td class="py-1 pr-2">S{{ '%02d'|format(season.season) }}</td>
+              <td class="py-1 pr-2">
+                <select name="season_pick" class="border border-slate-300 rounded px-1 py-0.5 text-xs">
+                  <option value="">— ne pas télécharger</option>
+                  {% for src in season.sources %}
+                  <option value="{{ season.season }}|{{ src.server_id }}|{{ src.series_rating_key }}">
+                    {{ src.label }} · {{ src.size_h }}{% if src.size_estimated %} ~{% endif %} ({{ src.episode_count }} ép.)
+                  </option>
+                  {% endfor %}
+                </select>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        <button type="submit"
+                class="px-2 py-1 rounded bg-slate-700 text-slate-100 hover:bg-slate-600">
+          Télécharger les saisons
+        </button>
+      </form>
+    </div>
+
+    <div>
+      <h4 class="text-slate-500 uppercase mb-1">Par épisode</h4>
+      {% for season in seasons %}
+      <div class="mb-2">
+        <button type="button"
+                hx-get="/admin/downloads/{{ type }}/{{ unification_id }}/episodes?season={{ season.season }}"
+                hx-target="#dl-episodes-{{ season.season }}"
+                hx-swap="innerHTML"
+                class="px-2 py-1 rounded border border-slate-300 bg-white hover:bg-slate-100">
+          S{{ '%02d'|format(season.season) }}
+        </button>
+        <div id="dl-episodes-{{ season.season }}" class="mt-1"></div>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <p class="text-slate-400 italic">Aucune saison disponible.</p>
+    {% endif %}
   {% endif %}
 </div>

@@ -171,7 +171,7 @@ async def test_run_health_check_batch_delegates_to_sampling_helper(monkeypatch, 
     monkeypatch.setattr(hc, "_get_client", _fake_client)
 
     async def _fake_check_one(client, item, account, semaphore):
-        return item, False, "head_ct_video"
+        return item, False, "head_ct_video", None
 
     monkeypatch.setattr(hc, "_check_one", _fake_check_one)
 
@@ -214,7 +214,7 @@ async def test_circuit_breaker_trips_on_small_account_below_old_fixed_50(
     monkeypatch.setattr(hc, "_get_client", _fake_client)
 
     async def _always_fail(client, item, account, semaphore):
-        return item, True, "timeout"  # transient reason, not a definitive one
+        return item, True, "timeout", None  # transient reason, not a definitive one
 
     monkeypatch.setattr(hc, "_check_one", _always_fail)
 
@@ -250,7 +250,7 @@ async def test_circuit_breaker_does_not_trip_below_minimum_sample(
     monkeypatch.setattr(hc, "_get_client", _fake_client)
 
     async def _always_fail(client, item, account, semaphore):
-        return item, True, "timeout"
+        return item, True, "timeout", None
 
     monkeypatch.setattr(hc, "_check_one", _always_fail)
 
@@ -284,7 +284,7 @@ async def test_circuit_breaker_does_not_trip_on_low_failure_rate(monkeypatch, db
     async def _mixed(client, item, account, semaphore):
         counter["n"] += 1
         is_broken = counter["n"] % 2 == 0
-        return item, is_broken, ("timeout" if is_broken else "head_ct_video")
+        return item, is_broken, ("timeout" if is_broken else "head_ct_video"), None
 
     monkeypatch.setattr(hc, "_check_one", _mixed)
 
@@ -318,8 +318,8 @@ async def test_circuit_breaker_is_scoped_per_account(monkeypatch, db_factory):
 
     async def _by_account(client, item, account, semaphore):
         if item.server_id.endswith("aaaaaaaa"):
-            return item, True, "timeout"
-        return item, False, "head_ct_video"
+            return item, True, "timeout", None
+        return item, False, "head_ct_video", None
 
     monkeypatch.setattr(hc, "_check_one", _by_account)
 
@@ -368,7 +368,7 @@ async def test_pipeline_validation_skips_accounts_with_active_downloads(
 
     async def _spy_check_one(client, item, account, semaphore):
         checked_server_ids.add(item.server_id)
-        return item, False, "head_ct_video"
+        return item, False, "head_ct_video", None
 
     monkeypatch.setattr(hc, "_check_one", _spy_check_one)
 
@@ -417,7 +417,7 @@ async def test_pipeline_validation_streams_per_account_not_whole_catalog(
     monkeypatch.setattr(hc, "_get_client", _fake_client)
 
     async def _fake_check_one(client, item, account, semaphore):
-        return item, False, "head_ct_video"
+        return item, False, "head_ct_video", None
 
     monkeypatch.setattr(hc, "_check_one", _fake_check_one)
 
@@ -463,7 +463,7 @@ async def test_check_one_head_video_content_type_is_ok(xtream_mock):
     )
 
     async with httpx.AsyncClient() as client:
-        _, is_broken, reason = await hc._check_one(
+        _, is_broken, reason, _size = await hc._check_one(
             client, _movie_item(), _fake_account(), asyncio.Semaphore(1)
         )
 
@@ -476,7 +476,7 @@ async def test_check_one_head_404_is_definitive_broken(xtream_mock):
     xtream_mock.head(STREAM_URL).respond(404)
 
     async with httpx.AsyncClient() as client:
-        _, is_broken, reason = await hc._check_one(
+        _, is_broken, reason, _size = await hc._check_one(
             client, _movie_item(), _fake_account(), asyncio.Semaphore(1)
         )
 
@@ -490,7 +490,7 @@ async def test_check_one_head_403_is_definitive_broken(xtream_mock):
     xtream_mock.head(STREAM_URL).respond(403)
 
     async with httpx.AsyncClient() as client:
-        _, is_broken, reason = await hc._check_one(
+        _, is_broken, reason, _size = await hc._check_one(
             client, _movie_item(), _fake_account(), asyncio.Semaphore(1)
         )
 
@@ -506,7 +506,7 @@ async def test_check_one_head_html_error_page_is_definitive_broken(xtream_mock):
     )
 
     async with httpx.AsyncClient() as client:
-        _, is_broken, reason = await hc._check_one(
+        _, is_broken, reason, _size = await hc._check_one(
             client, _movie_item(), _fake_account(), asyncio.Semaphore(1)
         )
 
@@ -522,7 +522,7 @@ async def test_check_one_ambiguous_head_falls_through_to_range_get_video(xtream_
     xtream_mock.get(STREAM_URL).respond(200, headers={"content-type": "video/mp2t"})
 
     async with httpx.AsyncClient() as client:
-        _, is_broken, reason = await hc._check_one(
+        _, is_broken, reason, _size = await hc._check_one(
             client, _movie_item(), _fake_account(), asyncio.Semaphore(1)
         )
 
@@ -536,7 +536,7 @@ async def test_check_one_range_get_magic_bytes_ok(xtream_mock):
     xtream_mock.get(STREAM_URL).respond(200, content=b"\x47" + b"\x00" * 187)  # MPEG-TS sync
 
     async with httpx.AsyncClient() as client:
-        _, is_broken, reason = await hc._check_one(
+        _, is_broken, reason, _size = await hc._check_one(
             client, _movie_item(), _fake_account(), asyncio.Semaphore(1)
         )
 
@@ -550,7 +550,7 @@ async def test_check_one_range_get_empty_body_is_definitive_broken(xtream_mock):
     xtream_mock.get(STREAM_URL).respond(200, content=b"")
 
     async with httpx.AsyncClient() as client:
-        _, is_broken, reason = await hc._check_one(
+        _, is_broken, reason, _size = await hc._check_one(
             client, _movie_item(), _fake_account(), asyncio.Semaphore(1)
         )
 
@@ -565,7 +565,7 @@ async def test_check_one_range_get_garbage_bytes_is_definitive_broken(xtream_moc
     xtream_mock.get(STREAM_URL).respond(200, content=b"not a video, definitely not")
 
     async with httpx.AsyncClient() as client:
-        _, is_broken, reason = await hc._check_one(
+        _, is_broken, reason, _size = await hc._check_one(
             client, _movie_item(), _fake_account(), asyncio.Semaphore(1)
         )
 
@@ -579,7 +579,7 @@ async def test_check_one_timeout_is_transient_not_definitive(xtream_mock):
     xtream_mock.head(STREAM_URL).mock(side_effect=httpx.ConnectTimeout("timed out"))
 
     async with httpx.AsyncClient() as client:
-        _, is_broken, reason = await hc._check_one(
+        _, is_broken, reason, _size = await hc._check_one(
             client, _movie_item(), _fake_account(), asyncio.Semaphore(1)
         )
 
@@ -593,10 +593,198 @@ async def test_check_one_connect_error_is_transient_not_definitive(xtream_mock):
     xtream_mock.head(STREAM_URL).mock(side_effect=httpx.ConnectError("refused"))
 
     async with httpx.AsyncClient() as client:
-        _, is_broken, reason = await hc._check_one(
+        _, is_broken, reason, _size = await hc._check_one(
             client, _movie_item(), _fake_account(), asyncio.Semaphore(1)
         )
 
     assert is_broken is True
     assert reason == "connect_error"
     assert hc._is_definitive_failure(reason) is False
+
+
+# ─── X1b: `_check_one` file-size capture (Content-Length / Content-Range) ─
+
+
+@pytest.mark.asyncio
+async def test_check_one_head_captures_content_length(xtream_mock):
+    xtream_mock.head(STREAM_URL).respond(
+        200, headers={"content-type": "video/mp4", "content-length": "1500000000"}
+    )
+
+    async with httpx.AsyncClient() as client:
+        _, is_broken, reason, size_bytes = await hc._check_one(
+            client, _movie_item(), _fake_account(), asyncio.Semaphore(1)
+        )
+
+    assert is_broken is False
+    assert reason == "head_ct_video"
+    assert size_bytes == 1_500_000_000
+
+
+@pytest.mark.asyncio
+async def test_check_one_range_get_captures_content_range_total(xtream_mock):
+    # HEAD has no Content-Length -> ambiguous -> falls through to the Range
+    # GET, which answers 206 with a Content-Range total.
+    xtream_mock.head(STREAM_URL).respond(200)
+    xtream_mock.get(STREAM_URL).respond(
+        206,
+        headers={
+            "content-type": "video/mp2t",
+            "content-range": "bytes 0-8191/2000000000",
+        },
+    )
+
+    async with httpx.AsyncClient() as client:
+        _, is_broken, reason, size_bytes = await hc._check_one(
+            client, _movie_item(), _fake_account(), asyncio.Semaphore(1)
+        )
+
+    assert is_broken is False
+    assert reason == "get_ct_video"
+    assert size_bytes == 2_000_000_000
+
+
+@pytest.mark.asyncio
+async def test_check_one_206_get_content_length_not_used_as_total(xtream_mock):
+    """A 206 Range GET's own Content-Length is the size of the returned
+    chunk, NOT the total file size — must never leak in as `size_bytes`
+    when there's no Content-Range total to fall back on."""
+    xtream_mock.head(STREAM_URL).respond(200)
+    xtream_mock.get(STREAM_URL).respond(
+        206, headers={"content-type": "video/mp2t", "content-length": "8192"}
+    )
+
+    async with httpx.AsyncClient() as client:
+        _, is_broken, reason, size_bytes = await hc._check_one(
+            client, _movie_item(), _fake_account(), asyncio.Semaphore(1)
+        )
+
+    assert is_broken is False
+    assert size_bytes is None
+
+
+@pytest.mark.asyncio
+async def test_check_one_broken_stream_has_no_size(xtream_mock):
+    xtream_mock.head(STREAM_URL).respond(404)
+
+    async with httpx.AsyncClient() as client:
+        _, is_broken, reason, size_bytes = await hc._check_one(
+            client, _movie_item(), _fake_account(), asyncio.Semaphore(1)
+        )
+
+    assert is_broken is True
+    assert size_bytes is None
+
+
+@pytest.mark.asyncio
+async def test_check_one_timeout_has_no_size(xtream_mock):
+    xtream_mock.head(STREAM_URL).mock(side_effect=httpx.ConnectTimeout("timed out"))
+
+    async with httpx.AsyncClient() as client:
+        _, is_broken, reason, size_bytes = await hc._check_one(
+            client, _movie_item(), _fake_account(), asyncio.Semaphore(1)
+        )
+
+    assert is_broken is True
+    assert size_bytes is None
+
+
+# ─── X1b: file_size persistence (both writers) ────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_health_check_batch_persists_captured_file_size(monkeypatch, db_factory):
+    async with db_factory() as db:
+        db.add(_account("aaaaaaaa", 20))
+        for m in _streams("xtream_aaaaaaaa", 2):
+            db.add(m)
+        await db.commit()
+
+    monkeypatch.setattr(settings, "STREAM_VALIDATION_ENABLED", True)
+    monkeypatch.setattr(hc, "worker_session_factory", db_factory)
+
+    async def _fake_client():
+        return None
+
+    monkeypatch.setattr(hc, "_get_client", _fake_client)
+
+    async def _fake_check_one(client, item, account, semaphore):
+        if item.rating_key.endswith("_0.mp4"):
+            return item, False, "head_ct_video", 1_500_000_000
+        return item, False, "head_ct_video", None
+
+    monkeypatch.setattr(hc, "_check_one", _fake_check_one)
+
+    await hc._run_health_check_batch()
+
+    rows = {r.rating_key: r for r in await _rows_for(db_factory, "xtream_aaaaaaaa")}
+    assert rows["vod_xtream_aaaaaaaa_0.mp4"].file_size == 1_500_000_000
+    assert rows["vod_xtream_aaaaaaaa_1.mp4"].file_size is None
+
+
+@pytest.mark.asyncio
+async def test_health_check_batch_preserves_file_size_on_broken_stream(
+    monkeypatch, db_factory
+):
+    """A stream that fails/times out this run must not blank out a
+    previously captured file_size — the column is only overwritten when a
+    fresh size was actually captured on this probe."""
+    async with db_factory() as db:
+        db.add(_account("aaaaaaaa", 20))
+        streams = _streams("xtream_aaaaaaaa", 1)
+        streams[0].file_size = 999_000_000
+        for m in streams:
+            db.add(m)
+        await db.commit()
+
+    monkeypatch.setattr(settings, "STREAM_VALIDATION_ENABLED", True)
+    monkeypatch.setattr(hc, "worker_session_factory", db_factory)
+
+    async def _fake_client():
+        return None
+
+    monkeypatch.setattr(hc, "_get_client", _fake_client)
+
+    async def _fake_check_one(client, item, account, semaphore):
+        return item, True, "timeout", None
+
+    monkeypatch.setattr(hc, "_check_one", _fake_check_one)
+
+    await hc._run_health_check_batch()
+
+    rows = await _rows_for(db_factory, "xtream_aaaaaaaa")
+    assert len(rows) == 1
+    assert rows[0].file_size == 999_000_000
+    assert rows[0].last_stream_check is not None  # still checked/updated
+
+
+@pytest.mark.asyncio
+async def test_pipeline_validation_persists_captured_file_size(monkeypatch, db_factory):
+    """The pipeline validator (run_pipeline_validation's impl) must persist
+    file_size the same way as the cron batch — it shares `_check_one`."""
+    async with db_factory() as db:
+        db.add(_account("aaaaaaaa", 20))
+        for m in _streams("xtream_aaaaaaaa", 2):
+            db.add(m)
+        await db.commit()
+
+    monkeypatch.setattr(settings, "STREAM_VALIDATION_ENABLED", True)
+    monkeypatch.setattr(hc, "worker_session_factory", db_factory)
+
+    async def _fake_client():
+        return None
+
+    monkeypatch.setattr(hc, "_get_client", _fake_client)
+
+    async def _fake_check_one(client, item, account, semaphore):
+        if item.rating_key.endswith("_0.mp4"):
+            return item, False, "get_ct_video", 2_000_000_000
+        return item, True, "timeout", None
+
+    monkeypatch.setattr(hc, "_check_one", _fake_check_one)
+
+    await hc._run_pipeline_validation_impl()
+
+    rows = {r.rating_key: r for r in await _rows_for(db_factory, "xtream_aaaaaaaa")}
+    assert rows["vod_xtream_aaaaaaaa_0.mp4"].file_size == 2_000_000_000
+    assert rows["vod_xtream_aaaaaaaa_1.mp4"].file_size is None

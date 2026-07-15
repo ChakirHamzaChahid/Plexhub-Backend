@@ -108,4 +108,22 @@ worker/la file déjà couverts par les follow-ups DL-03/04/05 ci-dessus.
 
 DoD de ces follow-ups (quand ils seront pris) : même gate que tout ticket de ce board (§ Definition of Done ci-dessus)
 + test de garde dédié à chaque finding.
+
+## Extension « Télécharger » Xtream — granularité épisode/saison + taille (tickets X1a→X4)
+
+Parité avec « Télécharger Plex » côté Xtream : `enqueue_selection` gagne les scopes `seasons`/`episodes`
+avec **source par unité** (chaque saison/épisode d'un compte différent), UI miroir (route `/episodes`,
+sélecteurs de source par saison/épisode), et **affichage de la taille** des médias. Taille exacte via la
+nouvelle colonne `media.file_size` (**migration 020**) peuplée par le `Content-Length` du HEAD du
+health-check (aucune requête réseau ajoutée), estimation `bitrate×durée` en fallback (préfixe « ~ »).
+Scopes existants `movie`/`series_all`/`series_seasons` inchangés (non-régression, 84 tests verts).
+
+| ID | Titre | Sévérité | Pourquoi non corrigé maintenant | Owner suggéré |
+|---|---|---|---|---|
+| **XD-01** | Taille se remplit progressivement (lazy) au fil des cycles de health-check | P3 (accepté) | Choix produit validé : la taille exacte n'existe pas dans le catalogue Xtream ni l'API provider — elle est capturée du `Content-Length` du HEAD que le health-check fait déjà (cron `hour=2` + validation pipeline, échantillon `ORDER BY random()` CR-P06). Un média non encore health-checké affiche `—` (ou une estimation `~` si `media_parts` porte un bitrate). Alternative « HEAD à la demande au clic » écartée (latence UI + charge provider, lourde pour la vue par-épisode M×N). | `sync-specialist` (si un préchauffage ciblé de la taille devient nécessaire) |
+| **XD-02** | Estimation `bitrate×durée` indisponible pour les films | P3 | `media_parts` est `[]` pour les films Xtream (`sync_worker`), donc pas de bitrate → un film sans `file_size` capturé affiche `—` (pas d'estimation `~`). Les épisodes ont un bitrate dans `media_parts` (estimation possible). Capturer un bitrate film au sync (`vod_info.bit_rate`) serait un petit ajout `sync_worker` si l'estimation film devient souhaitée. | `sync-specialist` (si estimation film demandée) |
+| **XD-03** | Pas de protection CSRF sur les nouveaux `POST /admin/downloads` (seasons/episodes) | P2 (sécu) | **Même dette transverse `CR-S07`/`DL-03`** couvrant tout `/admin` — la route POST enqueue existait déjà, ce ticket n'en change que le format de champs. Aucune régression propre. À corriger dans l'effort transverse `/admin` (voir DL-03). | `security-reviewer` puis `backend-developer` (effort dédié `/admin`, même que DL-03) |
+
+DoD de ces follow-ups (quand ils seront pris) : même gate que tout ticket de ce board (§ Definition of Done ci-dessus)
++ test de garde dédié à chaque finding.
 </content>

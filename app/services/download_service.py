@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
 import logging
 import os
 import re
@@ -39,6 +40,7 @@ from app.config import settings
 from app.models.database import DownloadBatch, DownloadJob, Media, XtreamAccount
 from app.models.schemas import DownloadJobResponse, apply_adult_prefix
 from app.services.aggregation_service import canonical_title_year
+from app.services.media_service import media_service
 from app.services.stream_service import parse_rating_key
 from app.utils.db_retry import run_with_retry
 from app.utils.server_id import parse_server_id
@@ -527,27 +529,241 @@ async def list_series_seasons(
     return sorted({(s if s is not None else 0) for s in rows})
 
 
+# --- Granular reads: per-season / per-episode sources + size (X2) -----------
+
+@dataclass
+class XtreamSeasonSources:
+    season: int
+    sources: list[dict]   # {server_id, series_rating_key, label, episode_count, size_bytes, size_estimated}
+
+
+@dataclass
+class XtreamEpisodeSources:
+    season: int
+    episode: int
+    title: str
+    sources: list[dict]   # {server_id, episode_rating_key, label, size_bytes, size_estimated}
+
+
+def _extract_video_bitrate_bps(media_parts_json: Optional[str]) -> Optional[int]:
+    """Best-effort VIDEO stream bitrate (bits/sec) from a `Media.media_parts`
+    JSON blob — the structure `sync_worker._build_media_parts` writes (a list
+    of "parts", each with a `streams[]` list holding one `{"type":
+    "VideoStream", "bitrate": <bps>}` entry for Xtream VOD/episodes). Also
+    tries the `bit_rate` key defensively (ffprobe-style naming some
+    producers use). Parses defensively — this is untrusted/legacy stored
+    JSON — and returns `None` on anything missing/malformed rather than
+    raising.
+    """
+    if not media_parts_json:
+        return None
+    try:
+        parts = json.loads(media_parts_json)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(parts, list):
+        return None
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        streams = part.get("streams")
+        if not isinstance(streams, list):
+            continue
+        for stream in streams:
+            if not isinstance(stream, dict) or stream.get("type") != "VideoStream":
+                continue
+            raw = stream.get("bitrate", stream.get("bit_rate"))
+            try:
+                bitrate = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if bitrate > 0:
+                return bitrate
+    return None
+
+
+def estimate_media_size(media_row: Media) -> tuple[Optional[int], bool]:
+    """Best-effort byte size for one `Media` row -> `(size_bytes, is_estimated)`.
+
+    - `file_size` populated (health-check HEAD `Content-Length`, exact,
+      bytes) -> `(file_size, False)`.
+    - Otherwise, an INDICATIVE estimate derived from the video stream's
+      bitrate (`media_parts` JSON, bits/sec) x duration (`Media.duration`,
+      milliseconds): ``bytes ≈ bitrate_bps / 8 * duration_s``. This ignores
+      audio/container overhead and is only as good as the provider's
+      ffprobe-style metadata (sync-time `info.video.bit_rate`/
+      `info.duration_secs`) — never treat it as authoritative disk usage;
+      `is_estimated=True` flags it so callers/UI can label it accordingly.
+    - Neither available -> `(None, False)`.
+
+    Public on purpose: reused by other download read-paths (e.g. the
+    film/whole-series version picker) that want a size without duplicating
+    this fallback chain.
+    """
+    if media_row.file_size:
+        return int(media_row.file_size), False
+
+    duration_ms = media_row.duration
+    if not duration_ms or duration_ms <= 0:
+        return None, False
+
+    bitrate_bps = _extract_video_bitrate_bps(media_row.media_parts)
+    if not bitrate_bps:
+        return None, False
+
+    duration_s = duration_ms / 1000.0
+    estimated_bytes = int(bitrate_bps / 8 * duration_s)
+    if estimated_bytes <= 0:
+        return None, False
+    return estimated_bytes, True
+
+
+def _source_sort_key(entry: dict) -> tuple[bool, int]:
+    """Sort sources by size descending, unknown (`None`) size last — shared
+    by both `list_series_*_with_sources` helpers below."""
+    size = entry["size_bytes"]
+    return (size is None, -(size or 0))
+
+
+async def list_series_seasons_with_sources(
+    db: AsyncSession, unification_id: str,
+) -> list[XtreamSeasonSources]:
+    """Per-season, per-source breakdown for a unified series (X2 — the
+    Xtream/`media` counterpart of the Plex season/episode source pickers).
+
+    Reuses `media_service.get_unified_episodes` (the SAME cross-account
+    episode aggregation — `aggregation_service.aggregate_series` — the admin
+    "versions" panel and the `/episodes/unified` API already use) so the
+    (season, source) grouping matches exactly; this only adds an
+    episode-count + summed size on top. Returns `[]` if `unification_id`
+    doesn't resolve to a show.
+    """
+    result = await media_service.get_unified_episodes(db, unification_id)
+    if result is None:
+        return []
+    _shows, series_group = result
+    labels = await media_service.account_labels(db)
+
+    # (server_id, season) -> running accumulator.
+    per_source: dict[tuple[str, int], dict] = {}
+    for slot in series_group.slots:
+        for ep in slot.members:
+            key = (ep.server_id, slot.season)
+            acc = per_source.setdefault(key, {
+                "series_rating_key": ep.grandparent_rating_key,
+                "episode_count": 0,
+                "sized_count": 0,
+                "size_bytes": 0,
+                "size_estimated": False,
+                "has_any_size": False,
+            })
+            acc["episode_count"] += 1
+            size, estimated = estimate_media_size(ep)
+            if size is not None:
+                acc["size_bytes"] += size
+                acc["sized_count"] += 1
+                acc["size_estimated"] = acc["size_estimated"] or estimated
+                acc["has_any_size"] = True
+
+    by_season: dict[int, list[dict]] = {}
+    for (server_id, season), acc in per_source.items():
+        # Flag the season sum as estimated when some episodes have no known
+        # size: the sum then only covers `sized_count`/`episode_count` files and
+        # UNDER-reports the true total — showing it as exact would mislead the
+        # operator on disk usage.
+        partial = acc["has_any_size"] and acc["sized_count"] < acc["episode_count"]
+        by_season.setdefault(season, []).append({
+            "server_id": server_id,
+            "series_rating_key": acc["series_rating_key"],
+            "label": labels.get(server_id, server_id),
+            "episode_count": acc["episode_count"],
+            "size_bytes": acc["size_bytes"] if acc["has_any_size"] else None,
+            "size_estimated": acc["size_estimated"] or partial,
+        })
+
+    return [
+        XtreamSeasonSources(season=season, sources=sorted(by_season[season], key=_source_sort_key))
+        for season in sorted(by_season)
+    ]
+
+
+async def list_series_episodes_with_sources(
+    db: AsyncSession, unification_id: str, season: int,
+) -> list[XtreamEpisodeSources]:
+    """Per-(season, episode), per-source breakdown for a unified series, one
+    season at a time. Same aggregation source as
+    `list_series_seasons_with_sources`. Returns `[]` if `unification_id`
+    doesn't resolve to a show, or that show has no episodes in `season`.
+    """
+    result = await media_service.get_unified_episodes(db, unification_id)
+    if result is None:
+        return []
+    _shows, series_group = result
+    labels = await media_service.account_labels(db)
+
+    out: list[XtreamEpisodeSources] = []
+    for slot in series_group.slots:
+        if slot.season != season:
+            continue
+        sources = []
+        for ep in sorted(slot.members, key=lambda m: (m.server_id or "", m.rating_key or "")):
+            size, estimated = estimate_media_size(ep)
+            sources.append({
+                "server_id": ep.server_id,
+                "episode_rating_key": ep.rating_key,
+                "label": labels.get(ep.server_id, ep.server_id),
+                "size_bytes": size,
+                "size_estimated": estimated,
+            })
+        sources.sort(key=_source_sort_key)
+        out.append(XtreamEpisodeSources(
+            season=slot.season, episode=slot.episode,
+            title=slot.best.title or "", sources=sources,
+        ))
+
+    out.sort(key=lambda x: x.episode)
+    return out
+
+
 async def enqueue_selection(
     db: AsyncSession,
     *,
     media_type: str,           # 'movie' | 'show' (type of the selection)
     unification_id: str,
-    server_id: str,
-    rating_key: str,
-    scope: str,                # 'movie' | 'series_all' | 'series_seasons'
+    server_id: Optional[str] = None,
+    rating_key: Optional[str] = None,
+    scope: str,                # 'movie' | 'series_all' | 'series_seasons' | 'seasons' | 'episodes'
     seasons: Optional[list[int]] = None,  # required (non-empty) for series_seasons
+    season_picks: Optional[list[tuple[int, str, str]]] = None,  # (season, server_id, series_rating_key) — scope='seasons'
+    episode_picks: Optional[list[tuple[str, str]]] = None,      # (server_id, episode_rating_key) — scope='episodes'
 ) -> EnqueueResult:
     """Resolve an operator selection into 1..N persisted `DownloadJob` rows.
 
     Movie -> exactly one job (`batch_id=None`). Series -> one `DownloadBatch` +
     one job per episode of the chosen source: `scope=series_all` takes every
     episode, `scope=series_seasons` takes only episodes whose season
-    (`parent_index`) is in `seasons`. Never raises for a "normal" failure mode
-    (missing config/account/media/episodes, empty season selection) — those come
-    back as `EnqueueResult(jobs=[], error=...)`.
+    (`parent_index`) is in `seasons`. `scope=seasons`/`scope=episodes` (X2 —
+    granular per-season/per-episode picker, one physical source PER UNIT,
+    mirroring `plex_download_service.enqueue_plex_selection`'s shape) resolve
+    `season_picks`/`episode_picks` instead of a single `server_id`/
+    `rating_key` — each pick names its own source, so one selection can span
+    multiple accounts/seasons/episodes; `server_id`/`rating_key` are unused
+    for those two scopes. Never raises for a "normal" failure mode (missing
+    config/account/media/episodes, empty season/episode selection) — those
+    come back as `EnqueueResult(jobs=[], error=...)`.
     """
     if not settings.DOWNLOAD_DIR:
         return EnqueueResult(jobs=[], batch_id=None, error="DOWNLOAD_DIR n'est pas défini")
+
+    if scope == "seasons":
+        return await _enqueue_seasons(
+            db, media_type=media_type, unification_id=unification_id, season_picks=season_picks,
+        )
+
+    if scope == "episodes":
+        return await _enqueue_episodes(
+            db, media_type=media_type, unification_id=unification_id, episode_picks=episode_picks,
+        )
 
     account = await _resolve_active_account(db, server_id)
     if account is None:
@@ -708,6 +924,234 @@ async def enqueue_selection(
         return EnqueueResult(jobs=jobs, batch_id=batch.id, error=None)
 
     return EnqueueResult(jobs=[], batch_id=None, error=f"scope inconnu: {scope!r}")
+
+
+# --- Granular enqueue: per-season / per-episode picks (X2) -------------------
+#
+# `scope='seasons'`/`scope='episodes'` mirror `plex_download_service`'s
+# `_enqueue_seasons`/`_enqueue_episodes`/`_persist_batch_and_jobs` 1:1 (same
+# shape: resolve picks -> one `DownloadBatch` + N deduped `DownloadJob`s),
+# adapted to the `media` table. Deliberately NOT wired into the
+# `series_all`/`series_seasons` block above — that already-tested code path
+# is left byte-for-byte unchanged; these are new, additive scopes only.
+
+
+async def _persist_episode_batch(
+    db: AsyncSession,
+    *,
+    media_type: str,
+    unification_id: str,
+    scope: str,
+    batch_server_id: str,
+    batch_rating_key: str,
+    batch_title: str,
+    episodes: list[Media],
+    show_title_for: Callable[[Media], Optional[str]],
+    op: str,
+) -> EnqueueResult:
+    """Create one `DownloadBatch` + one `DownloadJob` per episode, deduped
+    against any existing non-terminal job for the same `(server_id,
+    rating_key)`. Shared by the `seasons`/`episodes` scopes — they differ
+    only in how `episodes`/`batch_title`/`show_title_for` were resolved by
+    the caller. `batch_server_id`/`batch_rating_key` are the FIRST pick —
+    used only for the batch's back-nav fields, never to filter `episodes`
+    (each episode already carries its own source)."""
+    batch = DownloadBatch(
+        id=uuid.uuid4().hex,
+        media_type=media_type or "show",
+        unification_id=unification_id or None,
+        title=batch_title,
+        server_id=batch_server_id,
+        rating_key=batch_rating_key,
+        scope=scope,
+        total_jobs=0,
+        created_at=now_ms(),
+    )
+    db.add(batch)
+
+    jobs: list[DownloadJob] = []
+    new_job_count = 0
+    seen_pk: set[tuple[str, str]] = set()
+    for ep in episodes:
+        pk = (ep.server_id, ep.rating_key)
+        if pk in seen_pk:
+            continue
+        seen_pk.add(pk)
+
+        existing = await _find_non_terminal_job(db, ep.server_id, ep.rating_key)
+        if existing is not None:
+            jobs.append(existing)
+            continue
+
+        show_title = show_title_for(ep) or "Unknown"
+        dest_path = compute_dest_path(
+            media_type="episode", title=show_title, year=None,
+            season=ep.parent_index, episode=ep.index,
+            ext=_ext_from_rating_key(ep.rating_key),
+        )
+        job = DownloadJob(
+            id=uuid.uuid4().hex,
+            batch_id=batch.id,
+            server_id=ep.server_id,
+            rating_key=ep.rating_key,
+            media_type="episode",
+            unification_id=unification_id or None,
+            title=ep.title or show_title,
+            season=ep.parent_index,
+            episode=ep.index,
+            dest_path=dest_path,
+            state="queued",
+            bytes_total=None,
+            bytes_done=0,
+            attempts=0,
+            created_at=now_ms(),
+            updated_at=now_ms(),
+        )
+        db.add(job)
+        jobs.append(job)
+        new_job_count += 1
+
+    # total_jobs counts only jobs actually linked to THIS batch — a reused
+    # (deduped) job may still point at an earlier batch_id (mirrors the
+    # series_all/series_seasons block above).
+    batch.total_jobs = new_job_count
+
+    async def _commit() -> None:
+        await db.commit()
+
+    await run_with_retry(_commit, op=op)
+    logger.info(
+        "Download enqueued: batch=%s scope=%s title=%r jobs=%d (new=%d)",
+        batch.id, scope, batch.title, len(jobs), new_job_count,
+    )
+    return EnqueueResult(jobs=jobs, batch_id=batch.id, error=None)
+
+
+async def _resolve_show_title(
+    db: AsyncSession, server_id: str, series_rating_key: str,
+) -> Optional[str]:
+    """`Media(server_id, rating_key=series_rating_key, type='show')`'s title,
+    or `None` if that row doesn't exist (caller falls back to an episode's
+    own `grandparent_title`)."""
+    show_row = (await db.execute(
+        select(Media)
+        .where(
+            Media.server_id == server_id,
+            Media.rating_key == series_rating_key,
+            Media.type == "show",
+        )
+        .limit(1)
+    )).scalars().first()
+    return show_row.title if show_row is not None else None
+
+
+async def _enqueue_seasons(
+    db: AsyncSession, *, media_type: str, unification_id: str,
+    season_picks: Optional[list[tuple[int, str, str]]],
+) -> EnqueueResult:
+    """`scope='seasons'` (X2): each pick is `(season, server_id,
+    series_rating_key)` — its OWN source, so one operator action can pull
+    season 1 from account A and season 2 from account B in a single batch."""
+    if not season_picks:
+        return EnqueueResult(jobs=[], batch_id=None, error="aucune sélection")
+
+    show_title_cache: dict[tuple[str, str], Optional[str]] = {}
+    episodes: list[Media] = []
+    seen_pk: set[tuple[str, str]] = set()
+
+    for season, srv, series_rk in season_picks:
+        cache_key = (srv, series_rk)
+        rows = list((await db.execute(
+            select(Media).where(
+                Media.type == "episode",
+                Media.server_id == srv,
+                Media.grandparent_rating_key == series_rk,
+                Media.parent_index == season,
+            )
+        )).scalars().all())
+
+        if cache_key not in show_title_cache:
+            title = await _resolve_show_title(db, srv, series_rk)
+            if title is None and rows:
+                title = rows[0].grandparent_title
+            show_title_cache[cache_key] = title
+
+        for ep in rows:
+            pk = (ep.server_id, ep.rating_key)
+            if pk in seen_pk:
+                continue
+            seen_pk.add(pk)
+            episodes.append(ep)
+
+    if not episodes:
+        return EnqueueResult(
+            jobs=[], batch_id=None, error="aucun épisode pour les saisons sélectionnées",
+        )
+
+    _, first_srv, first_series_rk = season_picks[0]
+    batch_title = show_title_cache.get((first_srv, first_series_rk)) or "Unknown"
+
+    def _show_title_for(ep: Media) -> Optional[str]:
+        return show_title_cache.get((ep.server_id, ep.grandparent_rating_key)) or ep.grandparent_title
+
+    return await _persist_episode_batch(
+        db, media_type=media_type, unification_id=unification_id,
+        scope="seasons", batch_server_id=first_srv, batch_rating_key=first_series_rk,
+        batch_title=batch_title, episodes=episodes, show_title_for=_show_title_for,
+        op="enqueue_seasons",
+    )
+
+
+async def _enqueue_episodes(
+    db: AsyncSession, *, media_type: str, unification_id: str,
+    episode_picks: Optional[list[tuple[str, str]]],
+) -> EnqueueResult:
+    """`scope='episodes'` (X2): each pick is `(server_id,
+    episode_rating_key)` — its own source. An unknown/missing episode is
+    skipped (non-fatal); the scope only errors if EVERY pick resolves to
+    nothing."""
+    if not episode_picks:
+        return EnqueueResult(jobs=[], batch_id=None, error="aucune sélection")
+
+    show_title_cache: dict[tuple[str, str], Optional[str]] = {}
+    episodes: list[Media] = []
+    seen_pk: set[tuple[str, str]] = set()
+
+    for srv, ep_rk in episode_picks:
+        pk = (srv, ep_rk)
+        if pk in seen_pk:
+            continue
+        ep = (await db.execute(
+            select(Media)
+            .where(Media.server_id == srv, Media.rating_key == ep_rk, Media.type == "episode")
+            .limit(1)
+        )).scalars().first()
+        if ep is None:
+            continue  # unknown episode -> skip non-fatal
+        seen_pk.add(pk)
+        episodes.append(ep)
+
+        show_key = (ep.server_id, ep.grandparent_rating_key)
+        if show_key not in show_title_cache and ep.grandparent_rating_key:
+            title = await _resolve_show_title(db, ep.server_id, ep.grandparent_rating_key)
+            show_title_cache[show_key] = title if title is not None else ep.grandparent_title
+
+    if not episodes:
+        return EnqueueResult(jobs=[], batch_id=None, error="aucun épisode disponible")
+
+    first_srv, first_ep_rk = episode_picks[0]
+
+    def _show_title_for(ep: Media) -> Optional[str]:
+        return show_title_cache.get((ep.server_id, ep.grandparent_rating_key)) or ep.grandparent_title
+
+    batch_title = _show_title_for(episodes[0]) or "Unknown"
+
+    return await _persist_episode_batch(
+        db, media_type=media_type, unification_id=unification_id,
+        scope="episodes", batch_server_id=first_srv, batch_rating_key=first_ep_rk,
+        batch_title=batch_title, episodes=episodes, show_title_for=_show_title_for,
+        op="enqueue_episodes",
+    )
 
 
 # --- Read / mutate (request-path, spec §5.5) ---------------------------------

@@ -104,7 +104,7 @@ async def test_pipeline_validation_peak_concurrency_per_account(monkeypatch, db_
             peak[sid] = max(peak[sid], cur[sid])
             await asyncio.sleep(0.01)
             cur[sid] -= 1
-            return item, False, "get_ct_video"
+            return item, False, "get_ct_video", None
 
     monkeypatch.setattr(hc, "_check_one", _fake_check_one)
 

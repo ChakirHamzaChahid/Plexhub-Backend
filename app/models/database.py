@@ -30,6 +30,7 @@ class Media(Base):
     art_url = Column(Text)
     year = Column(Integer)
     duration = Column(Integer)  # milliseconds
+    file_size = Column(BigInteger)  # file size in bytes, populated by health-check HEAD Content-Length (nullable — unknown until validated)
     summary = Column(Text)
     genres = Column(Text)  # comma-separated
     content_rating = Column(Text)

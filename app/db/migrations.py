@@ -45,6 +45,7 @@ async def run_migrations(engine: AsyncEngine) -> None:
     await _migration_017_create_media_group_snapshot(engine)
     await _migration_018_create_download_tables(engine)
     await _migration_019_create_plex_tables(engine)
+    await _migration_020_add_media_file_size(engine)
 
     logger.info("All migrations completed successfully")
 
@@ -941,3 +942,39 @@ async def _migration_019_create_plex_tables(engine: AsyncEngine) -> None:
             logger.info("Migration 019: plex_server/plex_media_item/plex_sync_status tables created")
         except Exception as e:
             logger.warning("Migration 019: tables may already exist: %s", e)
+
+
+async def _migration_020_add_media_file_size(engine: AsyncEngine) -> None:
+    """Add the `file_size` column to the media table (extension "download
+    Xtream granulaire + taille", Tâche X1a fondation).
+
+    Purely additive and nullable: `file_size` (BIGINT, bytes) is NOT
+    backfilled by this migration — it stays NULL for every existing row
+    until the health-check worker (Tâche X1b) captures the `Content-Length`
+    header of the HEAD request it already issues during stream validation
+    and writes it back. Consumed later by the download-selector UI to show
+    file sizes before enqueueing a download job.
+
+    Idempotent: the column is probed (PRAGMA table_info) before ADD COLUMN
+    is attempted, so a column already present (fresh DB via create_all,
+    CR-C05) is a silent no-op instead of a raise-and-warn; the try/except
+    remains as a safety net for a race with another process's init_db().
+    """
+    logger.info("Migration 020: Adding file_size column to media")
+
+    columns = [
+        ("file_size", "BIGINT"),
+    ]
+
+    for name, sql_type in columns:
+        async with engine.begin() as conn:
+            if await _column_exists(conn, "media", name):
+                logger.debug("Migration 020: %s already present, skipping ADD COLUMN", name)
+                continue
+            try:
+                await conn.execute(text(
+                    f"ALTER TABLE media ADD COLUMN {name} {sql_type}"
+                ))
+                logger.info("Migration 020: %s column added", name)
+            except Exception as e:
+                logger.warning("Migration 020: %s may already exist: %s", name, e)

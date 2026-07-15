@@ -40,7 +40,7 @@ from sqlalchemy import func, select, update
 
 from app.config import settings
 from app.models.database import DownloadJob, Media, XtreamAccount
-from app.services import download_service
+from app.services import download_service, plex_download_service
 from app.services.download_nfo import render_media_nfo
 from app.services.download_service import (
     DownloadCanceled,
@@ -53,7 +53,7 @@ from app.services.download_service import (
 )
 from app.services.stream_service import build_stream_url
 from app.utils.db_retry import run_with_retry
-from app.utils.server_id import parse_server_id
+from app.utils.server_id import is_plex_server_id, parse_server_id
 from app.utils.tasks import create_background_task
 from app.utils.time import now_ms
 
@@ -424,15 +424,20 @@ async def _run_job(session_factory, job_id: str, sem: asyncio.Semaphore) -> None
         if job is None:
             return
 
-        account = await _load_account(session_factory, job.server_id)
-        if account is None:
-            await _mark_failed(session_factory, job_id, "compte source introuvable ou inactif")
-            return
-
-        url = build_stream_url(account, job.rating_key)
-        if not url:
-            await _mark_failed(session_factory, job_id, "URL de flux introuvable")
-            return
+        if is_plex_server_id(job.server_id):
+            url = await plex_download_service.resolve_job_url(session_factory, job)
+            if not url:
+                await _mark_failed(session_factory, job_id, "source Plex introuvable ou non synchronisée")
+                return
+        else:
+            account = await _load_account(session_factory, job.server_id)
+            if account is None:
+                await _mark_failed(session_factory, job_id, "compte source introuvable ou inactif")
+                return
+            url = build_stream_url(account, job.rating_key)
+            if not url:
+                await _mark_failed(session_factory, job_id, "URL de flux introuvable")
+                return
 
         try:
             dest = resolve_confined(job.dest_path)

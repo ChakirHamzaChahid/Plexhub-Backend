@@ -439,4 +439,7 @@ async def resolve_job_url(session_factory, job) -> Optional[str]:
         return None
 
     base = server.base_uri.rstrip("/")
-    return f"{base}{item.part_key}?download=1&X-Plex-Token={server.access_token}"
+    # Plex Part.key is always "/library/parts/..." today; normalize defensively
+    # so a future relative part_key can't produce a malformed URL.
+    part_key = item.part_key if item.part_key.startswith("/") else f"/{item.part_key}"
+    return f"{base}{part_key}?download=1&X-Plex-Token={server.access_token}"

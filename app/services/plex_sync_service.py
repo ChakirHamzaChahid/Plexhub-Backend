@@ -520,7 +520,13 @@ async def _bridge_tmdb_to_imdb(session_factory) -> int:
                 select(
                     PlexMediaItem.server_id, PlexMediaItem.rating_key,
                     PlexMediaItem.imdb_id, PlexMediaItem.tmdb_id,
-                ).where(PlexMediaItem.type.in_(("movie", "show")))
+                )
+                .where(PlexMediaItem.type.in_(("movie", "show")))
+                # Deterministic ordering so the "first-wins" tmdb->imdb map
+                # below picks the same imdb_id every run when a tmdb_id maps to
+                # two different imdb_ids across servers (rare/anomalous, but
+                # otherwise order-of-query dependent — same class as CR-F09).
+                .order_by(PlexMediaItem.server_id, PlexMediaItem.rating_key)
             )
             return list(result.all())
 

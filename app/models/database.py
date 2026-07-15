@@ -1,5 +1,6 @@
 from sqlalchemy import (
     Column, Text, Integer, BigInteger, Boolean, Float, Index, String,
+    CheckConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase
 
@@ -645,3 +646,8 @@ class PlexSyncStatus(Base):
     started_at = Column(BigInteger)                          # epoch ms
     finished_at = Column(BigInteger)                          # epoch ms
     error = Column(Text)                                       # bounded message, never a token/URL
+
+    # Enforce the singleton on a fresh DB too (create_all), converging with
+    # migration 019's `CHECK (id = 1)` — otherwise the constraint only existed
+    # on upgraded DBs (same fresh-vs-migration divergence class as CR-C05).
+    __table_args__ = (CheckConstraint("id = 1", name="ck_plex_sync_status_singleton"),)

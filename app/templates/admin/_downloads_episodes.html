@@ -1,0 +1,42 @@
+<div class="text-xs">
+  {% if episodes %}
+  <form hx-post="/admin/downloads" hx-target="#downloads-queue" hx-swap="innerHTML">
+    <input type="hidden" name="type" value="show">
+    <input type="hidden" name="unification_id" value="{{ unification_id }}">
+    <input type="hidden" name="scope" value="episodes">
+    <table class="w-full text-xs mb-2">
+      <thead class="text-slate-500 uppercase">
+        <tr>
+          <th class="text-left py-1 pr-2">Épisode</th>
+          <th class="text-left py-1 pr-2">Source</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-slate-100">
+        {% for episode in episodes %}
+        <tr>
+          <td class="py-1 pr-2">
+            S{{ '%02d'|format(season) }}E{{ '%02d'|format(episode.episode) }} — {{ episode.title }}
+          </td>
+          <td class="py-1 pr-2">
+            <select name="episode_pick" class="border border-slate-300 rounded px-1 py-0.5 text-xs">
+              <option value="">— ne pas télécharger</option>
+              {% for src in episode.sources %}
+              <option value="{{ src.server_id }}|{{ src.episode_rating_key }}">
+                {{ src.label }} · {{ src.size_h }}{% if src.size_estimated %} ~{% endif %}
+              </option>
+              {% endfor %}
+            </select>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <button type="submit"
+            class="px-2 py-1 rounded bg-slate-700 text-slate-100 hover:bg-slate-600">
+      Télécharger les épisodes
+    </button>
+  </form>
+  {% else %}
+  <p class="text-slate-400 italic">Aucun épisode disponible pour cette saison.</p>
+  {% endif %}
+</div>

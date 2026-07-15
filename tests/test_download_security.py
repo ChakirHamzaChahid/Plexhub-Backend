@@ -254,8 +254,8 @@ class TestAdminDownloadsRequiresBasicAuth:
     async def test_enqueue_401_without_credentials(self, api_client):
         resp = await api_client.post(
             "/admin/downloads",
-            data={"type": "movie", "unification_id": "x", "server_id": "xtream_a",
-                  "rating_key": "vod_1.mkv", "scope": "movie"},
+            data={"type": "movie", "unification_id": "x", "scope": "movie",
+                  "source": "xtream_a|vod_1.mkv"},
         )
         assert resp.status_code == 401
 

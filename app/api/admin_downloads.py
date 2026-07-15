@@ -13,8 +13,20 @@ Security invariants (house law + spec §0.7/F-007):
     logged, or rendered here — only ``title``/``label``/``serverId``/
     ``ratingKey``/job state are ever displayed;
   * the client never supplies a filesystem path — only a selection
-    (``type``, ``unificationId``, ``serverId``, ``ratingKey``, ``scope``);
-    the destination is computed server-side by ``download_service``.
+    (``type``, ``unificationId``, ``scope``, a ``source`` of
+    ``server_id|rating_key``, or repeated ``season_pick``/``episode_pick``
+    selectors); the destination is computed server-side by
+    ``download_service``.
+
+X2 (granular per-episode/per-season download + size display): the versions
+panel now also shows a size (``estimate_media_size`` — exact via
+``Media.file_size`` when the health-check has populated it, else an
+indicative bitrate*duration estimate flagged ``size_estimated``) and a show's
+"Par saison"/"Par épisode" pickers let the operator choose a DIFFERENT source
+PER season/episode (``download_service.list_series_{seasons,episodes}
+_with_sources`` + ``enqueue_selection(scope='seasons'|'episodes', ...)``),
+mirroring ``app.api.admin_plex_downloads`` (the Plex-sourced twin of this
+router) 1:1.
 """
 from __future__ import annotations
 
@@ -38,6 +50,31 @@ router = APIRouter(prefix="/admin/downloads", tags=["admin-downloads"])
 
 _TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+
+_GIB = 1024**3
+_MIB = 1024**2
+
+
+def _fmt_size(size_bytes: Optional[int]) -> str:
+    """``"4.2 Go"`` (Gio) for >=1 GiB, ``"850.0 Mo"`` (Mio) otherwise,
+    ``"—"`` for an unknown size (mirrors ``admin_plex_downloads._fmt_size``
+    byte-for-byte — same Mio-based "Mo" label convention already used by
+    ``_downloads_queue.html``'s byte counters)."""
+    if size_bytes is None:
+        return "—"
+    if size_bytes >= _GIB:
+        return f"{size_bytes / _GIB:.1f} Go"
+    return f"{size_bytes / _MIB:.1f} Mo"
+
+
+def _enrich_source_dict(source: dict) -> dict:
+    """``list_series_seasons_with_sources``/``list_series_episodes_with_sources``
+    already return per-source dicts (``size_bytes``/``size_estimated``) — add
+    the pre-formatted ``size_h`` so the template never does size arithmetic
+    itself (mirrors ``admin_plex_downloads._enrich_source_dict``)."""
+    out = dict(source)
+    out["size_h"] = _fmt_size(source.get("size_bytes"))
+    return out
 
 
 def _job_view(job) -> dict:
@@ -168,11 +205,15 @@ async def admin_downloads_list_fragment(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# F-002 — versions of a title (movie: per-source quality/language; show: per
-# -source "whole series" — PRD §3 Parcours B: "chaque version = une source de
-# série (compte)"). Both cases reuse `media_service.get_unified_group`, the
-# same READ path `/api/media/{movies,shows}/unified?unificationId=` already
-# uses for shows (see `api/media.py::list_shows_unified`).
+# F-002/X2 — versions of a title (movie: per-source size; show: whole-series
+# sources + per-season/per-episode source pickers, MIRRORS
+# `admin_plex_downloads`'s `/versions`+`/episodes` shape exactly). Both cases
+# reuse `media_service.get_unified_group`, the same READ path
+# `/api/media/{movies,shows}/unified?unificationId=` already uses for shows
+# (see `api/media.py::list_shows_unified`); the granular per-season/per
+# -episode breakdown reuses `download_service.list_series_{seasons,episodes}
+# _with_sources` (the same cross-account episode aggregation the "versions"
+# panel and `/episodes/unified` API already use).
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -200,20 +241,35 @@ async def admin_downloads_versions(
     for m, label in build_versions(
         group.members, lambda m: labels.get(m.server_id, m.server_id)
     ):
-        version = {
+        version: dict = {
             "server_id": m.server_id,
             "rating_key": m.rating_key,
             "label": label,
             "is_broken": bool(m.is_broken),
-            "seasons": [],
         }
-        # For a show, list its available seasons so the UI can offer a
-        # per-season download in addition to the whole series.
-        if type == "show":
-            version["seasons"] = await download_service.list_series_seasons(
-                db, m.server_id, m.rating_key
-            )
+        if type == "movie":
+            # Whole-series sources (show case) intentionally carry no size —
+            # per-season/per-episode granularity is where a show's size lives
+            # (below), same convention as `admin_plex_downloads`.
+            size_bytes, size_estimated = download_service.estimate_media_size(m)
+            version["size_bytes"] = size_bytes
+            version["size_h"] = _fmt_size(size_bytes)
+            version["size_estimated"] = size_estimated
         versions.append(version)
+
+    seasons: list[dict] = []
+    if type == "show":
+        season_rows = await download_service.list_series_seasons_with_sources(
+            db, unification_id
+        )
+        seasons = [
+            {
+                "season": row.season,
+                "sources": [_enrich_source_dict(s) for s in row.sources],
+            }
+            for row in season_rows
+        ]
+
     clean_title, clean_year = canonical_title_year(group.best)
     return templates.TemplateResponse(
         request,
@@ -224,13 +280,98 @@ async def admin_downloads_versions(
             "title": clean_title,
             "year": clean_year,
             "versions": versions,
+            "seasons": seasons,
         },
     )
 
 
+@router.get("/{type}/{unification_id:path}/episodes", response_class=HTMLResponse)
+async def admin_downloads_episodes(
+    type: str,
+    unification_id: str,
+    request: Request,
+    season: int = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Per-episode source picker for one season (X2) — ``:path`` converter
+    required for the same reason as ``/versions`` above."""
+    if type not in ("movie", "show"):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown type")
+
+    rows = await download_service.list_series_episodes_with_sources(
+        db, unification_id, season
+    )
+    episodes = [
+        {
+            "season": row.season,
+            "episode": row.episode,
+            "title": row.title,
+            "sources": [_enrich_source_dict(s) for s in row.sources],
+        }
+        for row in rows
+    ]
+    return templates.TemplateResponse(
+        request,
+        "admin/_downloads_episodes.html",
+        {"unification_id": unification_id, "season": season, "episodes": episodes},
+    )
+
+
 # ──────────────────────────────────────────────────────────────────────────────
-# F-003/F-004/F-005/F-006/F-104 — enqueue + queue panel + cancel/retry/clear
+# F-003/F-004/F-005/F-006/F-104/X2 — enqueue + queue panel + cancel/retry/clear
 # ──────────────────────────────────────────────────────────────────────────────
+
+
+def _parse_source(raw: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """``"server_id|rating_key"`` -> ``(server_id, rating_key)``, split on the
+    FIRST ``|`` only (mirrors ``admin_plex_downloads._parse_source``)."""
+    if not raw or "|" not in raw:
+        return None, None
+    server_id, rating_key = raw.split("|", 1)
+    server_id, rating_key = server_id.strip(), rating_key.strip()
+    if not server_id or not rating_key:
+        return None, None
+    return server_id, rating_key
+
+
+def _parse_season_picks(raw_picks: list[str]) -> list[tuple[int, str, str]]:
+    """``"season|server_id|series_rating_key"`` entries -> parsed picks
+    (mirrors ``admin_plex_downloads._parse_season_picks``)."""
+    picks: list[tuple[int, str, str]] = []
+    for raw in raw_picks:
+        raw = (raw or "").strip()
+        if not raw:
+            continue  # "-- ne pas télécharger" placeholder
+        parts = raw.split("|", 2)
+        if len(parts) != 3:
+            continue
+        season_str, server_id, show_rating_key = (p.strip() for p in parts)
+        if not season_str or not server_id or not show_rating_key:
+            continue
+        try:
+            season = int(season_str)
+        except ValueError:
+            continue
+        picks.append((season, server_id, show_rating_key))
+    return picks
+
+
+def _parse_episode_picks(raw_picks: list[str]) -> list[tuple[str, str]]:
+    """``"server_id|episode_rating_key"`` entries -> parsed picks (mirrors
+    ``admin_plex_downloads._parse_episode_picks``)."""
+    picks: list[tuple[str, str]] = []
+    for raw in raw_picks:
+        raw = (raw or "").strip()
+        if not raw:
+            continue  # "-- ne pas télécharger" placeholder
+        parts = raw.split("|", 1)
+        if len(parts) != 2:
+            continue
+        server_id, episode_rating_key = (p.strip() for p in parts)
+        if not server_id or not episode_rating_key:
+            continue
+        picks.append((server_id, episode_rating_key))
+    return picks
 
 
 @router.post("", response_class=HTMLResponse)
@@ -239,31 +380,59 @@ async def admin_downloads_enqueue(
     request: Request,
     type: str = Form(...),
     unification_id: str = Form(...),
-    server_id: str = Form(...),
-    rating_key: str = Form(...),
     scope: str = Form(...),
-    # Repeated `seasons` checkbox fields (scope=series_seasons only); ignored
-    # otherwise. FastAPI collects same-named form fields into this list.
-    seasons: list[int] = Form(default=[]),
+    # movie / series_all: "server_id|rating_key". Unused for seasons/episodes.
+    source: Optional[str] = Form(None),
+    # Repeated `season_pick`/`episode_pick` selects (scope=seasons/episodes
+    # only) -- FastAPI collects same-named form fields into these lists.
+    season_pick: list[str] = Form(default=[]),
+    episode_pick: list[str] = Form(default=[]),
     db: AsyncSession = Depends(get_db),
 ):
+    """Dispatch by scope (X2 — mirrors ``admin_plex_downloads_enqueue`` 1:1):
+    ``movie``/``series_all`` take a single ``source``; ``seasons``/``episodes``
+    take one source PER unit via the repeated ``season_pick``/``episode_pick``
+    selectors, so one operator action can span multiple accounts. The old
+    ``series_seasons`` (checkbox) scope is intentionally no longer reachable
+    from this router — ``download_service.enqueue_selection`` still supports
+    it for its own tests, but the UI now offers ``seasons`` (with a per-season
+    source picker) instead."""
+    error: Optional[str] = None
+
     if type not in ("movie", "show") or scope not in (
-        "movie", "series_all", "series_seasons",
+        "movie", "series_all", "seasons", "episodes",
     ):
         error = "Sélection invalide (type/scope inattendu)."
-    elif scope == "series_seasons" and not seasons:
-        error = "Aucune saison sélectionnée."
-    else:
-        result = await download_service.enqueue_selection(
-            db,
-            media_type=type,
-            unification_id=unification_id,
-            server_id=server_id,
-            rating_key=rating_key,
-            scope=scope,
-            seasons=seasons or None,
-        )
-        error = result.error
+    elif scope in ("movie", "series_all"):
+        server_id, rating_key = _parse_source(source)
+        if not server_id or not rating_key:
+            error = "Sélection invalide (source manquante)."
+        else:
+            result = await download_service.enqueue_selection(
+                db, media_type=type, unification_id=unification_id, scope=scope,
+                server_id=server_id, rating_key=rating_key,
+            )
+            error = result.error
+    elif scope == "seasons":
+        picks = _parse_season_picks(season_pick)
+        if not picks:
+            error = "Aucune saison sélectionnée."
+        else:
+            result = await download_service.enqueue_selection(
+                db, media_type=type, unification_id=unification_id, scope=scope,
+                season_picks=picks,
+            )
+            error = result.error
+    else:  # scope == "episodes"
+        picks = _parse_episode_picks(episode_pick)
+        if not picks:
+            error = "Aucun épisode sélectionné."
+        else:
+            result = await download_service.enqueue_selection(
+                db, media_type=type, unification_id=unification_id, scope=scope,
+                episode_picks=picks,
+            )
+            error = result.error
 
     return templates.TemplateResponse(
         request, "admin/_downloads_queue.html", await _queue_context(db, enqueue_error=error),

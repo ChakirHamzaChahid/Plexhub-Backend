@@ -652,6 +652,7 @@ async def list_series_seasons_with_sources(
             acc = per_source.setdefault(key, {
                 "series_rating_key": ep.grandparent_rating_key,
                 "episode_count": 0,
+                "sized_count": 0,
                 "size_bytes": 0,
                 "size_estimated": False,
                 "has_any_size": False,
@@ -660,18 +661,24 @@ async def list_series_seasons_with_sources(
             size, estimated = estimate_media_size(ep)
             if size is not None:
                 acc["size_bytes"] += size
+                acc["sized_count"] += 1
                 acc["size_estimated"] = acc["size_estimated"] or estimated
                 acc["has_any_size"] = True
 
     by_season: dict[int, list[dict]] = {}
     for (server_id, season), acc in per_source.items():
+        # Flag the season sum as estimated when some episodes have no known
+        # size: the sum then only covers `sized_count`/`episode_count` files and
+        # UNDER-reports the true total — showing it as exact would mislead the
+        # operator on disk usage.
+        partial = acc["has_any_size"] and acc["sized_count"] < acc["episode_count"]
         by_season.setdefault(season, []).append({
             "server_id": server_id,
             "series_rating_key": acc["series_rating_key"],
             "label": labels.get(server_id, server_id),
             "episode_count": acc["episode_count"],
             "size_bytes": acc["size_bytes"] if acc["has_any_size"] else None,
-            "size_estimated": acc["size_estimated"],
+            "size_estimated": acc["size_estimated"] or partial,
         })
 
     return [

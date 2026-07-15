@@ -580,3 +580,66 @@ class DownloadEnqueueRequest(BaseModel):
     rating_key: str
     scope: str                                  # 'movie' | 'series_all' | 'series_seasons'
     seasons: Optional[list[int]] = None         # required (non-empty) for series_seasons
+
+
+# --- Plex catalogue Schemas (feature "Télécharger Plex", Tâche C4 —
+#     read-only shapes for the JSON mirror, Tâche C7; the reads themselves
+#     live in services.plex_catalog_service, which returns dataclasses —
+#     these Pydantic models are the wire serialization the router builds
+#     from those dataclasses.) ---
+
+class PlexServerResponse(BaseModel):
+    """One ``plex_server`` row, camelCase. NEVER ``accessToken``/``baseUri``
+    (per-server secret + its connection URI — see ``PlexServer`` docstring,
+    house-law piège on secrets)."""
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    server_id: str                              # "plex_<clientIdentifier>"
+    client_identifier: str
+    name: str
+    owner_title: Optional[str] = None
+    owned: bool
+    is_reachable: bool
+    last_synced_at: Optional[int] = None
+    last_sync_error: Optional[str] = None
+
+
+class PlexSourceResponse(BaseModel):
+    """One playable version of a unified Plex item (one row of
+    ``plex_media_item``)."""
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    server_id: str
+    rating_key: str
+    server_name: str
+    resolution: str                             # "1080p" or "" if unknown
+    size_bytes: Optional[int] = None
+    video_codec: Optional[str] = None
+    container: Optional[str] = None
+
+
+class PlexUnifiedItemResponse(BaseModel):
+    """One deduplicated Plex movie/show group (``GROUP BY unification_id``
+    over ``plex_media_item``)."""
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    unification_id: str
+    type: str                                   # 'movie' | 'show'
+    title: str
+    year: Optional[int] = None
+    source_count: int
+    sources: list[PlexSourceResponse] = []
+
+
+class PlexServerListResponse(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    items: list[PlexServerResponse]
+    total: int
+
+
+class PlexCatalogResponse(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    items: list[PlexUnifiedItemResponse]
+    total: int

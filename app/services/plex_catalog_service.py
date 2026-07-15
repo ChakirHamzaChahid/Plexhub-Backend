@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.database import PlexMediaItem, PlexServer
+from app.models.database import PlexMediaItem, PlexServer, PlexSyncStatus
 from app.utils.server_id import build_plex_server_id, parse_plex_server_id
 
 
@@ -436,6 +436,28 @@ async def list_episodes_with_sources(
         )
         for episode, sources in sorted(by_episode.items(), key=lambda kv: kv[0])
     ]
+
+
+async def get_sync_status(db: AsyncSession) -> dict:
+    """Read the singleton `plex_sync_status` row (id=1) for the admin UI's
+    status panel (ticket C6).
+
+    Defaults to `{"state": "idle", ...}` when the row doesn't exist yet (a
+    fresh DB, before `plex_sync_service` has ever run — it upserts the row
+    lazily on first claim/reap, not at migration time). Never exposes a
+    secret: this table carries only `state`/`started_at`/`finished_at`/a
+    bounded `error` string (`plex_sync_service._safe_error`), never a
+    token/URL — see `PlexSyncStatus`'s docstring.
+    """
+    row = await db.get(PlexSyncStatus, 1)
+    if row is None:
+        return {"state": "idle", "started_at": None, "finished_at": None, "error": None}
+    return {
+        "state": row.state,
+        "started_at": row.started_at,
+        "finished_at": row.finished_at,
+        "error": row.error,
+    }
 
 
 async def list_servers(db: AsyncSession) -> list[dict]:

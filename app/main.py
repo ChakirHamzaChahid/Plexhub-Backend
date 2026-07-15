@@ -15,6 +15,7 @@ from app.api import (
     accounts,
     admin,
     admin_downloads,
+    admin_plex_downloads,
     ai,
     api_keys,
     categories,
@@ -392,6 +393,29 @@ async def lifespan(app: FastAPI):
             from app.utils.tasks import create_background_task
             create_background_task(_run_download_worker(), name="download_worker")
 
+            # Plex catalogue sync status reap (feature "Télécharger Plex",
+            # ticket C6) — a `plex_sync_status` row left `running` belongs to
+            # a previous process instance that is definitely dead (mirrors
+            # `plex_sync_service.reap_sync_status`'s own docstring); reap it
+            # to `idle` at master boot so a stale "synchronisation…" badge
+            # never gets stuck in the admin UI. Guarded by `PLEX_ACCOUNT_TOKEN`
+            # so nothing touches the DB when the feature is unconfigured
+            # (mirrors `run_full_sync`'s own no-op guard), and dispatched via
+            # `create_background_task` so it never blocks lifespan startup —
+            # same non-blocking convention as `_run_download_worker` above.
+            # Deliberately independent of `DOWNLOAD_DIR`/`_run_download_worker`
+            # (the Plex sync status can need reaping even when the physical
+            # download queue itself is disabled).
+            async def _reap_plex_sync():
+                if not settings.PLEX_ACCOUNT_TOKEN:
+                    return
+                from app.services import plex_sync_service
+                from app.db.database import async_session_factory
+
+                await plex_sync_service.reap_sync_status(async_session_factory)
+
+            create_background_task(_reap_plex_sync(), name="plex_sync_reap")
+
             # Non-blocking initial sync, then enrichment, then Plex generation
             async def initial_sync_then_enrich():
                 if _PIPELINE_LOCK.locked():
@@ -514,6 +538,11 @@ app.include_router(admin.router, dependencies=[Depends(verify_admin_basic_auth)]
 # as the rest of /admin (identical convention, separate router module per the
 # feature's disjoint-file-ownership rule, docs/20-impl-media-download.md §7.3).
 app.include_router(admin_downloads.router, dependencies=[Depends(verify_admin_basic_auth)])
+# Admin "Télécharger Plex" tab (ticket C6) — mirror of the block above, same
+# self-prefixed "/admin/plex-downloads" + same Basic Auth guard at the same
+# mount site; separate router module per the feature's disjoint-file-
+# ownership convention.
+app.include_router(admin_plex_downloads.router, dependencies=[Depends(verify_admin_basic_auth)])
 
 # Interactive API docs — kept off the public default URLs above (docs_url=None …)
 # and re-exposed here behind the SAME HTTP Basic Auth as /admin, so they're

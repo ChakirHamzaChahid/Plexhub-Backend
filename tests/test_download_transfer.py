@@ -7,6 +7,8 @@ repo — see `docs/40-testplan-media-download.md` §6 risk #4.
 """
 from __future__ import annotations
 
+import logging
+
 import httpx
 import pytest
 
@@ -417,4 +419,72 @@ class TestSafeRedirectFollow:
         )
         with pytest.raises(DownloadPermanentError):
             await download_to_disk(URL, dest)
+        assert not dest.exists()
+
+
+# ─── Plex "download disabled": 403 on ?download=1 -> direct-stream fallback ───
+
+
+class TestPlexDownloadDisabledFallback:
+    """A shared Plex server whose owner disabled "Allow Downloads" answers the
+    `?download=1` URL with 403, but still serves the byte-identical original
+    file via the direct-play part URL (no `download=1`). `download_to_disk`
+    switches to the next `fallback_urls` candidate on that 403 WITHOUT
+    consuming the retry budget — the transfer recovers transparently. A single
+    respx route (matched by base path) inspects each request's query so the
+    test never depends on respx query-param matching semantics.
+    """
+
+    _PART = r"^http://pms\.example/library/parts/1/file\.mkv"
+    _TOKEN = "SEKRET-PLEX-TOKEN-99"  # distinctive -> provable absence from logs
+    _PRIMARY = f"http://pms.example/library/parts/1/file.mkv?download=1&X-Plex-Token={_TOKEN}"
+    _FALLBACK = f"http://pms.example/library/parts/1/file.mkv?X-Plex-Token={_TOKEN}"
+
+    async def test_403_on_primary_recovers_via_stream_fallback(self, tmp_path, xtream_mock, caplog):
+        dest = tmp_path / "Movies" / "PD" / "PD.mkv"
+        seen: list[str] = []
+
+        def _route(request: httpx.Request) -> httpx.Response:
+            seen.append(str(request.url))
+            if "download=1" in str(request.url):
+                return httpx.Response(403)  # downloads disabled on this share
+            return httpx.Response(200, content=BODY, headers={"Content-Length": str(len(BODY))})
+
+        route = xtream_mock.get(url__regex=self._PART).mock(side_effect=_route)
+
+        with caplog.at_level(logging.DEBUG, logger="plexhub.download"):
+            result = await download_to_disk(
+                self._PRIMARY, dest, fallback_urls=[self._FALLBACK], chunk_bytes=10,
+            )
+
+        assert route.call_count == 2, "primary (403) then stream fallback (200)"
+        assert "download=1" in seen[0] and "download=1" not in seen[1]
+        assert dest.read_bytes() == BODY
+        assert result.bytes_downloaded == len(BODY)
+        assert result.already_present is False
+        # The 403-fallback log line must never carry the token or a URL.
+        for record in caplog.records:
+            assert self._TOKEN not in record.getMessage()
+            assert "X-Plex-Token" not in record.getMessage()
+
+    async def test_403_without_fallback_stays_permanent(self, tmp_path, xtream_mock):
+        """No `fallback_urls` (the Xtream default) -> a 403 is still a permanent
+        failure, byte-for-byte unchanged behaviour."""
+        dest = tmp_path / "Movies" / "PD2" / "PD2.mkv"
+        route = xtream_mock.get(url__regex=self._PART).mock(return_value=httpx.Response(403))
+
+        with pytest.raises(DownloadPermanentError):
+            await download_to_disk(self._PRIMARY, dest, fallback_urls=[])
+        assert route.call_count == 1, "no fallback attempted"
+        assert not dest.exists()
+
+    async def test_403_on_all_candidates_fails_permanent(self, tmp_path, xtream_mock):
+        """If EVERY candidate 403s, the last one exhausts the list and raises
+        a permanent failure (no infinite loop)."""
+        dest = tmp_path / "Movies" / "PD3" / "PD3.mkv"
+        route = xtream_mock.get(url__regex=self._PART).mock(return_value=httpx.Response(403))
+
+        with pytest.raises(DownloadPermanentError):
+            await download_to_disk(self._PRIMARY, dest, fallback_urls=[self._FALLBACK])
+        assert route.call_count == 2, "primary + one fallback, both 403"
         assert not dest.exists()

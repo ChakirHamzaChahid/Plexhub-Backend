@@ -17,17 +17,23 @@ two entry points:
     path confinement itself is proven later, at write time, by
     `download_service.resolve_confined`).
 
-  - `resolve_job_url`: called from `download_worker._run_job` at transfer
+  - `resolve_job_urls`: called from `download_worker._run_job` at transfer
     time (parallel to `stream_service.build_stream_url` for Xtream jobs) to
-    re-derive the Plex direct-download URL for a `plex_*`-sourced job. The
-    URL embeds `X-Plex-Token` — a secret — and this function, like its
-    Xtream counterpart, NEVER logs or persists it; only the caller's
-    `dest`/`job_id`/`title` may appear in log lines.
+    re-derive the Plex transfer URLs for a `plex_*`-sourced job. Returns an
+    ORDERED list `[download_url, stream_url]`: the `?download=1` URL first,
+    then the direct-play part URL (same `Part.key`, WITHOUT `download=1`)
+    that `download_to_disk` switches to on a 403 (share with "Allow
+    Downloads" disabled — the stream is still served). Both embed
+    `X-Plex-Token` — a secret — and this function, like its Xtream
+    counterpart, NEVER logs or persists any of them; only the caller's
+    `dest`/`job_id`/`title` may appear in log lines. (`resolve_job_url`,
+    singular, is a thin back-compat wrapper returning the first URL.)
 
 Dispatch lives in `download_worker._run_job`::
 
     if is_plex_server_id(job.server_id):
-        url = await plex_download_service.resolve_job_url(session_factory, job)
+        plex_urls = await plex_download_service.resolve_job_urls(session_factory, job)
+        url, fallback_urls = plex_urls[0], plex_urls[1:]
     else:
         ...  # existing Xtream path (build_stream_url / _load_account), unchanged
 """
@@ -406,24 +412,35 @@ async def enqueue_plex_selection(
 
 # --- Worker-time URL resolution (ticket C5) ---------------------------------
 
-async def resolve_job_url(session_factory, job) -> Optional[str]:
-    """Re-derive the Plex direct-download URL for a job at worker time.
+async def resolve_job_urls(session_factory, job) -> list[str]:
+    """Ordered candidate transfer URLs for a Plex job, most-preferred first.
 
     Loads `PlexServer` (`base_uri` + decrypted `access_token`) +
     `PlexMediaItem` (`part_key`) via a fresh session opened from
-    `session_factory` (same pattern as `download_worker._load_account`).
-    Returns `None` if the server/item is missing, or if `base_uri`,
-    `access_token`, or `part_key` is empty.
+    `session_factory` (same pattern as `download_worker._load_account`), then
+    builds TWO forms of the same `Part.key` endpoint:
 
-    The returned URL contains the token — the caller MUST NOT log/persist
-    it (only `job_id`/`title`/`dest` may appear in log lines, same secrets
-    invariant as the Xtream stream URL).
+      [0] original-file "download" URL (`?download=1`) — what the Android app
+          uses; served when the share has "Allow Downloads" enabled.
+      [1] direct-play stream URL (SAME Part.key, WITHOUT `download=1`) —
+          byte-identical original file served through the playback pathway,
+          which is gated by *playback* permission only (NOT the per-share
+          download/sync toggle). This is the fallback `download_to_disk`
+          switches to on a 403 (owner disabled downloads but the stream is
+          still served). Both support HTTP Range, so `.part` resume is
+          unaffected whichever URL wins.
+
+    Every returned URL embeds `X-Plex-Token` — a secret: the caller MUST NOT
+    log/persist any of them (same invariant as the Xtream stream URL; only
+    `job_id`/`title`/`dest` may appear in log lines). Returns `[]` if the
+    server/item is missing, or if `base_uri`, `access_token`, or `part_key`
+    is empty.
     """
     if not is_plex_server_id(job.server_id):
-        return None
+        return []
     client_identifier = parse_plex_server_id(job.server_id)
     if not client_identifier:
-        return None
+        return []
 
     async def _do() -> tuple[Optional[PlexServer], Optional[PlexMediaItem]]:
         async with session_factory() as db:
@@ -434,12 +451,29 @@ async def resolve_job_url(session_factory, job) -> Optional[str]:
     server, item = await run_with_retry(_do, op="resolve_plex_job_url")
 
     if server is None or item is None:
-        return None
+        return []
     if not server.base_uri or not server.access_token or not item.part_key:
-        return None
+        return []
 
     base = server.base_uri.rstrip("/")
     # Plex Part.key is always "/library/parts/..." today; normalize defensively
     # so a future relative part_key can't produce a malformed URL.
     part_key = item.part_key if item.part_key.startswith("/") else f"/{item.part_key}"
-    return f"{base}{part_key}?download=1&X-Plex-Token={server.access_token}"
+    token = server.access_token
+    return [
+        f"{base}{part_key}?download=1&X-Plex-Token={token}",
+        f"{base}{part_key}?X-Plex-Token={token}",
+    ]
+
+
+async def resolve_job_url(session_factory, job) -> Optional[str]:
+    """Back-compat single-URL resolver: the preferred (`?download=1`) URL, or
+    `None` if no candidate can be built.
+
+    `download_worker` uses `resolve_job_urls` instead, to also obtain the
+    direct-stream fallback; this thin wrapper is retained for any caller/test
+    that only needs the primary URL. Same secrets invariant as
+    `resolve_job_urls`.
+    """
+    urls = await resolve_job_urls(session_factory, job)
+    return urls[0] if urls else None

@@ -135,6 +135,39 @@ class TestPlexDispatch:
             f"?download=1&X-Plex-Token={TOKEN}"
         )
 
+    async def test_plex_job_passes_direct_stream_fallback_url(
+        self, db_engine, monkeypatch, download_dir,
+    ):
+        """The worker hands `download_to_disk` the `?download=1` URL as the
+        primary AND the download-less direct-play part URL as `fallback_urls`
+        (so a 403 on a downloads-disabled share recovers via the stream)."""
+        factory = await _seeded_factory(
+            db_engine,
+            jobs=[_plex_job("p6")],
+            servers=[_plex_server()],
+            items=[_plex_item(rating_key="1001")],
+        )
+        monkeypatch.setattr(settings, "DOWNLOAD_MIN_FREE_DISK_MB", 0)
+
+        captured: dict = {}
+
+        async def _fake_download_to_disk(
+            url, dest, *, on_progress=None, cancel_check=None, fallback_urls=None, **_kw,
+        ):
+            captured["url"] = url
+            captured["fallback_urls"] = fallback_urls
+            return DownloadResult(
+                bytes_downloaded=2, bytes_total=2, already_present=False, resumed=False,
+            )
+
+        monkeypatch.setattr(download_service, "download_to_disk", _fake_download_to_disk)
+
+        await _run_job(factory, "p6", asyncio.Semaphore(1))
+
+        base = "https://1-2-3-4.plex.direct:32400/library/parts/1001/file.mkv"
+        assert captured["url"] == f"{base}?download=1&X-Plex-Token={TOKEN}"
+        assert captured["fallback_urls"] == [f"{base}?X-Plex-Token={TOKEN}"]
+
     async def test_xtream_job_keeps_existing_path_intact(
         self, db_engine, monkeypatch, download_dir, xtream_mock,
     ):
@@ -305,3 +338,27 @@ class TestResolveJobUrl:
             "https://5-6-7-8.plex.direct:32400/library/parts/1001/file.mkv"
             f"?download=1&X-Plex-Token={TOKEN}"
         )
+
+    async def test_resolve_job_urls_returns_download_then_stream(self, db_engine):
+        """`resolve_job_urls` returns the `?download=1` URL first, then the
+        direct-play stream URL (SAME part, WITHOUT `download=1`) used as the
+        403 fallback for shares with downloads disabled."""
+        factory = await _seeded_factory(
+            db_engine, jobs=[],
+            servers=[_plex_server(base_uri="https://5-6-7-8.plex.direct:32400/")],
+            items=[_plex_item(rating_key="1001", part_key="/library/parts/1001/file.mkv")],
+        )
+        urls = await plex_download_service.resolve_job_urls(factory, _plex_job("j6"))
+        base = "https://5-6-7-8.plex.direct:32400/library/parts/1001/file.mkv"
+        assert urls == [
+            f"{base}?download=1&X-Plex-Token={TOKEN}",
+            f"{base}?X-Plex-Token={TOKEN}",
+        ]
+
+    async def test_resolve_job_urls_empty_when_incomplete(self, db_engine):
+        factory = await _seeded_factory(
+            db_engine, jobs=[],
+            servers=[_plex_server(access_token="")],
+            items=[_plex_item(rating_key="1001")],
+        )
+        assert await plex_download_service.resolve_job_urls(factory, _plex_job("j7")) == []

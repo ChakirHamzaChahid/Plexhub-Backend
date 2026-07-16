@@ -31,7 +31,7 @@ from app.api import (
 )
 from app.utils.request_context import RequestIdLogFilter, RequestIdMiddleware
 
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 
 logger = logging.getLogger("plexhub")
 

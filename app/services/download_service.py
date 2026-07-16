@@ -304,6 +304,7 @@ async def download_to_disk(
     on_progress: Optional[Callable[[int, Optional[int]], Awaitable[None]]] = None,
     cancel_check: Optional[Callable[[], Awaitable[bool]]] = None,
     chunk_bytes: int = settings.DOWNLOAD_CHUNK_BYTES,
+    fallback_urls: Optional[list[str]] = None,
 ) -> DownloadResult:
     """GET streaming httpx into `<dest>.part`, atomic promotion on success.
 
@@ -324,10 +325,20 @@ async def download_to_disk(
       behaviour (any 3xx is a permanent failure).
     - `mkdir`/`stat`/`os.replace` are offloaded via `asyncio.to_thread`;
       buffered chunk writes stay inline (accepted I/O, same as elsewhere).
+    - `fallback_urls` (optional, ordered): additional candidate URLs tried, in
+      order, ONLY when the current source answers **403** before any byte is
+      transferred. This is the Plex "download disabled" case — a shared server
+      with `?download=1` gated off still serves the byte-identical original
+      file via the direct-play part URL (no `download=1`), so switching to it
+      recovers the transfer without consuming the retry budget. Empty/None (the
+      Xtream default) leaves the 403 behaviour unchanged: a permanent failure.
     - On cancel/failure the `.part` is left on disk — never promoted.
     - No message raised here ever contains `url` (it may carry Xtream creds).
     """
     part = dest.with_name(dest.name + ".part")
+    # Ordered direct-stream fallbacks (Plex download-disabled recovery). A 403
+    # on the current source pops the next one instead of failing permanently.
+    pending_fallbacks: list[str] = list(fallback_urls or [])
 
     def _prepare() -> tuple[int, int]:
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -385,6 +396,21 @@ async def download_to_disk(
                             bytes_downloaded=resume_from, bytes_total=resume_from,
                             already_present=False, resumed=True,
                         )
+                    if resp.status_code == 403 and pending_fallbacks:
+                        # Plex "download disabled": a shared server gates the
+                        # `?download=1` URL with 403 but still serves the
+                        # byte-identical original file via the direct-play part
+                        # URL. Switch to the next candidate WITHOUT consuming the
+                        # retry budget or touching `.part` (a 403 wrote nothing);
+                        # `resume_from`/Range headers stay valid for the retry.
+                        # Never logs the URL/token (only this benign line).
+                        url = pending_fallbacks.pop(0)
+                        redirects_left = settings.DOWNLOAD_MAX_REDIRECTS
+                        logger.info(
+                            "Download: primary source rejected (403) — retrying"
+                            " via direct-stream fallback"
+                        )
+                        continue
                     if resp.status_code in (404, 403):
                         raise DownloadPermanentError(f"upstream {resp.status_code}")
                     if resp.status_code >= 500 or resp.status_code == 429:

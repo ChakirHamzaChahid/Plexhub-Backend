@@ -424,11 +424,20 @@ async def _run_job(session_factory, job_id: str, sem: asyncio.Semaphore) -> None
         if job is None:
             return
 
+        # Direct-stream fallbacks (Plex download-disabled recovery); Xtream
+        # jobs never populate this, so their transfer is byte-for-byte
+        # unchanged (download_to_disk treats [] like the old single-URL call).
+        fallback_urls: list[str] = []
         if is_plex_server_id(job.server_id):
-            url = await plex_download_service.resolve_job_url(session_factory, job)
-            if not url:
+            plex_urls = await plex_download_service.resolve_job_urls(session_factory, job)
+            if not plex_urls:
                 await _mark_failed(session_factory, job_id, "source Plex introuvable ou non synchronisée")
                 return
+            # [0] = original-file `?download=1` URL (share allows downloads);
+            # the rest are direct-stream fallbacks download_to_disk switches to
+            # on a 403 — see plex_download_service.resolve_job_urls.
+            url = plex_urls[0]
+            fallback_urls = plex_urls[1:]
         else:
             account = await _load_account(session_factory, job.server_id)
             if account is None:
@@ -479,6 +488,7 @@ async def _run_job(session_factory, job_id: str, sem: asyncio.Semaphore) -> None
             await download_service.check_free_disk_space()
             result = await download_service.download_to_disk(
                 url, dest, on_progress=_on_progress, cancel_check=_cancel_check,
+                fallback_urls=fallback_urls,
             )
         except DownloadCanceled:
             logger.info("Download job %s: canceled (title=%r)", job_id, job.title)

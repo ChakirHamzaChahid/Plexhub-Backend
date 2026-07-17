@@ -7,11 +7,23 @@ A third tab alongside the source-specific "Télécharger" (Xtream) and
 `unified_download_catalog_service` merges the two catalogues by
 `unification_id` so a title present in both sources shows once, with a badge
 per origin. The actual per-source selection + enqueue is delegated VERBATIM to
-the existing origin routers: the merged card lazy-loads each origin's existing
-`/versions` fragment (`/admin/downloads/…` and `/admin/plex-downloads/…`),
-whose enqueue forms already POST to their own endpoints and target the SHARED
-`#downloads-queue`. So there is **no new enqueue/worker/queue logic here** — the
-worker already dispatches by `is_plex_server_id`, and the queue is common.
+the existing origin routers: each merged card (a ``<details>``) carries, as
+STATIC children, one lazy loader per present origin that pulls that origin's
+existing `/versions` fragment (`/admin/downloads/…` and
+`/admin/plex-downloads/…`), whose enqueue forms already POST to their own
+endpoints and target the SHARED `#downloads-queue`. So there is **no new
+enqueue/worker/queue logic here** — the worker already dispatches by
+`is_plex_server_id`, and the queue is common.
+
+The loaders fire on the ``<details>``'s real ``toggle`` DOM event
+(``hx-trigger="toggle once from:closest details"``) rather than on an
+auto-trigger inside HTMX-swapped content: htmx does NOT fire ``load``/
+``revealed``/``intersect`` on content swapped into a target that is a
+*descendant* of the element carrying the ``hx-get`` (verified in-browser), so
+the earlier ``<details hx-get>`` → ``/sources`` → nested ``hx-trigger="load"``
+two-hop silently never fired. Because the card already knows which origins it
+has (``UnifiedCard.origins``), the loaders are rendered directly into the list
+fragment and no intermediate ``/sources`` round-trip is needed.
 
 Mounted at ``/admin/unified-downloads`` (Basic Auth at mount time in
 ``main.py``, same convention as the other two admin download tabs). Router =
@@ -25,7 +37,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -125,32 +137,4 @@ async def admin_unified_downloads_list_fragment(
             cards, total, truncated, offset,
             page=page, page_size=page_size, media_type=media_type, search=search, genre=genre,
         ),
-    )
-
-
-# ── Per-card sources: which origins carry it (each origin's existing version
-#    picker is embedded via HTMX from here) ──────────────────────────────────
-
-
-@router.get("/{type}/{unification_id:path}/sources", response_class=HTMLResponse)
-async def admin_unified_downloads_sources(
-    type: str,
-    unification_id: str,
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-):
-    """``unification_id`` carries literal ``/`` (``imdb://tt…``) — the
-    ``:path`` converter is required, same as the origin routers' ``/versions``.
-    Renders one section per origin present; each lazy-loads that origin's
-    EXISTING version fragment, whose enqueue forms target the shared queue."""
-    if type not in ("movie", "show"):
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown type")
-
-    avail = await unified_catalog.get_group_availability(db, type, unification_id)
-    if avail is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "unificationId inconnu")
-
-    return templates.TemplateResponse(
-        request, "admin/_unified_downloads_sources.html",
-        {"avail": avail, "type": type, "unification_id": unification_id},
     )

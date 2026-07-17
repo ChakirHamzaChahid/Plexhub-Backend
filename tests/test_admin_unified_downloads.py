@@ -3,8 +3,9 @@ tab (feature "écran de téléchargement unifié", Vague W3).
 
 Covers: Basic Auth gate (mirrors the other two download tabs), the merged
 browse index/list (a title present in BOTH Plex and Xtream shows once with both
-origin badges), the genre filter over both catalogues, and the per-card
-`/sources` fragment (embeds each present origin's existing version picker).
+origin badges), the genre filter over both catalogues, and the per-card origin
+version loaders inlined in the list fragment (each present origin embeds its
+existing `/versions` picker, fired by the `<details>` toggle).
 Seeds `Media` (Xtream) + `PlexMediaItem`/`PlexServer` (Plex) rows directly.
 """
 from __future__ import annotations
@@ -80,11 +81,6 @@ class TestRequiresBasicAuth:
     async def test_list_401_without_credentials(self, api_client, monkeypatch):
         _configure_admin(monkeypatch)
         resp = await api_client.get("/admin/unified-downloads/list")
-        assert resp.status_code == 401
-
-    async def test_sources_401_without_credentials(self, api_client, monkeypatch):
-        _configure_admin(monkeypatch)
-        resp = await api_client.get(f"/admin/unified-downloads/movie/{SHARED_UID}/sources")
         assert resp.status_code == 401
 
 
@@ -186,11 +182,17 @@ class TestUnifiedBrowse:
         assert "2 sources" in resp.text
 
 
-# ─── Per-card sources fragment ──────────────────────────────────────────────
+# ─── Per-card origin version loaders (inlined in the list fragment) ──────────
 
 
-class TestSourcesFragment:
-    async def test_sources_embeds_both_origin_pickers(
+class TestOriginVersionLoaders:
+    """Each merged card embeds, per present origin, a lazy loader for that
+    origin's EXISTING `/versions` fragment — fired by the ``<details>``'s real
+    ``toggle`` event (``toggle once from:closest details``), never a
+    swap-time auto-trigger (see the router docstring / the browser-verified
+    htmx descendant-target quirk)."""
+
+    async def test_list_embeds_both_origin_version_loaders(
         self, api_client, monkeypatch, db_factory,
     ):
         _configure_admin(monkeypatch)
@@ -204,15 +206,17 @@ class TestSourcesFragment:
             await s.commit()
 
         resp = await api_client.get(
-            f"/admin/unified-downloads/movie/{SHARED_UID}/sources",
+            "/admin/unified-downloads/list", params={"type": "movie"},
             auth=(ADMIN_USER, ADMIN_PASS),
         )
         assert resp.status_code == 200
-        # Each present origin embeds its EXISTING version picker endpoint.
+        # Each present origin embeds its EXISTING version picker endpoint,
+        # fired by the details toggle (not a swap-time auto-trigger).
         assert f"/admin/downloads/movie/{SHARED_UID}/versions" in resp.text
         assert f"/admin/plex-downloads/movie/{SHARED_UID}/versions" in resp.text
+        assert "toggle once from:closest details" in resp.text
 
-    async def test_sources_only_present_origin(
+    async def test_list_only_present_origin_loader(
         self, api_client, monkeypatch, db_factory,
     ):
         _configure_admin(monkeypatch)
@@ -225,21 +229,12 @@ class TestSourcesFragment:
             await s.commit()
 
         resp = await api_client.get(
-            "/admin/unified-downloads/movie/imdb://tt999/sources",
+            "/admin/unified-downloads/list", params={"type": "movie"},
             auth=(ADMIN_USER, ADMIN_PASS),
         )
         assert resp.status_code == 200
         assert "/admin/plex-downloads/movie/imdb://tt999/versions" in resp.text
         assert "/admin/downloads/movie/imdb://tt999/versions" not in resp.text
-
-    async def test_sources_404_unknown_group(self, api_client, monkeypatch, db_factory):
-        _configure_admin(monkeypatch)
-        _wire_db(monkeypatch, db_factory)
-        resp = await api_client.get(
-            "/admin/unified-downloads/movie/imdb://nope/sources",
-            auth=(ADMIN_USER, ADMIN_PASS),
-        )
-        assert resp.status_code == 404
 
     async def test_no_secret_leaks_in_any_response(
         self, api_client, monkeypatch, db_factory,
@@ -256,7 +251,6 @@ class TestSourcesFragment:
         for url in (
             "/admin/unified-downloads",
             "/admin/unified-downloads/list?type=movie",
-            f"/admin/unified-downloads/movie/{SHARED_UID}/sources",
         ):
             resp = await api_client.get(url, auth=(ADMIN_USER, ADMIN_PASS))
             assert "secret-token" not in resp.text

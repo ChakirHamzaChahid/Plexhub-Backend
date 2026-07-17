@@ -56,27 +56,6 @@ class UnifiedCard:
     source_count: int               # total versions across BOTH origins
 
 
-@dataclass
-class UnifiedGroupAvailability:
-    unification_id: str
-    type: str
-    title: str
-    year: int | None
-    has_xtream: bool
-    has_plex: bool
-    xtream_source_count: int
-    plex_source_count: int
-
-    @property
-    def origins(self) -> list[str]:
-        out = []
-        if self.has_plex:
-            out.append(ORIGIN_PLEX)
-        if self.has_xtream:
-            out.append(ORIGIN_XTREAM)
-        return out
-
-
 def _merge_card(
     merged: dict[str, UnifiedCard],
     *,
@@ -169,45 +148,3 @@ async def list_unified(
     total = len(cards)
     truncated = x_total > cap or p_total > cap
     return cards[offset:offset + limit], total, truncated
-
-
-async def get_group_availability(
-    db: AsyncSession,
-    media_type: str,
-    unification_id: str,
-) -> UnifiedGroupAvailability | None:
-    """Which origins carry *unification_id*, and how many sources each has —
-    powers the merged card's per-origin "choose a source" panels (each origin's
-    existing version/season/episode picker + enqueue endpoint is reused as-is).
-
-    Returns ``None`` if neither catalogue has the group.
-    """
-    x_group = await media_service.get_unified_group(db, media_type, unification_id)
-    p_group = await plex_catalog_service.get_group(db, media_type, unification_id)
-
-    if x_group is None and p_group is None:
-        return None
-
-    if x_group is not None:
-        title, year = canonical_title_year(x_group.best)
-        x_count = len(x_group.members)
-    else:
-        title, year, x_count = None, None, 0
-
-    if p_group is not None:
-        if title is None:
-            title, year = p_group.title, p_group.year
-        p_count = p_group.source_count
-    else:
-        p_count = 0
-
-    return UnifiedGroupAvailability(
-        unification_id=unification_id,
-        type=media_type,
-        title=title or "Unknown",
-        year=year,
-        has_xtream=x_group is not None,
-        has_plex=p_group is not None,
-        xtream_source_count=x_count,
-        plex_source_count=p_count,
-    )

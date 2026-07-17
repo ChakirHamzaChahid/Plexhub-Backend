@@ -9,11 +9,16 @@
 <div class="flex flex-col gap-2">
   {% if items %}
     {% for item in items %}
-    <details class="bg-white border border-slate-200 rounded shadow-sm"
-              hx-get="/admin/unified-downloads/{{ item.type }}/{{ item.unification_id }}/sources"
-              hx-trigger="toggle once"
-              hx-target="find .sources-body"
-              hx-swap="innerHTML">
+    {# One <details> per unified title. The per-origin version pickers are STATIC
+       children fired by the real `toggle` DOM event (hx-trigger="toggle once
+       from:closest details"), NOT an auto-trigger on swapped content: htmx does
+       not fire load/revealed/intersect on content swapped into a target that is
+       a *descendant* of the element carrying the hx-get, so the old
+       <details hx-get>/sources → nested hx-trigger="load" two-hop never fired
+       (verified in-browser). Each loader targets itself and pulls the origin's
+       EXISTING /versions fragment, whose enqueue forms already POST to their own
+       endpoint and target the shared #downloads-queue. #}
+    <details class="bg-white border border-slate-200 rounded shadow-sm">
       <summary class="px-3 py-2 cursor-pointer flex items-center gap-3 text-sm select-none">
         <span class="flex-1 font-medium">
           {{ item.title }}{% if item.year %} ({{ item.year }}){% endif %}
@@ -28,7 +33,30 @@
         </span>
         <span class="text-xs text-slate-500">{{ item.source_count }} source{{ 's' if item.source_count != 1 else '' }}</span>
       </summary>
-      <div class="sources-body px-3 pb-3 text-xs text-slate-500">Chargement…</div>
+      <div class="sources-body px-3 pb-3 flex flex-col gap-3">
+        {% if 'plex' in item.origins %}
+        <div class="border-l-2 border-orange-300 pl-2">
+          <div class="text-[11px] font-semibold uppercase text-orange-700 mb-1">Plex</div>
+          <div hx-get="/admin/plex-downloads/{{ item.type }}/{{ item.unification_id }}/versions"
+               hx-trigger="toggle once from:closest details"
+               hx-swap="innerHTML"
+               class="text-xs text-slate-500">
+            <span class="text-slate-400">Chargement des sources Plex…</span>
+          </div>
+        </div>
+        {% endif %}
+        {% if 'xtream' in item.origins %}
+        <div class="border-l-2 border-sky-300 pl-2">
+          <div class="text-[11px] font-semibold uppercase text-sky-700 mb-1">Xtream</div>
+          <div hx-get="/admin/downloads/{{ item.type }}/{{ item.unification_id }}/versions"
+               hx-trigger="toggle once from:closest details"
+               hx-swap="innerHTML"
+               class="text-xs text-slate-500">
+            <span class="text-slate-400">Chargement des sources Xtream…</span>
+          </div>
+        </div>
+        {% endif %}
+      </div>
     </details>
     {% endfor %}
   {% else %}

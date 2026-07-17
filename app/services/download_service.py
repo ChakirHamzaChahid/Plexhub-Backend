@@ -91,6 +91,15 @@ class InsufficientDiskSpaceError(DownloadPermanentError):
 
 _PATH_SEP_RE = re.compile(r"[\\/]+")
 _PARENT_DIR_RE = re.compile(r"\.\.+")
+# Characters that are legal on POSIX filesystems (ext4/NFS) but ILLEGAL on
+# NTFS. When a Linux-written file carrying one is exposed over SMB/Samba, the
+# share auto-generates a mangled 8.3 short name (e.g. `WISTO~1.MKV`) so Windows
+# clients can open it — the real name then reads as gibberish there. Normalize
+# them out of every segment so the same file reads correctly on both. `/` and
+# `\` are handled separately (path separators, `_PATH_SEP_RE`). `:` is remapped
+# to ` - ` (media-server convention for `Title: Subtitle`); the rest are dropped.
+_WIN_COLON_RE = re.compile(r"\s*:\s*")
+_WIN_ILLEGAL_RE = re.compile(r'[*?"<>|]')
 _MAX_SEGMENT_LEN = 180
 _DEFAULT_EXT = "ts"
 _RESERVED_WINDOWS_NAMES = frozenset(
@@ -107,9 +116,22 @@ def _strip_unicode_control(text: str) -> str:
     return "".join(ch for ch in text if unicodedata.category(ch) not in ("Cc", "Cf", "Cs"))
 
 
+def remap_ntfs_illegal_chars(text: str) -> str:
+    """Remap characters that are legal on POSIX (ext4/NFS) but ILLEGAL on NTFS,
+    so a Linux-written filename isn't Samba-mangled to an 8.3 short name on
+    Windows SMB clients: `:` -> ` - ` (readable for `Title: Subtitle`), and
+    `* ? " < > |` dropped. Does NOT touch `/`/`\\` (path separators — handled
+    by `_PATH_SEP_RE`). Public on purpose: the one-shot on-disk rename
+    migration (`app/scripts/rename_download_illegal_chars.py`) reuses it so a
+    renamed existing file matches exactly what a fresh download now produces."""
+    text = _WIN_COLON_RE.sub(" - ", text)
+    return _WIN_ILLEGAL_RE.sub("", text)
+
+
 def _sanitize_segment(name: str, *, fallback: str) -> str:
     """Sanitize ONE path segment: NFC-normalize, strip separators/control
-    chars/parent-dir markers, trim trailing '.'/' ', cap length.
+    chars/parent-dir markers, remap NTFS-illegal characters (so the file
+    isn't Samba-mangled on Windows clients), trim trailing '.'/' ', cap length.
 
     This is defense in depth — `resolve_confined` (realpath containment) is
     what actually PROVES the resulting path stays under `DOWNLOAD_DIR`
@@ -119,6 +141,10 @@ def _sanitize_segment(name: str, *, fallback: str) -> str:
     text = unicodedata.normalize("NFC", name or "")
     text = _strip_unicode_control(text)
     text = _PATH_SEP_RE.sub(" ", text)
+    # NTFS-illegal but POSIX-legal chars (`:` -> ` - `, `* ? " < > |` dropped),
+    # remapped BEFORE the whitespace collapse below so the injected spaces are
+    # normalized. Single source of truth shared with the rename migration.
+    text = remap_ntfs_illegal_chars(text)
     # Collapse any run of '..' (and longer) to a single '.' so no parent-dir
     # marker survives; the trailing strip below then drops a lone '.'.
     text = _PARENT_DIR_RE.sub(".", text)

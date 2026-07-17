@@ -291,3 +291,83 @@ class TestNoClientSuppliedPathField:
         sig = inspect.signature(admin_downloads_enqueue)
         forbidden = {"path", "dest_path", "output_dir", "dir"}
         assert not (set(sig.parameters) & forbidden)
+
+
+# ─── Cross-platform (NTFS/Samba) safety: NTFS-illegal chars remapped ────────
+
+# Chars legal on POSIX (ext4/NFS) but ILLEGAL on NTFS — a Linux-written file
+# carrying one gets a mangled 8.3 short name when served over SMB/Samba to a
+# Windows client. `/` and `\` are path separators (checked elsewhere) and so
+# are excluded from this set.
+_NTFS_ILLEGAL = set('<>:"|?*')
+
+
+class TestNtfsIllegalCharsSanitized:
+    """Real-world bug: `Wistoria: Wand and Sword` (and other `Title: Subtitle`
+    series) wrote fine on the Linux volume but showed up as a mangled 8.3 name
+    on the Windows SMB client, because Samba remaps any NTFS-illegal char.
+    `_sanitize_segment` now remaps `:` -> ` - ` and drops `* ? " < > |` so the
+    on-disk name is identical on both platforms."""
+
+    COLON_TITLES = [
+        pytest.param(
+            "Wistoria: Wand and Sword", "Wistoria - Wand and Sword", id="anime-subtitle",
+        ),
+        pytest.param(
+            "Code Geass: Lelouch of the Rebellion",
+            "Code Geass - Lelouch of the Rebellion", id="colon-space",
+        ),
+        pytest.param("Ratio 2:1", "Ratio 2 - 1", id="tight-colon"),
+    ]
+
+    @pytest.mark.parametrize("title,expected_stem", COLON_TITLES)
+    def test_movie_colon_becomes_dash(self, download_dir, title, expected_stem):
+        dest = compute_dest_path(
+            media_type="movie", title=title, year=None,
+            season=None, episode=None, ext="mkv",
+        )
+        assert dest == f"Movies/{expected_stem}/{expected_stem}.mkv"
+        for seg in dest.split("/"):
+            assert not (_NTFS_ILLEGAL & set(seg)), f"NTFS-illegal char survived in {seg!r}"
+        assert _under_base(resolve_confined(dest), download_dir)
+
+    def test_episode_show_title_colon_becomes_dash(self, download_dir):
+        dest = compute_dest_path(
+            media_type="episode", title="Code Geass: Lelouch of the Rebellion", year=None,
+            season=1, episode=2, ext="mkv",
+        )
+        parts = dest.split("/")
+        assert parts[1] == "Code Geass - Lelouch of the Rebellion"
+        assert parts[2] == "Season 01"
+        for seg in parts:
+            assert not (_NTFS_ILLEGAL & set(seg)), f"NTFS-illegal char survived in {seg!r}"
+        assert _under_base(resolve_confined(dest), download_dir)
+
+    def test_all_illegal_chars_removed_from_movie_and_episode(self, download_dir):
+        title = 'What? "Quote"* <tag> | pipe'
+        movie = compute_dest_path(
+            media_type="movie", title=title, year=2020,
+            season=None, episode=None, ext="mkv",
+        )
+        episode = compute_dest_path(
+            media_type="episode", title=title, year=None,
+            season=3, episode=7, ext="mkv",
+        )
+        for dest in (movie, episode):
+            for seg in dest.split("/"):
+                assert not (_NTFS_ILLEGAL & set(seg)), (
+                    f"NTFS-illegal char survived in {seg!r} of {dest!r}"
+                )
+            assert _under_base(resolve_confined(dest), download_dir)
+
+    def test_colon_only_title_does_not_collapse_to_empty(self, download_dir):
+        """A degenerate `:`-only title must still yield a non-empty, illegal-
+        char-free segment (never an empty path component)."""
+        dest = compute_dest_path(
+            media_type="movie", title=":", year=None,
+            season=None, episode=None, ext="mkv",
+        )
+        folder = dest.split("/")[1]
+        assert folder, "colon-only title collapsed to an empty segment"
+        assert not (_NTFS_ILLEGAL & set(folder))
+        assert _under_base(resolve_confined(dest), download_dir)

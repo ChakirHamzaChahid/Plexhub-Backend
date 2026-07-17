@@ -201,11 +201,18 @@ async def test_reset_request_count(configured_omdb, omdb_mock):
     assert configured_omdb.get_request_count() == 0
 
 
-async def test_api_key_never_leaks_on_hard_http_error(configured_omdb, omdb_mock, caplog):
+async def test_api_key_never_leaks_on_hard_http_error(
+    configured_omdb, omdb_mock, caplog, monkeypatch,
+):
     """A hard HTTP failure must never leak `apikey=test_key` via any log
     record. `httpx.HTTPStatusError.__str__` embeds the full request URL
     (including the query string, which carries `apikey`) — the service must
     log exception type / status code only, never `str(exc)` directly."""
+    # caplog captures via the ROOT handler, but importing `app.main` (any
+    # api_client test earlier in the suite) sets `plexhub`.propagate = False
+    # (main.py) — re-enable propagation for this test so caplog sees the
+    # records regardless of test order (monkeypatch restores it after).
+    monkeypatch.setattr(logging.getLogger("plexhub"), "propagate", True)
     omdb_mock.get("/").respond(401, json={"Response": "False", "Error": "Invalid API key!"})
     with caplog.at_level(logging.WARNING, logger="plexhub.omdb"):
         data = await configured_omdb.get_by_imdb_id("tt0133093")

@@ -46,6 +46,7 @@ async def run_migrations(engine: AsyncEngine) -> None:
     await _migration_018_create_download_tables(engine)
     await _migration_019_create_plex_tables(engine)
     await _migration_020_add_media_file_size(engine)
+    await _migration_021_add_plex_media_item_genres(engine)
 
     logger.info("All migrations completed successfully")
 
@@ -978,3 +979,35 @@ async def _migration_020_add_media_file_size(engine: AsyncEngine) -> None:
                 logger.info("Migration 020: %s column added", name)
             except Exception as e:
                 logger.warning("Migration 020: %s may already exist: %s", name, e)
+
+
+async def _migration_021_add_plex_media_item_genres(engine: AsyncEngine) -> None:
+    """Add the `genres` column to plex_media_item (feature "écran de
+    téléchargement unifié Plex+Xtream", Vague W1 — genre filter parity with
+    the Xtream `media.genres` column).
+
+    Purely additive and nullable: `genres` (TEXT, comma-separated Plex
+    `Genre[].tag`) is NOT backfilled — it stays NULL for every existing
+    `plex_media_item` row until the next Plex catalogue sync
+    (`plex_sync_service`) re-upserts it with the value captured by
+    `plex_api_service.parse_genres`. Consumed by `plex_catalog_service`'s and
+    the unified download screen's genre filter (`.ilike('%genre%')`).
+
+    Idempotent: the column is probed (PRAGMA table_info) before ADD COLUMN, so
+    a column already present (fresh DB via create_all, CR-C05) is a silent
+    no-op; the try/except remains as a safety net for a race with another
+    process's init_db().
+    """
+    logger.info("Migration 021: Adding genres column to plex_media_item")
+
+    async with engine.begin() as conn:
+        if await _column_exists(conn, "plex_media_item", "genres"):
+            logger.debug("Migration 021: genres already present, skipping ADD COLUMN")
+            return
+        try:
+            await conn.execute(text(
+                "ALTER TABLE plex_media_item ADD COLUMN genres TEXT"
+            ))
+            logger.info("Migration 021: genres column added")
+        except Exception as e:
+            logger.warning("Migration 021: genres may already exist: %s", e)

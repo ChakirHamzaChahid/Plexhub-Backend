@@ -134,6 +134,25 @@ def parse_guids(metadata: dict) -> dict:
     return result
 
 
+def parse_genres(metadata: dict) -> Optional[str]:
+    """Comma-join a Plex Metadata's ``Genre[]`` tags
+    (``[{"tag": "Action"}, {"tag": "Sci-Fi"}]`` -> ``"Action, Sci-Fi"``), or
+    ``None`` if absent/empty. Never raises. Matches the Xtream ``Media.genres``
+    convention (comma-separated) so the unified download screen can genre-filter
+    both catalogues identically (``.ilike('%genre%')``)."""
+    if not isinstance(metadata, dict):
+        return None
+    genres = metadata.get("Genre")
+    if not isinstance(genres, list):
+        return None
+    tags = [
+        g["tag"].strip()
+        for g in genres
+        if isinstance(g, dict) and isinstance(g.get("tag"), str) and g["tag"].strip()
+    ]
+    return ", ".join(tags) or None
+
+
 def _int_or_none(value: Any) -> Optional[int]:
     if value is None:
         return None

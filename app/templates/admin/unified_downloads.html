@@ -1,0 +1,65 @@
+{% extends "admin/base.html" %}
+{% block title %}Téléchargements (Plex + Xtream) — PlexHub Admin{% endblock %}
+
+{% block content %}
+<section class="mb-6">
+  <h2 class="text-xl font-semibold mb-1">Téléchargements — Plex &amp; Xtream</h2>
+  <p class="text-sm text-slate-500">
+    Écran unifié : films et séries des deux sources (Plex partagés + comptes Xtream), dédupliqués
+    par identité (un titre présent des deux côtés n'apparaît qu'une fois). Ouvre un titre pour
+    choisir la source à télécharger — chaque source réutilise le sélecteur de l'onglet d'origine
+    (<a href="/admin/downloads" class="underline">Télécharger</a> /
+    <a href="/admin/plex-downloads" class="underline">Télécharger Plex</a>) et alimente la même
+    file de téléchargement.
+  </p>
+</section>
+
+<form id="udl-filters"
+      class="flex flex-wrap items-end gap-3 bg-white p-3 rounded shadow-sm border border-slate-200 mb-4"
+      hx-get="/admin/unified-downloads/list"
+      hx-target="#unified-downloads-list"
+      hx-swap="innerHTML"
+      hx-trigger="change from:#udl-filters select, keyup changed delay:300ms from:#udl-filters input[type=search], submit"
+      hx-include="#udl-filters"
+      hx-push-url="false">
+
+  <div class="flex flex-col">
+    <label class="text-xs text-slate-500" for="udl-type">Type</label>
+    <select id="udl-type" name="type" class="border border-slate-300 rounded px-2 py-1 text-sm">
+      <option value="movie" {% if type == 'movie' %}selected{% endif %}>Films</option>
+      <option value="show" {% if type == 'show' %}selected{% endif %}>Séries</option>
+    </select>
+  </div>
+
+  <div class="flex flex-col">
+    <label class="text-xs text-slate-500" for="udl-search">Recherche</label>
+    <input id="udl-search" name="search" type="search" value="{{ search }}" placeholder="titre…"
+           class="border border-slate-300 rounded px-2 py-1 text-sm w-56">
+  </div>
+
+  <div class="flex flex-col">
+    <label class="text-xs text-slate-500" for="udl-genre">Genre</label>
+    <input id="udl-genre" name="genre" type="search" value="{{ genre }}" placeholder="ex. Action"
+           class="border border-slate-300 rounded px-2 py-1 text-sm w-40">
+  </div>
+
+  <input type="hidden" name="page" value="1">
+  <input type="hidden" name="page_size" value="{{ page_size }}">
+  <span class="htmx-indicator text-xs text-slate-500 self-center">⏳ chargement…</span>
+</form>
+
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+  <div>
+    <h3 class="text-sm font-semibold text-slate-600 uppercase mb-2">Catalogue unifié</h3>
+    <div id="unified-downloads-list">
+      {% include "admin/_unified_downloads_list.html" %}
+    </div>
+  </div>
+  <div>
+    <h3 class="text-sm font-semibold text-slate-600 uppercase mb-2">File de téléchargement</h3>
+    <div id="downloads-queue" hx-get="/admin/downloads/queue" hx-trigger="every 2s" hx-swap="innerHTML">
+      {% include "admin/_downloads_queue.html" %}
+    </div>
+  </div>
+</div>
+{% endblock %}

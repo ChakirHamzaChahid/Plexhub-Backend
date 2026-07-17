@@ -19,6 +19,7 @@ from app.services.plex_api_service import (
     PlexApiError,
     PlexApiService,
     best_media,
+    parse_genres,
     parse_guids,
 )
 
@@ -353,6 +354,28 @@ class TestParseGuids:
         result = parse_guids(metadata)
         assert result["imdb_id"] is None
         assert result["tmdb_id"] == "42"
+
+
+# ─── parse_genres ─────────────────────────────────────────────────────────
+
+
+class TestParseGenres:
+    def test_joins_tags_comma_separated(self):
+        metadata = {"Genre": [{"tag": "Action"}, {"tag": "Sci-Fi"}]}
+        assert parse_genres(metadata) == "Action, Sci-Fi"
+
+    def test_missing_genre_key_returns_none(self):
+        assert parse_genres({}) is None
+
+    def test_non_dict_metadata_returns_none(self):
+        assert parse_genres(None) is None
+
+    def test_empty_or_blank_tags_dropped(self):
+        metadata = {"Genre": [{"tag": "  "}, {"tag": "Drama"}, {"noTag": "x"}, "junk"]}
+        assert parse_genres(metadata) == "Drama"
+
+    def test_all_blank_returns_none(self):
+        assert parse_genres({"Genre": [{"tag": ""}, {}]}) is None
 
 
 # ─── best_media ───────────────────────────────────────────────────────────

@@ -132,6 +132,11 @@ class Settings:
     # verified to resolve to a PUBLIC IP first (DL-01 SSRF guard). Set to 0 to
     # restore the old strict behaviour (any 3xx = permanent failure).
     DOWNLOAD_MAX_REDIRECTS: int = _safe_int("DOWNLOAD_MAX_REDIRECTS", 5)
+    # Per-source ceiling for the unified "Téléchargements" screen's in-memory
+    # cross-catalogue merge (Xtream + Plex). Beyond this a source's window is
+    # truncated and the UI says so (never a silent cap). The admin screen is
+    # search/genre-driven in practice, so the default is comfortable.
+    UNIFIED_DOWNLOAD_MERGE_CAP: int = _safe_int("UNIFIED_DOWNLOAD_MERGE_CAP", 5000)
 
     # Plex shared-servers download source (feature "Télécharger Plex").
     # "" = feature disabled (no plex.tv discovery, no catalogue sync). The

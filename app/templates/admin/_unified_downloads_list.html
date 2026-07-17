@@ -1,0 +1,59 @@
+{% set page_count = ((catalogue_total - 1) // page_size) + 1 if catalogue_total else 1 %}
+
+{% if truncated %}
+<div class="bg-amber-50 border border-amber-200 text-amber-700 rounded p-2 mb-2 text-xs">
+  Beaucoup de titres — la liste est tronquée. Affine avec la recherche ou le filtre par genre pour tout voir.
+</div>
+{% endif %}
+
+<div class="flex flex-col gap-2">
+  {% if items %}
+    {% for item in items %}
+    <details class="bg-white border border-slate-200 rounded shadow-sm"
+              hx-get="/admin/unified-downloads/{{ item.type }}/{{ item.unification_id }}/sources"
+              hx-trigger="toggle once"
+              hx-target="find .sources-body"
+              hx-swap="innerHTML">
+      <summary class="px-3 py-2 cursor-pointer flex items-center gap-3 text-sm select-none">
+        <span class="flex-1 font-medium">
+          {{ item.title }}{% if item.year %} ({{ item.year }}){% endif %}
+        </span>
+        <span class="flex gap-1">
+          {% if 'plex' in item.origins %}
+          <span class="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-orange-100 text-orange-700">Plex</span>
+          {% endif %}
+          {% if 'xtream' in item.origins %}
+          <span class="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-sky-100 text-sky-700">Xtream</span>
+          {% endif %}
+        </span>
+        <span class="text-xs text-slate-500">{{ item.source_count }} source{{ 's' if item.source_count != 1 else '' }}</span>
+      </summary>
+      <div class="sources-body px-3 pb-3 text-xs text-slate-500">Chargement…</div>
+    </details>
+    {% endfor %}
+  {% else %}
+    <div class="bg-white border border-slate-200 rounded shadow-sm px-3 py-8 text-center text-slate-400 text-sm">
+      Aucun titre trouvé.
+    </div>
+  {% endif %}
+</div>
+
+<nav class="flex items-center justify-between px-1 py-3 text-xs text-slate-600">
+  <span>{{ catalogue_total }} résultat(s){% if truncated %}+{% endif %} · page {{ page }} / {{ page_count }}</span>
+  <span class="flex gap-2">
+    {% if page > 1 %}
+    <button type="button" hx-get="/admin/unified-downloads/list" hx-target="#unified-downloads-list"
+            hx-include="#udl-filters" hx-vals='{"page": {{ page - 1 }} }'
+            class="px-2 py-1 rounded border border-slate-300 bg-white hover:bg-slate-100">← Précédent</button>
+    {% else %}
+    <span class="px-2 py-1 rounded border border-slate-200 text-slate-300">← Précédent</span>
+    {% endif %}
+    {% if page < page_count %}
+    <button type="button" hx-get="/admin/unified-downloads/list" hx-target="#unified-downloads-list"
+            hx-include="#udl-filters" hx-vals='{"page": {{ page + 1 }} }'
+            class="px-2 py-1 rounded border border-slate-300 bg-white hover:bg-slate-100">Suivant →</button>
+    {% else %}
+    <span class="px-2 py-1 rounded border border-slate-200 text-slate-300">Suivant →</span>
+    {% endif %}
+  </span>
+</nav>

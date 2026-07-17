@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from app.models.database import Media
+from app.models.database import Media, PlexMediaItem
 from app.plex_generator.models import PlexEpisode, PlexMovie
 from app.plex_generator.nfo_builder import build_episode_nfo, build_movie_nfo
 
@@ -83,6 +83,60 @@ def render_media_nfo(media: Media) -> Optional[str]:
             summary=media.summary,
             duration_ms=media.duration,
             thumb_url=media.resolved_thumb_url or media.thumb_url,
+        )
+        return build_episode_nfo(episode)
+
+    return None
+
+
+def render_plex_media_nfo(item: PlexMediaItem) -> Optional[str]:
+    """Return the ``.nfo`` XML for a downloaded ``PlexMediaItem`` row.
+
+    Plex counterpart of ``render_media_nfo`` (which only reads the Xtream
+    ``Media`` table, so Plex-sourced jobs were previously skipped — board
+    DL-PLEX-03). ``PlexMediaItem`` carries fewer fields than ``Media`` (no
+    summary/rating/cast), so the emitted NFO is intentionally minimal but
+    valid/exploitable: title, year, ids, genres (M021), duration, and — for
+    episodes — series/season/episode numbering.
+
+    ``thumb_url`` is a PMS-relative path that needs the (secret) per-server
+    token to resolve, so it is deliberately NOT emitted as a ``<thumb>`` (a
+    tokenless relative path would be a dead link, and embedding the host/token
+    is forbidden). Returns ``None`` for a type we don't emit a per-file NFO for
+    (e.g. ``show``), so the caller can skip writing.
+    """
+    if item.type == "movie":
+        movie = PlexMovie(
+            source_id=item.rating_key,
+            title=item.title or "Unknown",
+            is_adult=False,
+            year=item.year,
+            poster_url=None,
+            fanart_url=None,
+            genres=item.genres,
+            summary=None,
+            imdb_id=item.imdb_id,
+            tmdb_id=_tmdb_int(item.tmdb_id),
+            content_rating=None,
+            rating=None,
+            duration_ms=item.duration_ms,
+            cast=None,
+        )
+        return build_movie_nfo(movie)
+
+    if item.type == "episode":
+        episode = PlexEpisode(
+            source_id=item.rating_key,
+            # PlexMediaItem episodes carry no show/grandparent title column, so
+            # the best available value is "Unknown" (a P2 could capture the show
+            # title at sync for a richer <showtitle>).
+            series_title="Unknown",
+            season_num=item.parent_index if item.parent_index is not None else 0,
+            episode_num=item.index if item.index is not None else 0,
+            title=item.title,
+            summary=None,
+            duration_ms=item.duration_ms,
+            thumb_url=None,
         )
         return build_episode_nfo(episode)
 

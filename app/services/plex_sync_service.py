@@ -39,6 +39,7 @@ from app.services.plex_api_service import (
     PlexConnectionDTO,
     PlexResourceDTO,
     best_media,
+    parse_genres,
     parse_guids,
     plex_api_service,
 )
@@ -224,6 +225,7 @@ def _map_movie(item: dict, server_id: str, synced_at: int) -> dict:
         "unification_id": calculate_plex_unification_id(
             guids["imdb_id"], guids["tmdb_id"], server_id, rating_key
         ),
+        "genres": parse_genres(item),
         "thumb_url": item.get("thumb"),
         "added_at": _epoch_s_to_ms(item.get("addedAt")),
         "height": media.get("height"),
@@ -258,6 +260,7 @@ def _map_show(item: dict, server_id: str, synced_at: int) -> dict:
         "unification_id": calculate_plex_unification_id(
             guids["imdb_id"], guids["tmdb_id"], server_id, rating_key
         ),
+        "genres": parse_genres(item),
         "thumb_url": item.get("thumb"),
         "added_at": _epoch_s_to_ms(item.get("addedAt")),
         "height": None,
@@ -300,6 +303,10 @@ def _map_episode(
         # Episodes are never unification group anchors (Android rule) —
         # a whole-series download resolves episodes by parent show instead.
         "unification_id": None,
+        # Kept for a consistent column set across the batch upsert (the genre
+        # filter targets movie/show rows; episodes carry their show's tags if
+        # Plex returns them, else NULL).
+        "genres": parse_genres(item),
         "thumb_url": item.get("thumb"),
         "added_at": _epoch_s_to_ms(item.get("addedAt")),
         "height": media.get("height"),

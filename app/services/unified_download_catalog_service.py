@@ -37,11 +37,10 @@ from app.services import plex_catalog_service
 from app.services.aggregation_service import canonical_title_year
 from app.services.media_service import media_service
 
-# Per-source ceiling for the in-memory merge. Beyond this, a source's window is
-# truncated and `truncated=True` is surfaced (never a silent cap). Overridable
-# via env for very large catalogues; the admin screen is search/genre-driven in
-# practice, so the default is comfortable.
-DEFAULT_MERGE_CAP = int(getattr(settings, "UNIFIED_DOWNLOAD_MERGE_CAP", 5000) or 5000)
+# Per-source ceiling for the in-memory merge (declared in config.py). Beyond
+# this, a source's window is truncated and `truncated=True` is surfaced (never
+# a silent cap). Overridable via `UNIFIED_DOWNLOAD_MERGE_CAP`.
+DEFAULT_MERGE_CAP = settings.UNIFIED_DOWNLOAD_MERGE_CAP or 5000
 
 ORIGIN_XTREAM = "xtream"
 ORIGIN_PLEX = "plex"
@@ -55,7 +54,6 @@ class UnifiedCard:
     year: int | None
     origins: list[str]              # sorted subset of ["plex", "xtream"]
     source_count: int               # total versions across BOTH origins
-    thumb_url: str | None = None
 
 
 @dataclass
@@ -88,7 +86,6 @@ def _merge_card(
     year: int | None,
     origin: str,
     source_count: int,
-    thumb_url: str | None,
 ) -> None:
     """Fold one source's group into the merged map, keyed by unification_id."""
     card = merged.get(unification_id)
@@ -100,7 +97,6 @@ def _merge_card(
             year=year,
             origins=[origin],
             source_count=source_count,
-            thumb_url=thumb_url,
         )
         return
     if origin not in card.origins:
@@ -110,8 +106,6 @@ def _merge_card(
     # fill a gap the first origin left (e.g. Plex year when Xtream had none).
     if card.year is None and year is not None:
         card.year = year
-    if not card.thumb_url and thumb_url:
-        card.thumb_url = thumb_url
 
 
 async def list_unified(
@@ -153,10 +147,10 @@ async def list_unified(
             year=year,
             origin=ORIGIN_XTREAM,
             source_count=len(g.members),
-            thumb_url=(g.best.resolved_thumb_url or g.best.thumb_url),
         )
 
     for it in p_items:
+        # (Plex thumb needs the per-server token, so it's never exposed anyway.)
         _merge_card(
             merged,
             unification_id=it.unification_id,
@@ -165,7 +159,6 @@ async def list_unified(
             year=it.year,
             origin=ORIGIN_PLEX,
             source_count=it.source_count,
-            thumb_url=None,  # Plex thumb needs the per-server token; never exposed
         )
 
     cards = list(merged.values())

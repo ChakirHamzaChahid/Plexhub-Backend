@@ -66,8 +66,14 @@ async def _load_cards(
 
 
 def _list_context(cards, total, truncated, offset, *, page, page_size, media_type, search, genre):
+    # `catalogue_total` is the browse-count the list fragment renders. It is
+    # DISTINCT from `total` because the full-page index also merges the shared
+    # queue panel's context (`_queue_context` sets its own `total` = job count),
+    # which would otherwise clobber the catalogue count on first render (the
+    # `/list` HTMX refresh never merges the queue, so it was correct there only).
     return {
-        "items": cards, "total": total, "truncated": truncated, "offset": offset,
+        "items": cards, "total": total, "catalogue_total": total,
+        "truncated": truncated, "offset": offset,
         "page": page, "page_size": page_size, "type": media_type,
         "search": search or "", "genre": genre or "",
     }

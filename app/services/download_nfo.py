@@ -127,7 +127,10 @@ def render_plex_media_nfo(item: PlexMediaItem) -> Optional[str]:
     if item.type == "episode":
         episode = PlexEpisode(
             source_id=item.rating_key,
-            series_title="Unknown",  # PlexMediaItem episode carries no show title; filled by title below
+            # PlexMediaItem episodes carry no show/grandparent title column, so
+            # the best available value is "Unknown" (a P2 could capture the show
+            # title at sync for a richer <showtitle>).
+            series_title="Unknown",
             season_num=item.parent_index if item.parent_index is not None else 0,
             episode_num=item.index if item.index is not None else 0,
             title=item.title,

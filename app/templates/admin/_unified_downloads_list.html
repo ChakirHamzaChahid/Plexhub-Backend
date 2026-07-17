@@ -1,4 +1,4 @@
-{% set page_count = ((total - 1) // page_size) + 1 if total else 1 %}
+{% set page_count = ((catalogue_total - 1) // page_size) + 1 if catalogue_total else 1 %}
 
 {% if truncated %}
 <div class="bg-amber-50 border border-amber-200 text-amber-700 rounded p-2 mb-2 text-xs">
@@ -39,7 +39,7 @@
 </div>
 
 <nav class="flex items-center justify-between px-1 py-3 text-xs text-slate-600">
-  <span>{{ total }} résultat(s){% if truncated %}+{% endif %} · page {{ page }} / {{ page_count }}</span>
+  <span>{{ catalogue_total }} résultat(s){% if truncated %}+{% endif %} · page {{ page }} / {{ page_count }}</span>
   <span class="flex gap-2">
     {% if page > 1 %}
     <button type="button" hx-get="/admin/unified-downloads/list" hx-target="#unified-downloads-list"

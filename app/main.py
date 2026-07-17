@@ -16,6 +16,7 @@ from app.api import (
     admin,
     admin_downloads,
     admin_plex_downloads,
+    admin_unified_downloads,
     ai,
     api_keys,
     categories,
@@ -577,6 +578,11 @@ app.include_router(admin_downloads.router, dependencies=[Depends(verify_admin_ba
 # mount site; separate router module per the feature's disjoint-file-
 # ownership convention.
 app.include_router(admin_plex_downloads.router, dependencies=[Depends(verify_admin_basic_auth)])
+# Admin unified "Téléchargements" tab (Vague W3) — merges the Xtream + Plex
+# catalogues into one deduplicated browse screen; browse-only, delegates
+# per-source enqueue to the two routers above. Same self-prefixed
+# "/admin/unified-downloads" + Basic Auth guard convention.
+app.include_router(admin_unified_downloads.router, dependencies=[Depends(verify_admin_basic_auth)])
 
 # Interactive API docs — kept off the public default URLs above (docs_url=None …)
 # and re-exposed here behind the SAME HTTP Basic Auth as /admin, so they're

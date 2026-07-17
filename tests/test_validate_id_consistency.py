@@ -5,6 +5,8 @@ Style: seed real Media rows in ``db_session`` + inject fake service doubles
 unittest.mock). The script's core ``run(db, *, tmdb=, omdb=, ...)`` is directly
 exercised; argparse/main stay untested (thin).
 """
+from types import SimpleNamespace
+
 import pytest
 from sqlalchemy import select
 
@@ -121,6 +123,76 @@ async def _col(db, rk, column, sid="a"):
 
 
 # ─── Tests ─────────────────────────────────────────────────────────────────
+
+
+def test_group_imdb_plurality_winner_pure():
+    # Pure unit test of _group_imdb's plurality heuristic (non-imdb group key):
+    # 2 of 3 members resolve to tt1000, 1 to tt5000 -> tt1000 wins.
+    own_imdb = {"10": "tt1000", "20": "tt1000", "30": "tt5000"}
+    units = [SimpleNamespace(tmdb_id=t) for t in ("10", "20", "30")]
+    assert vic._group_imdb("tmdb://999", units, own_imdb) == "tt1000"
+
+
+def test_group_imdb_none_when_nothing_resolves_pure():
+    own_imdb = {"10": None, "20": None}
+    units = [SimpleNamespace(tmdb_id=t) for t in ("10", "20")]
+    assert vic._group_imdb("tmdb://888", units, own_imdb) is None
+
+
+def test_group_imdb_imdb_keyed_ignores_plurality():
+    # An imdb://-keyed group takes its reference straight from the key, never
+    # from a member vote (even if members would vote differently).
+    own_imdb = {"10": "tt5000", "20": "tt5000"}
+    units = [SimpleNamespace(tmdb_id=t) for t in ("10", "20")]
+    assert vic._group_imdb("imdb://tt1000", units, own_imdb) == "tt1000"
+
+
+@pytest.mark.asyncio
+async def test_tmdb_keyed_group_plurality_classification(db_session):
+    # unification_id itself is tmdb-based (not imdb://) — the group's reference
+    # imdb must come from the PLURALITY of members' own-tmdb resolutions, not
+    # from the key (there is no imdb in the key to read).
+    uid = "tmdb://999"
+    _seed(db_session, rk="a", tmdb=10, imdb=None, uid=uid, title="Right Movie", dur_min=90)
+    _seed(db_session, rk="b", tmdb=20, imdb=None, uid=uid, title="Right Movie", dur_min=90)
+    _seed(db_session, rk="c", tmdb=30, imdb=None, uid=uid, title="Right Movie", dur_min=90)
+    await db_session.commit()
+
+    # a, b resolve to tt1000 (plurality); c resolves elsewhere (minority).
+    tmdb = _FakeTMDB(imdb_by_tmdb={10: "tt1000", 20: "tt1000", 30: "tt5000"})
+    omdb = _FakeOMDb(data_by_imdb={"tt1000": _omdb("Right Movie", 90)})
+
+    report = await vic.run(db_session, media_type="movie", tmdb=tmdb, omdb=omdb)
+
+    assert report.suspect_group_count == 1
+    consistent = [v for v in report.verdicts if v.classification == vic.CONSISTENT]
+    assert {v.rating_key for v in consistent} == {"a", "b"}
+    # The minority member is classified against the plurality-derived group
+    # imdb via the OMDb same-content fallback (title+duration both match).
+    minority = _verdict(report, "c")
+    assert minority.classification == vic.SAME_CONTENT_MISLABELED
+    assert minority.new_imdb_id == "tt1000"
+    assert minority.new_unification_id == "imdb://tt1000"
+
+
+@pytest.mark.asyncio
+async def test_tmdb_keyed_group_no_resolution_all_uncertain(db_session):
+    # Degenerate case: a tmdb://-keyed suspect group where NO member's own
+    # tmdb_id resolves (dead ids) -> group imdb is None -> OMDb is never
+    # queried (nothing to look up) -> every member lands UNCERTAIN.
+    uid = "tmdb://888"
+    _seed(db_session, rk="x", tmdb=40, imdb=None, uid=uid, title="Foo", dur_min=90)
+    _seed(db_session, rk="y", tmdb=50, imdb=None, uid=uid, title="Foo", dur_min=90)
+    await db_session.commit()
+
+    tmdb = _FakeTMDB(imdb_by_tmdb={})  # both tmdb_ids are "dead"
+    omdb = _FakeOMDb(data_by_imdb={})
+
+    report = await vic.run(db_session, media_type="movie", tmdb=tmdb, omdb=omdb)
+
+    assert report.suspect_group_count == 1
+    assert omdb.calls == []
+    assert all(v.classification == vic.UNCERTAIN for v in report.verdicts)
 
 
 @pytest.mark.asyncio

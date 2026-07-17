@@ -224,6 +224,66 @@ class TestOmdbTieBreak:
         assert item.status == "done"
 
     @pytest.mark.asyncio
+    async def test_year_gap_but_similar_title_keeps_match(self, db_session, monkeypatch):
+        """AND-logic from the title side: a year gap > 1 alone (e.g. a
+        same-title remake) is NOT conclusive without a low title similarity
+        too — the match must be kept."""
+        item = _item(title="Terminator", year=1984)
+        db_session.add(_media(item))
+        await db_session.flush()
+        fake = _FakeOmdb(data=_omdb_data(title="Terminator", year="1990"))
+        monkeypatch.setattr(ew, "omdb_service", fake)
+
+        fr = FetchResult(item=item, data=_data(year=1984), confidence=0.8,
+                          result="matched", api_used=1, cache_key=None)
+        await _apply_enrichment_results(db_session, [fr])
+        await db_session.commit()
+
+        assert fake.calls == 1
+        assert fr.result == "matched"
+        assert item.status == "done"
+        assert await _tmdb_id_of(db_session, item) == "218"
+
+    @pytest.mark.asyncio
+    async def test_same_batch_shared_imdb_id_no_double_insert(self, db_session, monkeypatch):
+        """P1 regression: two items in the SAME `_apply_enrichment_results`
+        batch sharing one `imdb_id` (routine — same film synced from two
+        Xtream accounts) must not double-INSERT the OMDb scrape-cache row.
+        Before the batch-local dedup this raised `UNIQUE constraint failed:
+        omdb_scrape_cache.imdb_id` on the single end-of-batch commit and
+        permanently stalled enrichment (items never left `pending`)."""
+        from app.models.database import OmdbScrapeCache
+        from sqlalchemy import func as sa_func
+
+        item1 = _item(rating_key="vod_a.mp4", server_id="xtream_a", title="Terminator", year=1984)
+        item2 = _item(rating_key="vod_b.mp4", server_id="xtream_b", title="Terminator", year=1984)
+        db_session.add_all([_media(item1), _media(item2)])
+        await db_session.flush()
+
+        fake = _FakeOmdb(data=_omdb_data(title="Zzz Totally Unrelated Picture Qqq", year="1987"))
+        monkeypatch.setattr(ew, "omdb_service", fake)
+
+        fr1 = FetchResult(item=item1, data=_data(imdb="tt0088247", year=1984), confidence=0.8,
+                           result="matched", api_used=1, cache_key=None)
+        fr2 = FetchResult(item=item2, data=_data(imdb="tt0088247", year=1984), confidence=0.8,
+                           result="matched", api_used=1, cache_key=None)
+
+        # Single batch, single commit — must not raise IntegrityError.
+        await _apply_enrichment_results(db_session, [fr1, fr2])
+        await db_session.commit()
+
+        assert fake.calls == 1  # one OMDb HTTP call for the shared imdb_id, not two
+        n = (await db_session.execute(
+            select(sa_func.count()).select_from(OmdbScrapeCache)
+            .where(OmdbScrapeCache.imdb_id == "tt0088247")
+        )).scalar_one()
+        assert n == 1  # one cache row, not two
+        assert fr1.result == "ambiguous" and fr2.result == "ambiguous"  # consistent verdict
+        assert item1.status == "skipped" and item2.status == "skipped"
+        assert await _tmdb_id_of(db_session, item1) is None
+        assert await _tmdb_id_of(db_session, item2) is None
+
+    @pytest.mark.asyncio
     async def test_omdb_raises_keeps_match(self, db_session, monkeypatch):
         item = _item()
         db_session.add(_media(item))

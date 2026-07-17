@@ -251,7 +251,13 @@ def _group_imdb(group_key: str, units: list[Media], own_imdb: dict[str, str | No
             counter[_fmt_imdb(real)] += 1
     if not counter:
         return None
-    return counter.most_common(1)[0][0]
+    top = counter.most_common()
+    if len(top) > 1 and top[0][1] == top[1][1]:
+        logger.warning(
+            "Plurality tie on group %s (%d votes each) — arbitrarily picking %s",
+            group_key, top[0][1], top[0][0],
+        )
+    return top[0][0]
 
 
 def _classify(

@@ -13,7 +13,7 @@ from app.db.database import async_session_factory
 from app.models.database import Media, EnrichmentQueue, XtreamAccount
 from app.services import scrape_cache_service as scrape_cache
 from app.services import omdb_scrape_cache_service as omdb_scrape_cache
-from app.services.omdb_service import omdb_service
+from app.services.omdb_service import OMDbData, omdb_service
 from app.services.tmdb_service import TMDBEnrichmentData, TMDBSearchOutcome, tmdb_service
 from app.utils.string_normalizer import normalize_for_sorting
 from app.utils.time import now_ms
@@ -180,6 +180,7 @@ def _parse_omdb_year(raw: str | None) -> int | None:
 
 async def _omdb_contradicts(
     db, item: EnrichmentQueue, data: TMDBEnrichmentData, ts: int,
+    omdb_batch_cache: dict[str, OMDbData | None],
 ) -> bool:
     """Cross-check a low-confidence TMDB match against OMDb (by imdb_id).
 
@@ -189,24 +190,38 @@ async def _omdb_contradicts(
     degrade a normal match). Downgrades ONLY when BOTH a year gap > 1 year
     AND a low title similarity hold — OMDb frequently returns the
     original/English title for localized content, so title alone is never
-    conclusive (language-safety)."""
+    conclusive (language-safety).
+
+    `omdb_batch_cache` dedupes get/call/put within the current batch (mirrors
+    the `put_keys` pattern below for `scrape_cache.put`): several queue items
+    can share one `imdb_id` (same title from two Xtream accounts) within the
+    same `no_autoflush` block, so a second `omdb_scrape_cache.put` for that id
+    can't see the first's still-pending INSERT and would add a second row with
+    the same primary key -> `UNIQUE constraint failed:
+    omdb_scrape_cache.imdb_id` crashes the whole batch at commit. One
+    get/call/put per imdb_id per batch is enough — every item sharing that id
+    reuses the in-memory verdict."""
     imdb_id = data.imdb_id
     if not imdb_id:
         return False
     try:
-        # Budget guard first — once the daily OMDb spend is exhausted, the
-        # tie-break is disabled for the rest of this run (no downgrade),
-        # even for ids that happen to already be cached.
-        if omdb_service.get_request_count() >= settings.OMDB_DAILY_LIMIT:
-            return False
-
-        cached = await omdb_scrape_cache.get(db, imdb_id, ts)
-        if cached is not None:
-            omdb_data = cached
+        if imdb_id in omdb_batch_cache:
+            omdb_data = omdb_batch_cache[imdb_id]
         else:
-            omdb_data = await omdb_service.get_by_imdb_id(imdb_id)
-            result = "found" if omdb_data is not None else "not_found"
-            await omdb_scrape_cache.put(db, imdb_id, result, omdb_data, ts)
+            # Budget guard first — once the daily OMDb spend is exhausted, the
+            # tie-break is disabled for the rest of this run (no downgrade),
+            # even for ids that happen to already be cached in the DB.
+            if omdb_service.get_request_count() >= settings.OMDB_DAILY_LIMIT:
+                return False
+
+            cached = await omdb_scrape_cache.get(db, imdb_id, ts)
+            if cached is not None:
+                omdb_data = cached
+            else:
+                omdb_data = await omdb_service.get_by_imdb_id(imdb_id)
+                result = "found" if omdb_data is not None else "not_found"
+                await omdb_scrape_cache.put(db, imdb_id, result, omdb_data, ts)
+            omdb_batch_cache[imdb_id] = omdb_data
 
         if omdb_data is None or not item.year:
             return False
@@ -261,6 +276,9 @@ async def _apply_enrichment_results(db, results: list[FetchResult]):
         # crashes the whole batch at commit. One put per key is enough — the id is
         # still applied to every media row below regardless.
         put_keys: set[str] = set()
+        # Batch-local OMDb dedup (same rationale as `put_keys` above, applied
+        # to `_omdb_contradicts`'s own get/call/put — see its docstring).
+        omdb_batch_cache: dict[str, OMDbData | None] = {}
         for fr in results:
             item = fr.item
             enrichment_data = fr.data
@@ -282,7 +300,7 @@ async def _apply_enrichment_results(db, results: list[FetchResult]):
                 elif (
                     fr.confidence is not None and fr.confidence < 1.0
                     and enrichment_data.imdb_id and omdb_service.is_configured
-                    and await _omdb_contradicts(db, item, enrichment_data, ts)
+                    and await _omdb_contradicts(db, item, enrichment_data, ts, omdb_batch_cache)
                 ):
                     fr.result = "ambiguous"
                     enrichment_data = None

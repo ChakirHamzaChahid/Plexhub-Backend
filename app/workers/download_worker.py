@@ -39,9 +39,9 @@ from pathlib import Path
 from sqlalchemy import func, select, update
 
 from app.config import settings
-from app.models.database import DownloadJob, Media, XtreamAccount
+from app.models.database import DownloadJob, Media, PlexMediaItem, XtreamAccount
 from app.services import download_service, plex_download_service
-from app.services.download_nfo import render_media_nfo
+from app.services.download_nfo import render_media_nfo, render_plex_media_nfo
 from app.services.download_service import (
     DownloadCanceled,
     DownloadDisabledError,
@@ -196,6 +196,16 @@ async def _load_media(session_factory, server_id: str, rating_key: str) -> Media
     return await run_with_retry(_do, op="load_media")
 
 
+async def _load_plex_media_item(
+    session_factory, server_id: str, rating_key: str,
+) -> PlexMediaItem | None:
+    async def _do():
+        async with session_factory() as db:
+            return await db.get(PlexMediaItem, (server_id, rating_key))
+
+    return await run_with_retry(_do, op="load_plex_media_item")
+
+
 def _write_nfo_text(path: Path, text: str) -> None:
     """Atomically write the sidecar .nfo (tmp in same dir + os.replace). Sync —
     call via ``asyncio.to_thread``."""
@@ -205,18 +215,29 @@ def _write_nfo_text(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
+async def _resolve_sidecar_nfo_xml(session_factory, job: DownloadJob) -> str | None:
+    """Build the sidecar ``.nfo`` XML for *job*, from whichever catalogue owns
+    it: Plex jobs (``plex_*`` server_id) read ``plex_media_item`` (board
+    DL-PLEX-03 — previously skipped because ``Media`` never holds a Plex row),
+    Xtream jobs read ``Media``. Returns ``None`` when the row is missing or the
+    type has no per-file NFO."""
+    if is_plex_server_id(job.server_id):
+        item = await _load_plex_media_item(session_factory, job.server_id, job.rating_key)
+        return render_plex_media_nfo(item) if item is not None else None
+    media = await _load_media(session_factory, job.server_id, job.rating_key)
+    return render_media_nfo(media) if media is not None else None
+
+
 async def _write_sidecar_nfo(session_factory, job: DownloadJob, dest: Path) -> None:
     """Best-effort: write a ``.nfo`` next to a just-completed download.
 
     Never raises — a missing/garbled NFO must not fail the download. The NFO
     sits in the SAME confined directory as ``dest`` (only the suffix changes),
-    so it inherits ``dest``'s path-confinement with no extra check.
+    so it inherits ``dest``'s path-confinement with no extra check. Covers both
+    Xtream and Plex jobs (see ``_resolve_sidecar_nfo_xml``).
     """
     try:
-        media = await _load_media(session_factory, job.server_id, job.rating_key)
-        if media is None:
-            return
-        xml = render_media_nfo(media)
+        xml = await _resolve_sidecar_nfo_xml(session_factory, job)
         if not xml:
             return
         nfo_path = dest.with_suffix(".nfo")

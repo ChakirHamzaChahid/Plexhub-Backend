@@ -296,6 +296,35 @@ class TestPlexDispatch:
         for record in caplog.records:
             assert TOKEN not in record.getMessage()
 
+    async def test_plex_movie_download_writes_sidecar_nfo(
+        self, db_engine, monkeypatch, download_dir,
+    ):
+        """W0 (board DL-PLEX-03): a completed Plex job writes a `.nfo` from
+        `plex_media_item` (previously skipped — `_load_media` only reads the
+        Xtream `Media` table)."""
+        factory = await _seeded_factory(
+            db_engine,
+            jobs=[_plex_job("p7")],
+            servers=[_plex_server()],
+            items=[_plex_item(rating_key="1001")],
+        )
+        monkeypatch.setattr(settings, "DOWNLOAD_MIN_FREE_DISK_MB", 0)
+
+        async def _fake_download_to_disk(url, dest, *, on_progress=None, cancel_check=None, **_kw):
+            return DownloadResult(
+                bytes_downloaded=2, bytes_total=2, already_present=False, resumed=False,
+            )
+
+        monkeypatch.setattr(download_service, "download_to_disk", _fake_download_to_disk)
+
+        await _run_job(factory, "p7", asyncio.Semaphore(1))
+
+        from app.services.download_service import resolve_confined
+        nfo = resolve_confined("Movies/p7/p7.mkv").with_suffix(".nfo")
+        assert nfo.exists(), "a Plex download must write a sidecar .nfo"
+        xml = nfo.read_text(encoding="utf-8")
+        assert "<movie>" in xml and "<title>Dune</title>" in xml
+
 
 class TestResolveJobUrl:
     async def test_returns_none_for_non_plex_server_id(self, db_engine):

@@ -52,6 +52,7 @@ def make_item(
     title: str,
     year: int | None = None,
     unification_id: str | None = None,
+    genres: str | None = None,
     parent_rating_key: str | None = None,
     grandparent_rating_key: str | None = None,
     parent_index: int | None = None,
@@ -71,6 +72,7 @@ def make_item(
         title=title,
         year=year,
         unification_id=unification_id,
+        genres=genres,
         parent_rating_key=parent_rating_key,
         grandparent_rating_key=grandparent_rating_key,
         parent_index=parent_index,
@@ -130,6 +132,29 @@ async def test_list_unified_search_by_title(db_session):
 
     assert total == 1
     assert items[0].title == "The Matrix"
+
+
+async def test_list_unified_filters_by_genre(db_session):
+    db_session.add_all([
+        make_server("srv-a", name="Server A"),
+        make_item("plex_srv-a", "1", type="movie", title="The Matrix", year=1999,
+                   unification_id="tt0133093", genres="Action, Sci-Fi"),
+        make_item("plex_srv-a", "2", type="movie", title="Amélie", year=2001,
+                   unification_id="tt0211915", genres="Comedy, Romance"),
+        make_item("plex_srv-a", "3", type="movie", title="No genre", year=2000,
+                   unification_id="tt0000003", genres=None),
+    ])
+    await db_session.commit()
+
+    items, total = await svc.list_unified(db_session, "movie", None, 50, 0, genre="Sci-Fi")
+
+    assert total == 1
+    assert items[0].title == "The Matrix"
+    # A NULL-genre row never matches a genre filter.
+    none_items, none_total = await svc.list_unified(
+        db_session, "movie", None, 50, 0, genre="Documentary",
+    )
+    assert none_total == 0 and none_items == []
 
 
 async def test_list_unified_pagination_and_total(db_session):

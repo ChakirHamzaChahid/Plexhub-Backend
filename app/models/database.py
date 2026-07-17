@@ -599,6 +599,8 @@ class PlexMediaItem(Base):
     tvdb_id = Column(Text)
     unification_id = Column(Text)                          # Android rule; populated for movies/shows post-sync, NULL on episodes
 
+    genres = Column(Text)                                  # comma-separated (Plex Genre[].tag), mirrors Media.genres — M021
+
     thumb_url = Column(Text)                                 # PMS-relative path (e.g. /library/metadata/123/thumb), no token
 
     added_at = Column(BigInteger)                             # epoch ms (Plex addedAt)

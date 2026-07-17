@@ -163,6 +163,7 @@ async def list_unified(
     search: str | None,
     limit: int,
     offset: int,
+    genre: str | None = None,
 ) -> tuple[list[PlexUnifiedItem], int]:
     """Paginated, deduplicated browse list for *media_type* ('movie'|'show').
 
@@ -172,6 +173,12 @@ async def list_unified(
     ``COUNT(*)`` per group: a `plex_media_item` row's primary key is
     ``(server_id, rating_key)``, so one row is exactly one source/version and
     plain row-counting is correct.
+
+    *genre* (optional, additive): a substring ``.ilike('%genre%')`` over the
+    comma-separated ``genres`` column (populated at sync from Plex
+    ``Genre[].tag``, M021) — same convention as ``media_service`` so the
+    unified download screen filters both catalogues identically. A row whose
+    ``genres`` is NULL (e.g. synced before M021) never matches a genre filter.
 
     Sort = recency, i.e. ``MAX(added_at)`` per group descending (ties broken
     by ``unification_id`` ascending for a stable page boundary).
@@ -196,6 +203,10 @@ async def list_unified(
     if search:
         base_filters.append(
             PlexMediaItem.title.ilike(f"%{_escape_like(search)}%", escape="\\")
+        )
+    if genre:
+        base_filters.append(
+            PlexMediaItem.genres.ilike(f"%{_escape_like(genre)}%", escape="\\")
         )
 
     max_added = func.max(PlexMediaItem.added_at)

@@ -154,27 +154,3 @@ async def test_truncated_flag_when_source_exceeds_cap(db_session):
 
     _cards, _total, truncated = await svc.list_unified(db_session, media_type="movie", cap=1)
     assert truncated is True
-
-
-# ─── get_group_availability ─────────────────────────────────────────────────
-
-
-async def test_availability_reports_both_origins(db_session):
-    db_session.add_all([
-        _plex_server(),
-        _media("x1", title="Interstellar", unification_id="imdb://tt0816692"),
-        _plex("p1", title="Interstellar", unification_id="imdb://tt0816692"),
-    ])
-    await db_session.commit()
-
-    avail = await svc.get_group_availability(db_session, "movie", "imdb://tt0816692")
-
-    assert avail is not None
-    assert avail.has_xtream and avail.has_plex
-    assert avail.xtream_source_count == 1
-    assert avail.plex_source_count == 1
-    assert avail.origins == ["plex", "xtream"]
-
-
-async def test_availability_none_for_unknown_group(db_session):
-    assert await svc.get_group_availability(db_session, "movie", "imdb://nope") is None

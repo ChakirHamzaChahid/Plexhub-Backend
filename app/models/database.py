@@ -361,6 +361,28 @@ class TmdbScrapeCache(Base):
     )
 
 
+class OmdbScrapeCache(Base):
+    """Persistent cache of an OMDb lookup, keyed directly by IMDb id.
+
+    The imdb-id consistency validator always has an `imdb_id` in hand (it is
+    validating an existing resolution), so unlike `TmdbScrapeCache` (keyed on
+    a normalized title signature because it resolves title -> id) this cache
+    is keyed on the id itself — a direct point lookup, no title fuzz-matching.
+    `payload` holds the OMDbData JSON on a match.
+    """
+
+    __tablename__ = "omdb_scrape_cache"
+
+    imdb_id = Column(Text, primary_key=True)   # direct key (validation flow always has an imdb_id in hand)
+    result = Column(Text, nullable=False)       # 'found' | 'not_found'
+    payload = Column(Text)                      # JSON of OMDbData when found
+    fetched_at = Column(BigInteger, nullable=False)
+
+    __table_args__ = (
+        Index("ix_omdb_scrape_cache_fetched_at", "fetched_at"),
+    )
+
+
 class ApiKey(Base):
     """Backend API key issued to a user/device.
 

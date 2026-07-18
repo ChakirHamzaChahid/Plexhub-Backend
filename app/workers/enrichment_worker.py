@@ -1,8 +1,10 @@
 import asyncio
 import logging
+import re
 from dataclasses import dataclass
 
 import httpx
+from rapidfuzz import fuzz
 
 from sqlalchemy import func, select, update
 
@@ -10,7 +12,10 @@ from app.config import settings
 from app.db.database import async_session_factory
 from app.models.database import Media, EnrichmentQueue, XtreamAccount
 from app.services import scrape_cache_service as scrape_cache
+from app.services import omdb_scrape_cache_service as omdb_scrape_cache
+from app.services.omdb_service import OMDbData, omdb_service
 from app.services.tmdb_service import TMDBEnrichmentData, TMDBSearchOutcome, tmdb_service
+from app.utils.string_normalizer import normalize_for_sorting
 from app.utils.time import now_ms
 from app.utils.db_retry import commit_with_retry
 
@@ -19,6 +24,17 @@ logger = logging.getLogger("plexhub.enrichment")
 BATCH_SIZE = 200  # Commit every N items
 CONCURRENCY = 8   # Parallel TMDB requests (free tier ~4 req/s, keep headroom)
 MAX_ATTEMPTS = 3  # Max enrichment attempts before permanently skipping
+
+# --- Anti-recurrence guard (Wave 3, S5 — id-consistency validator design doc §5) --
+# `_IMDB_ID_RE`: cheap shape tripwire for `TMDBEnrichmentData.imdb_id`.
+_IMDB_ID_RE = re.compile(r"^tt\d+$")
+# Conservative OMDb tie-break thresholds (tech-lead deviation D1 — this is the
+# *primary* defense, not the doc's "Optionnel"). Both conditions must hold to
+# downgrade a match: a year gap of more than 1, AND a low title similarity —
+# title alone is never conclusive because OMDb frequently returns the
+# original/English title for localized content.
+_OMDB_YEAR_TOLERANCE = 1
+_OMDB_TITLE_CONTRADICTION_SIM = 0.55
 
 
 @dataclass
@@ -138,6 +154,108 @@ async def _fetch_series_data(item, semaphore):
     return await _resolve(item, "show", semaphore)
 
 
+def _shape_invalid(data: TMDBEnrichmentData) -> str | None:
+    """Cheap intra-record tripwire on a single `get_details()` result.
+
+    `tmdb_id`/`imdb_id` both come from the SAME TMDB response
+    (`external_ids`, see `tmdb_service._parse_details`) so they are
+    consistent by construction — this only bounds the root-cause search if
+    object-level corruption is ever observed in prod. Returns a short reason
+    string on failure, else None."""
+    if data.tmdb_id is None or data.tmdb_id <= 0:
+        return f"non-positive tmdb_id ({data.tmdb_id!r})"
+    if data.imdb_id is not None and not _IMDB_ID_RE.match(data.imdb_id):
+        return f"malformed imdb_id shape ({data.imdb_id!r})"
+    return None
+
+
+def _parse_omdb_year(raw: str | None) -> int | None:
+    """OMDb `Year`: "1984" (movie), "2015–2019" / "2015-" (series, en-dash or
+    open-ended). Take the leading 4-digit year; unparseable -> None."""
+    if not raw:
+        return None
+    m = re.match(r"^(\d{4})", raw)
+    return int(m.group(1)) if m else None
+
+
+async def _omdb_contradicts(
+    db, item: EnrichmentQueue, data: TMDBEnrichmentData, ts: int,
+    omdb_batch_cache: dict[str, OMDbData | None],
+) -> bool:
+    """Cross-check a low-confidence TMDB match against OMDb (by imdb_id).
+
+    Fail-open on every non-conclusive path: unconfigured, budget exhausted,
+    not found, missing year on either side, or any transport/parsing
+    exception -> False (keep the match; absence of signal must never
+    degrade a normal match). Downgrades ONLY when BOTH a year gap > 1 year
+    AND a low title similarity hold — OMDb frequently returns the
+    original/English title for localized content, so title alone is never
+    conclusive (language-safety).
+
+    `omdb_batch_cache` dedupes get/call/put within the current batch (mirrors
+    the `put_keys` pattern below for `scrape_cache.put`): several queue items
+    can share one `imdb_id` (same title from two Xtream accounts) within the
+    same `no_autoflush` block, so a second `omdb_scrape_cache.put` for that id
+    can't see the first's still-pending INSERT and would add a second row with
+    the same primary key -> `UNIQUE constraint failed:
+    omdb_scrape_cache.imdb_id` crashes the whole batch at commit. One
+    get/call/put per imdb_id per batch is enough — every item sharing that id
+    reuses the in-memory verdict."""
+    imdb_id = data.imdb_id
+    if not imdb_id:
+        return False
+    try:
+        if imdb_id in omdb_batch_cache:
+            omdb_data = omdb_batch_cache[imdb_id]
+        else:
+            # Budget guard first — once the daily OMDb spend is exhausted, the
+            # tie-break is disabled for the rest of this run (no downgrade),
+            # even for ids that happen to already be cached in the DB.
+            if omdb_service.get_request_count() >= settings.OMDB_DAILY_LIMIT:
+                return False
+
+            cached = await omdb_scrape_cache.get(db, imdb_id, ts)
+            if cached is not None:
+                omdb_data = cached
+            else:
+                omdb_data = await omdb_service.get_by_imdb_id(imdb_id)
+                result = "found" if omdb_data is not None else "not_found"
+                await omdb_scrape_cache.put(db, imdb_id, result, omdb_data, ts)
+            omdb_batch_cache[imdb_id] = omdb_data
+
+        if omdb_data is None or not item.year:
+            return False
+        omdb_year = _parse_omdb_year(omdb_data.year)
+        if omdb_year is None:
+            return False
+        if abs(omdb_year - item.year) <= _OMDB_YEAR_TOLERANCE:
+            return False
+
+        query_norm = normalize_for_sorting(item.title)
+        cand_norm = normalize_for_sorting(omdb_data.title)
+        if not query_norm or not cand_norm:
+            return False
+        sim = max(
+            fuzz.ratio(query_norm, cand_norm),
+            fuzz.token_set_ratio(query_norm, cand_norm),
+        ) / 100.0
+        if sim >= _OMDB_TITLE_CONTRADICTION_SIM:
+            return False
+
+        logger.warning(
+            "Enrichment guard: OMDb contradicts match for rating_key=%s "
+            "(item year=%s, omdb year=%s, title similarity=%.2f) — downgrading to ambiguous",
+            item.rating_key, item.year, omdb_year, sim,
+        )
+        return True
+    except Exception as e:
+        logger.warning(
+            "Enrichment guard: OMDb tie-break failed for rating_key=%s (%s) — keeping match",
+            item.rating_key, type(e).__name__,
+        )
+        return False
+
+
 async def _apply_enrichment_results(db, results: list[FetchResult]):
     """Apply enrichment results to DB — IDs + rich metadata + scrape cache + metric."""
     from app.utils.metrics import tmdb_match_total
@@ -158,9 +276,35 @@ async def _apply_enrichment_results(db, results: list[FetchResult]):
         # crashes the whole batch at commit. One put per key is enough — the id is
         # still applied to every media row below regardless.
         put_keys: set[str] = set()
+        # Batch-local OMDb dedup (same rationale as `put_keys` above, applied
+        # to `_omdb_contradicts`'s own get/call/put — see its docstring).
+        omdb_batch_cache: dict[str, OMDbData | None] = {}
         for fr in results:
             item = fr.item
             enrichment_data = fr.data
+
+            # --- Anti-recurrence guard (Wave 3, S5) -----------------------------
+            # Runs BEFORE the outcome metric / scrape-cache write below so a
+            # downgrade to "ambiguous" is reflected everywhere fr.result feeds
+            # into (the plexhub_tmdb_match_total metric, the persisted scrape
+            # cache resolution, and the id-write gate further down).
+            if enrichment_data:
+                shape_issue = _shape_invalid(enrichment_data)
+                if shape_issue:
+                    logger.warning(
+                        "Enrichment guard: %s for rating_key=%s — downgrading to ambiguous",
+                        shape_issue, item.rating_key,
+                    )
+                    fr.result = "ambiguous"
+                    enrichment_data = None
+                elif (
+                    fr.confidence is not None and fr.confidence < 1.0
+                    and enrichment_data.imdb_id and omdb_service.is_configured
+                    and await _omdb_contradicts(db, item, enrichment_data, ts, omdb_batch_cache)
+                ):
+                    fr.result = "ambiguous"
+                    enrichment_data = None
+            # ---------------------------------------------------------------------
 
             # Outcome metric (only the genuine matching attempts — skip scenario 2/3).
             if fr.result in ("matched", "nomatch", "ambiguous"):

@@ -85,6 +85,20 @@ def tmdb_mock():
 
 
 @pytest.fixture
+def omdb_mock():
+    """respx context that mocks www.omdbapi.com for the test duration.
+
+    Usage::
+
+        async def test_x(omdb_mock):
+            omdb_mock.get("/").respond(200, json={"Response": "True", ...})
+            ...
+    """
+    with respx.mock(base_url="https://www.omdbapi.com", assert_all_called=False) as r:
+        yield r
+
+
+@pytest.fixture
 def xtream_mock():
     """respx context with no base_url — caller registers full URLs."""
     with respx.mock(assert_all_called=False) as r:

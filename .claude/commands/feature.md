@@ -30,4 +30,4 @@ Tu es l'**orchestrateur**. Construis un **DAG de sous-tâches dépendantes** pui
 ## Sûreté
 Risky (migration de schéma, refacto large, secrets, release) = `needs-approval`. Éditions de contrats **additives** quand possible. Jamais d'auto-merge par-dessus un `REQUEST CHANGES`. `BLOCKED` remonté verbatim. Secrets jamais en clair (tokens, clés API, Fernet).
 
-> Raccourci : ce workflow s'appuie sur `/app-plan` (DAG) pour le découpage. `/feature` ajoute la phase Requirements en amont et la DoD backend.
+> Raccourci : ce workflow s'appuie sur les briques `/app-plan` (DAG, phase 2), `/app-build` (exécution parallèle + review streaming + QA, phases 3-5) et `/app-review` (review d'un lot isolé). `/feature` ajoute la phase Requirements en amont et la DoD backend. Routage (modèle, effort) des invocations = skill `model-effort-routing`.

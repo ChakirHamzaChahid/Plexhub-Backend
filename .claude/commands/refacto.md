@@ -24,3 +24,5 @@ Cible : $ARGUMENTS
 
 ## DoD (chaque étape)
 `pytest -v` vert · serveur boote · `GET /api/health` 200 · migrations idempotentes · `ruff check` (si câblé) · OpenAPI à jour si l'API change.
+
+> Raccourci : les étapes **indépendantes** peuvent s'exécuter via la brique `/app-build` (devs parallèles + review streaming) et se relire via `/app-review`. Routage (modèle, effort) des invocations = skill `model-effort-routing` (lue par `tech-lead` avant découpe).

@@ -47,6 +47,7 @@ async def run_migrations(engine: AsyncEngine) -> None:
     await _migration_019_create_plex_tables(engine)
     await _migration_020_add_media_file_size(engine)
     await _migration_021_add_plex_media_item_genres(engine)
+    await _migration_022_create_omdb_scrape_cache(engine)
 
     logger.info("All migrations completed successfully")
 
@@ -1011,3 +1012,40 @@ async def _migration_021_add_plex_media_item_genres(engine: AsyncEngine) -> None
             logger.info("Migration 021: genres column added")
         except Exception as e:
             logger.warning("Migration 021: genres may already exist: %s", e)
+
+
+async def _migration_022_create_omdb_scrape_cache(engine: AsyncEngine) -> None:
+    """Create the omdb_scrape_cache table (imdb-id consistency validator).
+
+    Persistent cache of an OMDb lookup, keyed directly on `imdb_id` — the
+    validator always has an imdb_id in hand (it's cross-checking an existing
+    resolution), so this is a direct point cache, unlike `tmdb_scrape_cache`
+    (title-signature keyed, because TMDB resolution starts from a title).
+    Purely additive: no existing table/column/data is touched.
+
+    Idempotent: CREATE TABLE/INDEX IF NOT EXISTS; a fresh DB already has this
+    table (+ its index) via Base.metadata.create_all (models/database.py's
+    OmdbScrapeCache), so this is a silent no-op there, and an upgraded DB
+    gets it here — same convergence invariant as migrations 017/018/019
+    (CR-C05/CR-P02): the DDL below byte-matches the ORM model's columns/types
+    and index name.
+    """
+    logger.info("Migration 022: Creating omdb_scrape_cache table")
+
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS omdb_scrape_cache (
+                    imdb_id    TEXT    PRIMARY KEY,
+                    result     TEXT    NOT NULL,
+                    payload    TEXT,
+                    fetched_at INTEGER NOT NULL
+                )
+            """))
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_omdb_scrape_cache_fetched_at "
+                "ON omdb_scrape_cache(fetched_at)"
+            ))
+            logger.info("Migration 022: omdb_scrape_cache table created")
+        except Exception as e:
+            logger.warning("Migration 022: table may already exist: %s", e)

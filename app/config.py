@@ -21,6 +21,11 @@ def _safe_int(env_var: str, default: int) -> int:
 
 class Settings:
     TMDB_API_KEY: str = os.getenv("TMDB_API_KEY", "")
+    # OMDb (imdb-id consistency validator) — separate provider/key from TMDB,
+    # used to cross-check imdb_id resolutions. "" = validator disabled.
+    OMDB_API_KEY: str = os.getenv("OMDB_API_KEY", "")
+    # User's plan = 100k requests/day; default keeps margin, env-overridable.
+    OMDB_DAILY_LIMIT: int = _safe_int("OMDB_DAILY_LIMIT", 20000)
     AI_API_KEY: str = os.getenv("AI_API_KEY", "")
 
     # Admin web UI (/admin) — HTTP Basic Auth, separate from the X-API-Key
@@ -185,6 +190,11 @@ class Settings:
             logger.info(f"TMDB API Key loaded: {self.TMDB_API_KEY[:4]}****")
         else:
             logger.warning("TMDB_API_KEY not set — enrichment will be disabled")
+
+        if self.OMDB_API_KEY:
+            logger.info(f"OMDb API Key loaded: {self.OMDB_API_KEY[:4]}****")
+        else:
+            logger.warning("OMDB_API_KEY not set — imdb-id consistency validator will be disabled")
 
         logger.info(f"Ollama LLM: {self.OLLAMA_URL} / model={self.OLLAMA_MODEL}")
         logger.info(

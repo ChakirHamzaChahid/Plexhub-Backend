@@ -7,6 +7,10 @@ services:
     environment:
       - APP_PORT=${APP_PORT:-8000}
       - TMDB_API_KEY=${TMDB_API_KEY}
+      # OMDb (complément TMDB : tie-break enrichissement + validateur d'ids).
+      # Vide = feature no-op. Se règle dans le .env hôte (jamais commité).
+      - OMDB_API_KEY=${OMDB_API_KEY:-}
+      - OMDB_DAILY_LIMIT=${OMDB_DAILY_LIMIT:-20000}
       - XTREAM_BASE_URL=${XTREAM_BASE_URL}
       - XTREAM_PORT=${XTREAM_PORT:-80}
       - XTREAM_USERNAME=${XTREAM_USERNAME}

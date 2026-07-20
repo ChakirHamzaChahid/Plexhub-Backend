@@ -2,15 +2,18 @@
 budgeting. Mirrors tests/test_tmdb_service_mocked.py's fixture/style."""
 from __future__ import annotations
 
+import json
 import logging
 
-import pytest
 import pytest_asyncio
 
-from app.services.omdb_service import OMDbService
+from app.services.omdb_service import OMDbData, OMDbService
 
-
-pytestmark = pytest.mark.asyncio
+# NOTE: no module-level `pytestmark = pytest.mark.asyncio` — `asyncio_mode =
+# "auto"` (pyproject.toml) already treats every `async def test_*` as an
+# asyncio test without a marker, and this file also has one plain sync test
+# (the OMDbData back-compat deserialization case), which the marker would
+# otherwise wrongly flag with a PytestWarning.
 
 
 @pytest_asyncio.fixture
@@ -220,3 +223,150 @@ async def test_api_key_never_leaks_on_hard_http_error(
     assert caplog.records  # sanity: the failure path did log something
     for record in caplog.records:
         assert "test_key" not in record.getMessage()
+
+
+# ─── search_by_title (Wave 1, contract C2) ─────────────────────────────────
+
+
+def _title_payload(**overrides):
+    base = {
+        "Response": "True",
+        "Title": "The Matrix",
+        "Year": "1999",
+        "Runtime": "136 min",
+        "Genre": "Action, Sci-Fi",
+        "Director": "Lana Wachowski, Lilly Wachowski",
+        "Actors": "Keanu Reeves, Laurence Fishburne",
+        "Plot": "A computer hacker learns the truth about reality.",
+        "imdbRating": "8.7",
+        "imdbVotes": "2,000,000",
+        "Type": "movie",
+        "imdbID": "tt0133093",
+    }
+    base.update(overrides)
+    return base
+
+
+async def test_search_by_title_returns_match_with_imdb_id(configured_omdb, omdb_mock):
+    omdb_mock.get("/").respond(200, json=_title_payload())
+    data = await configured_omdb.search_by_title("The Matrix", 1999, "movie")
+    assert data is not None
+    assert data.title == "The Matrix"
+    assert data.imdb_id == "tt0133093"
+    assert data.imdb_rating == 8.7
+    assert data.type == "movie"
+
+
+async def test_search_by_title_not_found_returns_none(configured_omdb, omdb_mock):
+    omdb_mock.get("/").respond(200, json={"Response": "False", "Error": "Movie not found!"})
+    data = await configured_omdb.search_by_title("Some Obscure Title", 2020, "movie")
+    assert data is None
+
+
+async def test_search_by_title_unconfigured_makes_zero_http_calls(monkeypatch, omdb_mock):
+    from app.services import omdb_service as mod
+
+    monkeypatch.setattr(mod.settings, "OMDB_API_KEY", "")
+    svc = OMDbService()
+    route = omdb_mock.get("/").respond(200, json=_title_payload())
+    data = await svc.search_by_title("The Matrix", 1999, "movie")
+    assert data is None
+    assert route.call_count == 0
+
+
+async def test_search_by_title_blank_title_short_circuits(configured_omdb):
+    data = await configured_omdb.search_by_title("", 1999, "movie")
+    assert data is None
+    assert configured_omdb.get_request_count() == 0
+
+
+async def test_search_by_title_maps_show_to_series(configured_omdb, omdb_mock):
+    route = omdb_mock.get("/").respond(
+        200, json=_title_payload(Title="Breaking Bad", Type="series", imdbID="tt0903747"),
+    )
+    data = await configured_omdb.search_by_title("Breaking Bad", 2008, "show")
+    assert data is not None
+    assert data.type == "series"
+
+    sent_params = dict(route.calls.last.request.url.params)
+    assert sent_params["type"] == "series"
+    assert sent_params["t"] == "Breaking Bad"
+    assert sent_params["y"] == "2008"
+
+
+async def test_search_by_title_maps_movie_to_movie(configured_omdb, omdb_mock):
+    route = omdb_mock.get("/").respond(200, json=_title_payload())
+    await configured_omdb.search_by_title("The Matrix", 1999, "movie")
+
+    sent_params = dict(route.calls.last.request.url.params)
+    assert sent_params["type"] == "movie"
+
+
+async def test_search_by_title_omits_year_param_when_none(configured_omdb, omdb_mock):
+    route = omdb_mock.get("/").respond(200, json=_title_payload())
+    await configured_omdb.search_by_title("The Matrix", None, "movie")
+
+    sent_params = dict(route.calls.last.request.url.params)
+    assert "y" not in sent_params
+
+
+async def test_search_by_title_real_call_increments_budget(configured_omdb, omdb_mock):
+    omdb_mock.get("/").respond(200, json=_title_payload())
+    assert configured_omdb.get_request_count() == 0
+
+    await configured_omdb.search_by_title("The Matrix", 1999, "movie")
+
+    assert configured_omdb.get_request_count() == 1
+
+
+async def test_search_by_title_key_never_leaks_on_hard_http_error(
+    configured_omdb, omdb_mock, caplog, monkeypatch,
+):
+    """Same guard as `get_by_imdb_id` (see
+    test_api_key_never_leaks_on_hard_http_error): a hard HTTP failure must
+    never leak `apikey=test_key` via any log record."""
+    monkeypatch.setattr(logging.getLogger("plexhub"), "propagate", True)
+    omdb_mock.get("/").respond(401, json={"Response": "False", "Error": "Invalid API key!"})
+    with caplog.at_level(logging.WARNING, logger="plexhub.omdb"):
+        data = await configured_omdb.search_by_title("The Matrix", 1999, "movie")
+    assert data is None
+    assert caplog.records
+    for record in caplog.records:
+        assert "test_key" not in record.getMessage()
+
+
+# ─── OMDbData.imdb_id back-compat (Wave 1, contract C2) ────────────────────
+
+
+async def test_get_by_imdb_id_populates_imdb_id_field(configured_omdb, omdb_mock):
+    omdb_mock.get("/").respond(200, json=_payload(imdbID="tt0133093"))
+    data = await configured_omdb.get_by_imdb_id("tt0133093")
+    assert data is not None
+    assert data.imdb_id == "tt0133093"
+
+
+async def test_get_by_imdb_id_falls_back_to_looked_up_id_when_response_omits_it(
+    configured_omdb, omdb_mock,
+):
+    """`data.get("imdbID") or imdb_id` — if OMDb's response body omits
+    `imdbID` (should not normally happen, but the payload is untrusted),
+    fall back to the id we actually queried."""
+    omdb_mock.get("/").respond(200, json=_payload())  # base payload has no imdbID key
+    data = await configured_omdb.get_by_imdb_id("tt0133093")
+    assert data is not None
+    assert data.imdb_id == "tt0133093"
+
+
+def test_omdb_data_old_cached_payload_deserializes_without_imdb_id():
+    """An OLD `omdb_scrape_cache` payload persisted before this field
+    existed has no `imdb_id` key. `omdb_scrape_cache_service.get` calls
+    `OMDbData(**json.loads(payload))` directly — the new field MUST default,
+    or every pre-existing cache row would raise `TypeError` on read."""
+    old_payload = (
+        '{"title":"X","year":"2020","runtime_minutes":null,"genre":null,'
+        '"director":null,"actors":null,"plot":null,"imdb_rating":null,'
+        '"imdb_votes":null,"type":"movie"}'
+    )
+    data = OMDbData(**json.loads(old_payload))
+    assert data.title == "X"
+    assert data.imdb_id is None

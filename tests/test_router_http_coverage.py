@@ -211,6 +211,82 @@ class TestMediaMutateEndpoints:
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# GET /api/media/episodes — server_id is MANDATORY (homonym-collision guard)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _episode(rating_key: str, server_id: str, grandparent_rating_key: str, title: str) -> Media:
+    return Media(
+        rating_key=rating_key, server_id=server_id,
+        filter="all", sort_order="default", library_section_id="xtream_series",
+        title=title, type="episode", year=2024,
+        grandparent_rating_key=grandparent_rating_key,
+        added_at=1, updated_at=1, is_in_allowed_categories=True, is_broken=False,
+    )
+
+
+@pytest_asyncio.fixture
+async def seeded_homonym_series(db_factory):
+    """Two DIFFERENT series colliding on the SAME provider rating key
+    `series_7724` across two accounts (the real MAO vs Treadstone case). The
+    episode rating keys are distinct, so a query WITHOUT server_id would return
+    the UNION (mixed) — this fixture is what makes the collision observable."""
+    async with db_factory() as s:
+        s.add(_episode("ep_A_1", "xtream_acctA", "series_7724", "MAO S01E01"))
+        s.add(_episode("ep_B_1", "xtream_acctB", "series_7724", "Treadstone S01E01"))
+        await s.commit()
+    return db_factory
+
+
+class TestEpisodesRequireServerId:
+    """Regression for the MAO/Treadstone bug: (parent_rating_key, server_id) is
+    the only key that identifies a series, so the raw episodes endpoint must
+    refuse an ambiguous query rather than mix two homonymous series."""
+
+    async def test_missing_server_id_returns_400(self, api_client, seeded_homonym_series):
+        resp = await api_client.get(
+            "/api/media/episodes",
+            params={"parent_rating_key": "series_7724"},
+            headers=API_HEADERS,
+        )
+        assert resp.status_code == 400, resp.text
+        assert "server_id" in resp.json()["detail"]
+
+    async def test_blank_server_id_returns_400(self, api_client, seeded_homonym_series):
+        resp = await api_client.get(
+            "/api/media/episodes",
+            params={"parent_rating_key": "series_7724", "server_id": ""},
+            headers=API_HEADERS,
+        )
+        assert resp.status_code == 400
+
+    async def test_with_server_id_scopes_to_one_account_no_mixing(
+        self, api_client, seeded_homonym_series,
+    ):
+        resp = await api_client.get(
+            "/api/media/episodes",
+            params={"parent_rating_key": "series_7724", "server_id": "xtream_acctA"},
+            headers=API_HEADERS,
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        # ONLY account A's series — Treadstone (account B) must not bleed in.
+        assert [i["title"] for i in body["items"]] == ["MAO S01E01"]
+        assert body["total"] == 1
+
+    async def test_other_account_returns_its_own_series(
+        self, api_client, seeded_homonym_series,
+    ):
+        resp = await api_client.get(
+            "/api/media/episodes",
+            params={"parent_rating_key": "series_7724", "server_id": "xtream_acctB"},
+            headers=API_HEADERS,
+        )
+        assert resp.status_code == 200, resp.text
+        assert [i["title"] for i in resp.json()["items"]] == ["Treadstone S01E01"]
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # live.py — per-channel endpoints + /api/live/epg
 # ══════════════════════════════════════════════════════════════════════════
 

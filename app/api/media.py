@@ -194,7 +194,14 @@ async def list_episodes(
     parent_rating_key: str = Query(...),
     limit: int = Query(500, ge=1, le=5000),
     offset: int = Query(0, ge=0),
-    server_id: Optional[str] = Query(None),
+    server_id: Optional[str] = Query(
+        None,
+        description="REQUIRED. A series parent_rating_key (e.g. 'series_7724') "
+                    "is unique only per Xtream account and collides across "
+                    "accounts, so (parent_rating_key, server_id) is the only key "
+                    "that identifies a series. Omitting it is rejected with 400 "
+                    "rather than silently mixing two homonymous series' episodes.",
+    ),
     cursor: Optional[str] = Query(
         None,
         description="Opaque keyset cursor (CR-P04). Episodes always sort by "
@@ -203,6 +210,16 @@ async def list_episodes(
     ),
     db: AsyncSession = Depends(get_db),
 ):
+    # server_id is mandatory here (kept as an Optional Query so a missing value
+    # is a clean 400 with this message, not FastAPI's generic 422). Without it,
+    # parent_rating_key matches rows across every account and returns two
+    # different series' episodes mixed together (the MAO/Treadstone bug).
+    if not server_id:
+        raise HTTPException(
+            400,
+            "server_id is required to list episodes: a series rating key is "
+            "unique only per account and collides across accounts.",
+        )
     try:
         items, total = await media_service.get_media_list(
             db, media_type="episode", limit=limit, offset=offset,

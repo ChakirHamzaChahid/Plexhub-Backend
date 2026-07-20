@@ -25,7 +25,7 @@ class Settings:
     # used to cross-check imdb_id resolutions. "" = validator disabled.
     OMDB_API_KEY: str = os.getenv("OMDB_API_KEY", "")
     # User's plan = 100k requests/day; default keeps margin, env-overridable.
-    OMDB_DAILY_LIMIT: int = _safe_int("OMDB_DAILY_LIMIT", 20000)
+    OMDB_DAILY_LIMIT: int = _safe_int("OMDB_DAILY_LIMIT", 95000)
     AI_API_KEY: str = os.getenv("AI_API_KEY", "")
 
     # Admin web UI (/admin) — HTTP Basic Auth, separate from the X-API-Key

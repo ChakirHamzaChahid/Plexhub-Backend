@@ -152,7 +152,8 @@ async def test_omdb_scrape_cache_write_and_read_roundtrip(fresh_engine):
 
 def test_omdb_config_defaults():
     """OMDB_API_KEY defaults to "" (feature disabled) and OMDB_DAILY_LIMIT
-    defaults to 20000 (paid-plan margin) when unset in the environment.
+    defaults to 95000 (paid 100k/day plan, 5k margin for retries) when unset
+    in the environment.
 
     No env var is set for either in the test environment/CI, so the module-
     level `settings` singleton (built once at import time, like every other
@@ -163,4 +164,4 @@ def test_omdb_config_defaults():
     from app.config import settings
 
     assert settings.OMDB_API_KEY == ""
-    assert settings.OMDB_DAILY_LIMIT == 20000
+    assert settings.OMDB_DAILY_LIMIT == 95000

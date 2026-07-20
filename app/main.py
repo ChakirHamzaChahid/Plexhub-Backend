@@ -21,6 +21,7 @@ from app.api import (
     api_keys,
     categories,
     downloads,
+    enrichment,
     health,
     live,
     media,
@@ -616,10 +617,17 @@ async def protected_openapi():
 #     own /api/admin/plex-downloads prefix + module-level verify_master_key
 #     (JSON read-only mirror of the Plex catalogue/servers, master secret
 #     only — same convention as downloads.router above).
+#   - `enrichment.router` (dual-provider enrichment refacto, Wave 3) — its
+#     own /api/admin/enrichment prefix + module-level verify_master_key
+#     (manual OMDb ratings backfill: spends the OMDb budget + mutates the
+#     whole catalog, master secret only — same convention as above). Not
+#     master-gated at the worker level (admin-triggered, not scheduler/cron —
+#     any process may run it, unlike the download workers).
 app.include_router(ai.router)
 app.include_router(api_keys.router)
 app.include_router(downloads.router)
 app.include_router(plex_downloads.router)
+app.include_router(enrichment.router)
 
 # Prometheus /metrics + per-request HTTP metrics
 from app.utils.metrics import setup_instrumentator  # noqa: E402

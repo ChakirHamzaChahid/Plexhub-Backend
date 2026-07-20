@@ -1,10 +1,15 @@
-"""OMDb HTTP client — imdb-id consistency validator support.
+"""OMDb HTTP client — imdb-id consistency validation + enrichment support.
 
-OMDb (https://www.omdbapi.com) is consulted ONLY by `imdb_id` here — this
-service never searches by title. It exists to cross-check that a
-`media.tmdb_id`/`media.imdb_id` pair genuinely refers to the same title (see
-`docs/plans/2026-07-17-omdb-id-consistency-validator-design.md`); the actual
-detector/corrector script (Wave 3) is out of scope for this module.
+OMDb (https://www.omdbapi.com) is consulted by `imdb_id` (`get_by_imdb_id`,
+used to cross-check that a `media.tmdb_id`/`media.imdb_id` pair genuinely
+refers to the same title, see
+`docs/plans/2026-07-17-omdb-id-consistency-validator-design.md`) and, since
+`docs/plans/2026-07-20-omdb-rating-enrichment-design.md`, by title
+(`search_by_title`, a fallback OMDb-by-title scrape for items TMDB failed to
+match — the caller decides how strong a title match must be before trusting
+it for identity, this module only returns OMDb's raw best `?t=` hit). The
+detector/corrector script (`app/scripts/validate_id_consistency.py`) and the
+enrichment worker are out of scope for this module.
 
 Architectural mirror of `app.services.tmdb_service` (client pooling,
 retry/backoff shape, real-call-count budgeting) — see
@@ -35,7 +40,7 @@ _RETRYABLE = (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolEr
 
 @dataclass
 class OMDbData:
-    """Parsed OMDb `?i=<imdb_id>` response (found case only)."""
+    """Parsed OMDb response (`?i=<imdb_id>` lookup or `?t=<title>` search)."""
     title: str
     year: str
     runtime_minutes: int | None
@@ -46,6 +51,12 @@ class OMDbData:
     imdb_rating: float | None
     imdb_votes: int | None
     type: str  # "movie" | "series" (OMDb also returns "episode", passed through as-is)
+    # Additive (defaulted so old `omdb_scrape_cache` payloads deserialize via
+    # `OMDbData(**json.loads(payload))` in `omdb_scrape_cache_service.py`
+    # without an `imdb_id` key — see tests/test_omdb_service.py back-compat
+    # case). Populated on both `get_by_imdb_id` (echoes the looked-up id) and
+    # `search_by_title` (the id OMDb resolved the title to).
+    imdb_id: str | None = None
 
 
 def _clean_str(value) -> str | None:
@@ -220,6 +231,66 @@ class OMDbService:
             imdb_rating=_parse_imdb_rating(data.get("imdbRating")),
             imdb_votes=_parse_imdb_votes(data.get("imdbVotes")),
             type=data.get("Type") or "",
+            # Consistency: echo the id we looked up, falling back to OMDb's
+            # own `imdbID` field (they should always agree on a match).
+            imdb_id=data.get("imdbID") or imdb_id,
+        )
+
+    async def search_by_title(
+        self, title: str, year: int | None, media_type: str
+    ) -> OMDbData | None:
+        """OMDb `?t=<title>&y=<year>&type=movie|series&plot=full` — single
+        best match (title search, not a validation-only lookup).
+
+        `media_type` "movie"/"show" maps to OMDb's "movie"/"series"; any
+        other value omits the `type` filter rather than guessing. Returns
+        `OMDbData` with `imdb_id` populated (from `imdbID`), or None when:
+        OMDb is unconfigured, `title` is blank, OMDb reports "not found"
+        (`Response: "False"`), or any transport/HTTP failure occurs — same
+        graceful-None shape as `get_by_imdb_id`. Counts real HTTP attempts
+        via `_request` (same `OMDB_DAILY_LIMIT` budget). The API key is
+        never logged (see module docstring): only exception type / HTTP
+        status, never `str(exc)`."""
+        if not title:
+            return None
+        if not self.is_configured:
+            return None
+
+        params: dict = {"t": title, "plot": "full"}
+        if year is not None:
+            params["y"] = str(year)
+        omdb_type = {"movie": "movie", "show": "series"}.get(media_type)
+        if omdb_type is not None:
+            params["type"] = omdb_type
+
+        try:
+            data = await self._request("/", params=params)
+        except httpx.HTTPStatusError as exc:
+            logger.warning(
+                "OMDb search_by_title failed for %r (HTTP %s)", title, exc.response.status_code,
+            )
+            return None
+        except Exception as exc:
+            logger.warning(
+                "OMDb search_by_title failed for %r (%s)", title, type(exc).__name__,
+            )
+            return None
+
+        if data.get("Response") != "True":
+            return None
+
+        return OMDbData(
+            title=data.get("Title") or "",
+            year=data.get("Year") or "",
+            runtime_minutes=_parse_runtime_minutes(data.get("Runtime")),
+            genre=_clean_str(data.get("Genre")),
+            director=_clean_str(data.get("Director")),
+            actors=_clean_str(data.get("Actors")),
+            plot=_clean_str(data.get("Plot")),
+            imdb_rating=_parse_imdb_rating(data.get("imdbRating")),
+            imdb_votes=_parse_imdb_votes(data.get("imdbVotes")),
+            type=data.get("Type") or "",
+            imdb_id=_clean_str(data.get("imdbID")),
         )
 
 

@@ -20,6 +20,7 @@ from app.api import (
     ai,
     api_keys,
     categories,
+    dav,
     downloads,
     enrichment,
     health,
@@ -33,7 +34,7 @@ from app.api import (
 )
 from app.utils.request_context import RequestIdLogFilter, RequestIdMiddleware
 
-APP_VERSION = "1.6.1"
+APP_VERSION = "1.7.0"
 
 logger = logging.getLogger("plexhub")
 
@@ -89,6 +90,18 @@ root_logger = logging.getLogger()
 root_logger.setLevel(logging.WARNING)
 root_logger.addHandler(console_handler)
 root_logger.addHandler(file_handler)
+
+# Explicit floor for httpx specifically (defense in depth, DAV-2 security
+# review F3): at INFO, httpx logs the FULL request URL for every call it
+# makes — including the DAV relay's (`app/dav/relay.py`) and the physical
+# download service's Xtream stream URLs, which embed the account's
+# username/password in the path/query. Root already sits at WARNING above,
+# which today already filters this out (a logger with no explicit level
+# inherits its nearest ancestor's), but that's implicit and one `root_logger
+# .setLevel(logging.INFO)` edit away from silently leaking credentials into
+# every log line. Pinning httpx's own level here means it stays WARNING
+# regardless of what root/`plexhub` are ever changed to.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 logger.info("Logging configured: plexhub=DEBUG, third-party=WARNING")
 
@@ -493,10 +506,14 @@ async def lifespan(app: FastAPI):
         from app.services.xtream_service import xtream_service
         from app.services.tmdb_service import tmdb_service
         from app.workers import health_check_worker
+        from app.dav import relay as dav_relay
 
         await xtream_service.close()
         await tmdb_service.close()
         await health_check_worker.close()
+        # DAV relay's pooled client (`app/dav/relay.py::get_client`) — a
+        # no-op if `/dav` was never enabled/hit (lazy client, stays `None`).
+        await dav_relay.close_client()
 
         # Shutdown image download thread pool
         from app.plex_generator.storage import shutdown_image_pool
@@ -628,6 +645,16 @@ app.include_router(api_keys.router)
 app.include_router(downloads.router)
 app.include_router(plex_downloads.router)
 app.include_router(enrichment.router)
+# `dav.router` (WebDAV virtual filesystem for Plex, ticket DAV-2) — its own
+# /dav prefix + module-level verify_dav_basic_auth. Deliberately OUTSIDE
+# /api: rclone (the only client this endpoint targets) speaks HTTP Basic
+# Auth, never a custom X-API-Key header, same rationale as the /admin block
+# above but with its own dedicated DAV_USERNAME/DAV_PASSWORD secret (not
+# ADMIN_*). Fail-closed at two layers: verify_dav_basic_auth 503s if
+# DAV_PASSWORD is unset, and the handler itself 503s if DAV_ENABLED=false.
+# Not part of the CR-A04 `/api/*` route-walk follow-up mentioned above (this
+# router never carries the /api prefix in the first place).
+app.include_router(dav.router)
 
 # Prometheus /metrics + per-request HTTP metrics
 from app.utils.metrics import setup_instrumentator  # noqa: E402

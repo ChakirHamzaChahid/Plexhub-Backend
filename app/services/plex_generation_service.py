@@ -116,6 +116,19 @@ async def generate_plex_library_auto() -> SyncReport | None:
             f"{report.deleted} deleted, {report.unchanged} unchanged, "
             f"{report.pruned} pruned"
         )
+        if settings.DAV_ENABLED:
+            # Ticket DAV-2: the WebDAV virtual tree (app/dav/vfs.py) is built
+            # from the same DB state a `.strm` generation pass just read —
+            # invalidate its TTL cache so the NEXT `/dav` request rebuilds it
+            # instead of serving a stale tree for up to DAV_TREE_TTL_MINUTES.
+            # Deferred import: mirrors this module's own
+            # `from app.db.database import async_session_factory` above —
+            # `app.dav.vfs` isn't otherwise a dependency of this module, and
+            # importing it at module scope would need to run even when
+            # DAV_ENABLED is false.
+            from app.dav.vfs import dav_tree_cache
+
+            dav_tree_cache.invalidate()
         return report
     except Exception as e:
         logger.error(f"Plex generation failed: {e}", exc_info=True)

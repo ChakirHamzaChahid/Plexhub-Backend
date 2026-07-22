@@ -147,6 +147,14 @@ def _resolve_series_names(series_list) -> dict[str, _NameResolution]:
     return resolutions
 
 
+# Public aliases (house convention for cross-module reuse of a private
+# helper): the DAV virtual filesystem tree builder needs the exact same
+# title/year disambiguation the .strm generator uses, so DAV paths match the
+# .strm tree at the extension. See app/dav/tree_builder.py.
+resolve_movie_names = _resolve_movie_names
+resolve_series_names = _resolve_series_names
+
+
 def _classify_image_error(exc: BaseException) -> str:
     """Bucket an image-download exception so we can aggregate counts.
 

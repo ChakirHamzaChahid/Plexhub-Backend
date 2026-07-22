@@ -13,6 +13,8 @@ Dependencies:
   verify_master_key — accepts ONLY the master secret; guards key-management
     endpoints so a per-user key cannot mint or revoke other keys.
   verify_admin_basic_auth — HTTP Basic Auth for the browser /admin UI.
+  verify_dav_basic_auth — HTTP Basic Auth for the read-only /dav WebDAV
+    endpoint (rclone can only send Basic Auth, not a custom header).
 
 Constant-time comparison on the master secret avoids timing oracles — plain `==`
 is forbidden and gated by a grep-based acceptance test.
@@ -134,6 +136,46 @@ async def verify_admin_basic_auth(
     pass_ok = secrets.compare_digest(
         credentials.password.encode("utf-8"),
         settings.ADMIN_PASSWORD.encode("utf-8"),
+    )
+    # Evaluate both before branching to avoid a username-timing oracle.
+    if not (user_ok and pass_ok):
+        raise unauthorized
+
+
+_dav_basic = HTTPBasic(auto_error=False)
+
+
+async def verify_dav_basic_auth(
+    credentials: HTTPBasicCredentials | None = Depends(_dav_basic),
+) -> None:
+    """HTTP Basic Auth guard for the read-only /dav WebDAV endpoint (fail-closed).
+
+    Mirrors verify_admin_basic_auth: rclone (the only WebDAV client this
+    endpoint targets) speaks HTTP Basic Auth, not a custom X-API-Key header.
+    DAV_USERNAME / DAV_PASSWORD are a secret dedicated to this endpoint —
+    separate from the backend's X-API-Key and from ADMIN_PASSWORD. Both
+    fields are compared constant-time. 401 with WWW-Authenticate so a
+    Basic-Auth-capable client can retry with credentials.
+    """
+    if not settings.DAV_PASSWORD:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="DAV not configured",
+        )
+    unauthorized = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid DAV credentials",
+        headers={"WWW-Authenticate": "Basic"},
+    )
+    if credentials is None:
+        raise unauthorized
+    user_ok = secrets.compare_digest(
+        credentials.username.encode("utf-8"),
+        settings.DAV_USERNAME.encode("utf-8"),
+    )
+    pass_ok = secrets.compare_digest(
+        credentials.password.encode("utf-8"),
+        settings.DAV_PASSWORD.encode("utf-8"),
     )
     # Evaluate both before branching to avoid a username-timing oracle.
     if not (user_ok and pass_ok):

@@ -323,6 +323,13 @@ async def _assert_public_redirect_host(host: Optional[str]) -> None:
             raise DownloadPermanentError("unsafe redirect")
 
 
+# Public alias (house convention for cross-module reuse of a private
+# helper): the DAV relay reuses this exact SSRF guard on redirect targets
+# rather than duplicating the resolution/validation logic. See
+# app/dav/relay.py.
+assert_public_redirect_host = _assert_public_redirect_host
+
+
 async def download_to_disk(
     url: str,
     dest: Path,

@@ -25,6 +25,32 @@ services:
       - STREAM_VALIDATION_RECHECK_HOURS=${STREAM_VALIDATION_RECHECK_HOURS:-24}
       - STREAM_FILTER_BROKEN=${STREAM_FILTER_BROKEN:-true}
       - PLEX_LIBRARY_DIR=/app/media
+      # WebDAV virtuel pour Plex (ticket DAV-1/DAV-2) : inactif par défaut
+      # (DAV_ENABLED=false / DAV_PASSWORD vide -> /dav répond 503). Le port
+      # ${APP_PORT:-8000} est déjà publié ci-dessus, donc un `rclone mount`
+      # tournant sur le même hôte Docker atteint /dav sans volume/port
+      # supplémentaire. Voir docs/30-ops-plex-webdav.md.
+      - DAV_ENABLED=${DAV_ENABLED:-false}
+      - DAV_USERNAME=${DAV_USERNAME:-plexdav}
+      - DAV_PASSWORD=${DAV_PASSWORD:-}
+      - DAV_MOVIE_LIMIT=${DAV_MOVIE_LIMIT:-25}
+      - DAV_SERIES_LIMIT=${DAV_SERIES_LIMIT:-5}
+      # csv of account ids; empty (default) = every active account
+      # (app/config.py's own "" -> [] parsing, mirrors DAV_PASSWORD's style
+      # above).
+      - DAV_ACCOUNT_IDS=${DAV_ACCOUNT_IDS:-}
+      - DAV_INCLUDE_ADULT=${DAV_INCLUDE_ADULT:-false}
+      - DAV_SINGLE_VERSION=${DAV_SINGLE_VERSION:-true}
+      - DAV_REQUIRE_KNOWN_SIZE=${DAV_REQUIRE_KNOWN_SIZE:-true}
+      - DAV_TREE_TTL_MINUTES=${DAV_TREE_TTL_MINUTES:-60}
+      - DAV_UPSTREAM_PER_ACCOUNT=${DAV_UPSTREAM_PER_ACCOUNT:-1}
+      - DAV_QUEUE_TIMEOUT_SECONDS=${DAV_QUEUE_TIMEOUT_SECONDS:-30}
+      - DAV_RANGE_SHIM=${DAV_RANGE_SHIM:-true}
+      # Reuse the physical-download timeouts by default (app/config.py) —
+      # only set here if you need the DAV relay's Xtream timeouts to
+      # diverge from DOWNLOAD_CONNECT_TIMEOUT/DOWNLOAD_READ_TIMEOUT.
+      - DAV_CONNECT_TIMEOUT=${DAV_CONNECT_TIMEOUT:-30}
+      - DAV_READ_TIMEOUT=${DAV_READ_TIMEOUT:-120}
       # Téléchargement physique de médias (onglet admin « Télécharger ») :
       # chemin FIXE dans le conteneur (comme PLEX_LIBRARY_DIR). Le dossier
       # hôte correspondant se règle via DOWNLOAD_HOST_PATH (volume ci-dessous).

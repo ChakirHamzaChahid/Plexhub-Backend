@@ -19,6 +19,16 @@ def _safe_int(env_var: str, default: int) -> int:
         return default
 
 
+def _safe_float(env_var: str, default: float) -> float:
+    """Parse env var as float with safe fallback and clear error message."""
+    raw = os.getenv(env_var, str(default))
+    try:
+        return float(raw)
+    except (ValueError, TypeError):
+        logger.warning(f"Invalid float for {env_var}={raw!r}, using default {default}")
+        return default
+
+
 class Settings:
     TMDB_API_KEY: str = os.getenv("TMDB_API_KEY", "")
     # OMDb (imdb-id consistency validator) — separate provider/key from TMDB,
@@ -158,6 +168,37 @@ class Settings:
     # only for typing/defaults — the real value is always set in __init__.
     PLEX_CLIENT_IDENTIFIER: str = ""
 
+    # WebDAV virtual filesystem for Plex (see docs/30-ops-plex-webdav.md).
+    # Plex ignores .strm files at scan time, so a read-only WebDAV tree is
+    # exposed at /dav (rclone-mounted on the same host) presenting Xtream
+    # content as regular video files; bytes are relayed on GET with Range
+    # pass-through. Additive/feature-gated: DAV_ENABLED=false by default, and
+    # even when true /dav fail-closes with 503 until DAV_PASSWORD is set
+    # (same fail-closed convention as ADMIN_PASSWORD above).
+    DAV_ENABLED: bool = os.getenv("DAV_ENABLED", "false").lower() in ("true", "1", "yes")
+    DAV_USERNAME: str = os.getenv("DAV_USERNAME", "plexdav")
+    DAV_PASSWORD: str = os.getenv("DAV_PASSWORD", "")
+    DAV_MOVIE_LIMIT: int = _safe_int("DAV_MOVIE_LIMIT", 25)    # 0 = unlimited
+    DAV_SERIES_LIMIT: int = _safe_int("DAV_SERIES_LIMIT", 5)   # 0 = unlimited
+    # csv of account ids; empty = every active account (mirrors DatabaseSource
+    # default in app/plex_generator/source.py).
+    DAV_ACCOUNT_IDS: list[str] = [
+        aid.strip() for aid in os.getenv("DAV_ACCOUNT_IDS", "").split(",") if aid.strip()
+    ]
+    DAV_INCLUDE_ADULT: bool = os.getenv("DAV_INCLUDE_ADULT", "false").lower() in ("true", "1", "yes")
+    DAV_SINGLE_VERSION: bool = os.getenv("DAV_SINGLE_VERSION", "true").lower() in ("true", "1", "yes")
+    # A version without a known file_size is excluded — an unknown/wrong size
+    # breaks rclone's VFS layer (Content-Length drives its read-ahead/cache).
+    DAV_REQUIRE_KNOWN_SIZE: bool = os.getenv("DAV_REQUIRE_KNOWN_SIZE", "true").lower() in ("true", "1", "yes")
+    DAV_TREE_TTL_MINUTES: int = _safe_int("DAV_TREE_TTL_MINUTES", 60)
+    DAV_UPSTREAM_PER_ACCOUNT: int = _safe_int("DAV_UPSTREAM_PER_ACCOUNT", 1)
+    DAV_QUEUE_TIMEOUT_SECONDS: int = _safe_int("DAV_QUEUE_TIMEOUT_SECONDS", 30)
+    DAV_RANGE_SHIM: bool = os.getenv("DAV_RANGE_SHIM", "true").lower() in ("true", "1", "yes")
+    # Reuse the physical-download HTTP timeouts by default (same upstream
+    # class of Xtream provider connections) — independently env-overridable.
+    DAV_CONNECT_TIMEOUT: float = _safe_float("DAV_CONNECT_TIMEOUT", float(DOWNLOAD_CONNECT_TIMEOUT))
+    DAV_READ_TIMEOUT: float = _safe_float("DAV_READ_TIMEOUT", float(DOWNLOAD_READ_TIMEOUT))
+
     @property
     def has_xtream_env(self) -> bool:
         return bool(self.XTREAM_BASE_URL and self.XTREAM_USERNAME and self.XTREAM_PASSWORD)
@@ -215,6 +256,18 @@ class Settings:
             logger.info("Plex download source: enabled (client_id=%s…)", self.PLEX_CLIENT_IDENTIFIER[:8])
         else:
             logger.info("Plex download source: PLEX_ACCOUNT_TOKEN not set — feature disabled")
+
+        if self.DAV_ENABLED:
+            logger.info(
+                "DAV WebDAV: enabled=%s movies=%s series=%s accounts=%s single_version=%s",
+                self.DAV_ENABLED,
+                self.DAV_MOVIE_LIMIT or "unlimited",
+                self.DAV_SERIES_LIMIT or "unlimited",
+                self.DAV_ACCOUNT_IDS or "all-active",
+                self.DAV_SINGLE_VERSION,
+            )
+        else:
+            logger.info("DAV WebDAV: disabled (DAV_ENABLED=false)")
 
 
 settings = Settings()

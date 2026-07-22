@@ -10,6 +10,7 @@ class PlexMovieVersion(BaseModel):
     server_id: str = ""       # which Xtream server this version comes from
     label: str | None = None  # human edition label, e.g. "VF · Compte 1"
     stream_url: str
+    file_size: int | None = None  # bytes, from Media.file_size (nullable — see DAV vfs)
 
 
 class PlexMovie(BaseModel):
@@ -47,6 +48,7 @@ class PlexEpisodeVersion(BaseModel):
     server_id: str = ""
     label: str | None = None
     stream_url: str
+    file_size: int | None = None  # bytes, from Media.file_size (nullable — see DAV vfs)
 
 
 class PlexEpisode(BaseModel):

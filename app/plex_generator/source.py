@@ -142,7 +142,7 @@ class DatabaseSource(MediaSource):
                     year=clean_year,
                     versions=[PlexMovieVersion(
                         source_id=row.rating_key, server_id=row.server_id,
-                        label=label, stream_url=url,
+                        label=label, stream_url=url, file_size=row.file_size,
                     ) for row, url, label in triples],
                     poster_url=best.resolved_thumb_url or best.thumb_url,
                     fanart_url=best.resolved_art_url or best.art_url,
@@ -216,7 +216,7 @@ class DatabaseSource(MediaSource):
                         title=best_ep.title,
                         versions=[PlexEpisodeVersion(
                             source_id=row.rating_key, server_id=row.server_id,
-                            label=label, stream_url=url,
+                            label=label, stream_url=url, file_size=row.file_size,
                         ) for row, url, label in triples],
                         summary=best_ep.summary,
                         duration_ms=best_ep.duration,

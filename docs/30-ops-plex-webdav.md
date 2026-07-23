@@ -33,6 +33,35 @@ en environnement avec tunnel Cloudflare (ou tout autre reverse-proxy public) :
    courte durée de vie ici (contrairement à `X-Plex-Token`) ; en cas de doute sur une fuite, changer `DAV_PASSWORD`
    (+ redémarrer le backend + reconfigurer le remote rclone, § 2) est le SEUL moyen de couper l'accès.
 
+## 0.1 ⚠️ Blocage connu à l'intégration Plex — préchauffage OBLIGATOIRE (retour device 2026-07)
+
+**Le relais HTTP fonctionne parfaitement** (PROPFIND, Range GET, tail-reads, contenu Matroska réel, y compris sous
+charge parallèle — vérifié en pré-flight isolé : ~47/50 requêtes header+tail à 8 concurrents = `206`, 0 × `503`). **Le
+blocage est côté Plex**, et il est **architectural**, pas un problème de réglage :
+
+- Pendant un scan, Plex **analyse chaque fichier** (ffprobe-like) en lisant l'**en-tête + la fin** (moov MP4 /
+  Cues+Tracks MKV) — et il **tient une transaction d'écriture SQLite** (`MetadataItem.cpp`) **pendant toute cette
+  lecture**.
+- Sur un flux IPTV **relayé** (haute latence, cap de connexions serré), chaque lecture prend **plusieurs secondes** →
+  transaction tenue **8-10 s par item** → warnings Plex `Held transaction for too long (8.38s)` /
+  `Waited over 10 seconds for a busy database; giving up` → cascade **`database is locked`** (Statistics /
+  BackgroundProcessing / clients distants) → **scan bloqué, 0 item indexé**. Pire cas observé (compte lent, `max_conn=1`) :
+  thread scanner en état `D` non-tuable sur FUSE, conteneur Plex à réanimer (`fusermount -uz` + `docker stop`).
+
+**Ce que ça N'EST PAS** (prouvé par 3 essais device) : ce n'est **pas** un problème de cap de connexions ni d'analyses
+optionnelles. Désactiver BIF/intro/loudness/chapitres (§ 5) et **isoler à un seul compte `max_connections=3`** réduit le
+volume de 503 mais **ne supprime pas** le blocage — la cause première est la transaction d'écriture tenue pendant une I/O
+amont lente.
+
+**Le correctif (Phase 0, validé comme approche) : préchauffer le cache VFS de rclone AVANT le scan** (§ 5.1). On lit
+l'en-tête + la fin de chaque fichier **à travers le montage, en série, Plex inactif** → rclone (`--vfs-cache-mode full`)
+persiste ces octets sur disque local → l'analyse de Plex tape ensuite le **cache local** (rapide) → la transaction SQLite
+n'est plus tenue → plus de cascade de verrous. La lente I/O amont est **découplée** de la transaction Plex.
+
+> ⚠️ **N'active PAS de scan Plex sur `/dav` sans avoir préchauffé d'abord** (§ 5.1). Un scan « à froid » sur ce montage
+> rejoue le blocage ci-dessus. La piste **pérenne** (cache header+tail intégré au relais backend, indépendant de rclone)
+> est décrite en § 9 — non implémentée à ce jour.
+
 ## 1. Activation
 
 Toutes les variables sont documentées dans `.env.example` (section « WebDAV virtuel pour Plex »). Le strict minimum
@@ -89,6 +118,7 @@ ExecStart=/usr/bin/rclone mount plexdav: /mnt/plexhub-dav \
   --attr-timeout 60m \
   --vfs-cache-mode full \
   --vfs-cache-max-size 20G \
+  --vfs-cache-max-age 720h \
   --vfs-read-chunk-size 8M \
   --vfs-read-chunk-size-limit 64M \
   --buffer-size 16M \
@@ -125,8 +155,13 @@ sudo systemctl enable --now plexhub-dav.service
 - `--dir-cache-time 720h` + `--poll-interval 0` : l'arbre ne change que via un rebuild explicite (invalidation posée
   par `plex_generation_service` après chaque génération réussie) — inutile de repoller le serveur en continu ;
   rafraîchir manuellement via `rclone rc` (§ 4) après un rebuild.
-- `--vfs-cache-mode full` + `--vfs-cache-max-size 20G` : Plex fait des seeks arbitraires pendant l'analyse/la lecture ;
-  le cache local absorbe les relectures sans re-solliciter le compte Xtream (qui a un cap de connexions serré).
+- `--vfs-cache-mode full` + `--vfs-cache-max-size 20G` + `--vfs-cache-max-age 720h` : Plex fait des seeks arbitraires
+  pendant l'analyse/la lecture ; le cache local absorbe les relectures sans re-solliciter le compte Xtream (qui a un cap
+  de connexions serré). ⚠️ **`--vfs-cache-max-age 720h` est indispensable** au préchauffage (§ 5.1) : sans lui, rclone
+  évince les octets du cache au bout de **1 h** (défaut), donc ce qu'on préchauffe serait perdu avant même le scan Plex.
+  ⚠️ **Dimensionner `--vfs-cache-max-size`** ≥ (nb d'items exposés) × (header + tail préchauffés, ~48 Mo) : à 20 Go le
+  cache tient ~400 items préchauffés ; pour un palier plus large, monter cette valeur ou préchauffer+scanner par
+  paliers (§ 5.1, § 6-Rollout).
 - `--vfs-read-chunk-size 8M` (`--vfs-read-chunk-size-limit 64M`) + `--buffer-size 16M` : lectures par blocs de taille
   raisonnable côté rclone → moins de requêtes HTTP Range vers le relay, meilleure utilisation du shim de Range
   (`DAV_RANGE_SHIM`, voir `app/dav/relay.py`) quand le panel Xtream l'ignore.
@@ -184,15 +219,59 @@ consomme une connexion Xtream limitée. Sur les deux bibliothèques de test (Fil
 Agents Plex par défaut (Movie/TV) : les noms générés (`Title (Year)/Title (Year).ext`, `Season NN/Title SxxEyy.ext`)
 matchent sans NFO grâce au nommage standard — pas besoin d'agent custom.
 
+### 5.1 Préchauffage du cache VFS — OBLIGATOIRE avant tout scan Plex
+
+**Contexte : § 0.1** (le scan « à froid » sur `/dav` fait tenir à Plex une transaction SQLite ~8 s/item → cascade
+`database is locked`). On casse ce blocage en préchauffant le cache VFS de rclone **avant** de lancer le scan : on lit
+l'en-tête + la fin de chaque fichier exposé **à travers le montage, en série** (donc ≤ cap de connexions), **Plex
+inactif**. rclone (`--vfs-cache-mode full` + `--vfs-cache-max-age 720h`) persiste ces octets sur disque local → les
+analyses de Plex tapent ensuite le cache local (rapide) → la transaction n'est plus tenue.
+
+Script fourni : **`scripts/prewarm-dav-cache.sh`**.
+
+```bash
+# Prérequis : plexhub-dav.service actif AVEC --vfs-cache-max-age 720h (§ 3),
+# Plex NON en train de scanner.
+
+# Palier de test complet (Films + Series du sous-ensemble exposé) :
+bash scripts/prewarm-dav-cache.sh
+
+# Ou cibler un seul sous-arbre (plus rapide pour un premier essai) :
+bash scripts/prewarm-dav-cache.sh Films
+
+# Réglages via variables d'env (défauts entre parenthèses) :
+#   DAV_MOUNT (/mnt/plexhub-dav)  DAV_PREWARM_HEADER_MB (16)  DAV_PREWARM_TAIL_MB (32)
+#   DAV_PREWARM_CONCURRENCY (1 — ne JAMAIS dépasser le max_connections du compte)
+#   DAV_PREWARM_LIMIT (0 = tous)
+DAV_PREWARM_TAIL_MB=48 bash scripts/prewarm-dav-cache.sh Films   # tail plus large si moov MP4 volumineux
+```
+
+**Enchaînement correct** : (1) `rclone rc vfs/refresh` si l'arbre vient d'être rebuildé (§ 4) → (2)
+`prewarm-dav-cache.sh` (Plex idle) → (3) **puis seulement** déclencher le scan Plex (§ 7.2). Répéter (1)→(3) à chaque
+palier (§ 6) : ne préchauffer que le nouveau sous-arbre suffit.
+
+**Notes** :
+- Le préchauffage est **idempotent** (relançable sans risque ; ce qui est déjà en cache n'est pas re-téléchargé) et ne
+  consomme **aucun octet amont « en trop »** — il lit exactement les mêmes fenêtres header/tail que Plex à l'analyse.
+- Un `moov` MP4 sans faststart, en toute fin de fichier, peut dépasser 32 Mo sur un très long métrage → si des items
+  restent lents à l'analyse malgré le préchauffage, augmenter `DAV_PREWARM_TAIL_MB` (ex. 48-64) et re-préchauffer.
+- Durée : quelques minutes au palier de test (25/5) ; proportionnelle au nombre d'items et à la latence amont aux
+  paliers larges (tourne sans surveillance, Plex éteint). C'est **volontairement lent et en série** — la vitesse du
+  préchauffage n'a pas d'importance, seul compte le fait que la lente I/O amont ne soit **pas** payée par Plex pendant
+  une transaction.
+
 ## 6. Rollout par paliers
 
 1. **Phase 0 — arbre + PROPFIND sans octets.** Vérifier le listing seul avant tout relais d'octets (§ 7, étape 1).
 2. **Phase 1 — le livrable : caps bas (25 films / 5 séries).** Créer les 2 bibliothèques Plex de test sur le mount,
-   scan complet, lecture + seek d'un film et d'un épisode. Vérifier dans les logs backend (`plexhub.dav` /
-   `plexhub.api.dav`) l'absence de tempête de 503 et le respect de la limite de connexions upstream par compte
-   (`DAV_UPSTREAM_PER_ACCOUNT`, clampée par `XtreamAccount.max_connections`).
+   **préchauffer le cache (§ 5.1) AVANT le scan** (obligatoire, cf. § 0.1), puis scan complet, lecture + seek d'un film
+   et d'un épisode. Vérifier dans les logs backend (`plexhub.dav` / `plexhub.api.dav`) l'absence de tempête de 503 et le
+   respect de la limite de connexions upstream par compte (`DAV_UPSTREAM_PER_ACCOUNT`, clampée par
+   `XtreamAccount.max_connections`).
 3. **Phase 2 — élargissement progressif.** Monter `DAV_MOVIE_LIMIT`/`DAV_SERIES_LIMIT` par paliers (25 → 250 → 2500 →
-   …), avec un **scan Plex manuel entre chaque palier** — jamais tout le catalogue d'un coup. L'ordre de sélection du
+   …), avec, à chaque palier, **rebuild d'arbre → `rclone rc vfs/refresh` (§ 4) → préchauffage du nouveau sous-ensemble
+   (§ 5.1) → puis scan Plex manuel** — jamais tout le catalogue d'un coup, jamais de scan sans préchauffage. L'ordre de
+   sélection du
    sous-ensemble est **déterministe** (tri titre/année/source_id) : les items déjà exposés gardent leurs chemins d'un
    palier à l'autre, seuls des items supplémentaires apparaissent. Options disponibles à ce stade : HEAD paresseux
    (`DAV_REQUIRE_KNOWN_SIZE=false`), multi-versions (`DAV_SINGLE_VERSION=false`), posters/fanart servis depuis les
@@ -221,10 +300,13 @@ curl -i -u "<DAV_USERNAME>:<DAV_PASSWORD>" \
 1. Créer 2 bibliothèques Plex de test (« Films (DAV test) », « Séries (DAV test) ») pointant sur
    `/mnt/plexhub-dav/Films` et `/mnt/plexhub-dav/Series`.
 2. Appliquer les réglages § 5 sur ces deux bibliothèques AVANT le premier scan.
-3. Lancer un scan complet — surveiller les logs backend (`docker compose logs -f backend | grep dav`) : pas de
-   rafale de `503`, le nombre de connexions upstream simultanées par compte ne dépasse jamais
-   `DAV_UPSTREAM_PER_ACCOUNT`/`max_connections`.
-4. Lire un film et un épisode jusqu'au bout d'un seek (avance rapide) — vérifier l'absence de coupure/buffering
+3. **Préchauffer le cache (§ 5.1)** — `bash scripts/prewarm-dav-cache.sh`, **Plex encore inactif** (aucun scan en
+   cours). C'est l'étape qui casse le blocage `database is locked` (§ 0.1) : ne JAMAIS la sauter.
+4. Lancer un scan complet — surveiller les logs backend (`docker compose logs -f backend | grep -iE 'dav|503'`) : pas
+   de rafale de `503`, le nombre de connexions upstream simultanées par compte ne dépasse jamais
+   `DAV_UPSTREAM_PER_ACCOUNT`/`max_connections`. Côté Plex, surveiller l'absence de `database is locked` /
+   `Held transaction for too long` dans les logs du serveur Plex (`Plex Media Server.log`).
+5. Lire un film et un épisode jusqu'au bout d'un seek (avance rapide) — vérifier l'absence de coupure/buffering
    anormal.
 
 ## 8. Risques actés
@@ -261,3 +343,32 @@ curl -i -u "<DAV_USERNAME>:<DAV_PASSWORD>" \
 - **`uvicorn --workers N > 1`** : les sémaphores de `app/dav/throttle.py` sont **process-local** — passer à
   plusieurs workers multiplierait le cap effectif par N. Le Dockerfile de ce repo lance un seul process ; ne PAS
   passer `--workers` sans revoir ce point.
+
+## 9. Piste pérenne — cache header+tail dans le relais backend (NON implémentée)
+
+Le préchauffage rclone (§ 5.1) est la solution **Phase 0** : elle valide l'hypothèse et débloque l'intégration Plex avec
+~0 code, mais elle dépend d'une orchestration ops (préchauffer → puis scanner) et du réglage fin de rclone
+(`--vfs-cache-max-age`/`--vfs-cache-max-size`). La solution **pérenne, scalable et déterministe** est un **cache
+header+tail intégré au relais** (`app/dav/relay.py`), indépendant de rclone :
+
+- **Principe** : au build de l'arbre (ou en tâche de fond préchauffée), le relais télécharge et **met en cache sur disque
+  local les N premiers Mo + les N derniers Mo** de chaque fichier exposé. Ensuite, toute requête `Range` de Plex tombant
+  **entièrement dans une zone cachée** est servie **depuis le disque local** (latence quasi nulle, **zéro** connexion
+  amont consommée). La lecture séquentielle réelle (playback) continue d'aller **en direct** vers l'amont (non cachée).
+- **Bénéfices vs Phase 0** : plus de dépendance à rclone pour la persistance ; contrôle exact des fenêtres (détection
+  `moov` MP4 possible → tail juste), invalidation propre sur dérive `Media.file_size`, cache LRU **borné** géré par le
+  backend, et surtout : le préchauffage devient une étape **intégrée** au pipeline (pas un script ops séparé à ne pas
+  oublier avant chaque scan).
+- **Points de conception** (pour un futur `/feature`) :
+  - fenêtres header (~8-16 Mo) / tail (~32 Mo, ou **détection `moov`** pour un tail au plus juste) ;
+  - stockage sur un volume dédié + **LRU borné en taille** (au-delà, éviction) ;
+  - remplissage **prewarm au build de l'arbre** (le lazy-sur-premier-accès NE suffit PAS : la 1re lecture EST la lecture
+    lente qui tient la transaction Plex — cf. § 0.1) ;
+  - respect du throttle par compte (`app/dav/throttle.py`) pendant le prewarm ;
+  - servir les `Range` intra-zone depuis le cache, déléguer le reste à `open_upstream` (chemin actuel).
+- **Complément possible** (moins fiable) : exposer les métadonnées média déjà connues (durée/codec) en sidecar pour que
+  Plex saute l'analyse — mais Plex sonde le fichier quoi qu'il arrive, donc le cache header+tail reste la piste
+  principale.
+
+À déclencher **après** confirmation device que le préchauffage rclone (§ 5.1) supprime bien le blocage `database is
+locked` — inutile d'investir dans ce cache backend tant que l'hypothèse header+tail n'est pas prouvée sur ta box.

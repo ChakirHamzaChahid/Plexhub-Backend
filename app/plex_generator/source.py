@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from abc import ABC, abstractmethod
 
@@ -95,6 +96,48 @@ class DatabaseSource(MediaSource):
             for row, label in labelled
         ]
 
+    def _build_movies(
+        self, rows: list[Media], accounts: dict[str, XtreamAccount],
+    ) -> list[PlexMovie]:
+        """Pure post-load step: group `rows` into deduped `PlexMovie` entries.
+
+        No DB/session access — `rows` and `accounts` are already fully
+        materialized ORM objects (plain columns, `expire_on_commit=False`) —
+        so this is safe and intended to run via `asyncio.to_thread` (AUDIT-P3-003,
+        §9 piège 11): `aggregate_movies` alone measured 239ms of pure CPU on
+        the real catalog, and the per-group `_build_versions` labelling loop
+        below adds materially more on top of that, so both are offloaded
+        together rather than just the aggregation call.
+        """
+        movies: list[PlexMovie] = []
+        for grp in aggregate_movies(rows):
+            triples = self._build_versions(grp.members, accounts)
+            if not triples:
+                continue
+            best = grp.best
+            clean_title, clean_year = canonical_title_year(best)
+            movies.append(PlexMovie(
+                source_id=grp.key,
+                title=clean_title,
+                is_adult=bool(best.is_adult),
+                year=clean_year,
+                versions=[PlexMovieVersion(
+                    source_id=row.rating_key, server_id=row.server_id,
+                    label=label, stream_url=url, file_size=row.file_size,
+                ) for row, url, label in triples],
+                poster_url=best.resolved_thumb_url or best.thumb_url,
+                fanart_url=best.resolved_art_url or best.art_url,
+                genres=best.genres,
+                summary=best.summary,
+                imdb_id=best.imdb_id,
+                tmdb_id=_tmdb_int(best.tmdb_id),
+                content_rating=best.content_rating,
+                rating=best.display_rating if best.display_rating else best.scraped_rating,
+                duration_ms=best.duration,
+                cast=best.cast,
+            ))
+        return movies
+
     async def get_movies(self) -> list[PlexMovie]:
         async with async_session_factory() as db:
             accounts = await self._load_accounts(db)
@@ -128,40 +171,78 @@ class DatabaseSource(MediaSource):
             result = await db.stream(query.execution_options(yield_per=1000))
             rows = [row async for row in result.scalars()]
 
-            movies: list[PlexMovie] = []
-            for grp in aggregate_movies(rows):
-                triples = self._build_versions(grp.members, accounts)
+        # AUDIT-P3-003: aggregation + per-group version labelling is CPU-bound
+        # pure Python over the whole catalog (measured 239ms+ on 12k rows) —
+        # offloaded off the event loop, outside the session block (`rows`/
+        # `accounts` are fully materialized, nothing here can trigger a lazy
+        # load or touch the now-closed AsyncSession, which is not thread-safe).
+        movies = await asyncio.to_thread(self._build_movies, rows, accounts)
+
+        logger.info(
+            f"Loaded {len(movies)} movie groups from "
+            f"{sum(len(v.versions) for v in movies)} sources "
+            f"across {len(accounts)} account(s)"
+        )
+        return movies
+
+    def _build_series(
+        self,
+        shows: list[Media],
+        episodes: list[Media],
+        accounts: dict[str, XtreamAccount],
+    ) -> list[PlexSeries]:
+        """Pure post-load step: group `shows`/`episodes` into deduped
+        `PlexSeries` entries (mirrors `_build_movies` — see its docstring for
+        why this is safe/intended to run via `asyncio.to_thread`, AUDIT-P3-003).
+        `aggregate_series` alone measured 504ms of pure CPU on the real
+        catalog (2 873 shows + 77 781 episodes); the per-slot
+        `_build_versions` labelling loop below adds materially more, hence
+        offloading both together.
+        """
+        series_list: list[PlexSeries] = []
+        for grp in aggregate_series(shows, episodes):
+            best = grp.best
+            clean_title, clean_year = canonical_title_year(best)
+            plex_episodes: list[PlexEpisode] = []
+            for slot in grp.slots:
+                triples = self._build_versions(slot.members, accounts)
                 if not triples:
                     continue
-                best = grp.best
-                clean_title, clean_year = canonical_title_year(best)
-                movies.append(PlexMovie(
-                    source_id=grp.key,
-                    title=clean_title,
-                    is_adult=bool(best.is_adult),
-                    year=clean_year,
-                    versions=[PlexMovieVersion(
+                best_ep = slot.best
+                plex_episodes.append(PlexEpisode(
+                    source_id=f"{grp.key}|S{slot.season:02d}E{slot.episode:02d}",
+                    series_title=clean_title,
+                    season_num=slot.season,
+                    episode_num=slot.episode,
+                    title=best_ep.title,
+                    versions=[PlexEpisodeVersion(
                         source_id=row.rating_key, server_id=row.server_id,
                         label=label, stream_url=url, file_size=row.file_size,
                     ) for row, url, label in triples],
-                    poster_url=best.resolved_thumb_url or best.thumb_url,
-                    fanart_url=best.resolved_art_url or best.art_url,
-                    genres=best.genres,
-                    summary=best.summary,
-                    imdb_id=best.imdb_id,
-                    tmdb_id=_tmdb_int(best.tmdb_id),
-                    content_rating=best.content_rating,
-                    rating=best.display_rating if best.display_rating else best.scraped_rating,
-                    duration_ms=best.duration,
-                    cast=best.cast,
+                    summary=best_ep.summary,
+                    duration_ms=best_ep.duration,
+                    thumb_url=best_ep.resolved_thumb_url or best_ep.thumb_url,
                 ))
 
-            logger.info(
-                f"Loaded {len(movies)} movie groups from "
-                f"{sum(len(v.versions) for v in movies)} sources "
-                f"across {len(accounts)} account(s)"
-            )
-            return movies
+            if not plex_episodes:
+                continue
+
+            series_list.append(PlexSeries(
+                source_id=grp.key,
+                title=clean_title,
+                year=clean_year,
+                poster_url=best.resolved_thumb_url or best.thumb_url,
+                fanart_url=best.resolved_art_url or best.art_url,
+                genres=best.genres,
+                summary=best.summary,
+                imdb_id=best.imdb_id,
+                tmdb_id=_tmdb_int(best.tmdb_id),
+                content_rating=best.content_rating,
+                rating=best.display_rating if best.display_rating else best.scraped_rating,
+                cast=best.cast,
+                episodes=plex_episodes,
+            ))
+        return series_list
 
     async def get_series(self) -> list[PlexSeries]:
         async with async_session_factory() as db:
@@ -198,53 +279,15 @@ class DatabaseSource(MediaSource):
             ep_stream = await db.stream(ep_query.execution_options(yield_per=1000))
             episodes = [e async for e in ep_stream.scalars()]
 
-            series_list: list[PlexSeries] = []
-            for grp in aggregate_series(shows, episodes):
-                best = grp.best
-                clean_title, clean_year = canonical_title_year(best)
-                plex_episodes: list[PlexEpisode] = []
-                for slot in grp.slots:
-                    triples = self._build_versions(slot.members, accounts)
-                    if not triples:
-                        continue
-                    best_ep = slot.best
-                    plex_episodes.append(PlexEpisode(
-                        source_id=f"{grp.key}|S{slot.season:02d}E{slot.episode:02d}",
-                        series_title=clean_title,
-                        season_num=slot.season,
-                        episode_num=slot.episode,
-                        title=best_ep.title,
-                        versions=[PlexEpisodeVersion(
-                            source_id=row.rating_key, server_id=row.server_id,
-                            label=label, stream_url=url, file_size=row.file_size,
-                        ) for row, url, label in triples],
-                        summary=best_ep.summary,
-                        duration_ms=best_ep.duration,
-                        thumb_url=best_ep.resolved_thumb_url or best_ep.thumb_url,
-                    ))
+        # AUDIT-P3-003: see get_movies — offloaded outside the session block,
+        # `shows`/`episodes`/`accounts` are fully materialized already.
+        series_list = await asyncio.to_thread(
+            self._build_series, shows, episodes, accounts,
+        )
 
-                if not plex_episodes:
-                    continue
-
-                series_list.append(PlexSeries(
-                    source_id=grp.key,
-                    title=clean_title,
-                    year=clean_year,
-                    poster_url=best.resolved_thumb_url or best.thumb_url,
-                    fanart_url=best.resolved_art_url or best.art_url,
-                    genres=best.genres,
-                    summary=best.summary,
-                    imdb_id=best.imdb_id,
-                    tmdb_id=_tmdb_int(best.tmdb_id),
-                    content_rating=best.content_rating,
-                    rating=best.display_rating if best.display_rating else best.scraped_rating,
-                    cast=best.cast,
-                    episodes=plex_episodes,
-                ))
-
-            logger.info(
-                f"Loaded {len(series_list)} series groups "
-                f"({sum(len(s.episodes) for s in series_list)} episode slots) "
-                f"across {len(accounts)} account(s)"
-            )
-            return series_list
+        logger.info(
+            f"Loaded {len(series_list)} series groups "
+            f"({sum(len(s.episodes) for s in series_list)} episode slots) "
+            f"across {len(accounts)} account(s)"
+        )
+        return series_list

@@ -8,6 +8,9 @@ See `docs/plans/2026-07-26-refacto-audit-v1-plan.md` §VAGUE 1 S1.4 and
 from __future__ import annotations
 
 import itertools
+import pathlib
+import subprocess
+import sys
 
 from prometheus_client import REGISTRY, generate_latest
 
@@ -65,13 +68,40 @@ class TestPreExistingMetricsZeroInit:
 
 class TestOpenCardinalityMetricsStayUnlabelled:
     """`account_id` is open cardinality: these must NOT be zero-initialised
-    (that would be an unbounded blow-up, not a fix) — see piège §9-10."""
+    (that would be an unbounded blow-up, not a fix) — see piège §9-10.
 
-    def test_sync_duration_seconds_has_no_series_before_first_sync(self):
-        _assert_no_series(_scrape(), "plexhub_sync_duration_seconds_bucket")
+    These assertions are about the state of the registry **at process boot**,
+    i.e. purely as a consequence of importing `app.utils.metrics`. They cannot
+    be checked against the ambient global REGISTRY of a full-suite run: any
+    earlier test that legitimately exercises a health-check or a sync emits
+    `.labels(account_id=...)` and creates a series, which made this assertion
+    pass alone and fail in-suite (order-dependent, not a real regression).
+    So we scrape a FRESH interpreter — that is exactly the property claimed.
+    """
 
-    def test_streams_alive_ratio_has_no_series_before_first_health_check(self):
-        _assert_no_series(_scrape(), "plexhub_streams_alive_ratio")
+    @staticmethod
+    def _boot_scrape() -> str:
+        """Import the metrics module in a clean process and return its scrape."""
+        code = (
+            "import app.utils.metrics\n"
+            "from prometheus_client import REGISTRY, generate_latest\n"
+            "import sys; sys.stdout.write(generate_latest(REGISTRY).decode('utf-8'))\n"
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=str(pathlib.Path(__file__).resolve().parent.parent),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert proc.returncode == 0, f"boot scrape failed: {proc.stderr}"
+        return proc.stdout
+
+    def test_sync_duration_seconds_has_no_series_at_boot(self):
+        _assert_no_series(self._boot_scrape(), "plexhub_sync_duration_seconds_bucket")
+
+    def test_streams_alive_ratio_has_no_series_at_boot(self):
+        _assert_no_series(self._boot_scrape(), "plexhub_streams_alive_ratio")
 
 
 class TestNewlyDeclaredMetricsSurface:

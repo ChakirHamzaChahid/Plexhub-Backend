@@ -23,12 +23,9 @@ from app.utils.unification import (
 )
 from app.utils.time import now_ms
 from app.utils.db_retry import commit_with_retry
+from app.services import job_registry
 
 logger = logging.getLogger("plexhub.sync")
-
-# In-memory sync job tracking (capped to prevent unbounded growth)
-_MAX_SYNC_JOBS = 100
-_sync_jobs: dict[str, dict] = {}
 
 # Per-account locks to prevent concurrent syncs on the same account
 _account_locks: dict[str, asyncio.Lock] = {}
@@ -42,13 +39,11 @@ def _get_account_lock(account_id: str) -> asyncio.Lock:
 
 
 def _record_sync_job(job_id: str, data: dict) -> None:
-    """Record a sync job, evicting oldest entries if over the cap."""
-    _sync_jobs[job_id] = data
-    if len(_sync_jobs) > _MAX_SYNC_JOBS:
-        # Remove oldest entries (dict preserves insertion order in Python 3.7+)
-        excess = len(_sync_jobs) - _MAX_SYNC_JOBS
-        for key in list(_sync_jobs)[:excess]:
-            del _sync_jobs[key]
+    """Deprecated shim over ``job_registry.set_job`` (ADR 0004 Décision 2 --
+    the tracker was extracted so all 5 ``/api/sync`` triggers, not just
+    ``sync_account``, can register/update a job under the router-issued
+    ``jobId``). Kept for backward compatibility."""
+    job_registry.set_job(job_id, data)
 
 
 def _safe_duration(value) -> int | None:
@@ -1087,18 +1082,41 @@ async def _refresh_categories(db, account, account_id: str):
                 f"({len(live_cats)} Live, {len(vod_cats)} VOD, {len(series_cats)} Series)")
 
 
-async def sync_account(account_id: str):
-    """Full sync for a single Xtream account."""
+async def sync_account(account_id: str, job_id: str | None = None):
+    """Full sync for a single Xtream account.
+
+    ``job_id``: when provided (the HTTP trigger in ``app/api/sync.py``
+    already registered this id in ``job_registry`` synchronously, before
+    scheduling this coroutine as a background task), this call only
+    *updates* that entry -- it never re-creates it, so the router's
+    ``started_at`` timestamp survives. When ``None`` (called directly by
+    ``run_all_accounts``/the scheduler/``accounts.py``, outside of any HTTP
+    trigger), a job id is self-assigned and registered here, exactly like
+    before this module's job-tracking was extracted to ``job_registry``.
+    """
     from app.utils.metrics import sync_duration_seconds
     import time as _time
 
     lock = _get_account_lock(account_id)
     if lock.locked():
         logger.warning(f"Sync already running for account {account_id}, skipping")
+        if job_id:
+            # The router already registered this id -- resolve it instead
+            # of leaving it stuck on "processing" forever.
+            job_registry.update_job(
+                job_id,
+                status="failed",
+                progress={"error": f"Sync already running for account {account_id}"},
+                error=f"Sync already running for account {account_id}",
+            )
+            return job_id
         return f"sync_{account_id}_skipped"
 
-    job_id = f"sync_{account_id}_{now_ms()}"
-    _record_sync_job(job_id, {"status": "processing", "progress": {}})
+    self_registered = job_id is None
+    if job_id is None:
+        job_id = f"sync_{account_id}_{now_ms()}"
+    if self_registered:
+        job_registry.create_job(job_id, phase="sync")
 
     sync_started = _time.monotonic()
     sync_result = "error"
@@ -1115,7 +1133,7 @@ async def sync_account(account_id: str):
                 account = result.scalars().first()
                 if not account:
                     logger.warning(f"Account {account_id} not found or inactive")
-                    _record_sync_job(job_id, {"status": "failed", "progress": {}})
+                    job_registry.update_job(job_id, status="failed", progress={})
                     return job_id
 
                 # Detached snapshot used by parallel coroutines (asyncio.gather
@@ -1570,10 +1588,11 @@ async def sync_account(account_id: str):
 
                 await commit_with_retry(db)
 
-                _record_sync_job(job_id, {
-                    "status": "completed",
-                    "progress": {"total": total_synced, "synced": total_synced},
-                })
+                job_registry.update_job(
+                    job_id,
+                    status="completed",
+                    progress={"total": total_synced, "synced": total_synced},
+                )
                 logger.info(
                     f"Sync complete for account {account_id}: {total_synced} items"
                 )
@@ -1581,7 +1600,9 @@ async def sync_account(account_id: str):
 
         except Exception as e:
             logger.error(f"Sync failed for account {account_id}: {e}", exc_info=True)
-            _record_sync_job(job_id, {"status": "failed", "progress": {"error": str(e)}})
+            job_registry.update_job(
+                job_id, status="failed", progress={"error": str(e)}, error=str(e),
+            )
             sync_result = "error"
         finally:
             sync_duration_seconds.labels(
@@ -1607,12 +1628,12 @@ async def run_all_accounts():
 
 
 def get_sync_job(job_id: str) -> dict | None:
-    return _sync_jobs.get(job_id)
+    """Deprecated shim over ``job_registry.get_job`` -- kept for backward
+    compatibility (see ``_record_sync_job``)."""
+    return job_registry.get_job(job_id)
 
 
 def get_all_sync_jobs() -> list[dict]:
-    """Return all tracked sync jobs (most recent first)."""
-    return [
-        {"job_id": k, **v}
-        for k, v in reversed(list(_sync_jobs.items()))
-    ]
+    """Deprecated shim over ``job_registry.get_all_jobs`` -- kept for
+    backward compatibility (see ``_record_sync_job``)."""
+    return job_registry.get_all_jobs()

@@ -326,10 +326,25 @@ class SyncRequest(BaseModel):
 
 
 class SyncStatusResponse(BaseModel):
+    """``GET /api/sync/status/{job_id}``.
+
+    ADR 0004 Décision 2 (AUDIT-P5-001/P5-008/P6-005): ``status`` keeps its
+    existing vocabulary (``processing``/``completed``/``failed``) to avoid
+    breaking serialization. ``phase``/``startedAt``/``finishedAt``/``error``
+    are ADDITIVE — populated by the job registry (``app/services/
+    job_registry.py``), ``None`` for job kinds that don't use them (e.g. a
+    plain per-account sync has no multi-phase concept). An unknown
+    ``job_id`` no longer returns 200 ``{"status": "unknown"}`` — the router
+    raises 404 instead (this schema is never built for that case).
+    """
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
-    status: str  # "pending", "processing", "completed", "failed"
+    status: str  # "processing", "completed", "failed"
     progress: Optional[dict] = None
+    phase: Optional[str] = None
+    started_at: Optional[int] = None
+    finished_at: Optional[int] = None
+    error: Optional[str] = None
 
 
 class JobIdResponse(BaseModel):
@@ -355,8 +370,8 @@ class MessageResponse(BaseModel):
 
 
 class SyncJobResponse(BaseModel):
-    """One tracked sync job entry from the in-memory job tracker
-    (``sync_worker.get_all_sync_jobs``).
+    """One tracked job entry from the shared in-memory job registry
+    (``app.services.job_registry.get_all_jobs``).
 
     ``progress`` intentionally stays an opaque dict: its shape genuinely
     varies by job state (``{}`` while processing, ``{"total":.., "synced":..}``

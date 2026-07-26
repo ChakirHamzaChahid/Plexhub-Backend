@@ -233,6 +233,11 @@ class Settings:
     # explicitly opts out (mirrors DOWNLOAD_DIR's convention).
     TRAILER_CACHE_DIR: str = ""  # resolved in __init__ (depends on DATA_DIR)
     TRAILER_CACHE_MAX_MB: int = _safe_int("TRAILER_CACHE_MAX_MB", 2048)
+    # Préflight disk-space guard before starting a yt-dlp download (code
+    # review BM-3, motif `DOWNLOAD_MIN_FREE_DISK_MB`). <=0 disables. Lower
+    # default than the physical-download feature's 2048 MB: a single
+    # trailer is a few tens of MB at most, not a whole movie.
+    TRAILER_MIN_FREE_DISK_MB: int = _safe_int("TRAILER_MIN_FREE_DISK_MB", 512)
 
     # WebDAV virtual filesystem for Plex (see docs/30-ops-plex-webdav.md).
     # Plex ignores .strm files at scan time, so a read-only WebDAV tree is

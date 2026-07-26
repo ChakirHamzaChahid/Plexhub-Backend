@@ -51,6 +51,29 @@ class TestVodTrailerCapture:
         row = map_vod_to_media(_vod_dto(), "acc1", 0, vod_info)
         assert row["youtube_trailer"] is None
 
+    def test_watch_url_normalized_to_bare_id(self):
+        """BB-1 (code review): panels indifferently emit a bare id or a
+        full URL — a full `watch?v=` URL must be normalized at capture
+        time, not stored raw (a raw URL would silently fail
+        `trailer_service`'s strict 11-char lookup, making the sync capture
+        inert for providers that emit URLs)."""
+        vod_info = {
+            "info": {"youtube_trailer": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
+            "movie_data": {},
+        }
+        row = map_vod_to_media(_vod_dto(), "acc1", 0, vod_info)
+        assert row["youtube_trailer"] == "dQw4w9WgXcQ"
+
+    def test_youtu_be_short_link_normalized_to_bare_id(self):
+        vod_info = {"info": {"youtube_trailer": "https://youtu.be/dQw4w9WgXcQ"}, "movie_data": {}}
+        row = map_vod_to_media(_vod_dto(), "acc1", 0, vod_info)
+        assert row["youtube_trailer"] == "dQw4w9WgXcQ"
+
+    def test_unrecognisable_trailer_value_stored_as_none(self):
+        vod_info = {"info": {"youtube_trailer": "not-a-youtube-value"}, "movie_data": {}}
+        row = map_vod_to_media(_vod_dto(), "acc1", 0, vod_info)
+        assert row["youtube_trailer"] is None
+
     def test_youtube_trailer_survives_alongside_other_info_fields(self):
         """Non-regression: adding the trailer extraction must not disturb
         the other `info`-derived fields already covered elsewhere."""
@@ -132,6 +155,44 @@ class TestSeriesTrailerCapture:
         async def _get_series_info(*a, **kw):
             return {
                 "info": {"youtube_trailer": "dQw4w9WgXcQ"},
+                "episodes": {"1": [_ep_dto(1, 1)]},
+            }
+
+        monkeypatch.setattr(xtream_service, "get_series", _get_series)
+        monkeypatch.setattr(xtream_service, "get_series_info", _get_series_info)
+
+        await sync_worker_module.sync_account(account_id)
+
+        assert await _series_trailer(factory) == "dQw4w9WgXcQ"
+
+    async def test_youtube_trailer_url_normalized_to_bare_id(self, db_engine, monkeypatch):
+        """BB-1 (code review): same URL-vs-bare-id normalization as the VOD
+        path — a series-level trailer key can arrive URL-shaped too."""
+        from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+        factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
+        monkeypatch.setattr(sync_worker_module, "async_session_factory", factory)
+
+        async def _empty(*a, **kw):
+            return []
+
+        monkeypatch.setattr(xtream_service, "get_vod_categories", _empty)
+        monkeypatch.setattr(xtream_service, "get_series_categories", _empty)
+        monkeypatch.setattr(xtream_service, "get_live_categories", _empty)
+        monkeypatch.setattr(xtream_service, "get_vod_streams", _empty)
+        monkeypatch.setattr(xtream_service, "get_live_streams", _empty)
+
+        account_id = "trailer_series_url_acc"
+        async with factory() as s:
+            s.add(_account(account_id))
+            await s.commit()
+
+        async def _get_series(*a, **kw):
+            return [dict(_SERIES_DTO)]
+
+        async def _get_series_info(*a, **kw):
+            return {
+                "info": {"youtube_trailer": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
                 "episodes": {"1": [_ep_dto(1, 1)]},
             }
 

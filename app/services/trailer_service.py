@@ -37,10 +37,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
 import shutil
+import time
 import uuid
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
@@ -54,16 +55,9 @@ from app.services.tmdb_service import tmdb_service
 from app.utils.db_retry import write_with_retry
 from app.utils.tasks import create_background_task
 from app.utils.ttl_cache import TTLCache
+from app.utils.youtube import YOUTUBE_ID_RE, extract_youtube_id
 
 logger = logging.getLogger("plexhub.trailer")
-
-# Bare YouTube video id shape (11 base64url-ish chars: A-Z a-z 0-9 - _) —
-# ALSO the exact `cache_key` shape accepted by
-# `GET /api/media/trailer/file/{cache_key}`: no separator or traversal
-# character (`.`, `/`) can ever match this pattern, so a validated id is
-# structurally incapable of escaping `TRAILER_CACHE_DIR` even before
-# `resolve_confined_cache_path`'s explicit realpath check runs.
-_YOUTUBE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 
 # Live TMDB `/videos` repli result cache (rating_key mode, no stored
 # `youtube_trailer` yet) — keyed (tmdb_id, media_kind). Caches BOTH positive
@@ -78,6 +72,20 @@ _tmdb_repli_cache: TTLCache[tuple[int, str], "str | None"] = TTLCache(
 )
 _MISSING = object()
 
+# Recently-failed downloads (video removed/age-restricted/geo-blocked/
+# transient network error) — BM-2, code review. Without this, every popup
+# focus on a permanently-broken id re-launches a full yt-dlp attempt
+# (up to ~90s of thread time each). A short TTL negative cache absorbs the
+# hammering while still eventually retrying (a geo-block or a transient
+# provider hiccup can resolve itself) — `resolve` reports "pending", never
+# "none", while an entry is live: the failure may be transient, so the
+# caller must keep polling, not treat it as a hard miss.
+_DOWNLOAD_FAILURE_TTL_SECONDS = 45 * 60
+_DOWNLOAD_FAILURE_CACHE_SIZE = 500
+_download_failures: TTLCache[str, bool] = TTLCache(
+    max_size=_DOWNLOAD_FAILURE_CACHE_SIZE, ttl_seconds=_DOWNLOAD_FAILURE_TTL_SECONDS,
+)
+
 # Per-process in-flight download dedup — several concurrent `resolve` calls
 # for the same trailer (e.g. the same Home card re-focused before its first
 # download finishes) must trigger exactly ONE yt-dlp download, not one per
@@ -86,6 +94,22 @@ _MISSING = object()
 # never corrupting, since the final `os.replace` promotion is atomic either
 # way).
 _in_flight: set[str] = set()
+
+# Global concurrency cap (BM-1, code review) — `_in_flight` alone only
+# dedupes by id; without a ceiling, scrolling the Home rail can trigger one
+# yt-dlp *process* per distinct card focused (each a real subprocess doing
+# network I/O + ffmpeg muxing). Once the cap is reached, a resolve for a
+# NEW id still answers "pending" (never "none" — nothing failed, it's just
+# queued) but does not start a download; it will be picked up on a later
+# focus once a slot frees up.
+_MAX_CONCURRENT_DOWNLOADS = 2
+
+# Orphaned `.ytdlp-*` work directories older than this are removed by the
+# nightly purge (crash/kill -9 mid-download leaves one behind — `_run()`'s
+# `finally: shutil.rmtree` only fires on a normal return/exception, not a
+# process kill). Generous window: a real download should finish in well
+# under an hour even on a slow connection.
+_ORPHAN_WORKDIR_MAX_AGE_SECONDS = 6 * 3600
 
 
 class TrailerDisabledError(Exception):
@@ -106,7 +130,7 @@ def is_valid_youtube_id(value: object) -> bool:
     """True iff `value` is a bare YouTube video id (11 chars,
     `[A-Za-z0-9_-]`) — also the exact `cache_key` shape the file endpoint
     accepts."""
-    return isinstance(value, str) and bool(_YOUTUBE_ID_RE.match(value))
+    return isinstance(value, str) and bool(YOUTUBE_ID_RE.match(value))
 
 
 def file_url_for(youtube_id: str) -> str:
@@ -129,13 +153,18 @@ def resolve_confined_cache_path(youtube_id: str) -> Path:
     base = Path(settings.TRAILER_CACHE_DIR).resolve(strict=False)
     resolved = Path(os.path.realpath(base / f"{youtube_id}.mp4"))
     # Mirrors `download_service.resolve_confined`'s invariant exactly: safe
-    # iff `resolved` sits STRICTLY under `base` (the `resolved == base` arm
-    # only matters for an empty-suffix request there; kept for parity). The
-    # comparison MUST be against `base`, never against the pre-realpath
-    # candidate — on Windows, `base / "/etc/passwd.mp4"` is ALREADY collapsed
-    # to a drive-relative path (e.g. "C:\\etc\\passwd.mp4") at construction
-    # time, before `os.path.realpath` even runs, so a candidate-vs-resolved
-    # comparison would silently never fire for that escape shape.
+    # iff `resolved` sits STRICTLY under `base`. The comparison MUST be
+    # against `base`, never against the pre-realpath candidate — on Windows,
+    # `base / "/etc/passwd.mp4"` is ALREADY collapsed to a drive-relative
+    # path (e.g. "C:\\etc\\passwd.mp4") at construction time, before
+    # `os.path.realpath` even runs, so a candidate-vs-resolved comparison
+    # would silently never fire for that escape shape (this exact bug was
+    # caught and fixed here during code review).
+    # `resolved == base` (the left arm below) is structurally unreachable on
+    # this call path: we always append a non-empty `f"{youtube_id}.mp4"`
+    # suffix, so `resolved` can never literally equal `base` itself — kept
+    # only for byte-for-byte parity with `download_service.resolve_confined`
+    # (whose `rel_path` CAN legitimately be empty for a directory request).
     if resolved != base and base not in resolved.parents:
         raise TrailerPathConfinementError(
             f"cache_key escapes TRAILER_CACHE_DIR: {youtube_id!r}"
@@ -148,10 +177,15 @@ def resolve_confined_cache_path(youtube_id: str) -> Path:
 
 async def resolve_by_youtube_id(youtube_id: str | None) -> TrailerResolution:
     """Generic mode — caller already knows the YouTube key (Jellyfin
-    `RemoteTrailers`, xtream-direct `getVodInfo`). No DB, no TMDB repli."""
-    if not is_valid_youtube_id(youtube_id):
+    `RemoteTrailers`, xtream-direct `getVodInfo`). No DB, no TMDB repli.
+
+    `youtube_id` is normalized via `extract_youtube_id` (BB-1, code review)
+    — defensive: an Android caller mirroring this same provider data could
+    just as easily be holding a raw URL instead of a bare id."""
+    normalized = extract_youtube_id(youtube_id)
+    if normalized is None:
         return TrailerResolution(status="none")
-    return await _resolve_cached_or_kickoff(youtube_id)  # type: ignore[arg-type]
+    return await _resolve_cached_or_kickoff(normalized)
 
 
 async def resolve_by_rating_key(
@@ -163,8 +197,15 @@ async def resolve_by_rating_key(
     if media is None:
         return TrailerResolution(status="none")
 
-    if is_valid_youtube_id(media.youtube_trailer):
-        return await _resolve_cached_or_kickoff(media.youtube_trailer)  # type: ignore[arg-type]
+    # BB-1 (code review): the STORED column may itself be URL-shaped —
+    # `sync_worker` normalizes at capture time going forward, but a row
+    # synced before that fix (or an upstream provider quirk not covered by
+    # `extract_youtube_id`'s patterns) could still hold something other than
+    # a bare id. Normalize defensively here too, rather than trusting the
+    # column's shape.
+    stored = extract_youtube_id(media.youtube_trailer)
+    if stored is not None:
+        return await _resolve_cached_or_kickoff(stored)
 
     tmdb_id = _as_int(media.tmdb_id)
     if tmdb_id is None or not tmdb_service.is_configured:
@@ -181,7 +222,8 @@ async def resolve_by_rating_key(
     else:
         resolved_id = cached
 
-    if not is_valid_youtube_id(resolved_id):
+    resolved_id = extract_youtube_id(resolved_id)
+    if resolved_id is None:
         return TrailerResolution(status="none")
     return await _resolve_cached_or_kickoff(resolved_id)
 
@@ -199,6 +241,15 @@ async def _write_back_youtube_trailer(
     worker's own rich-metadata write uses. Best-effort: a failure here never
     fails the resolve (the id resolved this call is still served/cached, it
     just won't be found by column on the NEXT resolve).
+
+    Unconditional `.values(youtube_trailer=youtube_id)`, NOT a
+    `func.coalesce(...)` fill-missing write like `enrichment_worker`'s rich
+    metadata — the asymmetry is intentional, not an oversight: this function
+    is only ever reached from `resolve_by_rating_key`'s branch where
+    `extract_youtube_id(media.youtube_trailer)` already returned `None`
+    (column empty, or holding something unparseable), so "the column is
+    empty" is enforced by the CALLER, not by a COALESCE in the UPDATE
+    itself — there is nothing to fill-missing against here.
 
     `write_with_retry` opens a FRESH session for this write (never the
     request-scoped `db` the caller read from) — a same-session retry after a
@@ -234,11 +285,24 @@ async def _resolve_cached_or_kickoff(youtube_id: str) -> TrailerResolution:
     if await asyncio.to_thread(_file_ready, path):
         return TrailerResolution(status="ready", url=file_url_for(youtube_id))
 
+    # BM-2 (code review): a recently-failed id is neither re-launched nor
+    # reported "none" — the failure (video removed/age-restricted/geo-
+    # blocked/transient network error) may be transient, so we keep saying
+    # "pending" and simply skip re-kicking a download until the TTL lapses.
+    if _download_failures.get(youtube_id, default=False):
+        return TrailerResolution(status="pending")
+
     if youtube_id not in _in_flight:
-        _in_flight.add(youtube_id)
-        create_background_task(
-            _download_and_release(youtube_id), name=f"trailer_dl_{youtube_id}",
-        )
+        # BM-1 (code review): global concurrency ceiling — `_in_flight`
+        # alone only dedupes by id. Below the cap AND enough free disk
+        # space (BM-3): launch. Otherwise: still "pending" (nothing failed,
+        # just not started yet) — no download is queued for later, the
+        # NEXT resolve call (next focus) re-evaluates from scratch.
+        if len(_in_flight) < _MAX_CONCURRENT_DOWNLOADS and await _has_enough_free_disk_space():
+            _in_flight.add(youtube_id)
+            create_background_task(
+                _download_and_release(youtube_id), name=f"trailer_dl_{youtube_id}",
+            )
     return TrailerResolution(status="pending")
 
 
@@ -249,13 +313,43 @@ def _file_ready(path: Path) -> bool:
         return False
 
 
+async def _has_enough_free_disk_space() -> bool:
+    """BM-3 (code review) préflight — mirrors
+    `download_service.check_free_disk_space`'s shape (blocking
+    `shutil.disk_usage` offloaded via `asyncio.to_thread`, house law §9.11).
+    `TRAILER_MIN_FREE_DISK_MB<=0` opts out (same convention as
+    `DOWNLOAD_MIN_FREE_DISK_MB`)."""
+    threshold_mb = settings.TRAILER_MIN_FREE_DISK_MB
+    if threshold_mb <= 0 or not settings.TRAILER_CACHE_DIR:
+        return True
+
+    def _stat_free_mb() -> float:
+        return shutil.disk_usage(settings.TRAILER_CACHE_DIR).free / (1024 * 1024)
+
+    try:
+        free_mb = await asyncio.to_thread(_stat_free_mb)
+    except OSError as exc:
+        logger.warning("Trailer disk-space check failed, allowing download: %s", exc)
+        return True
+    if free_mb < threshold_mb:
+        logger.warning(
+            "Trailer download skipped — only %.0f MiB free (< %s MiB floor)",
+            free_mb, threshold_mb,
+        )
+        return False
+    return True
+
+
 async def _download_and_release(youtube_id: str) -> None:
     try:
         downloaded = await _download_trailer(youtube_id)
         if downloaded:
             await purge_lru()
+        else:
+            _download_failures.set(youtube_id, True)
     except Exception as exc:
         logger.warning("Trailer download failed for %s: %s", youtube_id, exc)
+        _download_failures.set(youtube_id, True)
     finally:
         _in_flight.discard(youtube_id)
 
@@ -319,10 +413,16 @@ def _run_ytdlp(youtube_id: str, work_dir: Path) -> None:
 class _YtDlpLogger:
     """Routes yt-dlp's own logging through `plexhub.trailer` instead of the
     library's stdout/stderr default (yt-dlp prints warnings/errors even with
-    `quiet=True`)."""
+    `quiet=True`).
+
+    `debug()` is routed to `logger.debug` rather than swallowed (code
+    review) — depending on the yt-dlp version, some ERROR-level diagnostics
+    (e.g. certain extractor failures) are routed through `.debug()` with a
+    leading `"[debug] "`/... prefix instead of `.error()`; dropping it
+    silently would hide the actual reason a download failed."""
 
     def debug(self, message: str) -> None:
-        pass
+        logger.debug("yt-dlp: %s", message)
 
     def info(self, message: str) -> None:
         pass
@@ -334,12 +434,23 @@ class _YtDlpLogger:
         logger.error("yt-dlp: %s", message)
 
 
+@lru_cache(maxsize=1)
+def _ffmpeg_available() -> bool:
+    """Memoized (code review) — `shutil.which` re-scans `PATH` on every
+    call; ffmpeg presence is fixed for the lifetime of the process (it's
+    baked into the Docker image), so re-stat'ing it on every single
+    download is pure waste. `select_format` is a thin wrapper so tests can
+    still flip availability freely by calling `_ffmpeg_available.cache_clear()`
+    between cases (see `tests/test_trailer_service.py`)."""
+    return shutil.which("ffmpeg") is not None
+
+
 def select_format() -> str:
     """Pure/testable: the primary tier needs ffmpeg to mux separate
     video+audio streams — without it (`ffmpeg` missing from the image) yt-dlp
     can only serve a pre-muxed progressive stream, so skip straight to the
     720p/any-mp4 progressive tiers (plan's documented repli)."""
-    if shutil.which("ffmpeg"):
+    if _ffmpeg_available():
         return (
             "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/"
             "best[ext=mp4][height<=720]/best[ext=mp4]"
@@ -352,10 +463,13 @@ def select_format() -> str:
 
 async def purge_lru() -> int:
     """Evict the least-recently-written cached trailers until the cache is
-    back under `TRAILER_CACHE_MAX_MB`. Returns the number of files removed.
-    No-op if the feature is disabled or the cap is `<=0` (opt-out, mirrors
-    `DOWNLOAD_MIN_FREE_DISK_MB`'s convention). Blocking filesystem walk/stat/
-    unlink — offloaded via `asyncio.to_thread` (house law §9.11)."""
+    back under `TRAILER_CACHE_MAX_MB`, AND remove any orphaned `.ytdlp-*`
+    work directory older than `_ORPHAN_WORKDIR_MAX_AGE_SECONDS` (a crash/
+    kill -9 mid-download leaves one behind — its own `finally: rmtree`
+    never gets a chance to run). Returns the total number of filesystem
+    entries removed (mp4s + orphan dirs combined). No-op if the feature is
+    disabled. Blocking filesystem walk/stat/unlink — offloaded via
+    `asyncio.to_thread` (house law §9.11)."""
     if not settings.TRAILER_CACHE_DIR:
         return 0
     return await asyncio.to_thread(_purge_lru_sync)
@@ -365,6 +479,38 @@ def _purge_lru_sync() -> int:
     base = Path(settings.TRAILER_CACHE_DIR)
     if not base.is_dir():
         return 0
+
+    removed = _purge_orphan_workdirs(base)
+    removed += _purge_lru_mp4s(base)
+    return removed
+
+
+def _purge_orphan_workdirs(base: Path) -> int:
+    """Remove `.ytdlp-*` work directories older than
+    `_ORPHAN_WORKDIR_MAX_AGE_SECONDS` — leftovers from a process kill/crash
+    mid-download (code review, minor). Independent of `TRAILER_CACHE_MAX_MB`
+    (opt-out `<=0` does not apply here — an orphan directory is pure litter,
+    never a legitimately-cached trailer)."""
+    now = time.time()
+    removed = 0
+    for p in base.iterdir():
+        if not p.is_dir() or not p.name.startswith(".ytdlp-"):
+            continue
+        try:
+            age = now - p.stat().st_mtime
+        except OSError:
+            continue
+        if age <= _ORPHAN_WORKDIR_MAX_AGE_SECONDS:
+            continue
+        shutil.rmtree(p, ignore_errors=True)
+        if not p.exists():
+            removed += 1
+    if removed:
+        logger.info("Trailer LRU purge: removed %s orphaned work director(y/ies)", removed)
+    return removed
+
+
+def _purge_lru_mp4s(base: Path) -> int:
     max_bytes = settings.TRAILER_CACHE_MAX_MB * 1024 * 1024
     if max_bytes <= 0:
         return 0

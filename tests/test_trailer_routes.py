@@ -39,9 +39,11 @@ async def _wire_test_db(monkeypatch, db_factory):
 async def _clear_trailer_state():
     trailer_service._in_flight.clear()
     trailer_service._tmdb_repli_cache.clear()
+    trailer_service._download_failures.clear()
     yield
     trailer_service._in_flight.clear()
     trailer_service._tmdb_repli_cache.clear()
+    trailer_service._download_failures.clear()
 
 
 def _stub_background_download(monkeypatch):
@@ -180,6 +182,7 @@ class TestFileEndpoint:
         assert r.content == b"fake-mp4-bytes"
         assert r.headers["content-type"] == "video/mp4"
         assert r.headers["content-encoding"] == "identity"
+        assert r.headers["accept-ranges"] == "bytes"
 
     async def test_range_request_returns_206_partial_content(self, api_client, trailer_dir):
         body = b"0123456789" * 100  # 1000 bytes
@@ -193,6 +196,10 @@ class TestFileEndpoint:
         assert r.content == body[10:20]
         assert r.headers["content-range"] == f"bytes 10-19/{len(body)}"
         assert r.headers["content-encoding"] == "identity"
+        # Locks in Starlette's `FileResponse` Range-support default (code
+        # review) — a client (the Android player) needs this advertised to
+        # know it may issue Range requests in the first place.
+        assert r.headers["accept-ranges"] == "bytes"
 
     async def test_missing_file_is_404(self, api_client, trailer_dir):
         r = await api_client.get(

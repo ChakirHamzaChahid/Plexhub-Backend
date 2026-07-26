@@ -23,6 +23,7 @@ from app.utils.unification import (
 )
 from app.utils.time import now_ms
 from app.utils.db_retry import commit_with_retry, write_with_retry
+from app.utils.youtube import extract_youtube_id
 from app.services import job_registry
 
 # --- AUDIT-P1-001 / ADR 0004 Decision 4 -- call-site migration note (Vague 3,
@@ -178,8 +179,11 @@ def map_vod_to_media(dto: dict, account_id: str, index: int, vod_info: dict | No
     tmdb_id_str = info.get("tmdb_id") or info.get("tmdb")
     tmdb_id_int = int(tmdb_id_str) if tmdb_id_str and str(tmdb_id_str).isdigit() else None
 
-    # YouTube trailer key (Lot A trailers) — bare video id, no URL wrapping.
-    youtube_trailer = info.get("youtube_trailer") or None
+    # YouTube trailer key (Lot A trailers). Panels indifferently emit a bare
+    # id, a full `watch?v=`/`youtu.be`/`embed` URL, etc. — normalize at
+    # capture time (code review BB-1) so `trailer_service`'s strict
+    # 11-char lookup never silently misses a provider that sends URLs.
+    youtube_trailer = extract_youtube_id(info.get("youtube_trailer"))
 
     # Thumb/Art
     thumb_url = info.get("movie_image") or info.get("cover_big") or dto.get("stream_icon")
@@ -1470,7 +1474,13 @@ async def sync_account(account_id: str, job_id: str | None = None):
                     try:
                         # Mapping happens outside semaphore
                         info = series_info.get("info") or {} if isinstance(series_info, dict) else {}
-                        youtube_trailer = info.get("youtube_trailer") or None if isinstance(info, dict) else None
+                        # BB-1 (code review): same URL-vs-bare-id normalization
+                        # as the VOD path above (map_vod_to_media) — a series
+                        # trailer key can arrive URL-shaped just as easily.
+                        youtube_trailer = (
+                            extract_youtube_id(info.get("youtube_trailer"))
+                            if isinstance(info, dict) else None
+                        )
 
                         episodes_data = series_info.get("episodes") or {} if isinstance(series_info, dict) else {}
                         if not isinstance(episodes_data, dict):

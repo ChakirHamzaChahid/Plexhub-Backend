@@ -26,6 +26,16 @@ from app.utils.server_id import build_server_id
 # ─── select_format (pure) ─────────────────────────────────────────────────
 
 
+@pytest.fixture(autouse=True)
+def _clear_ffmpeg_memo():
+    """`_ffmpeg_available` is `functools.lru_cache`'d (code review, minor) —
+    clear it before/after every test in this module so a `shutil.which`
+    monkeypatch in one test can't leak its cached verdict into another."""
+    trailer_service._ffmpeg_available.cache_clear()
+    yield
+    trailer_service._ffmpeg_available.cache_clear()
+
+
 class TestSelectFormat:
     def test_with_ffmpeg_uses_mergeable_primary_tier(self, monkeypatch):
         monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/ffmpeg")
@@ -38,10 +48,20 @@ class TestSelectFormat:
         assert fmt == "best[ext=mp4][height<=720]/best[ext=mp4]"
         assert "bestvideo" not in fmt
 
+    def test_result_is_memoized_until_cache_cleared(self, monkeypatch):
+        monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/ffmpeg")
+        first = trailer_service._ffmpeg_available()
+        # Flip the underlying signal WITHOUT clearing the cache -> stale.
+        monkeypatch.setattr(shutil, "which", lambda name: None)
+        assert trailer_service._ffmpeg_available() == first
+        trailer_service._ffmpeg_available.cache_clear()
+        assert trailer_service._ffmpeg_available() is False
+
     def test_every_tier_requires_mp4(self, monkeypatch):
         """Every fallback tier must stay `ext=mp4` — the outtmpl
         (`trailer.%(ext)s`) assumes the final container is always mp4."""
         for which_result in ("/usr/bin/ffmpeg", None):
+            trailer_service._ffmpeg_available.cache_clear()
             monkeypatch.setattr(shutil, "which", lambda name, r=which_result: r)
             for tier in trailer_service.select_format().split("/"):
                 assert "ext=mp4" in tier or tier == "best[ext=mp4]"
@@ -141,6 +161,124 @@ class TestResolveByYoutubeId:
         assert r2.status == "pending"
         assert kicked_off.count == 1, "a second resolve while a download is in flight must not re-kick"
 
+    async def test_url_input_normalized_before_resolving(self, trailer_dir):
+        """BB-1 (code review): the generic mode must accept the same
+        URL shapes the sync capture normalizes at write time — an Android
+        caller mirroring raw provider data could hold a URL just as easily."""
+        (Path(trailer_dir) / "dQw4w9WgXcQ.mp4").write_bytes(b"bytes")
+        result = await trailer_service.resolve_by_youtube_id(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        )
+        assert result.status == "ready"
+        assert result.url == "/api/media/trailer/file/dQw4w9WgXcQ"
+
+
+class TestGlobalConcurrencyCap:
+    """BM-1, code review — `_in_flight` alone only dedupes by id; a global
+    ceiling caps how many yt-dlp processes can run at once regardless of
+    how many DISTINCT ids are being resolved concurrently."""
+
+    async def test_third_distinct_id_is_not_kicked_off_past_the_cap(
+        self, trailer_dir, monkeypatch,
+    ):
+        kicked_off = _stub_background_download(monkeypatch)
+        assert trailer_service._MAX_CONCURRENT_DOWNLOADS == 2
+
+        r1 = await trailer_service.resolve_by_youtube_id("aaaaaaaaaaa")
+        r2 = await trailer_service.resolve_by_youtube_id("bbbbbbbbbbb")
+        r3 = await trailer_service.resolve_by_youtube_id("ccccccccccc")
+
+        assert r1.status == r2.status == r3.status == "pending"
+        assert kicked_off.count == 2, "a 3rd distinct id must not start a 3rd concurrent download"
+        assert trailer_service._in_flight == {"aaaaaaaaaaa", "bbbbbbbbbbb"}
+
+    async def test_slot_frees_up_for_a_later_resolve(self, trailer_dir, monkeypatch):
+        kicked_off = _stub_background_download(monkeypatch)
+        await trailer_service.resolve_by_youtube_id("aaaaaaaaaaa")
+        await trailer_service.resolve_by_youtube_id("bbbbbbbbbbb")
+        assert kicked_off.count == 2
+
+        # Simulate the first download finishing (releases its slot).
+        trailer_service._in_flight.discard("aaaaaaaaaaa")
+
+        r3 = await trailer_service.resolve_by_youtube_id("ccccccccccc")
+        assert r3.status == "pending"
+        assert kicked_off.count == 3, "a freed slot must allow a new download to start"
+
+
+class TestDownloadFailureNegativeCache:
+    """BM-2, code review — a permanently-broken id (removed/age-restricted/
+    geo-blocked video) must not be re-attempted on every single focus."""
+
+    async def test_failed_download_is_not_relaunched_on_next_resolve(
+        self, trailer_dir, monkeypatch,
+    ):
+        def _fake_run_ytdlp(youtube_id, work_dir):
+            raise RuntimeError("Video unavailable")
+        monkeypatch.setattr(trailer_service, "_run_ytdlp", _fake_run_ytdlp)
+
+        # First resolve: kicks off the (failing) download for real, and
+        # awaits it directly (bypassing create_background_task) so the
+        # failure is recorded before the assertions below.
+        await trailer_service._download_and_release("dQw4w9WgXcQ")
+        assert trailer_service._download_failures.get("dQw4w9WgXcQ", default=False) is True
+
+        kicked_off = _stub_background_download(monkeypatch)
+        result = await trailer_service.resolve_by_youtube_id("dQw4w9WgXcQ")
+
+        assert result.status == "pending"
+        assert kicked_off.count == 0, "a recently-failed id must not be re-kicked immediately"
+
+    async def test_no_output_file_also_counts_as_a_failure(self, trailer_dir, monkeypatch):
+        def _fake_run_ytdlp(youtube_id, work_dir):
+            pass  # produces nothing -> _download_trailer returns False
+
+        monkeypatch.setattr(trailer_service, "_run_ytdlp", _fake_run_ytdlp)
+        await trailer_service._download_and_release("dQw4w9WgXcQ")
+
+        assert trailer_service._download_failures.get("dQw4w9WgXcQ", default=False) is True
+
+    async def test_successful_download_never_marked_as_a_failure(self, trailer_dir, monkeypatch):
+        def _fake_run_ytdlp(youtube_id, work_dir):
+            (work_dir / "trailer.mp4").write_bytes(b"bytes")
+
+        monkeypatch.setattr(trailer_service, "_run_ytdlp", _fake_run_ytdlp)
+        await trailer_service._download_and_release("dQw4w9WgXcQ")
+
+        assert trailer_service._download_failures.get("dQw4w9WgXcQ", default=False) is False
+
+
+class TestDiskSpaceGuard:
+    """BM-3, code review — a préflight floor prevents starting a download
+    that would fill the disk."""
+
+    async def test_below_floor_skips_download_without_failing(
+        self, trailer_dir, monkeypatch,
+    ):
+        monkeypatch.setattr(settings, "TRAILER_MIN_FREE_DISK_MB", 10**9)  # impossibly high
+        kicked_off = _stub_background_download(monkeypatch)
+
+        result = await trailer_service.resolve_by_youtube_id("dQw4w9WgXcQ")
+
+        assert result.status == "pending"
+        assert kicked_off.count == 0
+        assert "dQw4w9WgXcQ" not in trailer_service._in_flight
+
+    async def test_disabled_floor_always_allows(self, trailer_dir, monkeypatch):
+        monkeypatch.setattr(settings, "TRAILER_MIN_FREE_DISK_MB", 0)
+        assert await trailer_service._has_enough_free_disk_space() is True
+
+    async def test_stat_failure_fails_open(self, trailer_dir, monkeypatch):
+        """A broken/unreadable filesystem must not permanently block
+        trailers — fail open (allow) rather than fail closed."""
+        monkeypatch.setattr(settings, "TRAILER_MIN_FREE_DISK_MB", 512)
+
+        def _boom(path):
+            raise OSError("disk error")
+        monkeypatch.setattr(shutil, "disk_usage", _boom)
+
+        assert await trailer_service._has_enough_free_disk_space() is True
+
 
 def _stub_background_download(monkeypatch):
     """Replaces `create_background_task` with a stub that records how many
@@ -168,12 +306,17 @@ class _CallCounter:
 
 @pytest_asyncio.fixture(autouse=True)
 async def _clear_in_flight():
-    """`_in_flight` is process-global module state — clear it before/after
-    every test in this file so a previous test's dedup entry can't leak
-    into an unrelated one."""
+    """`_in_flight`/`_download_failures` are process-global module state —
+    clear them before/after every test in this file so a previous test's
+    dedup/negative-cache entry can't leak into an unrelated one (e.g. a
+    `_download_failures` entry for "dQw4w9WgXcQ" set by a download-failure
+    test would otherwise silently suppress a LATER, unrelated test's
+    download kickoff for the same canonical test id)."""
     trailer_service._in_flight.clear()
+    trailer_service._download_failures.clear()
     yield
     trailer_service._in_flight.clear()
+    trailer_service._download_failures.clear()
 
 
 # ─── resolve_by_rating_key: stored column, TMDB repli, write-back ─────────
@@ -213,6 +356,29 @@ class TestResolveByRatingKey:
 
         async def _boom(*a, **k):
             raise AssertionError("TMDB must not be called when the column is already set")
+        monkeypatch.setattr(tmdb_service, "get_videos_trailer", _boom)
+
+        async with db_factory() as db:
+            result = await trailer_service.resolve_by_rating_key(
+                db, media.rating_key, media.server_id,
+            )
+        assert result.status == "ready"
+        assert result.url == "/api/media/trailer/file/dQw4w9WgXcQ"
+
+    async def test_url_shaped_stored_column_normalized_defensively(
+        self, trailer_dir, db_factory, monkeypatch,
+    ):
+        """BB-1 (code review) — a row synced BEFORE the sync_worker
+        normalization fix (or an upstream quirk `extract_youtube_id`
+        doesn't recognise as URL-shaped) could still hold a raw URL in
+        `youtube_trailer`. Must resolve correctly, not silently miss."""
+        media = await _seed_media(
+            db_factory, youtube_trailer="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        )
+        (Path(trailer_dir) / "dQw4w9WgXcQ.mp4").write_bytes(b"bytes")
+
+        async def _boom(*a, **k):
+            raise AssertionError("TMDB must not be called when the column already resolves")
         monkeypatch.setattr(tmdb_service, "get_videos_trailer", _boom)
 
         async with db_factory() as db:
@@ -457,3 +623,54 @@ class TestPurgeLru:
         monkeypatch.setattr(settings, "TRAILER_CACHE_DIR", str(ghost))
         removed = await trailer_service.purge_lru()
         assert removed == 0
+
+
+class TestPurgeOrphanWorkdirs:
+    """Minor (code review) — a crash/`kill -9` mid-download leaves a
+    `.ytdlp-*` work directory behind (its own `finally: shutil.rmtree`
+    never gets a chance to run); the nightly/post-download purge must
+    eventually reclaim it."""
+
+    async def test_old_orphan_workdir_is_removed(self, trailer_dir, monkeypatch):
+        import os as _os
+        import time as _time
+
+        monkeypatch.setattr(settings, "TRAILER_CACHE_MAX_MB", 0)  # isolate: no mp4 eviction
+        base = Path(trailer_dir)
+        orphan = base / ".ytdlp-dQw4w9WgXcQ-deadbeef"
+        orphan.mkdir()
+        (orphan / "partial.mp4.part").write_bytes(b"partial")
+        old_mtime = _time.time() - trailer_service._ORPHAN_WORKDIR_MAX_AGE_SECONDS - 60
+        _os.utime(orphan, (old_mtime, old_mtime))
+
+        removed = await trailer_service.purge_lru()
+
+        assert removed == 1
+        assert not orphan.exists()
+
+    async def test_fresh_workdir_is_kept(self, trailer_dir, monkeypatch):
+        monkeypatch.setattr(settings, "TRAILER_CACHE_MAX_MB", 0)
+        base = Path(trailer_dir)
+        active = base / ".ytdlp-dQw4w9WgXcQ-abc12345"
+        active.mkdir()
+
+        removed = await trailer_service.purge_lru()
+
+        assert removed == 0
+        assert active.exists()
+
+    async def test_non_ytdlp_directories_are_left_alone(self, trailer_dir, monkeypatch):
+        import os as _os
+        import time as _time
+
+        monkeypatch.setattr(settings, "TRAILER_CACHE_MAX_MB", 0)
+        base = Path(trailer_dir)
+        unrelated = base / "some-other-dir"
+        unrelated.mkdir()
+        old_mtime = _time.time() - trailer_service._ORPHAN_WORKDIR_MAX_AGE_SECONDS - 60
+        _os.utime(unrelated, (old_mtime, old_mtime))
+
+        removed = await trailer_service.purge_lru()
+
+        assert removed == 0
+        assert unrelated.exists()

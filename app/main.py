@@ -558,10 +558,9 @@ app.add_middleware(RequestIdMiddleware)
 # two routers that self-guard because they own a broader path prefix than
 # "/api"). They are grouped and labelled explicitly below so the guard for
 # every router is visible in this ONE place, without changing any path or
-# which guard applies to which router. Tracked follow-up (not done here):
-# a startup assertion walking `app.routes` to assert every `/api/*` route
-# carries an auth dependency — see CR-A04,
-# docs/audit/cleanroom-2026-07-11/10-architecture.md.
+# which guard applies to which router. The startup assertion once tracked
+# here as "not done" now runs at the end of this block (AUDIT-P4-001 /
+# CR-A04) — see app/api/route_audit.py.
 from app.api.deps import verify_admin_basic_auth, verify_backend_secret  # noqa: E402
 
 # Shared X-API-Key guard for the JSON API (fail-closed, constant-time).
@@ -655,6 +654,12 @@ app.include_router(enrichment.router)
 # Not part of the CR-A04 `/api/*` route-walk follow-up mentioned above (this
 # router never carries the /api prefix in the first place).
 app.include_router(dav.router)
+
+# Boot-time route-auth audit (AUDIT-P4-001 / CR-A04): fails startup if any
+# `/api/*` route above lacks a recognised auth dependency. All logic lives in
+# app/api/route_audit.py; this call must stay LAST in the mounting block.
+from app.api.route_audit import assert_api_routes_authenticated  # noqa: E402
+assert_api_routes_authenticated(app)
 
 # Prometheus /metrics + per-request HTTP metrics
 from app.utils.metrics import setup_instrumentator  # noqa: E402

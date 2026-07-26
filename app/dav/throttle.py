@@ -18,10 +18,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Callable
 
 from app.config import settings
 from app.models.database import XtreamAccount
+from app.utils.metrics import dav_permit_wait_seconds, dav_throttle_rejections_total
 
 logger = logging.getLogger("plexhub.dav")
 
@@ -88,14 +90,27 @@ class AccountThrottle:
 
         Raises `ThrottleTimeout` if no permit frees up in time; nothing is
         acquired in that case (no matching release needed).
+
+        Observability (S5.3, AUDIT-P8-002): every call observes how long it
+        queued for a permit (`plexhub_dav_permit_wait_seconds`, success case
+        only — the wait is only meaningful once relaying actually happens)
+        and every `ThrottleTimeout` bumps `plexhub_dav_throttle_rejections_
+        total` (the 503+Retry-After the router sends back to rclone). Both
+        metrics are unlabelled by design — `account_id` never becomes a
+        Prometheus label (open cardinality, piège 18f); the wait-seconds
+        histogram is what lets an operator see a saturated account (queueing
+        getting longer) BEFORE it starts producing rejections.
         """
         sem = await self._get_semaphore(account_id, limit)
+        wait_started = time.monotonic()
         try:
             await asyncio.wait_for(sem.acquire(), timeout=timeout)
         except asyncio.TimeoutError:
+            dav_throttle_rejections_total.inc()
             raise ThrottleTimeout(
                 f"no upstream permit available within {timeout}s"
             ) from None
+        dav_permit_wait_seconds.observe(time.monotonic() - wait_started)
 
         released = {"done": False}
 

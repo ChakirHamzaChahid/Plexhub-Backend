@@ -15,6 +15,18 @@ mode with a deliberately short `busy_timeout`, holds a *real* write
 lock from a second connection (`BEGIN IMMEDIATE` on a plain
 background-thread `sqlite3` connection), and drives the retry helpers
 against that genuine contention.
+
+AUDIT-P1-001 / ADR 0004 (Decision 4, `docs/architecture/adr/
+0004-audit-v1-remediation-contracts.md`): this same real-lock harness
+proved that `commit_with_retry` (same-session retry) is structurally
+unable to survive a real lock — a second `db.commit()` on an already
+invalidated session raises `PendingRollbackError`, not another
+`OperationalError`. `TestCommitWithRetryFailsHonestly` now asserts the
+*honest* failure mode (original `OperationalError` re-raised, never the
+confusing `PendingRollbackError`), and `TestWriteWithRetryRealLock`
+asserts that the new fresh-session-per-attempt primitive,
+`write_with_retry`, actually recovers the write. No production call site
+is converted by this module — that is Vague 3 of the remediation plan.
 """
 from __future__ import annotations
 
@@ -25,11 +37,11 @@ import time
 
 import pytest
 from sqlalchemy import Column, Integer, String, event
-from sqlalchemy.exc import PendingRollbackError
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
-from app.utils.db_retry import commit_with_retry, run_with_retry
+from app.utils.db_retry import commit_with_retry, run_with_retry, write_with_retry
 
 
 class _RetryProbeBase(DeclarativeBase):
@@ -215,28 +227,29 @@ class TestRunWithRetryRealLock:
         assert attempts["n"] == 1
 
 
-class TestCommitWithRetrySameSessionBoundary:
-    """Documents a real, verified boundary discovered while building this
-    real-lock coverage for CR-T08 (not itself part of CR-T08's ask, and NOT
-    fixed here — app/ is out of scope for this pass; flagged for a
-    follow-up finding).
+class TestCommitWithRetryFailsHonestly:
+    """AUDIT-P1-001 / ADR 0004, Decision 4.
 
-    Every production call site uses the pattern `db.add(...)` followed by a
-    bare `await commit_with_retry(db)` on the SAME `AsyncSession` (e.g.
-    `app/api/accounts.py:42`, `app/workers/sync_worker.py:1085`). Under a
-    REAL lock this behaves differently from the fresh-session-per-attempt
-    pattern above: SQLAlchemy invalidates a Session's transaction after its
-    first failed flush/commit, so retry attempt #2 on the *same* session
-    raises `PendingRollbackError` (a session-state guard, not another
-    `OperationalError`) — and `run_with_retry`'s `except OperationalError`
-    does not catch it, so the retry loop aborts after exactly one real lock
-    hit instead of recovering. This is deterministic (it does not depend on
-    whether the lock is still held by the time the retry fires) so it is
-    locked in here as CURRENT, observed behaviour rather than left as an
-    invisible gap.
+    `commit_with_retry` (same-session retry) is now proven honest rather
+    than resilient: every production call site historically used the
+    pattern `db.add(...)` followed by a bare `await commit_with_retry(db)`
+    on the SAME `AsyncSession` (e.g. `app/api/accounts.py:42`,
+    `app/workers/sync_worker.py:1085` — none of those call sites are
+    touched by this change, cf. `write_with_retry` below for the actual
+    fix). Under a REAL lock, SQLAlchemy invalidates a Session's transaction
+    after its first failed commit, so retry attempt #2 on the *same*
+    session raises `PendingRollbackError` (a session-state guard) instead
+    of another `OperationalError`.
+
+    Previously this `PendingRollbackError` propagated verbatim, hiding the
+    real cause. `commit_with_retry` now catches it, does a hygiene
+    rollback, and re-raises the ORIGINAL `OperationalError` ("database is
+    locked") — so a caller's trace always names the true cause, even
+    though the same-session retry still cannot recover the write itself
+    (that requires `write_with_retry`, proven below).
     """
 
-    async def test_same_session_retry_does_not_survive_a_real_lock(self, tmp_path):
+    async def test_same_session_retry_reraises_the_original_lock_error(self, tmp_path):
         db_path = str(tmp_path / "retry_same_session.db")
         _init_wal_db(db_path)
 
@@ -255,9 +268,124 @@ class TestCommitWithRetrySameSessionBoundary:
 
         async with factory() as session:
             session.add(_RetryProbe(value="writer"))
-            with pytest.raises(PendingRollbackError):
+            with pytest.raises(OperationalError) as exc_info:
                 await commit_with_retry(session, delays=(0.1, 0.2, 0.4))
+            assert "database is locked" in str(exc_info.value).lower()
 
         blocker.join(timeout=5)
         await engine.dispose()
         assert not blocker.is_alive()
+
+
+class TestWriteWithRetryRealLock:
+    """AUDIT-P1-001 / ADR 0004, Decision 4 — `write_with_retry` is the
+    primitive that actually survives a real lock: a fresh session per
+    attempt has no invalidated transaction to trip over."""
+
+    async def test_survives_a_real_lock_and_writes_the_row(self, tmp_path):
+        db_path = str(tmp_path / "write_with_retry_lock.db")
+        _init_wal_db(db_path)
+
+        hold_seconds = 0.35
+        lock_acquired = threading.Event()
+        blocker = threading.Thread(
+            target=_hold_write_lock,
+            args=(db_path, lock_acquired, hold_seconds),
+            daemon=True,
+        )
+        blocker.start()
+        assert lock_acquired.wait(timeout=5), "blocker thread never acquired the write lock"
+
+        engine = _make_engine(db_path)
+        factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        attempts = {"n": 0}
+
+        async def _work(session: AsyncSession) -> None:
+            attempts["n"] += 1
+            session.add(_RetryProbe(value="writer"))
+            await session.commit()
+
+        await write_with_retry(
+            _work,
+            session_factory=factory,
+            delays=(0.1, 0.2, 0.4),
+            op="test-write-with-retry",
+        )
+
+        blocker.join(timeout=5)
+        await engine.dispose()
+
+        assert not blocker.is_alive()
+        assert attempts["n"] >= 2, (
+            "expected at least one real retry attempt (a fresh session per "
+            "attempt, not an immediate first-try success)"
+        )
+
+        check = sqlite3.connect(db_path)
+        try:
+            rows = check.execute("SELECT value FROM retry_probe ORDER BY id").fetchall()
+        finally:
+            check.close()
+        assert ("writer",) in rows
+        assert ("blocker",) in rows
+
+    async def test_counts_real_attempts_across_fresh_sessions(self, tmp_path):
+        """Each retry attempt gets its own session — `work` observes a
+        fresh `AsyncSession` instance every call, proving no pending object
+        is silently reused/expelled across attempts."""
+        db_path = str(tmp_path / "write_with_retry_attempts.db")
+        _init_wal_db(db_path)
+
+        hold_seconds = 0.35
+        lock_acquired = threading.Event()
+        blocker = threading.Thread(
+            target=_hold_write_lock,
+            args=(db_path, lock_acquired, hold_seconds),
+            daemon=True,
+        )
+        blocker.start()
+        assert lock_acquired.wait(timeout=5), "blocker thread never acquired the write lock"
+
+        engine = _make_engine(db_path)
+        factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        seen_sessions: list[int] = []
+
+        async def _work(session: AsyncSession) -> None:
+            seen_sessions.append(id(session))
+            session.add(_RetryProbe(value=f"writer-{len(seen_sessions)}"))
+            await session.commit()
+
+        await write_with_retry(
+            _work,
+            session_factory=factory,
+            delays=(0.1, 0.2, 0.4),
+            op="test-write-attempts",
+        )
+
+        blocker.join(timeout=5)
+        await engine.dispose()
+
+        assert len(seen_sessions) >= 2
+        assert len(set(seen_sessions)) == len(seen_sessions), (
+            "expected a distinct fresh session object per attempt"
+        )
+
+    async def test_non_locked_error_is_not_retried(self, tmp_path):
+        """A non-lock failure inside `work` (e.g. IntegrityError-like bug)
+        must surface immediately, with no wasted retries."""
+        db_path = str(tmp_path / "write_with_retry_non_lock.db")
+        _init_wal_db(db_path)
+
+        engine = _make_engine(db_path)
+        factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        attempts = {"n": 0}
+
+        async def _work(session: AsyncSession) -> None:
+            attempts["n"] += 1
+            raise OperationalError("boom", params=None, orig=Exception("syntax error near 'foo'"))
+
+        with pytest.raises(OperationalError):
+            await write_with_retry(_work, session_factory=factory, delays=(0.05,), op="test-non-lock")
+
+        await engine.dispose()
+        assert attempts["n"] == 1

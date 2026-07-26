@@ -8,10 +8,12 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from prometheus_client import REGISTRY, generate_latest
 
 from app.config import settings
 from app.dav.throttle import AccountThrottle, ThrottleTimeout, account_throttle, upstream_limit
 from app.models.database import XtreamAccount
+from app.utils import metrics
 
 
 def _account(max_connections: int = 1) -> XtreamAccount:
@@ -136,3 +138,125 @@ class TestAccountThrottleConcurrency:
 class TestModuleSingleton:
     def test_account_throttle_singleton_is_an_account_throttle(self):
         assert isinstance(account_throttle, AccountThrottle)
+
+
+# ─── S5.3 (AUDIT-P8-002): permit-wait histogram + rejection counter ────────
+
+
+def _histogram_count(hist) -> float:
+    """`Histogram` has no public `_count` accessor (unlike `Counter`'s
+    `_value`) — read it back the same way `prometheus_client.generate_latest`
+    would, via `.collect()`'s samples, filtering the `_count` suffix."""
+    for metric in hist.collect():
+        for sample in metric.samples:
+            if sample.name.endswith("_count"):
+                return sample.value
+    raise AssertionError("no _count sample found")  # pragma: no cover - defensive
+
+
+def _counter_value(counter) -> float:
+    return counter._value.get()
+
+
+class TestPermitWaitAndRejectionMetrics:
+    """`AccountThrottle.acquire` is the ONLY call site for both
+    `plexhub_dav_permit_wait_seconds` (success) and
+    `plexhub_dav_throttle_rejections_total` (`ThrottleTimeout`) — both
+    unlabelled by design (no `account_id`, no URL), see the metric
+    docstrings in `app/utils/metrics.py` and `AccountThrottle.acquire`'s own.
+    """
+
+    async def test_successful_acquire_observes_wait_seconds_and_does_not_reject(self):
+        throttle = AccountThrottle()
+        wait_before = _histogram_count(metrics.dav_permit_wait_seconds)
+        rejections_before = _counter_value(metrics.dav_throttle_rejections_total)
+
+        release = await throttle.acquire("acct1", limit=1, timeout=5)
+        release()
+
+        assert _histogram_count(metrics.dav_permit_wait_seconds) == wait_before + 1
+        assert _counter_value(metrics.dav_throttle_rejections_total) == rejections_before
+
+    async def test_queued_acquire_observes_a_nonzero_wait(self):
+        """A second caller that has to wait for the first release still
+        succeeds (no timeout) — its wait time must be observed as > 0,
+        proving the histogram measures actual queueing, not just "acquired
+        instantly"."""
+        throttle = AccountThrottle()
+        release1 = await throttle.acquire("acct1", limit=1, timeout=5)
+
+        async def _second():
+            return await throttle.acquire("acct1", limit=1, timeout=5)
+
+        task = asyncio.create_task(_second())
+        await asyncio.sleep(0.05)
+        release1()
+        release2 = await asyncio.wait_for(task, timeout=5)
+        release2()
+
+        sum_after = metrics.dav_permit_wait_seconds._sum.get()
+        assert sum_after > 0, "queued caller's wait must be reflected in the histogram sum"
+
+    async def test_timeout_increments_rejection_counter_and_leaves_wait_histogram_untouched(self):
+        """This is the signal AUDIT-P8-002 asks for: a 503+Retry-After
+        (`ThrottleTimeout`) MUST be countable. The wait histogram is NOT
+        touched on this path (it only measures the wait that precedes an
+        actual relay, per its own docstring)."""
+        throttle = AccountThrottle()
+        release1 = await throttle.acquire("acct1", limit=1, timeout=5)
+        try:
+            rejections_before = _counter_value(metrics.dav_throttle_rejections_total)
+            wait_count_before = _histogram_count(metrics.dav_permit_wait_seconds)
+
+            with pytest.raises(ThrottleTimeout):
+                await throttle.acquire("acct1", limit=1, timeout=0.05)
+
+            assert _counter_value(metrics.dav_throttle_rejections_total) == rejections_before + 1
+            assert _histogram_count(metrics.dav_permit_wait_seconds) == wait_count_before
+        finally:
+            release1()
+
+    async def test_multiple_timeouts_accumulate_on_the_same_counter(self):
+        throttle = AccountThrottle()
+        release1 = await throttle.acquire("acct1", limit=1, timeout=5)
+        try:
+            before = _counter_value(metrics.dav_throttle_rejections_total)
+            for _ in range(3):
+                with pytest.raises(ThrottleTimeout):
+                    await throttle.acquire("acct1", limit=1, timeout=0.02)
+            assert _counter_value(metrics.dav_throttle_rejections_total) == before + 3
+        finally:
+            release1()
+
+    async def test_account_id_never_appears_as_a_prometheus_label_or_value(self):
+        """Open-cardinality identifiers (`account_id`) must never leak into
+        the metrics surface (piège 18f / AUDIT-P8-002 non-negotiable) — both
+        metrics are declared with NO labelnames in `app/utils/metrics.py`, so
+        there is no `.labels(...)` call site available even by mistake. This
+        proves it end-to-end: acquire/timeout using a distinctive
+        "account_id" that looks like it could carry a secret, then scrape
+        the real Prometheus registry and assert it never shows up."""
+        secret_looking_account_id = "acct-SEKRET-SHOULD-NEVER-LEAK-42"
+        throttle = AccountThrottle()
+
+        # Hold the only permit, then force a real timeout on a second
+        # acquire for the SAME account id -> exercises both the success
+        # path (permit-wait histogram) and the rejection path (counter)
+        # with a distinctive, secret-looking account id.
+        release1 = await throttle.acquire(secret_looking_account_id, limit=1, timeout=5)
+        with pytest.raises(ThrottleTimeout):
+            await throttle.acquire(secret_looking_account_id, limit=1, timeout=0.02)
+        release1()
+
+        body = generate_latest(REGISTRY).decode("utf-8")
+        assert secret_looking_account_id not in body
+        # The two counter/unbucketed lines carry NO labels at all (only the
+        # histogram's `_bucket` lines legitimately have a `le="..."` label,
+        # which is a fixed bucket boundary, never an account id).
+        for line in body.splitlines():
+            if line.startswith("plexhub_dav_throttle_rejections_total "):
+                assert "{" not in line
+            if line.startswith("plexhub_dav_permit_wait_seconds_count ") or line.startswith(
+                "plexhub_dav_permit_wait_seconds_sum "
+            ):
+                assert "{" not in line

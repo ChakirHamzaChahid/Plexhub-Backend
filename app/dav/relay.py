@@ -7,10 +7,14 @@ releasing it once `UpstreamStream.body` is fully drained/`aclose`d; this
 module itself knows nothing about accounts or the throttle).
 
 Reuses the SAME redirect-following + SSRF guard as
-`app.services.download_service.download_to_disk`
-(`assert_public_redirect_host`) — a provider's stream URL can legitimately
-302 to a CDN host, and that hop must be verified to resolve to a public IP
-before being fetched, exactly like a physical download.
+`app.services.download_service.download_to_disk` — both call the shared
+predicate in `app.utils.ssrf` (CR-S08) directly, rather than this module
+importing from `app.services.download_service` (which would recreate the
+`services ⇄ dav` import cycle `app.services.plex_generation_service`
+already has the other way, via a deferred `app.dav.vfs` import — see
+AUDIT-P4-007). A provider's stream URL can legitimately 302 to a CDN host,
+and that hop must be verified to resolve to a public IP before being
+fetched, exactly like a physical download.
 
 Range handling: the client's `Range` header is passed straight through to
 the upstream. Some Xtream panels ignore it and answer 200 with the full
@@ -22,6 +26,20 @@ leaves an ignored Range as a raw 200 pass-through instead.
 Secrets invariant (mirrors download_service): the upstream URL embeds the
 Xtream account's user/password in its path/query. No exception message or
 log line in this module ever contains `url`/a redirect `Location` value.
+
+Observability (S5.3, AUDIT-P8-002): every body this module hands back
+(plain pass-through AND the range-shim's re-sliced body — see
+`_counted_body`) is wrapped so every chunk actually relayed to the DAV
+client increments `plexhub_dav_relayed_bytes_total`, unlabelled. The
+shim's own extra cost (draining and discarding the bytes before `start`
+and after `end` while still holding the account's throttle permit) is
+NOT double-counted here — only bytes the client actually receives are
+counted — but it shows up anyway: holding the permit longer is exactly
+what makes `plexhub_dav_permit_wait_seconds` (`app/dav/throttle.py`) rise
+for the next request queued behind it, and eventually
+`plexhub_dav_throttle_rejections_total` once that queueing exceeds
+`DAV_QUEUE_TIMEOUT_SECONDS` — the shim's cost is visible through the
+throttle metrics, not hidden by the byte counter.
 """
 from __future__ import annotations
 
@@ -33,7 +51,8 @@ from typing import AsyncIterator, Awaitable, Callable, Optional
 import httpx
 
 from app.config import settings
-from app.services.download_service import DownloadPermanentError, assert_public_redirect_host
+from app.utils.metrics import dav_relayed_bytes_total
+from app.utils.ssrf import SsrfBlockedError, assert_public_host
 
 logger = logging.getLogger("plexhub.dav")
 
@@ -188,6 +207,22 @@ async def _shim_ranged_body(
             yield chunk[slice_start:slice_end]
 
 
+async def _counted_body(body: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
+    """Wrap an upstream byte iterator so every chunk actually handed to the
+    DAV client (`app/api/dav.py`'s `body()` generator drains `Upstream
+    Stream.body`) is counted into `plexhub_dav_relayed_bytes_total` (S5.3,
+    AUDIT-P8-002) — unlabelled, no URL/account/filename anywhere near it
+    (piège 18f). Applied uniformly at every place this module hands back a
+    real body (plain pass-through AND the range-shim's re-sliced body), so
+    a caller draining `UpstreamStream.body` always gets counted bytes
+    regardless of which path produced the stream. Not applied to
+    `_empty_body` (416 responses never carry bytes to count)."""
+    async for chunk in body:
+        if chunk:
+            dav_relayed_bytes_total.inc(len(chunk))
+        yield chunk
+
+
 async def _empty_body() -> AsyncIterator[bytes]:
     """An async generator that yields nothing — used for synthesized 416
     responses, which never have a body."""
@@ -246,7 +281,7 @@ async def _send(client: httpx.AsyncClient, url: str, headers: dict[str, str]) ->
 
 async def open_upstream(url: str, range_header: Optional[str]) -> UpstreamStream:
     """Fetch `url` (an already-built Xtream stream URL — never logged),
-    following redirects (SSRF-guarded via `assert_public_redirect_host`,
+    following redirects (SSRF-guarded via `app.utils.ssrf.assert_public_host`,
     up to `settings.DOWNLOAD_MAX_REDIRECTS` hops) and passing `range_header`
     (the DAV client's `Range` header, or `None`) through to the upstream.
 
@@ -274,8 +309,8 @@ async def open_upstream(url: str, range_header: Optional[str]) -> UpstreamStream
                 raise UpstreamError("too many redirects (or missing Location)")
             next_url = str(resp.url.join(location))
             try:
-                await assert_public_redirect_host(httpx.URL(next_url).host)
-            except DownloadPermanentError:
+                await assert_public_host(httpx.URL(next_url).host)
+            except SsrfBlockedError:
                 logger.warning("DAV relay: rejected redirect to a non-public host")
                 raise UpstreamError("unsafe redirect target") from None
             current_url = next_url
@@ -309,7 +344,7 @@ async def open_upstream(url: str, range_header: Optional[str]) -> UpstreamStream
 
     return UpstreamStream(
         resp.status_code, _passthrough_headers(resp),
-        resp.aiter_bytes(settings.DOWNLOAD_CHUNK_BYTES), resp.aclose,
+        _counted_body(resp.aiter_bytes(settings.DOWNLOAD_CHUNK_BYTES)), resp.aclose,
     )
 
 
@@ -327,7 +362,7 @@ async def _apply_range_shim(resp: httpx.Response, range_header: str) -> Upstream
         # pass the 200 through unshimmed rather than guess.
         return UpstreamStream(
             200, _passthrough_headers(resp),
-            resp.aiter_bytes(settings.DOWNLOAD_CHUNK_BYTES), resp.aclose,
+            _counted_body(resp.aiter_bytes(settings.DOWNLOAD_CHUNK_BYTES)), resp.aclose,
         )
 
     start, end = parsed
@@ -346,5 +381,5 @@ async def _apply_range_shim(resp: httpx.Response, range_header: str) -> Upstream
     content_type = resp.headers.get("content-type")
     if content_type is not None:
         headers["Content-Type"] = content_type
-    body = _shim_ranged_body(resp, start, end, settings.DOWNLOAD_CHUNK_BYTES)
+    body = _counted_body(_shim_ranged_body(resp, start, end, settings.DOWNLOAD_CHUNK_BYTES))
     return UpstreamStream(206, headers, body, resp.aclose)

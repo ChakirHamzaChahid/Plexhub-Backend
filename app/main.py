@@ -33,8 +33,9 @@ from app.api import (
     tv_auth,
 )
 from app.utils.request_context import RequestIdLogFilter, RequestIdMiddleware
+from app.utils.job_health import mark_job_success, set_master, track_job
 
-APP_VERSION = "1.7.1"
+APP_VERSION = "1.8.0"
 
 logger = logging.getLogger("plexhub")
 
@@ -140,15 +141,21 @@ async def _rebuild_unified_groups():
     generated Plex library. Non-fatal: the unified list falls back to live
     aggregation if this fails or hasn't run yet, so a failure never breaks
     browsing.
+
+    Also refreshes sqlite_stat1 (AUDIT-P3-001) right after, while both
+    pipeline callers below still hold `_PIPELINE_LOCK`.
     """
     from app.services import unified_group_service
-    from app.db.database import async_session_factory
+    from app.db.database import async_session_factory, engine
+    from app.db.maintenance import run_sqlite_maintenance
 
     try:
         counts = await unified_group_service.rebuild_all(async_session_factory)
         logger.info("Unified-group snapshot rebuilt: %s", counts)
     except Exception as e:
         logger.error("Unified-group snapshot rebuild failed: %s", e, exc_info=True)
+
+    await run_sqlite_maintenance(engine)
 
 
 async def _auto_provision_xtream_account():
@@ -284,6 +291,11 @@ async def lifespan(app: FastAPI):
                 lock_fd = None
             is_master = False
 
+        # S5.1 (AUDIT-P8-005): publish the REAL election result verbatim —
+        # `plexhub_is_master` must reflect a slave/OSError fallback exactly,
+        # never re-decide mastership itself (piège §9-7 / AUDIT-P1-003).
+        set_master(is_master)
+
         # Auto-provision Xtream account from env vars
         if settings.has_xtream_env:
             await _auto_provision_xtream_account()
@@ -313,6 +325,7 @@ async def lifespan(app: FastAPI):
                         await _auto_generate_plex_library()
                         logger.info("Scheduled generation done — rebuilding unified-group snapshot")
                         await _rebuild_unified_groups()
+                        mark_job_success("pipeline")  # S5.1: only on a full, exception-free run
                     except Exception as e:
                         logger.error(f"Scheduled sync pipeline failed: {e}", exc_info=True)
 
@@ -330,7 +343,7 @@ async def lifespan(app: FastAPI):
                 misfire_grace_time=300,
             )
             scheduler.add_job(
-                health_check_worker.run,
+                track_job("health_check")(health_check_worker.run),
                 "cron",
                 hour=2,
                 id="health_check",
@@ -339,7 +352,7 @@ async def lifespan(app: FastAPI):
                 misfire_grace_time=3600,
             )
             scheduler.add_job(
-                _cleanup_stale_epg,
+                track_job("epg_cleanup")(_cleanup_stale_epg),
                 "cron",
                 hour=3,
                 id="epg_cleanup",
@@ -354,7 +367,7 @@ async def lifespan(app: FastAPI):
                 await subtitle_service.cleanup_cache(async_session_factory)
 
             scheduler.add_job(
-                _subtitle_cache_cleanup,
+                track_job("subtitle_cache_cleanup")(_subtitle_cache_cleanup),
                 "cron",
                 hour=3,
                 id="subtitle_cache_cleanup",
@@ -371,7 +384,7 @@ async def lifespan(app: FastAPI):
                     await asyncio.to_thread(_run_backup)
 
                 scheduler.add_job(
-                    _scheduled_backup,
+                    track_job("db_backup")(_scheduled_backup),
                     "cron",
                     hour=settings.BACKUP_HOUR,
                     id="db_backup",
@@ -403,7 +416,7 @@ async def lifespan(app: FastAPI):
                     await plex_sync_service.run_full_sync(async_session_factory)
 
                 scheduler.add_job(
-                    _scheduled_plex_sync,
+                    track_job("plex_catalogue_sync")(_scheduled_plex_sync),
                     "interval",
                     hours=settings.PLEX_SYNC_INTERVAL_HOURS,
                     id="plex_catalogue_sync",
@@ -482,6 +495,7 @@ async def lifespan(app: FastAPI):
                     await _auto_generate_plex_library()
                     logger.info("Generation done — rebuilding unified-group snapshot")
                     await _rebuild_unified_groups()
+                    mark_job_success("pipeline")  # S5.1: same freshness gauge as the interval job
 
             from app.utils.tasks import create_background_task
             create_background_task(initial_sync_then_enrich(), name="initial_sync")
@@ -551,6 +565,9 @@ app.add_middleware(
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 # Added last so it wraps the others — request_id is set before any other middleware runs.
 app.add_middleware(RequestIdMiddleware)
+# CSRF guard for POST/PUT/PATCH/DELETE /admin* (S4.3, AUDIT-P2-005/CR-S07) — see app/api/csrf.py.
+from app.api.csrf import AdminCsrfMiddleware  # noqa: E402
+app.add_middleware(AdminCsrfMiddleware)
 
 # ─── Routes / auth-per-router (CR-A04) ───────────────────────────────────
 # Three mounting patterns coexist here by necessity (a public health check, a
@@ -558,11 +575,14 @@ app.add_middleware(RequestIdMiddleware)
 # two routers that self-guard because they own a broader path prefix than
 # "/api"). They are grouped and labelled explicitly below so the guard for
 # every router is visible in this ONE place, without changing any path or
-# which guard applies to which router. Tracked follow-up (not done here):
-# a startup assertion walking `app.routes` to assert every `/api/*` route
-# carries an auth dependency — see CR-A04,
-# docs/audit/cleanroom-2026-07-11/10-architecture.md.
-from app.api.deps import verify_admin_basic_auth, verify_backend_secret  # noqa: E402
+# which guard applies to which router. The startup assertion once tracked
+# here as "not done" now runs at the end of this block (AUDIT-P4-001 /
+# CR-A04) — see app/api/route_audit.py.
+from app.api.deps import (  # noqa: E402
+    verify_admin_basic_auth,
+    verify_backend_secret,
+    verify_metrics_basic_auth,
+)
 
 # Shared X-API-Key guard for the JSON API (fail-closed, constant-time).
 _guard = [Depends(verify_backend_secret)]
@@ -656,6 +676,14 @@ app.include_router(enrichment.router)
 # router never carries the /api prefix in the first place).
 app.include_router(dav.router)
 
-# Prometheus /metrics + per-request HTTP metrics
+# Boot-time route-auth audit (AUDIT-P4-001 / CR-A04): fails startup if any
+# `/api/*` route above lacks a recognised auth dependency. All logic lives in
+# app/api/route_audit.py; this call must stay LAST in the mounting block.
+from app.api.route_audit import assert_api_routes_authenticated  # noqa: E402
+assert_api_routes_authenticated(app)
+
+# Prometheus /metrics + per-request HTTP metrics. Basic Auth guard (S4.1,
+# AUDIT-P2-001/CR-S02): METRICS_USERNAME/METRICS_PASSWORD, escape hatch
+# METRICS_PUBLIC=true — see app/api/deps.py::verify_metrics_basic_auth.
 from app.utils.metrics import setup_instrumentator  # noqa: E402
-setup_instrumentator(app)
+setup_instrumentator(app, dependencies=[Depends(verify_metrics_basic_auth)])

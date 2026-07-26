@@ -44,12 +44,55 @@ class Settings:
     ADMIN_USERNAME: str = os.getenv("ADMIN_USERNAME", "admin")
     ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "")
 
+    # /metrics — HTTP Basic Auth, dedicated secret (AUDIT-P2-001 / CR-S02,
+    # ADR 0004 §Décision 3). Prometheus speaks `basic_auth:` natively, so this
+    # mirrors verify_admin_basic_auth rather than reusing X-API-Key — same
+    # rationale as DAV_USERNAME/DAV_PASSWORD for rclone. Deliberately its own
+    # secret pair, separate from ADMIN_* (a compromised scraper must not open
+    # the admin UI) and from AI_API_KEY. Fail-closed by default: an empty
+    # METRICS_PASSWORD 503s /metrics, exactly like ADMIN_PASSWORD/DAV_PASSWORD.
+    METRICS_USERNAME: str = os.getenv("METRICS_USERNAME", "plexhub-metrics")
+    METRICS_PASSWORD: str = os.getenv("METRICS_PASSWORD", "")
+    # Explicit escape hatch (default false = safe): lets an operator deploy
+    # before reconfiguring their Prometheus scraper's basic_auth, or roll back
+    # if needed. When true, /metrics stays open with NO credential check and
+    # boot logs a WARNING naming the debt — never silent. See
+    # docs/plans/2026-07-26-refacto-audit-v1-plan.md §7.1 for the operator
+    # migration procedure.
+    METRICS_PUBLIC: bool = os.getenv("METRICS_PUBLIC", "false").lower() in ("true", "1", "yes")
+
     # TV pairing (device-flow) — Mission 18
     # Optional explicit Fernet key (urlsafe base64, 32 bytes) for payload
     # encryption at rest. When empty, a key is derived from AI_API_KEY.
     # When neither is set, tv-auth endpoints return 503.
     TV_AUTH_ENCRYPTION_KEY: str = os.getenv("TV_AUTH_ENCRYPTION_KEY", "")
     TV_AUTH_TTL_SECONDS: int = _safe_int("TV_AUTH_TTL_SECONDS", 900)  # 15 min
+
+    # Rate-limit / flood cap on the UNAUTHENTICATED POST /api/tv-auth/start
+    # endpoint (AUDIT-P2-004 / CR-S05, S4.2) — see app/utils/rate_limit.py's
+    # module docstring for the full doctrine. Deliberately narrow in scope:
+    # NO global API rate limiter (PlexHubTV polls several authenticated
+    # endpoints on a legitimate schedule; a blanket limiter risks throttling
+    # that). Generic X-API-Key/Basic-Auth brute-force protection is
+    # delegated to the WAF/ingress (same doctrine already documented for
+    # /dav, CLAUDE.md §9 piège 18b) — this repo does not attempt it.
+    # Per-client-IP request-rate cap: max calls per rolling window.
+    TV_AUTH_START_RATE_LIMIT_MAX: int = _safe_int("TV_AUTH_START_RATE_LIMIT_MAX", 5)
+    TV_AUTH_START_RATE_LIMIT_WINDOW_SECONDS: int = _safe_int(
+        "TV_AUTH_START_RATE_LIMIT_WINDOW_SECONDS", 60
+    )
+    # In-process, per-apparent-IP APPROXIMATION of "sessions this client
+    # started that haven't expired yet" (window = TV_AUTH_TTL_SECONDS,
+    # deliberately an over-count — see rate_limit.py). <=0 disables this
+    # specific check.
+    TV_AUTH_PENDING_SESSIONS_CAP_PER_IP: int = _safe_int(
+        "TV_AUTH_PENDING_SESSIONS_CAP_PER_IP", 20
+    )
+    # THE real bound on unauthenticated table growth: a DB-authoritative
+    # COUNT(status='pending') ceiling, GLOBAL (not per-IP) — correct even if
+    # client identification above is fully spoofed. <=0 disables the cap
+    # (not recommended).
+    TV_AUTH_PENDING_SESSIONS_CAP: int = _safe_int("TV_AUTH_PENDING_SESSIONS_CAP", 500)
 
     # Xtream credential encryption at rest (CR-S03) — see
     # app/utils/crypto_fields.py for full key-resolution semantics.
@@ -77,6 +120,18 @@ class Settings:
     STREAM_FILTER_BROKEN: bool = os.getenv("STREAM_FILTER_BROKEN", "true").lower() in ("true", "1", "yes")
 
     PLEX_LIBRARY_DIR: str = os.getenv("PLEX_LIBRARY_DIR", "")
+    # AUDIT-P6-006: `write_file`/`download_image` (plex_generator/storage.py)
+    # preserve any existing generated file forever — a `.nfo` is never
+    # refreshed after a re-enrichment (new OMDb notes, ids corrected by
+    # validate_id_consistency, blended display_rating...). Opt-in refresh:
+    # when true, NFO files ARE rewritten on the next generation even if they
+    # already exist. Images are NEVER affected by this flag (posters/fanart
+    # hand-retouched with Tiny Media Manager are out of scope by design).
+    # Default false = strictly unchanged behaviour; also settable per-request
+    # via `forceRefreshMetadata` on POST /api/plex/generate (see api/plex.py).
+    PLEX_FORCE_REFRESH_METADATA: bool = os.getenv(
+        "PLEX_FORCE_REFRESH_METADATA", "false"
+    ).lower() in ("true", "1", "yes")
 
     # DB backups (online sqlite .backup snapshots)
     BACKUP_ENABLED: bool = os.getenv("BACKUP_ENABLED", "true").lower() in ("true", "1", "yes")
@@ -199,6 +254,21 @@ class Settings:
     DAV_CONNECT_TIMEOUT: float = _safe_float("DAV_CONNECT_TIMEOUT", float(DOWNLOAD_CONNECT_TIMEOUT))
     DAV_READ_TIMEOUT: float = _safe_float("DAV_READ_TIMEOUT", float(DOWNLOAD_READ_TIMEOUT))
 
+    # SSRF guard (CR-S08, app/utils/ssrf.py) — shared by physical downloads,
+    # the DAV relay, library image downloads, and stream health-check probes.
+    # Comma-separated hostnames explicitly allowed to resolve to a private/
+    # loopback/reserved address (operator opt-in for a self-hosted provider
+    # that legitimately lives on a private network). Empty (the default) —
+    # verified against this deployment's actual provider hosts, all public —
+    # means no exception: every private range stays blocked.
+    SSRF_ALLOW_PRIVATE_HOSTS: str = os.getenv("SSRF_ALLOW_PRIVATE_HOSTS", "")
+    # How long a hostname's public/private DNS verdict is cached, in seconds.
+    # A throughput tradeoff for the health-check worker (thousands of probes
+    # against a handful of provider hostnames) — NOT a security control; a
+    # longer cache widens the DNS-rebinding TOCTOU window documented in
+    # app/utils/ssrf.py, it doesn't narrow it. <=0 disables caching entirely.
+    SSRF_DNS_CACHE_SECONDS: int = _safe_int("SSRF_DNS_CACHE_SECONDS", 60)
+
     @property
     def has_xtream_env(self) -> bool:
         return bool(self.XTREAM_BASE_URL and self.XTREAM_USERNAME and self.XTREAM_PASSWORD)
@@ -237,6 +307,18 @@ class Settings:
         else:
             logger.warning("OMDB_API_KEY not set — imdb-id consistency validator will be disabled")
 
+        logger.info(
+            "tv-auth/start rate limit: %s reqs/%ss per apparent IP, pending "
+            "cap=%s (global, DB-authoritative) / %s (per-IP approx, %ss "
+            "window) — generic brute-force protection on other endpoints is "
+            "delegated to the WAF/ingress, not enforced here",
+            self.TV_AUTH_START_RATE_LIMIT_MAX,
+            self.TV_AUTH_START_RATE_LIMIT_WINDOW_SECONDS,
+            self.TV_AUTH_PENDING_SESSIONS_CAP,
+            self.TV_AUTH_PENDING_SESSIONS_CAP_PER_IP,
+            self.TV_AUTH_TTL_SECONDS,
+        )
+
         logger.info(f"Ollama LLM: {self.OLLAMA_URL} / model={self.OLLAMA_MODEL}")
         logger.info(
             f"Adult tagging: rating={self.ADULT_CONTENT_RATING!r}, "
@@ -256,6 +338,16 @@ class Settings:
             logger.info("Plex download source: enabled (client_id=%s…)", self.PLEX_CLIENT_IDENTIFIER[:8])
         else:
             logger.info("Plex download source: PLEX_ACCOUNT_TOKEN not set — feature disabled")
+
+        if self.METRICS_PUBLIC:
+            logger.warning(
+                "METRICS_PUBLIC=true — /metrics is served WITHOUT authentication "
+                "(escape hatch, AUDIT-P2-001/CR-S02). Set METRICS_USERNAME/"
+                "METRICS_PASSWORD and reconfigure your Prometheus scraper's "
+                "basic_auth, then unset METRICS_PUBLIC."
+            )
+        elif not self.METRICS_PASSWORD:
+            logger.warning("METRICS_PASSWORD not set — /metrics is fail-closed (503)")
 
         if self.DAV_ENABLED:
             logger.info(

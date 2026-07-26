@@ -43,10 +43,10 @@ from app.plex_generator.mapping import MappingStore
 from app.plex_generator.naming import series_nfo_path
 from app.utils.server_id import build_server_id
 from app.utils.time import now_ms
+from app.utils.rating_blend import blend_rating
 from app.utils.unification import (
     calculate_unification_id,
     calculate_history_group_key,
-    calculate_display_rating,
 )
 
 
@@ -528,17 +528,23 @@ def _compute_updates(row: Media, parsed: NfoEntry, overwrite: bool) -> dict:
                 new_unif, row.rating_key, row.server_id,
             )
 
-        # Keep display_rating in sync when we (re)write a rating. The read paths
-        # fall back COALESCE(display_rating, scraped_rating), but display_rating
-        # is what sync_worker/enrichment_worker persist and what's indexed for
-        # sorting (ix_media_type_rating) — so mirror the same priority here:
-        # COALESCE(scraped_rating, audience_rating, rating).
-        if "scraped_rating" in updates or "audience_rating" in updates:
-            new_scraped = updates.get("scraped_rating", row.scraped_rating)
-            new_audience = updates.get("audience_rating", row.audience_rating)
-            new_display = calculate_display_rating(new_scraped, new_audience, row.rating)
-            if new_display and new_display != (row.display_rating or 0.0):
-                updates["display_rating"] = new_display
+        # Keep display_rating in sync when we (re)write an IMDb/TMDB rating —
+        # using the SAME formula (D-BLEND, `rating_blend.blend_rating`) as the
+        # enrichment pipeline, so there is a single writer for this value
+        # across the codebase (ADR 0004 Decision 1 / AUDIT-P4-005). The old
+        # `calculate_display_rating` COALESCE is now sync_worker-only: calling
+        # it here re-introduced a second, contradicting writer that flip-
+        # flopped `display_rating` between imports and enrichment runs.
+        if "imdb_rating" in updates or "tmdb_rating" in updates:
+            new_imdb = updates.get("imdb_rating", row.imdb_rating)
+            new_tmdb = updates.get("tmdb_rating", row.tmdb_rating)
+            blended = blend_rating(new_imdb, new_tmdb)
+            # `blended` is None only when neither rating is usable (<=0/NULL)
+            # after this write — nothing to do: the existing display_rating
+            # (COALESCE, set by sync_worker for NFO-only rows with no IMDb/
+            # TMDB note) is left untouched, never reset to NULL/0.
+            if blended is not None and blended != (row.display_rating or 0.0):
+                updates["display_rating"] = blended
     return updates
 
 

@@ -179,9 +179,17 @@ async def get_channel_epg(
         raise HTTPException(404, "Account not found")
 
     if new_entries:
-        # CR-C04: this write can race a long-running sync/validation holding
-        # the single WAL writer — retry on "database is locked" instead of
-        # surfacing a raw 500 to the client (no per-entry refresh needed).
+        # AUDIT-P1-001 (S3.3) — deliberately NOT converted to write_with_retry.
+        # live_service.ingest_short_epg mixes a real network call (Xtream
+        # short-EPG fetch) with the staged EpgEntry writes on the SAME `db`
+        # session (ADR 0004, Decision 4: `work` must be fully replayable).
+        # Wrapping the whole call would re-fetch from the Xtream provider on
+        # every lock retry (up to 4x) — an external side effect this zone
+        # (S3.3, routers only) cannot remove without restructuring
+        # app/services/live_service.py (owned by S3.2). commit_with_retry
+        # (now honest per ADR 0004) is kept: a real, sustained lock surfaces
+        # the true OperationalError instead of silently retrying a provider
+        # refetch.
         await commit_with_retry(db)  # Persist EPG entries
 
     return EpgListResponse(

@@ -8,6 +8,8 @@ from pathlib import Path
 
 import httpx
 
+from app.utils.ssrf import assert_public_host_sync, vet_request_sync
+
 # Folder-level files the generator owns. A title folder containing ONLY these
 # (and per-episode .nfo siblings) and no .strm is a safe-to-remove orphan.
 _GENERATED_FILES = frozenset({"tvshow.nfo", "movie.nfo", "poster.jpg", "fanart.jpg"})
@@ -47,12 +49,19 @@ _all_clients_lock = threading.Lock()
 
 
 def _get_image_client() -> httpx.Client:
-    """Return a per-thread httpx.Client (thread-safe by isolation)."""
+    """Return a per-thread httpx.Client (thread-safe by isolation).
+
+    Poster/fanart URLs are provider-controlled (TMDB/OMDb scrape results),
+    so this is one of two SSRF-relevant download surfaces (CR-S08) — the
+    `vet_request_sync` event hook fires on the initial request AND on every
+    followed redirect hop (`follow_redirects=True` is unchanged; only public
+    targets are ever actually connected to)."""
     client = getattr(_thread_local, "http_client", None)
     if client is None or client.is_closed:
         client = httpx.Client(
             timeout=15.0,
             follow_redirects=True,
+            event_hooks={"request": [vet_request_sync]},
         )
         _thread_local.http_client = client
         with _all_clients_lock:
@@ -78,7 +87,7 @@ class LibraryStorage(ABC):
     def write_strm(self, rel_path: str, url: str) -> None: ...
 
     @abstractmethod
-    def write_file(self, rel_path: str, content: str) -> None: ...
+    def write_file(self, rel_path: str, content: str, *, force: bool = False) -> str: ...
 
     @abstractmethod
     def download_image(self, rel_path: str, image_url: str) -> bool: ...
@@ -109,11 +118,28 @@ class LocalStorage(LibraryStorage):
         full = self._resolve(rel_path)
         _atomic_write_text(full, url.strip() + "\n")
 
-    def write_file(self, rel_path: str, content: str) -> None:
+    def write_file(self, rel_path: str, content: str, *, force: bool = False) -> str:
+        """Write a generated text file (NFO), returning what actually happened.
+
+        By default (``force=False``) an existing file is left untouched — this
+        is the long-standing contract that lets an operator hand-enrich a
+        generated NFO with Tiny Media Manager without the next generation run
+        clobbering it. ``force=True`` (opt-in refresh, AUDIT-P6-006) atomically
+        rewrites the file even if it already exists, so durable-metadata
+        changes (OMDb notes, corrected ids, blended `display_rating`...) can
+        actually reach disk. Callers use the return value to report
+        created/updated/unchanged honestly instead of silently dropping NFO
+        writes from the SyncReport (see plex_generator/generator.py).
+
+        Images are NEVER subject to this — see download_image below, which
+        has no ``force`` parameter at all by design.
+        """
         full = self._resolve(rel_path)
-        if full.exists():
-            return  # Preserve existing file (e.g. enriched by Tiny Media Manager)
+        existed = full.exists()
+        if existed and not force:
+            return "unchanged"  # Preserve existing file (e.g. enriched by Tiny Media Manager)
         _atomic_write_text(full, content)
+        return "updated" if existed else "created"
 
     def download_image(self, rel_path: str, image_url: str) -> bool:
         full = self._resolve(rel_path)
@@ -129,6 +155,13 @@ class LocalStorage(LibraryStorage):
 
     @staticmethod
     def _download_sync(full: Path, image_url: str) -> None:
+        """Runs in the `_image_pool` worker thread — never on the event
+        loop. `assert_public_host_sync` (CR-S08) is an explicit pre-check on
+        top of the client's `vet_request_sync` hook (belt-and-suspenders:
+        the hook alone already covers this request and any redirect it
+        follows) so a rejected target is refused before httpx even opens a
+        connection for the initial request."""
+        assert_public_host_sync(httpx.URL(image_url).host)
         client = _get_image_client()
         resp = client.get(image_url)
         resp.raise_for_status()
@@ -202,8 +235,9 @@ class DryRunStorage(LibraryStorage):
     def write_strm(self, rel_path: str, url: str) -> None:
         logger.info(f"[DRY-RUN] write_strm: {rel_path}")
 
-    def write_file(self, rel_path: str, content: str) -> None:
-        logger.info(f"[DRY-RUN] write_file: {rel_path}")
+    def write_file(self, rel_path: str, content: str, *, force: bool = False) -> str:
+        logger.info(f"[DRY-RUN] write_file: {rel_path} (force={force})")
+        return "created"
 
     def download_image(self, rel_path: str, image_url: str) -> bool:
         logger.info(f"[DRY-RUN] download_image: {rel_path}")

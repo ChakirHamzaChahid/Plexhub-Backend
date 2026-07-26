@@ -19,6 +19,11 @@ class GenerateRequest(BaseModel):
     output_dir: Optional[str] = None
     strm_only: bool = False
     dry_run: bool = False
+    # AUDIT-P6-006: additive, opt-in. Default False = strictly unchanged
+    # behaviour (an existing generated .nfo is preserved, never rewritten).
+    # When true, .nfo files are refreshed even if already on disk — images
+    # are NEVER affected by this flag (see plex_generator/storage.py).
+    force_refresh_metadata: bool = False
 
 
 class GenerateResponse(BaseModel):
@@ -98,6 +103,7 @@ async def generate_plex_library(req: GenerateRequest):
         output_dir=output,
         strm_only=req.strm_only,
         dry_run=req.dry_run,
+        force_refresh_metadata=req.force_refresh_metadata,
     )
 
     return GenerateResponse(

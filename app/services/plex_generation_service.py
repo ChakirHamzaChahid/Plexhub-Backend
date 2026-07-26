@@ -52,6 +52,7 @@ async def generate_plex_library(
     output_dir: Path | str | None = None,
     strm_only: bool = False,
     dry_run: bool = False,
+    force_refresh_metadata: bool = False,
 ) -> SyncReport:
     """Generate (or dry-run) the unified Plex/Jellyfin library tree.
 
@@ -62,6 +63,11 @@ async def generate_plex_library(
     friendlier response (e.g. the HTTP 400 in `app/api/plex.py`) must resolve
     their own output directory and pass it in rather than relying on this
     fallback.
+
+    ``force_refresh_metadata`` (AUDIT-P6-006, opt-in) rewrites `.nfo` files
+    even when they already exist on disk — never affects images. Defaults to
+    False: an explicit `True` must come from the caller (request body flag or
+    `settings.PLEX_FORCE_REFRESH_METADATA`), never turned on implicitly here.
     """
     resolved_output = (
         Path(output_dir) if output_dir is not None
@@ -72,7 +78,10 @@ async def generate_plex_library(
 
     storage = DryRunStorage() if dry_run else LocalStorage(resolved_output)
     source = DatabaseSource(account_ids)
-    generator = PlexLibraryGenerator(source, storage, resolved_output, strm_only)
+    generator = PlexLibraryGenerator(
+        source, storage, resolved_output, strm_only,
+        force_refresh_metadata=force_refresh_metadata,
+    )
     return await generator.generate()
 
 
@@ -110,7 +119,13 @@ async def generate_plex_library_auto() -> SyncReport | None:
         f"Auto-generating unified Plex library across {len(account_ids)} account(s)"
     )
     try:
-        report = await generate_plex_library(output_dir=output)
+        # AUDIT-P6-006: honours the operator's env-level opt-in (defaults
+        # False — the unattended boot/scheduled pipeline never force-refreshes
+        # NFO files unless PLEX_FORCE_REFRESH_METADATA is explicitly set).
+        report = await generate_plex_library(
+            output_dir=output,
+            force_refresh_metadata=settings.PLEX_FORCE_REFRESH_METADATA,
+        )
         logger.info(
             f"Plex generation: {report.created} created, {report.updated} updated, "
             f"{report.deleted} deleted, {report.unchanged} unchanged, "

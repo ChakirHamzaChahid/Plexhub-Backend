@@ -4,60 +4,60 @@ services:
     container_name: plexhub-backend
     ports:
       - "${APP_PORT:-8000}:${APP_PORT:-8000}"
+    # AUDIT-P7-006 : le bloc `environment:` seul n'injectait qu'un sous-ensemble
+    # des clés lues par app/config.py (~20 manquantes : AI_API_KEY,
+    # ADMIN_USERNAME/ADMIN_PASSWORD, TV_AUTH_ENCRYPTION_KEY,
+    # XTREAM_ENCRYPTION_KEY, CORS_ORIGINS, OLLAMA_*, PLEX_ACCOUNT_TOKEN,
+    # TMDB_LANGUAGE, BACKUP_*, DATA_DIR/LOG_DIR, AI_EMBED_*, ADULT_*,
+    # XTREAM_USER_AGENT, ...) et le `.env` hôte n'entrait jamais dans le
+    # conteneur (le Dockerfile ne copie que app/, et rien ne le monte) :
+    # `docker compose up` livré donnait 100 % de l'API en 401 et
+    # l'admin/docs en 503.
+    #
+    # `env_file: .env` couvre toute la surface présente ET future en une
+    # seule ligne (`required: false` : absence de `.env` = pas d'erreur de
+    # config, mais AUCUNE valeur permissive par défaut n'est injectée ici —
+    # ADMIN_PASSWORD/AI_API_KEY restent vides côté app.config, donc le
+    # comportement fail-closed est préservé : /admin reste 503, /api/* reste
+    # 401). Copier `.env.example` vers `.env` (jamais commité, voir
+    # .gitignore) pour peupler ces clés.
+    #
+    # S4.1 (AUDIT-P2-001/CR-S02) : /metrics est désormais authentifié par
+    # défaut (METRICS_USERNAME/METRICS_PASSWORD, déjà couverts par
+    # `env_file: .env` ci-dessous comme le reste — rien à ajouter dans le
+    # bloc `environment:` figé). METRICS_PASSWORD vide ⇒ /metrics répond 503
+    # fail-closed ; reconfigurer la job Prometheus en `basic_auth:` avant de
+    # déployer (voir docs/plans/2026-07-26-refacto-audit-v1-plan.md §7.1).
+    #
+    # PRÉCÉDENCE : Compose applique `environment:` APRÈS `env_file:`, donc le
+    # bloc `environment:` ci-dessous gagne toujours sur `.env`. On l'utilise
+    # donc uniquement pour les valeurs qui DOIVENT rester verrouillées au
+    # chemin conteneur (PLEX_LIBRARY_DIR/DOWNLOAD_DIR : un `.env` hôte ne
+    # doit jamais pouvoir les faire pointer ailleurs que sur les volumes
+    # montés plus bas) et pour APP_PORT/TZ (déjà interpolés dans ce fichier
+    # via `${...}`, donc réaffirmés ici pour cohérence avec `ports:`
+    # ci-dessus).
+    env_file:
+      - path: .env
+        required: false
     environment:
       - APP_PORT=${APP_PORT:-8000}
-      - TMDB_API_KEY=${TMDB_API_KEY}
-      # OMDb (complément TMDB : tie-break enrichissement + validateur d'ids).
-      # Vide = feature no-op. Se règle dans le .env hôte (jamais commité).
-      - OMDB_API_KEY=${OMDB_API_KEY:-}
-      - OMDB_DAILY_LIMIT=${OMDB_DAILY_LIMIT:-95000}
-      - XTREAM_BASE_URL=${XTREAM_BASE_URL}
-      - XTREAM_PORT=${XTREAM_PORT:-80}
-      - XTREAM_USERNAME=${XTREAM_USERNAME}
-      - XTREAM_PASSWORD=${XTREAM_PASSWORD}
-      - SYNC_INTERVAL_HOURS=6
-      - ENRICHMENT_DAILY_LIMIT=50000
-      - HEALTH_CHECK_BATCH_SIZE=1000
-      - STREAM_VALIDATION_ENABLED=${STREAM_VALIDATION_ENABLED:-true}
-      - STREAM_VALIDATION_CONCURRENCY=${STREAM_VALIDATION_CONCURRENCY:-20}
-      - STREAM_VALIDATION_TIMEOUT=${STREAM_VALIDATION_TIMEOUT:-15}
-      - STREAM_BROKEN_THRESHOLD=${STREAM_BROKEN_THRESHOLD:-3}
-      - STREAM_VALIDATION_RECHECK_HOURS=${STREAM_VALIDATION_RECHECK_HOURS:-24}
-      - STREAM_FILTER_BROKEN=${STREAM_FILTER_BROKEN:-true}
       - PLEX_LIBRARY_DIR=/app/media
-      # WebDAV virtuel pour Plex (ticket DAV-1/DAV-2) : inactif par défaut
-      # (DAV_ENABLED=false / DAV_PASSWORD vide -> /dav répond 503). Le port
-      # ${APP_PORT:-8000} est déjà publié ci-dessus, donc un `rclone mount`
-      # tournant sur le même hôte Docker atteint /dav sans volume/port
-      # supplémentaire. Voir docs/30-ops-plex-webdav.md.
-      - DAV_ENABLED=${DAV_ENABLED:-false}
-      - DAV_USERNAME=${DAV_USERNAME:-plexdav}
-      - DAV_PASSWORD=${DAV_PASSWORD:-}
-      - DAV_MOVIE_LIMIT=${DAV_MOVIE_LIMIT:-25}
-      - DAV_SERIES_LIMIT=${DAV_SERIES_LIMIT:-5}
-      # csv of account ids; empty (default) = every active account
-      # (app/config.py's own "" -> [] parsing, mirrors DAV_PASSWORD's style
-      # above).
-      - DAV_ACCOUNT_IDS=${DAV_ACCOUNT_IDS:-}
-      - DAV_INCLUDE_ADULT=${DAV_INCLUDE_ADULT:-false}
-      - DAV_SINGLE_VERSION=${DAV_SINGLE_VERSION:-true}
-      - DAV_REQUIRE_KNOWN_SIZE=${DAV_REQUIRE_KNOWN_SIZE:-true}
-      - DAV_TREE_TTL_MINUTES=${DAV_TREE_TTL_MINUTES:-60}
-      - DAV_UPSTREAM_PER_ACCOUNT=${DAV_UPSTREAM_PER_ACCOUNT:-1}
-      - DAV_QUEUE_TIMEOUT_SECONDS=${DAV_QUEUE_TIMEOUT_SECONDS:-30}
-      - DAV_RANGE_SHIM=${DAV_RANGE_SHIM:-true}
-      # Reuse the physical-download timeouts by default (app/config.py) —
-      # only set here if you need the DAV relay's Xtream timeouts to
-      # diverge from DOWNLOAD_CONNECT_TIMEOUT/DOWNLOAD_READ_TIMEOUT.
-      - DAV_CONNECT_TIMEOUT=${DAV_CONNECT_TIMEOUT:-30}
-      - DAV_READ_TIMEOUT=${DAV_READ_TIMEOUT:-120}
       # Téléchargement physique de médias (onglet admin « Télécharger ») :
       # chemin FIXE dans le conteneur (comme PLEX_LIBRARY_DIR). Le dossier
       # hôte correspondant se règle via DOWNLOAD_HOST_PATH (volume ci-dessous).
       - DOWNLOAD_DIR=/app/downloads
-      - DOWNLOAD_CONCURRENCY=${DOWNLOAD_CONCURRENCY:-1}
-      - DOWNLOAD_MIN_FREE_DISK_MB=${DOWNLOAD_MIN_FREE_DISK_MB:-2048}
       - TZ=${TZ:-UTC}
+    # AUDIT-P7-007 (S6.1) : l'image tourne désormais en utilisateur non-root
+    # UID:GID 1000:1000 (voir Dockerfile). Ces 4 volumes hôtes doivent être
+    # accessibles en écriture par 1000:1000 AVANT le premier
+    # `docker compose up` avec cette image, sinon le boot échoue à `init_db`
+    # (SQLite/WAL + verrou d'élection master `fcntl.flock`) ou dégrade en
+    # esclave silencieux (AUDIT-P1-003) :
+    #   chown -R 1000:1000 ./data ./logs ./media ./downloads
+    # (adapter les 2 derniers chemins si PLEX_MEDIA_HOST_PATH/
+    # DOWNLOAD_HOST_PATH sont surchargés). Détail + procédure de migration
+    # d'un déploiement existant : docs/32-ops-docker-nonroot.md.
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs

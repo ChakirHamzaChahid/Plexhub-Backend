@@ -5,11 +5,11 @@ import logging
 import time
 from typing import List, Optional
 from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.config import settings
 from app.models.database import XtreamCategory, XtreamAccount, Media, LiveChannel
 from app.services.xtream_service import xtream_service
-from app.utils.db_retry import commit_with_retry
+from app.utils.db_retry import commit_with_retry, write_with_retry
 from app.utils.server_id import build_server_id
 
 logger = logging.getLogger(__name__)
@@ -237,8 +237,14 @@ async def bulk_update_categories(
                 )
             )
         result = await db.execute(base_stmt)
-        # CR-C04: retry on "database is locked" — bulk category writes can
-        # race a concurrent sync/validation cycle holding the WAL writer.
+        # NOT converted to write_with_retry (AUDIT-P1-001, ADR 0004 Decision
+        # 4 — "no mechanical conversion"): this is the only commit point for
+        # update_filter_mode()'s and the per-category update_category_
+        # allowed() statements executed above, all pending on this SAME `db`
+        # session (no earlier commit in this function). A fresh session
+        # would either orphan those uncommitted statements or race this
+        # session's own held write transaction. commit_with_retry is honest
+        # here; busy_timeout=60s is the real safety net for this call path.
         await commit_with_retry(db)
         logger.info(
             f"Set {result.rowcount} unlisted categories to is_allowed={default_allowed} "
@@ -290,7 +296,15 @@ async def update_media_category_visibility(
             .where(LiveChannel.server_id == server_id)
             .values(is_in_allowed_categories=True)
         )
-        # CR-C04: retry on "database is locked" — request-path write.
+        # NOT converted to write_with_retry (AUDIT-P1-001, ADR 0004 Decision
+        # 4 — "no mechanical conversion"): this function's own
+        # `category_filter_mode` read at the top of update_media_category_
+        # visibility() depends on read-after-write consistency with this
+        # SAME `db` session — notably bulk_update_categories()'s
+        # update_filter_mode() call when filter_mode == "all" (this is its
+        # only commit point). A fresh session would silently read the STALE
+        # filter_mode instead. commit_with_retry is honest here;
+        # busy_timeout=60s is the real safety net for this call path.
         await commit_with_retry(db)
         logger.info(f"Visibility update [{account_id}]: mode=all, all media + live channels set to visible")
         return
@@ -405,7 +419,14 @@ async def update_media_category_visibility(
                 .values(is_in_allowed_categories=True)
             )
 
-    # CR-C04: retry on "database is locked" — request-path write.
+    # NOT converted to write_with_retry (AUDIT-P1-001, ADR 0004 Decision 4 —
+    # "no mechanical conversion"): same read-after-uncommitted-write
+    # dependency as the mode=="all" branch above (this function's own
+    # `category_filter_mode` read, plus whatever bulk_update_categories()
+    # left pending on this SAME `db` session before calling us) — a fresh
+    # session risks a stale read or a lock race against `db`'s own held
+    # write transaction. commit_with_retry is honest here; busy_timeout=60s
+    # is the real safety net for this call path.
     await commit_with_retry(db)
 
     logger.info(
@@ -435,60 +456,85 @@ async def update_media_adult_flags(
     generation (folder/file names + movie.nfo <title>) — via apply_adult_prefix,
     but never stored on media.title. Idempotent and retroactive: runs every sync
     after update_media_category_visibility.
+
+    AUDIT-P1-001 / ADR 0004 Decision 4 (S3.2): converted to write_with_retry.
+    This function is fully self-contained — everything it reads and writes
+    is re-derived from `account_id` alone, nothing depends on prior
+    uncommitted state of the caller's `db` session (unlike
+    update_media_category_visibility, which is NOT converted — see its
+    docstring/comments) — so it is safe to run each retry attempt on a
+    FRESH session bound to the same engine as the caller's `db` (`db.bind`,
+    not `db.get_bind()` — the latter returns the underlying sync `Engine`,
+    which `async_sessionmaker` rejects; `.bind` is the actual `AsyncEngine`
+    the session was built from). This also keeps tests against an isolated
+    `db_engine` fixture writing to that same test database rather than the
+    production pool. `db` itself is only used to resolve the target engine;
+    the real read+write happens on the fresh session inside `_work`.
     """
     server_id = build_server_id(account_id)
 
-    result = await db.execute(
-        select(XtreamCategory).where(XtreamCategory.account_id == account_id)
-    )
-    categories = result.scalars().all()
+    async def _work(session: AsyncSession) -> int:
+        result = await session.execute(
+            select(XtreamCategory).where(XtreamCategory.account_id == account_id)
+        )
+        categories = result.scalars().all()
 
-    explicit_ids = set(settings.ADULT_CATEGORY_IDS)
-    adult_vod_ids = {
-        cat.category_id
-        for cat in categories
-        if cat.category_type == "vod"
-        and (_is_adult_category_name(cat.category_name) or cat.category_id in explicit_ids)
-    }
+        explicit_ids = set(settings.ADULT_CATEGORY_IDS)
+        adult_vod_ids = {
+            cat.category_id
+            for cat in categories
+            if cat.category_type == "vod"
+            and (_is_adult_category_name(cat.category_name) or cat.category_id in explicit_ids)
+        }
 
-    # Reset every movie to non-adult, then flag the adult categories.
-    await db.execute(
-        update(Media)
-        .where(Media.server_id == server_id, Media.type == "movie")
-        .values(is_adult=False)
-    )
+        # Reset every movie to non-adult, then flag the adult categories.
+        # Idempotent by construction: a replayed attempt (retry) fully
+        # recomputes from scratch every time, never doubling an effect.
+        await session.execute(
+            update(Media)
+            .where(Media.server_id == server_id, Media.type == "movie")
+            .values(is_adult=False)
+        )
 
-    if adult_vod_ids:
-        chunk_size = 500
-        vod_list = list(adult_vod_ids)
-        for i in range(0, len(vod_list), chunk_size):
-            chunk = vod_list[i : i + chunk_size]
-            await db.execute(
+        if adult_vod_ids:
+            chunk_size = 500
+            vod_list = list(adult_vod_ids)
+            for i in range(0, len(vod_list), chunk_size):
+                chunk = vod_list[i : i + chunk_size]
+                await session.execute(
+                    update(Media)
+                    .where(
+                        Media.server_id == server_id,
+                        Media.type == "movie",
+                        Media.filter.in_(chunk),
+                    )
+                    .values(is_adult=True)
+                )
+
+            # Force the +18 certification on flagged movies (NFO <mpaa> / API).
+            await session.execute(
                 update(Media)
                 .where(
                     Media.server_id == server_id,
                     Media.type == "movie",
-                    Media.filter.in_(chunk),
+                    Media.is_adult == True,
                 )
-                .values(is_adult=True)
+                .values(content_rating=settings.ADULT_CONTENT_RATING)
             )
 
-        # Force the +18 certification on flagged movies (NFO <mpaa> / API).
-        await db.execute(
-            update(Media)
-            .where(
-                Media.server_id == server_id,
-                Media.type == "movie",
-                Media.is_adult == True,
-            )
-            .values(content_rating=settings.ADULT_CONTENT_RATING)
-        )
+        await session.commit()
+        return len(adult_vod_ids)
 
-    await db.commit()
+    session_factory = async_sessionmaker(db.bind, class_=AsyncSession, expire_on_commit=False)
+    adult_category_count = await write_with_retry(
+        _work,
+        session_factory=session_factory,
+        op="category_service.update_media_adult_flags",
+    )
 
     logger.info(
         f"Adult flags update [{account_id}]: "
-        f"adult VOD categories={len(adult_vod_ids)}"
+        f"adult VOD categories={adult_category_count}"
     )
 
 

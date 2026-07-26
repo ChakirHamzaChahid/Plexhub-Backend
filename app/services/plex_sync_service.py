@@ -21,6 +21,16 @@ Identity rule (Android contract, house-law piège 15's sibling for Plex):
 item with neither an `imdb://` nor a `tmdb://` guid gets a per-source key
 (`plexsrc://{server_id}/{rating_key}`) that can never accidentally merge two
 different titles.
+
+Observability (AUDIT-P8-002 / S5.4,
+`docs/plans/2026-07-26-refacto-audit-v1-plan.md` §VAGUE 5): every exit of
+`run_full_sync` increments `plexhub_plex_sync_total{result}` (declared +
+zero-init'd in `app.utils.metrics`, `result in {ok, disabled,
+already_running, error}`) so the sync's outcome — including the
+claim-based `already_running` case, which is routine, not a failure — is
+visible without reading logs. Never labelled with a server/account
+identifier, an `access_token`, or a `base_uri` (closed, secret-free label
+set, same invariant as `_safe_error()` above).
 """
 from __future__ import annotations
 
@@ -44,6 +54,7 @@ from app.services.plex_api_service import (
     plex_api_service,
 )
 from app.utils.db_retry import run_with_retry
+from app.utils.metrics import plex_sync_total
 from app.utils.server_id import build_plex_server_id, parse_plex_server_id
 from app.utils.time import now_ms
 
@@ -602,13 +613,22 @@ async def run_full_sync(session_factory) -> PlexSyncReport:
 
     No-op (returns a `status="disabled"` report) when `PLEX_ACCOUNT_TOKEN`
     is unset. Returns `status="already_running"` without doing any work if
-    another sync currently holds the claim. Always releases the claim
-    (`finally`), even on an unexpected exception.
+    another sync currently holds the claim (a normal, expected outcome of the
+    claim-based design, NOT an error — see `plexhub_plex_sync_total` below).
+    Always releases the claim (`finally`), even on an unexpected exception.
+
+    Every exit point increments `plexhub_plex_sync_total{result}`
+    (AUDIT-P8-002 / S5.4, `result in {ok, disabled, already_running,
+    error}`) exactly once, mirroring `PlexSyncReport.status` byte-for-byte —
+    `already_running` and `error` are deliberately distinct labels so a
+    concurrent-claim rejection (routine) never inflates the error rate.
     """
     if not settings.PLEX_ACCOUNT_TOKEN:
+        plex_sync_total.labels(result="disabled").inc()
         return PlexSyncReport(status="disabled")
 
     if not await _claim_sync(session_factory):
+        plex_sync_total.labels(result="already_running").inc()
         return PlexSyncReport(status="already_running")
 
     report = PlexSyncReport()
@@ -671,4 +691,5 @@ async def run_full_sync(session_factory) -> PlexSyncReport:
         report.duration_s = time.monotonic() - t0
         await _release_sync(session_factory, error=release_error)
 
+    plex_sync_total.labels(result=report.status).inc()
     return report

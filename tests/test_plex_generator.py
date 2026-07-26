@@ -202,6 +202,52 @@ class TestLocalStorage:
         storage.write_file("Films/Test/movie.nfo", "<movie><title>X</title></movie>")
         assert (tmp_path / "Films" / "Test" / "movie.nfo").exists()
 
+    def test_write_file_returns_created_on_first_write(self, tmp_path):
+        storage = LocalStorage(tmp_path)
+        status = storage.write_file("Films/Test/movie.nfo", "<movie/>")
+        assert status == "created"
+
+    def test_write_file_preserves_existing_by_default(self, tmp_path):
+        """AUDIT-P6-006 default contract: an existing generated file (e.g.
+        hand-enriched with Tiny Media Manager) is never rewritten unless the
+        caller explicitly opts in with force=True."""
+        storage = LocalStorage(tmp_path)
+        storage.write_file("Films/Test/movie.nfo", "<movie><title>Original</title></movie>")
+        status = storage.write_file("Films/Test/movie.nfo", "<movie><title>New</title></movie>")
+        assert status == "unchanged"
+        content = (tmp_path / "Films" / "Test" / "movie.nfo").read_text(encoding="utf-8")
+        assert "Original" in content
+        assert "New" not in content
+
+    def test_write_file_force_rewrites_existing(self, tmp_path):
+        storage = LocalStorage(tmp_path)
+        storage.write_file("Films/Test/movie.nfo", "<movie><title>Original</title></movie>")
+        status = storage.write_file(
+            "Films/Test/movie.nfo", "<movie><title>New</title></movie>", force=True,
+        )
+        assert status == "updated"
+        content = (tmp_path / "Films" / "Test" / "movie.nfo").read_text(encoding="utf-8")
+        assert "New" in content
+        assert "Original" not in content
+
+    def test_write_file_force_on_new_file_is_created_not_updated(self, tmp_path):
+        storage = LocalStorage(tmp_path)
+        status = storage.write_file("Films/Test/movie.nfo", "<movie/>", force=True)
+        assert status == "created"
+
+    def test_write_file_force_writes_atomically(self, tmp_path):
+        """force=True must go through the same tempfile+os.replace path as any
+        other write — never leave a partially-written file if interrupted."""
+        storage = LocalStorage(tmp_path)
+        storage.write_file("Films/Test/movie.nfo", "<movie><title>Original</title></movie>")
+        storage.write_file(
+            "Films/Test/movie.nfo", "<movie><title>New</title></movie>", force=True,
+        )
+        target = tmp_path / "Films" / "Test" / "movie.nfo"
+        tmp = target.with_suffix(target.suffix + ".tmp")
+        assert not tmp.exists()
+        assert target.read_text(encoding="utf-8") == "<movie><title>New</title></movie>"
+
     def test_delete_file(self, tmp_path):
         storage = LocalStorage(tmp_path)
         storage.write_strm("Films/Test/Test.strm", "http://x")
@@ -631,3 +677,174 @@ class TestGenerateOffloadsBlockingIO:
         # loop, the ticker would get essentially 0 ticks during that window.
         # Offloaded via asyncio.to_thread, the loop keeps ticking concurrently.
         assert tick_count >= 10
+
+
+class TestForceRefreshMetadata:
+    """AUDIT-P6-006: opt-in refresh policy for generated NFO files.
+
+    `write_file`/`download_image` preserve any existing generated file
+    forever, so a re-enrichment (new OMDb notes, ids corrected by
+    validate_id_consistency, blended display_rating...) never reaches disk
+    until an operator manually deletes the NFO. These tests pin: (1) the
+    default stays byte-for-byte the historical "preserve" behaviour, (2) the
+    opt-in `force_refresh_metadata=True` flag actually refreshes NFO content,
+    (3) images are NEVER refreshed by this flag under any circumstance, and
+    (4) the `[XXX]` adult tag survives a refresh (piège 15)."""
+
+    def _movie(self, summary: str, is_adult: bool = False, poster_url: str | None = None):
+        return PlexMovie(
+            source_id="vod_1.mp4", title="Dune", year=2021,
+            stream_url="http://stream/1", summary=summary, is_adult=is_adult,
+            poster_url=poster_url,
+        )
+
+    def test_default_does_not_rewrite_existing_nfo(self, tmp_path):
+        source = MockSource(movies=[self._movie("Original summary")])
+        storage = LocalStorage(tmp_path)
+        gen1 = PlexLibraryGenerator(source, storage, tmp_path, strm_only=False)
+        asyncio.run(gen1.generate())
+
+        nfo_path = tmp_path / "Films" / "Dune (2021)" / "movie.nfo"
+        assert "Original summary" in nfo_path.read_text(encoding="utf-8")
+
+        # Re-enrichment changes the summary in the source, but a plain re-run
+        # (force_refresh_metadata defaults False) must leave the NFO exactly
+        # as it was — this is the "strictly unchanged by default" contract.
+        source2 = MockSource(movies=[self._movie("New enriched summary")])
+        gen2 = PlexLibraryGenerator(source2, storage, tmp_path, strm_only=False)
+        report2 = asyncio.run(gen2.generate())
+
+        content = nfo_path.read_text(encoding="utf-8")
+        assert "Original summary" in content
+        assert "New enriched summary" not in content
+        # NFO writes stay invisible to the report by default, exactly as
+        # before this feature existed — only the (unchanged) .strm counts.
+        assert report2.updated == 0
+        assert report2.created == 0
+        assert report2.unchanged == 1
+
+    def test_force_refresh_rewrites_nfo_content(self, tmp_path):
+        source = MockSource(movies=[self._movie("Original summary")])
+        storage = LocalStorage(tmp_path)
+        gen1 = PlexLibraryGenerator(source, storage, tmp_path, strm_only=False)
+        asyncio.run(gen1.generate())
+
+        nfo_path = tmp_path / "Films" / "Dune (2021)" / "movie.nfo"
+        assert "Original summary" in nfo_path.read_text(encoding="utf-8")
+
+        source2 = MockSource(movies=[self._movie("New enriched summary")])
+        gen2 = PlexLibraryGenerator(
+            source2, storage, tmp_path, strm_only=False, force_refresh_metadata=True,
+        )
+        report2 = asyncio.run(gen2.generate())
+
+        content = nfo_path.read_text(encoding="utf-8")
+        assert "New enriched summary" in content
+        assert "Original summary" not in content
+        # The refresh must be honestly reflected as `updated`, never silently
+        # folded into `unchanged` — that's the whole point of this finding.
+        assert report2.updated == 1
+
+    def test_force_refresh_new_file_counts_as_created(self, tmp_path):
+        source = MockSource(movies=[self._movie("Only summary")])
+        storage = LocalStorage(tmp_path)
+        gen = PlexLibraryGenerator(
+            source, storage, tmp_path, strm_only=False, force_refresh_metadata=True,
+        )
+        report = asyncio.run(gen.generate())
+
+        # First-ever run: nothing pre-existed, so the .nfo counts as created,
+        # same bucket the .strm creation lands in.
+        assert report.created == 2  # 1 .strm + 1 .nfo
+
+    def test_force_refresh_never_touches_poster_image(self, tmp_path):
+        poster_rel = movie_poster_path("Dune", 2021)
+        poster_full = tmp_path / poster_rel
+        poster_full.parent.mkdir(parents=True, exist_ok=True)
+        sentinel = b"\xff\xd8\xff-hand-retouched-by-tinyMediaManager"
+        poster_full.write_bytes(sentinel)
+
+        source = MockSource(movies=[
+            self._movie("Some summary", poster_url="http://example.invalid/poster.jpg"),
+        ])
+        storage = LocalStorage(tmp_path)
+        gen = PlexLibraryGenerator(
+            source, storage, tmp_path, strm_only=False, force_refresh_metadata=True,
+        )
+        asyncio.run(gen.generate())
+
+        # download_image/submit_image_download take no `force` parameter at
+        # all — an existing poster short-circuits before any network call,
+        # regardless of force_refresh_metadata. No network access is even
+        # attempted here (poster.jpg already existed), so this test needs no
+        # HTTP mocking; if the guard regressed, this write would attempt a
+        # real request to example.invalid and fail loudly instead of silently
+        # preserving the sentinel bytes.
+        assert poster_full.read_bytes() == sentinel
+
+    def test_force_refresh_preserves_adult_title_prefix(self, tmp_path):
+        """Piège §9-15: a refreshed NFO must keep re-applying the [XXX] tag —
+        it's re-derived from `is_adult` on every build_movie_nfo() call, not
+        cached from the first write, so a refresh can't silently drop it."""
+        source = MockSource(movies=[self._movie("Original", is_adult=True)])
+        storage = LocalStorage(tmp_path)
+        gen1 = PlexLibraryGenerator(source, storage, tmp_path, strm_only=False)
+        asyncio.run(gen1.generate())
+
+        nfo_path = tmp_path / "Films" / "[XXX] Dune (2021)" / "movie.nfo"
+        assert "<title>[XXX] Dune</title>" in nfo_path.read_text(encoding="utf-8")
+
+        source2 = MockSource(movies=[self._movie("Refreshed", is_adult=True)])
+        gen2 = PlexLibraryGenerator(
+            source2, storage, tmp_path, strm_only=False, force_refresh_metadata=True,
+        )
+        asyncio.run(gen2.generate())
+
+        content = nfo_path.read_text(encoding="utf-8")
+        assert "<title>[XXX] Dune</title>" in content
+        assert "Refreshed" in content
+
+    def test_force_refresh_series_and_episode_nfo_rewritten(self, tmp_path):
+        series = _make_series()
+        source = MockSource(series=[series])
+        storage = LocalStorage(tmp_path)
+        gen1 = PlexLibraryGenerator(source, storage, tmp_path, strm_only=False)
+        asyncio.run(gen1.generate())
+
+        tvshow_path = tmp_path / "Series" / "Test Series" / "tvshow.nfo"
+        ep1_nfo = (
+            tmp_path / "Series" / "Test Series" / "Season 01"
+            / "Test Series S01E01.nfo"
+        )
+        assert tvshow_path.exists()
+        assert ep1_nfo.exists()
+        original_tvshow = tvshow_path.read_text(encoding="utf-8")
+        original_ep1 = ep1_nfo.read_text(encoding="utf-8")
+
+        # Rebuild with an episode whose summary changed.
+        changed_series = _make_series(episodes=[
+            PlexEpisode(
+                source_id="ep_1.mkv", series_title="Test Series",
+                season_num=1, episode_num=1, stream_url="http://stream/ep1",
+                summary="Changed episode summary",
+            ),
+            PlexEpisode(
+                source_id="ep_2.mkv", series_title="Test Series",
+                season_num=1, episode_num=2, stream_url="http://stream/ep2",
+            ),
+        ])
+        source2 = MockSource(series=[changed_series])
+        gen2 = PlexLibraryGenerator(
+            source2, storage, tmp_path, strm_only=False, force_refresh_metadata=True,
+        )
+        report2 = asyncio.run(gen2.generate())
+
+        assert ep1_nfo.read_text(encoding="utf-8") != original_ep1
+        assert "Changed episode summary" in ep1_nfo.read_text(encoding="utf-8")
+        # tvshow.nfo content is identical here (nothing series-level changed)
+        # but force=True still rewrites it — content stays correct either way.
+        assert tvshow_path.read_text(encoding="utf-8") == original_tvshow
+        # tvshow.nfo + 2 episode NFOs, all pre-existing -> all rewritten and
+        # honestly counted as "updated" (both .strm URLs are unchanged, so no
+        # .strm contributes to this count).
+        assert report2.updated == 3

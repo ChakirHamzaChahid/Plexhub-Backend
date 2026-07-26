@@ -14,6 +14,7 @@ from app.models.database import (
 from app.services.aggregation_service import (
     MovieGroup, SeriesGroup, aggregate_movies, aggregate_series,
 )
+from app.utils.metrics import unified_path_total
 from app.utils.server_id import build_server_id
 from app.utils.time import now_ms
 from app.utils.ttl_cache import TTLCache
@@ -275,12 +276,29 @@ class MediaService:
         # / searched queries can't (filtering rows changes group membership +
         # best-row selection), and include_broken=False is never issued by the
         # API — both correctly fall through to the live aggregation below.
+        #
+        # S2.4 (AUDIT-P3-002, visibility only): every call increments exactly
+        # one of the three `plexhub_unified_path_total{path}` series so the two
+        # live-aggregation causes are distinguishable in production:
+        #   - "snapshot"      — the fast, intended path (precomputed media_group).
+        #   - "live_filtered" — EXPECTED live path: the request itself carries a
+        #     filter the snapshot can't serve (search/genre/year, or the
+        #     API-unreachable include_broken=False).
+        #   - "live_fallback" — ANOMALOUS live path: an unfiltered request that
+        #     *should* have hit the snapshot fell through because
+        #     `_unified_list_from_snapshot` returned None (snapshot empty/never
+        #     built for this media_type) — this is the silent-degradation
+        #     scenario the finding is about; it should page an on-call.
         if search is None and genre is None and year is None and include_broken:
             snapshot = await self._unified_list_from_snapshot(
                 db, media_type, limit, offset,
             )
             if snapshot is not None:
+                unified_path_total.labels(path="snapshot").inc()
                 return snapshot
+            unified_path_total.labels(path="live_fallback").inc()
+        else:
+            unified_path_total.labels(path="live_filtered").inc()
 
         query = select(Media).where(
             Media.type == media_type,

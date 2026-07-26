@@ -33,7 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import verify_api_key
 from app.db.database import async_session_factory, get_db
 from app.models.database import AiMediaBlurb, AiSubtitleCache
-from app.utils.db_retry import commit_with_retry
+from app.utils.db_retry import write_with_retry
 from app.utils.time import now_ms
 from app.services.embedding_service import EmbeddingUnavailableError, weighted_centroid
 from app.services.recommendation_service import (
@@ -1017,9 +1017,16 @@ async def translate_subtitle(
 
     duration = round(time.perf_counter() - t0, 2)
 
-    # 4. Persist to cache — ignore concurrent race on same cache_key
-    try:
-        db.add(
+    # 4. Persist to cache — ignore concurrent race on same cache_key.
+    # AUDIT-P1-001 (S3.3): converted to write_with_retry. This write is
+    # self-contained (no read-modify-write coupling with `db`, the
+    # request-scoped session — the cache lookup happened earlier, on a
+    # separate query, and its outcome doesn't gate this insert) and
+    # idempotent-enough to replay: the cache_key is content-derived, so a
+    # retried attempt stages the exact same row again. `work` reconstructs
+    # the ORM object from scratch on every call, per ADR 0004, Decision 4.
+    async def _persist_subtitle_cache(session: AsyncSession) -> None:
+        session.add(
             AiSubtitleCache(
                 cache_key=cache_key,
                 target_lang=payload.target_lang,
@@ -1030,9 +1037,14 @@ async def translate_subtitle(
                 created_at=now_ms(),
             )
         )
-        await commit_with_retry(db)
+        await session.commit()
+
+    try:
+        await write_with_retry(_persist_subtitle_cache, op="ai.subtitles_cache_persist")
     except IntegrityError:
-        await db.rollback()
+        # Concurrent race on the same cache_key — best-effort cache, the
+        # freshly computed `result` is still returned to the client below.
+        pass
 
     # 5. Return fresh result
     return SubtitleTranslateResponse(
@@ -1153,17 +1165,23 @@ async def blurb_generate(
     except Exception as exc:
         raise _ollama_503(exc) from exc
 
-    # 4. Persist (INSERT OR REPLACE semantics via delete+add)
+    # 4. Persist (INSERT OR REPLACE semantics via delete+add).
+    # AUDIT-P1-001 (S3.3): converted to write_with_retry. Self-contained
+    # delete-then-insert with no read-modify-write coupling to `db` (the
+    # request-scoped session) — replaying the whole delete+add on a lock
+    # retry is idempotent (same final row). `work` rebuilds the statement
+    # and ORM object from scratch every call, per ADR 0004, Decision 4.
     tags_json = _json.dumps(result["tags"], ensure_ascii=False)
-    try:
-        await db.execute(
+
+    async def _persist_blurb(session: AsyncSession) -> None:
+        await session.execute(
             _text(
                 "DELETE FROM ai_media_blurb "
                 "WHERE tmdb_id = :tid AND media_type = :mt AND lang = :lang"
             ),
             {"tid": payload.tmdb_id, "mt": payload.media_type, "lang": payload.lang},
         )
-        db.add(
+        session.add(
             AiMediaBlurb(
                 tmdb_id=payload.tmdb_id,
                 media_type=payload.media_type,
@@ -1174,9 +1192,14 @@ async def blurb_generate(
                 created_at=now_ms(),
             )
         )
-        await commit_with_retry(db)
+        await session.commit()
+
+    try:
+        await write_with_retry(_persist_blurb, op="ai.blurb_cache_persist")
     except Exception:
-        await db.rollback()
+        # Best-effort cache: the freshly generated `result` is still
+        # returned to the client below even if persistence ultimately fails.
+        pass
 
     # 5. Return fresh result
     return BlurbResponse(

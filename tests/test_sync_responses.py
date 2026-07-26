@@ -9,9 +9,9 @@ Same pattern as ``tests/test_categories_refresh_camelcase.py`` (CR-C02).
 from __future__ import annotations
 
 from app.config import settings
-from app.workers import sync_worker as sync_worker_module
 from app.workers import enrichment_worker as enrichment_worker_module
 from app.api import sync as sync_router_module
+from app.services import job_registry
 
 
 # The JSON API is X-API-Key gated (fail-closed) — same pattern as
@@ -26,8 +26,8 @@ async def test_list_sync_jobs_returns_typed_camelcase_shape(monkeypatch, api_cli
     (camelCase), via ``SyncJobListResponse``/``SyncJobResponse``."""
     monkeypatch.setattr(settings, "AI_API_KEY", API_KEY)
     monkeypatch.setattr(
-        sync_worker_module,
-        "_sync_jobs",
+        job_registry,
+        "_jobs",
         {
             "sync_acct1_12345": {
                 "status": "completed",

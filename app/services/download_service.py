@@ -19,13 +19,11 @@ it in any exception message.
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import json
 import logging
 import os
 import re
 import shutil
-import socket
 import unicodedata
 import uuid
 from dataclasses import dataclass
@@ -42,8 +40,11 @@ from app.models.schemas import DownloadJobResponse, apply_adult_prefix
 from app.services.aggregation_service import canonical_title_year
 from app.services.media_service import media_service
 from app.services.stream_service import parse_rating_key
+from app.utils import metrics
 from app.utils.db_retry import run_with_retry
 from app.utils.server_id import parse_server_id
+from app.utils.ssrf import SsrfBlockedError
+from app.utils.ssrf import assert_public_host as _assert_public_host
 from app.utils.time import now_ms
 
 logger = logging.getLogger("plexhub.download")
@@ -85,6 +86,65 @@ class InsufficientDiskSpaceError(DownloadPermanentError):
     won't fix itself within the job's auto-retry budget, so this must not
     consume one of `DOWNLOAD_MAX_RETRIES` — it fails the job immediately,
     same as an upstream 404/403."""
+
+
+# --- Failure-reason classification (S5.2, AUDIT-P8-002/F-103) ---------------
+
+def classify_failure_reason(message: str) -> Optional[str]:
+    """Map a download failure's exception message to one of the CLOSED
+    ``plexhub_download_failures_total{reason}`` values declared in
+    ``app/utils/metrics.py`` (S1.4) — ``http_403 | disk_full | timeout |
+    confinement``. Colocated here rather than in the worker because the
+    exact wording of every message it matches is owned by THIS module:
+    `download_to_disk` and `check_free_disk_space` are the only two call
+    sites that ever raise them.
+
+    NEVER returns `None`: every failure maps to exactly one series, so
+    `sum(plexhub_download_failures_total)` equals the real failure count.
+
+    S5.2 originally mapped only 4 reasons and returned `None` for every
+    other real mode (`upstream 404`, `upstream {5xx}`, `unsafe redirect`,
+    `invalid content-type ...`, generic `network error`) and for caller-side
+    failures that never reach `download_to_disk` (missing Xtream account /
+    Plex source / media row, unresolved stream URL). That was the right call
+    at the time — mislabelling a 404 as `http_403` is worse than silence —
+    but it left the most common failure mode invisible in a subsystem the
+    audit called "totally blind" (AUDIT-P8-002). The enum was therefore
+    widened in `app/utils/metrics.py`, and this function now covers it.
+
+    `other` is the honest catch-all, not a dumping ground: a rising `other`
+    means a new failure mode appeared and the enum needs a value for it.
+
+    `confinement` (`PathConfinementError`/`DownloadDisabledError`, raised by
+    `resolve_confined`) is classified by the WORKER at its own call site
+    instead of here — those two exception *types* are already unambiguous
+    there, so no message string-match is needed for them.
+    """
+    if message.startswith("upstream "):
+        status = message[9:].split()[0] if len(message) > 9 else ""
+        if status == "403":
+            return "http_403"
+        if status == "404":
+            return "http_404"
+        if status.isdigit() and 500 <= int(status) <= 599:
+            return "http_5xx"
+        return "http_other"
+    if message.startswith("insufficient free disk space") or message.startswith("disk error"):
+        return "disk_full"
+    if message == "network timeout":
+        return "timeout"
+    if message == "network error":
+        return "network"
+    if message == "unsafe redirect":
+        return "unsafe_redirect"
+    if message.startswith("invalid content-type"):
+        return "invalid_content"
+    if "introuvable" in message:
+        # Pre-transfer caller-side failures raised by the worker before
+        # `download_to_disk` is ever reached: missing/inactive Xtream account,
+        # unresolvable stream URL, missing or unsynced Plex source row.
+        return "source_missing"
+    return "other"
 
 
 # --- Path confinement (F-007, security-critical) -----------------------------
@@ -292,41 +352,31 @@ async def _assert_public_redirect_host(host: Optional[str]) -> None:
     a provider's 302 can never make us fetch an internal address. The raised
     message never contains the host or the URL (they can embed Xtream creds).
 
-    Residual caveat: this validates the hostname's *current* resolution; a
-    determined attacker could DNS-rebind between this check and httpx's own
-    connect. That is a far more involved attack than the plain "302 to
-    127.0.0.1" this guards against, and out of scope for a self-hosted puller
-    against an operator-chosen provider.
+    Thin delegation to the shared `app.utils.ssrf` predicate (CR-S08) — the
+    resolution/validation logic itself, the DNS-verdict cache, and the
+    allow-list live there now so the DAV relay, library image downloads, and
+    stream health-check probes can all share the exact same guard instead of
+    four independent copies. This function only maps `SsrfBlockedError` to
+    the `DownloadPermanentError` this module's callers already expect.
+
+    Residual caveat (documented in full in `app.utils.ssrf`): this validates
+    the hostname's *current* resolution; a determined attacker could
+    DNS-rebind between this check and httpx's own connect. That is a far more
+    involved attack than the plain "302 to 127.0.0.1" this guards against,
+    and out of scope for a self-hosted puller against an operator-chosen
+    provider.
     """
-    if not host:
-        raise DownloadPermanentError("unsafe redirect")
-    # A bare IP literal in the Location skips DNS but still must be public.
     try:
-        infos = await asyncio.to_thread(
-            socket.getaddrinfo, host, None, type=socket.SOCK_STREAM
-        )
-    except OSError:
+        await _assert_public_host(host)
+    except SsrfBlockedError:
         raise DownloadPermanentError("unsafe redirect") from None
-    for info in infos:
-        try:
-            ip = ipaddress.ip_address(info[4][0])
-        except ValueError:
-            raise DownloadPermanentError("unsafe redirect") from None
-        if (
-            not ip.is_global
-            or ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_reserved
-            or ip.is_multicast
-        ):
-            raise DownloadPermanentError("unsafe redirect")
 
 
 # Public alias (house convention for cross-module reuse of a private
-# helper): the DAV relay reuses this exact SSRF guard on redirect targets
-# rather than duplicating the resolution/validation logic. See
-# app/dav/relay.py.
+# helper), kept for backward compatibility. `app/dav/relay.py` now imports
+# `app.utils.ssrf.assert_public_host` directly instead (breaks the
+# `services -> dav` edge of the `services <-> dav` import cycle,
+# AUDIT-P4-007 — see app/dav/relay.py's module docstring).
 assert_public_redirect_host = _assert_public_redirect_host
 
 
@@ -491,6 +541,15 @@ async def download_to_disk(
                                 continue
                             f.write(chunk)
                             bytes_done += len(chunk)
+                            # S5.2 (AUDIT-P8-002/F-103): count REAL bytes
+                            # transferred over the wire this call, not the
+                            # final file size — correct across resumes/retries
+                            # (a job resumed 3x increments by each delta, never
+                            # the same byte twice) and across a cancel (bytes
+                            # already flushed to `.part` before the cancel are
+                            # real bytes written to disk, so they still count
+                            # even though `.part` is never promoted).
+                            metrics.download_bytes_total.inc(len(chunk))
                             if on_progress is not None:
                                 await on_progress(bytes_done, bytes_total)
                             if cancel_check is not None and await cancel_check():

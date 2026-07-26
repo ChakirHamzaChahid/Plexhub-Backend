@@ -42,5 +42,18 @@ def calculate_display_rating(
     audience_rating: float | None,
     rating: float | None,
 ) -> float:
-    """COALESCE(scrapedRating, audienceRating, rating, 0.0) — matches Android."""
+    """COALESCE(scrapedRating, audienceRating, rating, 0.0) — matches Android.
+
+    Sync-only fallback (ADR 0004 Decision 1, AUDIT-P4-005): `sync_worker` is
+    the sole remaining caller of this formula. It is correct ONLY for raw
+    Xtream rows that carry no IMDb/TMDB rating yet — in that case
+    `app/utils/rating_blend.blend_rating` returns `None` ("nothing to
+    write") and this COALESCE is the right repli. Never use this to
+    (re)compute `display_rating` for a row that has, or is being given, an
+    IMDb or TMDB rating: `rating_blend.blend_rating` /
+    `blend_display_rating_case` is the single source of truth for that case
+    (see `nfo_import_service._compute_updates`, `enrichment_worker`). Calling
+    this formula on such a row is exactly the bug this ADR fixes — two
+    writers disagreeing and flip-flopping `display_rating` on every run.
+    """
     return scraped_rating or audience_rating or rating or 0.0

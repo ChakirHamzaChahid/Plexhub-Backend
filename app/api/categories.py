@@ -100,8 +100,17 @@ async def refresh_categories(
     try:
         vod_count, series_count = await refresh_categories_from_provider(db, account_id)
 
-        # CR-C04: retry on "database is locked" — refresh can race a
-        # concurrent sync/validation cycle holding the single WAL writer.
+        # AUDIT-P1-001 (S3.3) — deliberately NOT converted to write_with_retry.
+        # refresh_categories_from_provider mixes real network calls
+        # (xtream_service.get_vod_categories/get_series_categories) with the
+        # upsert writes on the SAME `db` session (ADR 0004, Decision 4:
+        # `work` must be fully replayable). Wrapping the whole call would
+        # re-fetch from the Xtream provider on every lock retry (up to 4x) —
+        # an external side effect this zone (S3.3, routers only) cannot
+        # remove without restructuring app/services/category_service.py
+        # (owned by S3.2). commit_with_retry (now honest per ADR 0004) is
+        # kept: a real, sustained lock surfaces the true OperationalError
+        # instead of silently retrying a provider refetch.
         await commit_with_retry(db)
 
         total_count = vod_count + series_count

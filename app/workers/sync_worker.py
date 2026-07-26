@@ -22,13 +22,38 @@ from app.utils.unification import (
     calculate_display_rating,
 )
 from app.utils.time import now_ms
-from app.utils.db_retry import commit_with_retry
+from app.utils.db_retry import commit_with_retry, write_with_retry
+from app.services import job_registry
+
+# --- AUDIT-P1-001 / ADR 0004 Decision 4 -- call-site migration note (Vague 3,
+# S3.1, docs/architecture/adr/0004-audit-v1-remediation-contracts.md) ---
+# `sync_account` holds ONE `AsyncSession` (`db`) across its entire multi-phase
+# run (categories -> VOD -> series -> episodes -> live -> visibility/adult
+# tagging/orphan cleanup -> last_synced_at). Nearly every phase's writes are
+# read back by a LATER statement on that SAME session before its own next
+# commit -- e.g. `_load_category_config` reads the very categories
+# `_refresh_categories` just wrote; each `differential_cleanup*` call reads
+# the rows its own batch loop just upserted this run; the final
+# `update_media_category_visibility`/`update_media_adult_flags` recompute over
+# the whole account's just-synced `Media` rows. `write_with_retry` opens a
+# FRESH session (a different connection) per attempt -- moving one of these
+# COMMITS to a fresh connection while `db`'s own transaction (started by an
+# earlier, still-unflushed read) stays open would leave `db` holding a stale
+# WAL snapshot for whatever it reads next: SQLite WAL readers see a fixed
+# snapshot as of when their transaction began, not later commits made by
+# OTHER connections. That would silently reintroduce a read-after-write gap
+# (e.g. a whitelist-mode first sync where `_load_category_config` misses the
+# categories just inserted by a fresh-session `_refresh_categories`) -- the
+# exact class of bug this migration exists to remove, not add. These
+# `commit_with_retry` call sites are therefore INTENTIONALLY left as-is (now
+# honest -- re-raises the real `OperationalError`, never `PendingRollbackError`
+# -- but not retrying past a real lock) rather than mechanically converted;
+# see ADR 0004 Decision 4, "Regle de non-conversion". The one exception is the
+# FINAL commit at the end of `sync_account` (visibility/adult/cleanup/
+# last_synced_at): by that point nothing else in this function reads from
+# `db` again, so it safely moves to `write_with_retry` below.
 
 logger = logging.getLogger("plexhub.sync")
-
-# In-memory sync job tracking (capped to prevent unbounded growth)
-_MAX_SYNC_JOBS = 100
-_sync_jobs: dict[str, dict] = {}
 
 # Per-account locks to prevent concurrent syncs on the same account
 _account_locks: dict[str, asyncio.Lock] = {}
@@ -42,13 +67,11 @@ def _get_account_lock(account_id: str) -> asyncio.Lock:
 
 
 def _record_sync_job(job_id: str, data: dict) -> None:
-    """Record a sync job, evicting oldest entries if over the cap."""
-    _sync_jobs[job_id] = data
-    if len(_sync_jobs) > _MAX_SYNC_JOBS:
-        # Remove oldest entries (dict preserves insertion order in Python 3.7+)
-        excess = len(_sync_jobs) - _MAX_SYNC_JOBS
-        for key in list(_sync_jobs)[:excess]:
-            del _sync_jobs[key]
+    """Deprecated shim over ``job_registry.set_job`` (ADR 0004 Décision 2 --
+    the tracker was extracted so all 5 ``/api/sync`` triggers, not just
+    ``sync_account``, can register/update a job under the router-issued
+    ``jobId``). Kept for backward compatibility."""
+    job_registry.set_job(job_id, data)
 
 
 def _safe_duration(value) -> int | None:
@@ -1082,23 +1105,51 @@ async def _refresh_categories(db, account, account_id: str):
         )
         await db.execute(stmt)
 
+    # Same-session coupling -- see the module-level note above (ADR 0004 D4):
+    # `_load_category_config` reads these rows back on the SAME `db` right
+    # after this call returns; a fresh-session write here could leave that
+    # read on a stale WAL snapshot. Left on `commit_with_retry` (honest,
+    # non-retrying) intentionally.
     await commit_with_retry(db)
     logger.info(f"Refreshed {count} categories for account {account_id} "
                 f"({len(live_cats)} Live, {len(vod_cats)} VOD, {len(series_cats)} Series)")
 
 
-async def sync_account(account_id: str):
-    """Full sync for a single Xtream account."""
+async def sync_account(account_id: str, job_id: str | None = None):
+    """Full sync for a single Xtream account.
+
+    ``job_id``: when provided (the HTTP trigger in ``app/api/sync.py``
+    already registered this id in ``job_registry`` synchronously, before
+    scheduling this coroutine as a background task), this call only
+    *updates* that entry -- it never re-creates it, so the router's
+    ``started_at`` timestamp survives. When ``None`` (called directly by
+    ``run_all_accounts``/the scheduler/``accounts.py``, outside of any HTTP
+    trigger), a job id is self-assigned and registered here, exactly like
+    before this module's job-tracking was extracted to ``job_registry``.
+    """
     from app.utils.metrics import sync_duration_seconds
     import time as _time
 
     lock = _get_account_lock(account_id)
     if lock.locked():
         logger.warning(f"Sync already running for account {account_id}, skipping")
+        if job_id:
+            # The router already registered this id -- resolve it instead
+            # of leaving it stuck on "processing" forever.
+            job_registry.update_job(
+                job_id,
+                status="failed",
+                progress={"error": f"Sync already running for account {account_id}"},
+                error=f"Sync already running for account {account_id}",
+            )
+            return job_id
         return f"sync_{account_id}_skipped"
 
-    job_id = f"sync_{account_id}_{now_ms()}"
-    _record_sync_job(job_id, {"status": "processing", "progress": {}})
+    self_registered = job_id is None
+    if job_id is None:
+        job_id = f"sync_{account_id}_{now_ms()}"
+    if self_registered:
+        job_registry.create_job(job_id, phase="sync")
 
     sync_started = _time.monotonic()
     sync_result = "error"
@@ -1115,7 +1166,7 @@ async def sync_account(account_id: str):
                 account = result.scalars().first()
                 if not account:
                     logger.warning(f"Account {account_id} not found or inactive")
-                    _record_sync_job(job_id, {"status": "failed", "progress": {}})
+                    job_registry.update_job(job_id, status="failed", progress={})
                     return job_id
 
                 # Detached snapshot used by parallel coroutines (asyncio.gather
@@ -1236,6 +1287,9 @@ async def sync_account(account_id: str):
                         async with db.begin_nested():  # SAVEPOINT
                             await upsert_media_batch(db, batch_rows, current_rating_keys=all_vod_keys)
                         vod_rows.extend(batch_rows)
+                        # Same-session coupling -- see module-level note (ADR
+                        # 0004 D4): `differential_cleanup*` below reads these
+                        # rows back on `db`. Left honest-not-retrying.
                         await commit_with_retry(db)
                     except Exception as e:
                         logger.error(f"VOD batch {batch_start}-{batch_end} failed, rolling back: {e}")
@@ -1258,6 +1312,9 @@ async def sync_account(account_id: str):
                         )
                 if vod_rows:
                     await enqueue_for_enrichment(db, vod_rows)
+                # Same-session coupling -- see module-level note (ADR 0004
+                # D4): the Series phase right after reads/writes the SAME
+                # `db`. Left honest-not-retrying.
                 await commit_with_retry(db)
                 total_synced += len(all_vod_keys)
                 logger.info(f"VOD sync: {len(vod_rows)} updated, {skipped_vod} unchanged, {len(all_vod_keys)} total")
@@ -1352,6 +1409,9 @@ async def sync_account(account_id: str):
                         await differential_cleanup_filtered(
                             db, server_id, synced_series_cat_ids, all_series_keys, media_type="show"
                         )
+                # Same-session coupling -- see module-level note (ADR 0004
+                # D4): the Episodes phase right after reads/writes the SAME
+                # `db`. Left honest-not-retrying.
                 await commit_with_retry(db)
                 total_synced += len(all_series_keys)
                 logger.info(f"Series sync: {len(series_rows)} updated, {unchanged_count} unchanged")
@@ -1464,6 +1524,10 @@ async def sync_account(account_id: str):
                                 episodes_removed += await differential_cleanup_episodes(
                                     db, server_id, grandparent_rating_key, live_keys
                                 )
+                        # Same-session coupling -- see module-level note (ADR
+                        # 0004 D4): this loop's own next batch, and the Live
+                        # phase after it, read/write the SAME `db`. Left
+                        # honest-not-retrying.
                         await commit_with_retry(db)
                         episode_count += len(episode_batch)
                         logger.info(f"Synced {episode_count} episodes ({batch_end}/{len(all_series_dtos)} series)")
@@ -1530,6 +1594,10 @@ async def sync_account(account_id: str):
                         try:
                             async with db.begin_nested():
                                 await upsert_live_channels_batch(db, batch)
+                            # Same-session coupling -- see module-level note
+                            # (ADR 0004 D4): `differential_cleanup_live*`
+                            # below reads these rows back on `db`. Left
+                            # honest-not-retrying.
                             await commit_with_retry(db)
                         except Exception as e:
                             logger.error(f"Live batch {batch_start} failed, rolling back: {e}")
@@ -1544,36 +1612,62 @@ async def sync_account(account_id: str):
                             db, server_id, synced_live_cat_ids, all_live_ids
                         )
 
+                # Same-session coupling -- see module-level note (ADR 0004
+                # D4): the visibility/adult/cleanup finalize block right
+                # after reads the rows this phase just wrote, on `db`. Left
+                # honest-not-retrying.
                 await commit_with_retry(db)
                 total_synced += len(all_live_ids)
                 logger.info(f"Live sync: {len(live_rows)} updated, {live_skipped} unchanged, {len(all_live_ids)} total")
 
-                # Recalculate visibility for ALL media based on category config
+                # Recalculate visibility for ALL media based on category
+                # config, tag adult content, reconcile orphaned
+                # enrichment-queue rows and bump the account's
+                # last_synced_at -- all in ONE fresh session, committed via
+                # `write_with_retry` (ADR 0004 Decision 4). Safe here --
+                # unlike every earlier commit in this function (see the
+                # module-level note) -- because this is the LAST use of the
+                # database in `sync_account`: nothing downstream reads from
+                # `db` again, so a fresh connection is guaranteed to already
+                # see everything the VOD/series/episode/live phases just
+                # committed through `db` itself (the commit right above).
+                # `session_factory=async_session_factory` is passed
+                # EXPLICITLY (not the `write_with_retry` default) because
+                # this module's own `async_session_factory` name is what
+                # tests monkeypatch (`wired_sync_db`) -- the default would
+                # silently resolve to the real `app.db.database` one instead.
                 from app.services.category_service import (
                     update_media_category_visibility,
                     update_media_adult_flags,
                 )
-                await update_media_category_visibility(db, account_id)
-                # Tag adult movies (+18 rating) from their Xtream category
-                await update_media_adult_flags(db, account_id)
 
-                # Reconcile enrichment_queue: drop rows whose media was removed
-                # (provider churn / pagination eviction leaves them orphaned).
-                await cleanup_orphan_enrichment_queue(db, server_id)
+                async def _finalize_account(session):
+                    await update_media_category_visibility(session, account_id)
+                    # Tag adult movies (+18 rating) from their Xtream category
+                    await update_media_adult_flags(session, account_id)
+                    # Reconcile enrichment_queue: drop rows whose media was
+                    # removed (provider churn / pagination eviction leaves
+                    # them orphaned).
+                    await cleanup_orphan_enrichment_queue(session, server_id)
+                    # Update account last_synced_at
+                    await session.execute(
+                        update(XtreamAccount)
+                        .where(XtreamAccount.id == account_id)
+                        .values(last_synced_at=now_ms())
+                    )
+                    await session.commit()
 
-                # Update account last_synced_at
-                await db.execute(
-                    update(XtreamAccount)
-                    .where(XtreamAccount.id == account_id)
-                    .values(last_synced_at=now_ms())
+                await write_with_retry(
+                    _finalize_account,
+                    session_factory=async_session_factory,
+                    op="sync_worker.finalize_account",
                 )
 
-                await commit_with_retry(db)
-
-                _record_sync_job(job_id, {
-                    "status": "completed",
-                    "progress": {"total": total_synced, "synced": total_synced},
-                })
+                job_registry.update_job(
+                    job_id,
+                    status="completed",
+                    progress={"total": total_synced, "synced": total_synced},
+                )
                 logger.info(
                     f"Sync complete for account {account_id}: {total_synced} items"
                 )
@@ -1581,7 +1675,9 @@ async def sync_account(account_id: str):
 
         except Exception as e:
             logger.error(f"Sync failed for account {account_id}: {e}", exc_info=True)
-            _record_sync_job(job_id, {"status": "failed", "progress": {"error": str(e)}})
+            job_registry.update_job(
+                job_id, status="failed", progress={"error": str(e)}, error=str(e),
+            )
             sync_result = "error"
         finally:
             sync_duration_seconds.labels(
@@ -1607,12 +1703,12 @@ async def run_all_accounts():
 
 
 def get_sync_job(job_id: str) -> dict | None:
-    return _sync_jobs.get(job_id)
+    """Deprecated shim over ``job_registry.get_job`` -- kept for backward
+    compatibility (see ``_record_sync_job``)."""
+    return job_registry.get_job(job_id)
 
 
 def get_all_sync_jobs() -> list[dict]:
-    """Return all tracked sync jobs (most recent first)."""
-    return [
-        {"job_id": k, **v}
-        for k, v in reversed(list(_sync_jobs.items()))
-    ]
+    """Deprecated shim over ``job_registry.get_all_jobs`` -- kept for
+    backward compatibility (see ``_record_sync_job``)."""
+    return job_registry.get_all_jobs()

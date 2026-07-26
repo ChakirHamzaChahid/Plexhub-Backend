@@ -191,11 +191,19 @@ class PlexLibraryGenerator:
         storage: LibraryStorage,
         output_dir: Path,
         strm_only: bool = False,
+        force_refresh_metadata: bool = False,
     ):
         self.source = source
         self.storage = storage
         self.output_dir = output_dir
         self.strm_only = strm_only
+        # AUDIT-P6-006 (opt-in NFO refresh): when True, `.nfo` files are
+        # rewritten even if they already exist on disk. Never affects images
+        # (LocalStorage.download_image has no such flag at all) — posters
+        # hand-retouched with Tiny Media Manager are never touched by this.
+        # Defaults False so the historical "preserve existing file" contract
+        # is unchanged unless an operator explicitly opts in (config/API/CLI).
+        self.force_refresh_metadata = force_refresh_metadata
         self.mapping = MappingStore(output_dir)
 
     async def generate(self) -> SyncReport:
@@ -346,6 +354,27 @@ class PlexLibraryGenerator:
 
         self.mapping.save()
 
+    def _record_metadata_write(self, status: str, report: SyncReport) -> None:
+        """Account a `.nfo` write's outcome in the report.
+
+        NFO writes have historically been invisible to the SyncReport (only
+        `.strm` create/move/update passed through `_sync_strm` below feed
+        created/updated/unchanged) — `write_file` used to return `None` and
+        every call site ignored it. That silent-by-default behaviour is kept
+        intact when refresh is off, so existing counts/tests are unaffected.
+        Only when `force_refresh_metadata` is active do we start counting NFO
+        writes too — that's the whole point of AUDIT-P6-006: a refreshed file
+        must show up as `updated`, not silently as `unchanged`.
+        """
+        if not self.force_refresh_metadata:
+            return
+        if status == "created":
+            report.created += 1
+        elif status == "updated":
+            report.updated += 1
+        else:
+            report.unchanged += 1
+
     def _sync_strm(
         self, key: str, path: str, stream_url: str, report: SyncReport,
     ) -> None:
@@ -403,10 +432,12 @@ class PlexLibraryGenerator:
         self, movie: PlexMovie, name: _NameResolution, report: SyncReport,
     ) -> None:
         nfo = build_movie_nfo(movie)
-        self.storage.write_file(
+        status = self.storage.write_file(
             movie_nfo_path(name.clean_title, name.year, name.suffix, name.fallback_id),
             nfo,
+            force=self.force_refresh_metadata,
         )
+        self._record_metadata_write(status, report)
 
         if movie.poster_url:
             poster_rel = movie_poster_path(
@@ -473,16 +504,21 @@ class PlexLibraryGenerator:
             seen_paths.add(path)
             self._sync_strm(key, path, v.stream_url, report)
             if nfo is not None:
-                self.storage.write_file(path[:-5] + ".nfo", nfo)
+                status = self.storage.write_file(
+                    path[:-5] + ".nfo", nfo, force=self.force_refresh_metadata,
+                )
+                self._record_metadata_write(status, report)
 
     def _write_series_metadata(
         self, series: PlexSeries, name: _NameResolution, report: SyncReport,
     ) -> None:
         nfo = build_tvshow_nfo(series)
-        self.storage.write_file(
+        status = self.storage.write_file(
             series_nfo_path(name.clean_title, name.year, name.suffix, name.fallback_id),
             nfo,
+            force=self.force_refresh_metadata,
         )
+        self._record_metadata_write(status, report)
 
         if series.poster_url:
             poster_rel = series_poster_path(

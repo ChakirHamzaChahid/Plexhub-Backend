@@ -78,7 +78,7 @@ class LibraryStorage(ABC):
     def write_strm(self, rel_path: str, url: str) -> None: ...
 
     @abstractmethod
-    def write_file(self, rel_path: str, content: str) -> None: ...
+    def write_file(self, rel_path: str, content: str, *, force: bool = False) -> str: ...
 
     @abstractmethod
     def download_image(self, rel_path: str, image_url: str) -> bool: ...
@@ -109,11 +109,28 @@ class LocalStorage(LibraryStorage):
         full = self._resolve(rel_path)
         _atomic_write_text(full, url.strip() + "\n")
 
-    def write_file(self, rel_path: str, content: str) -> None:
+    def write_file(self, rel_path: str, content: str, *, force: bool = False) -> str:
+        """Write a generated text file (NFO), returning what actually happened.
+
+        By default (``force=False``) an existing file is left untouched — this
+        is the long-standing contract that lets an operator hand-enrich a
+        generated NFO with Tiny Media Manager without the next generation run
+        clobbering it. ``force=True`` (opt-in refresh, AUDIT-P6-006) atomically
+        rewrites the file even if it already exists, so durable-metadata
+        changes (OMDb notes, corrected ids, blended `display_rating`...) can
+        actually reach disk. Callers use the return value to report
+        created/updated/unchanged honestly instead of silently dropping NFO
+        writes from the SyncReport (see plex_generator/generator.py).
+
+        Images are NEVER subject to this — see download_image below, which
+        has no ``force`` parameter at all by design.
+        """
         full = self._resolve(rel_path)
-        if full.exists():
-            return  # Preserve existing file (e.g. enriched by Tiny Media Manager)
+        existed = full.exists()
+        if existed and not force:
+            return "unchanged"  # Preserve existing file (e.g. enriched by Tiny Media Manager)
         _atomic_write_text(full, content)
+        return "updated" if existed else "created"
 
     def download_image(self, rel_path: str, image_url: str) -> bool:
         full = self._resolve(rel_path)
@@ -202,8 +219,9 @@ class DryRunStorage(LibraryStorage):
     def write_strm(self, rel_path: str, url: str) -> None:
         logger.info(f"[DRY-RUN] write_strm: {rel_path}")
 
-    def write_file(self, rel_path: str, content: str) -> None:
-        logger.info(f"[DRY-RUN] write_file: {rel_path}")
+    def write_file(self, rel_path: str, content: str, *, force: bool = False) -> str:
+        logger.info(f"[DRY-RUN] write_file: {rel_path} (force={force})")
+        return "created"
 
     def download_image(self, rel_path: str, image_url: str) -> bool:
         logger.info(f"[DRY-RUN] download_image: {rel_path}")

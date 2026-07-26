@@ -77,6 +77,18 @@ class Settings:
     STREAM_FILTER_BROKEN: bool = os.getenv("STREAM_FILTER_BROKEN", "true").lower() in ("true", "1", "yes")
 
     PLEX_LIBRARY_DIR: str = os.getenv("PLEX_LIBRARY_DIR", "")
+    # AUDIT-P6-006: `write_file`/`download_image` (plex_generator/storage.py)
+    # preserve any existing generated file forever — a `.nfo` is never
+    # refreshed after a re-enrichment (new OMDb notes, ids corrected by
+    # validate_id_consistency, blended display_rating...). Opt-in refresh:
+    # when true, NFO files ARE rewritten on the next generation even if they
+    # already exist. Images are NEVER affected by this flag (posters/fanart
+    # hand-retouched with Tiny Media Manager are out of scope by design).
+    # Default false = strictly unchanged behaviour; also settable per-request
+    # via `forceRefreshMetadata` on POST /api/plex/generate (see api/plex.py).
+    PLEX_FORCE_REFRESH_METADATA: bool = os.getenv(
+        "PLEX_FORCE_REFRESH_METADATA", "false"
+    ).lower() in ("true", "1", "yes")
 
     # DB backups (online sqlite .backup snapshots)
     BACKUP_ENABLED: bool = os.getenv("BACKUP_ENABLED", "true").lower() in ("true", "1", "yes")

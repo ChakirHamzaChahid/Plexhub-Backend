@@ -10,7 +10,7 @@ from app.db.database import worker_session_factory
 from app.models.database import DownloadJob, Media, XtreamAccount
 from app.services.stream_service import build_stream_url
 from app.utils.time import now_ms
-from app.utils.db_retry import commit_with_retry
+from app.utils.db_retry import commit_with_retry, write_with_retry
 
 logger = logging.getLogger("plexhub.health_check")
 
@@ -450,48 +450,78 @@ async def _run_health_check_batch():
         # Run all health checks concurrently
         results = await asyncio.gather(*tasks)
 
-        # Apply results to DB
-        reasons: dict[str, int] = {}
-        for item, is_broken, reason, size_bytes in results:
-            if is_broken is None:
-                continue
-            reasons[reason] = reasons.get(reason, 0) + 1
+    # --- Apply results in a FRESH session (ADR 0004 Decision 4) ---
+    # Everything this batch needed to read (sampled items, the account
+    # preload, the busy-server set) already happened above, inside the now-
+    # closed `worker_session_factory()` block -- nothing below reads back
+    # through a session, so committing the writes via `write_with_retry`
+    # (fresh session per retry attempt) is safe here: unlike
+    # `_run_pipeline_validation_impl` (one long session with periodic partial
+    # commit AND circuit-breaker partial rollback across many accounts), this
+    # function makes exactly one apply-and-commit pass at the very end, and
+    # `item.rating_key`/`item.server_id`/`item.stream_error_count` are plain
+    # already-loaded column values read (never mutated) off ORM instances
+    # that are simply allowed to go out of scope here -- no pending ORM state
+    # needs to survive into the fresh session.
+    reasons: dict[str, int] = {}
+    checked = 0
+    broken_count = 0
+    pending_updates: list[tuple[str, str, dict]] = []
+    for item, is_broken, reason, size_bytes in results:
+        if is_broken is None:
+            continue
+        reasons[reason] = reasons.get(reason, 0) + 1
 
-            new_error_count = (
-                (item.stream_error_count or 0) + 1 if is_broken else 0
-            )
-            definitive = is_broken and _is_definitive_failure(reason)
-            mark_broken = (
-                is_broken
-                and (definitive or new_error_count >= settings.STREAM_BROKEN_THRESHOLD)
-            )
+        new_error_count = (
+            (item.stream_error_count or 0) + 1 if is_broken else 0
+        )
+        definitive = is_broken and _is_definitive_failure(reason)
+        mark_broken = (
+            is_broken
+            and (definitive or new_error_count >= settings.STREAM_BROKEN_THRESHOLD)
+        )
 
-            values = {
-                "is_broken": mark_broken,
-                "last_stream_check": now_ms(),
-                "stream_error_count": new_error_count,
-            }
-            # Only overwrite file_size when we actually captured a fresh size
-            # this check — never blank out a previously-known size with NULL
-            # just because this particular probe didn't yield one (e.g. it
-            # short-circuited on an error path before any Content-Length was
-            # read).
-            if size_bytes is not None:
-                values["file_size"] = size_bytes
+        values = {
+            "is_broken": mark_broken,
+            "last_stream_check": now_ms(),
+            "stream_error_count": new_error_count,
+        }
+        # Only overwrite file_size when we actually captured a fresh size
+        # this check — never blank out a previously-known size with NULL
+        # just because this particular probe didn't yield one (e.g. it
+        # short-circuited on an error path before any Content-Length was
+        # read).
+        if size_bytes is not None:
+            values["file_size"] = size_bytes
 
-            await db.execute(
-                update(Media)
-                .where(
-                    Media.rating_key == item.rating_key,
-                    Media.server_id == item.server_id,
+        pending_updates.append((item.rating_key, item.server_id, values))
+        checked += 1
+        if mark_broken:
+            broken_count += 1
+
+    if pending_updates:
+        async def _apply_batch(session):
+            for rating_key, server_id, values in pending_updates:
+                await session.execute(
+                    update(Media)
+                    .where(
+                        Media.rating_key == rating_key,
+                        Media.server_id == server_id,
+                    )
+                    .values(**values)
                 )
-                .values(**values)
-            )
-            checked += 1
-            if mark_broken:
-                broken_count += 1
+            await session.commit()
 
-        await commit_with_retry(db)
+        # `session_factory=worker_session_factory` EXPLICITLY: this worker's
+        # DB traffic is deliberately isolated onto the dedicated worker pool
+        # (see `worker_session_factory`'s docstring in `app/db/database.py`)
+        # and tests monkeypatch `worker_session_factory` on THIS module --
+        # the `write_with_retry` default would silently resolve to the API
+        # pool's `async_session_factory` instead.
+        await write_with_retry(
+            _apply_batch, session_factory=worker_session_factory,
+            op="health_check.apply_batch",
+        )
 
     logger.info(
         f"Health check complete: {checked} checked, {broken_count} broken | "
@@ -748,7 +778,21 @@ async def _run_pipeline_validation_impl():
                         f"reasons: {diag_reasons}"
                     )
 
-                # Commit periodically to avoid huge transactions
+                # AUDIT-P1-001 / ADR 0004 Decision 4 -- INTENTIONALLY left on
+                # `commit_with_retry`, not converted to `write_with_retry`:
+                # this function holds ONE `db` session across many accounts,
+                # with periodic partial COMMITS (here) interleaved with a
+                # circuit breaker that does a partial ROLLBACK of the
+                # CURRENT account's not-yet-committed updates
+                # (`db.rollback()` a few lines below) while later accounts
+                # keep streaming rows through the SAME session
+                # (`db.stream(...)`, `db.expunge_all()`). Moving this commit
+                # to a fresh connection would decouple it from that
+                # rollback/expunge choreography — a real semantic change,
+                # not a mechanical one — so it stays honest-not-retrying
+                # here. See `_run_health_check_batch` above for the sibling
+                # cron entrypoint, which has no such coupling and WAS
+                # converted.
                 if pending_updates >= commit_interval:
                     await commit_with_retry(db)
                     pending_updates = 0
@@ -757,7 +801,8 @@ async def _run_pipeline_validation_impl():
                 circuit_tripped = True
                 continue
 
-            # Commit remaining for this account
+            # Commit remaining for this account -- same coupling as the
+            # periodic commit above (ADR 0004 D4); left honest-not-retrying.
             if pending_updates > 0:
                 await commit_with_retry(db)
                 pending_updates = 0

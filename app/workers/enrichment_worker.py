@@ -17,7 +17,7 @@ from app.services.omdb_service import OMDbData, omdb_service
 from app.services.tmdb_service import TMDBEnrichmentData, TMDBSearchOutcome, tmdb_service
 from app.utils.string_normalizer import normalize_for_sorting
 from app.utils.time import now_ms
-from app.utils.db_retry import commit_with_retry
+from app.utils.db_retry import commit_with_retry, write_with_retry
 from app.utils.rating_blend import blend_display_rating_case, recompute_display_rating_stmt
 from app.utils.unification import calculate_unification_id
 
@@ -660,6 +660,22 @@ async def run():
 
             before = used()
             await _apply_enrichment_results(db, results)
+            # AUDIT-P1-001 / ADR 0004 Decision 4 -- INTENTIONALLY left on
+            # `commit_with_retry` (now honest, not a same-session retry
+            # primitive -- see that function's docstring), not converted to
+            # `write_with_retry`: `_apply_enrichment_results` mutates ORM
+            # attributes (`item.status`, `item.attempts`, `item.processed_at`)
+            # on `EnrichmentQueue` instances that are ATTACHED TO THIS SAME
+            # `db` session (`pending_vod`, loaded via `db.execute(...)` above).
+            # `write_with_retry` opens a FRESH session per attempt; those
+            # instances aren't attached to it, so their pending mutations
+            # could not be flushed/committed through it without first
+            # re-loading each item by primary key into the new session --
+            # a deeper restructuring of `_apply_enrichment_results` that is
+            # out of scope for this call-site migration (this function's
+            # single-session-for-hours shape is flagged separately as
+            # AUDIT-P1-005 and explicitly out of scope for Vague 3, S3.1 --
+            # see the plan). Left honest-not-retrying.
             await commit_with_retry(db)
 
             logger.info(f"Enrichment VOD {batch_end}/{len(pending_vod)} "
@@ -695,6 +711,10 @@ async def run():
 
                 before = used()
                 await _apply_enrichment_results(db, results)
+                # Same reasoning as the VOD phase's commit above (ADR 0004
+                # D4 / AUDIT-P1-005) -- `pending_series` items are ORM
+                # objects attached to this SAME `db` session; left
+                # honest-not-retrying.
                 await commit_with_retry(db)
 
                 logger.info(f"Enrichment Series {batch_end}/{len(pending_series)} "
@@ -711,10 +731,21 @@ async def run():
     # rating (sync_worker), and the blend is recomputable from the persisted
     # columns — so this SQL-only pass restores it. Defensive: a failure here
     # must never crash the whole run.
+    # Converted to `write_with_retry` (ADR 0004 Decision 4): unlike the two
+    # batch-commit sites above, this block opens its OWN fresh, short-lived
+    # session with a SINGLE SQL-only statement -- no ORM objects attached, no
+    # prior read on this session for a later statement to depend on -- so a
+    # fresh session per retry attempt is a straightforward, safe fit.
     try:
-        async with async_session_factory() as db:
-            await db.execute(recompute_display_rating_stmt())
-            await commit_with_retry(db)
+        async def _recompute_display_rating(session):
+            await session.execute(recompute_display_rating_stmt())
+            await session.commit()
+
+        await write_with_retry(
+            _recompute_display_rating,
+            session_factory=async_session_factory,
+            op="enrichment.recompute_display_rating",
+        )
     except Exception as e:
         logger.warning(
             "Enrichment: display_rating recompute failed (%s) — skipping heal",

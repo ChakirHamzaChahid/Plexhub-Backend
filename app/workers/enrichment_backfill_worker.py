@@ -28,8 +28,16 @@ be "running" at a time, per process. Triggered exclusively by
   "Risks"). Idempotent: running it twice is a no-op the second time.
 
 Process-local job store (same CR-A06 caveat as ``embedding_worker._ai_jobs``
-— not shared across master/worker processes). All writers go through
-``commit_with_retry`` (WAL lock safety, CLAUDE.md §9 piège 8).
+— not shared across master/worker processes). Writers go through
+``write_with_retry`` (fresh session per retry attempt — AUDIT-P1-001 / ADR
+0004 Decision 4, ``docs/architecture/adr/0004-audit-v1-remediation-
+contracts.md``): the write step of ``_run_phase_a`` and the Phase B recompute
+already open their OWN short-lived session with no prior read on that same
+session for a later statement to depend on, so converting them from the
+non-retrying ``commit_with_retry`` was a safe, mechanical fit (unlike the
+long-lived, multi-phase sessions in ``sync_worker``/``enrichment_worker``,
+where the same conversion is deliberately NOT applied — see those modules'
+call sites for the reasoning).
 """
 from __future__ import annotations
 
@@ -39,13 +47,14 @@ from collections import OrderedDict
 from typing import Any, Literal
 
 from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy.exc import OperationalError
 
 from app.config import settings
 from app.db.database import async_session_factory
 from app.models.database import Media
 from app.services import omdb_scrape_cache_service as omdb_scrape_cache
 from app.services.omdb_service import omdb_service
-from app.utils.db_retry import commit_with_retry
+from app.utils.db_retry import write_with_retry
 from app.utils.rating_blend import blend_display_rating_case, recompute_display_rating_stmt
 from app.utils.time import now_ms
 
@@ -53,7 +62,10 @@ logger = logging.getLogger("plexhub.enrichment_backfill")
 
 PAGE_SIZE = 200
 JOBS_CAP = 100
-COMMIT_EVERY = 200  # matches enrichment_worker.BATCH_SIZE order of magnitude
+# NOTE: the old `COMMIT_EVERY` intra-page commit threshold is gone (S3.1,
+# AUDIT-P1-001 / ADR 0004 Decision 4) -- `_run_phase_a`'s write step now
+# commits the whole page in one `write_with_retry` attempt, since PAGE_SIZE
+# already bounded it to the same order of magnitude.
 
 MediaTypeFilter = Literal["movie", "show", "all"]
 
@@ -172,7 +184,6 @@ async def _run_phase_a(
     cursor_server: str | None = None
     cursor_rk: str | None = None
     scanned = 0
-    put_keys: set[str] = set()
 
     while True:
         if limit is not None:
@@ -229,72 +240,120 @@ async def _run_phase_a(
                 continue
             fetched.append((server_id, rating_key, omdb_data, omdb_put))
 
-        # --- Write step: one session, all writes for this page.
-        pending_writes = 0
-        async with session_factory() as db:
-            # See enrichment_worker._apply_enrichment_results: defer autoflush
-            # so an in-loop query never unexpectedly flushes a pending write
-            # outside a commit_with_retry-wrapped commit.
-            with db.no_autoflush:
-                for server_id, rating_key, omdb_data, omdb_put in fetched:
-                    job = _jobs.get(job_id)
-                    try:
-                        if omdb_put is not None:
-                            put_imdb_id, put_result = omdb_put
-                            if put_imdb_id not in put_keys:
-                                put_keys.add(put_imdb_id)
-                                await omdb_scrape_cache.put(
-                                    db, put_imdb_id, put_result, omdb_data, now_ms(),
-                                )
-                                pending_writes += 1
+        # --- Write step: one FRESH session for this whole page, via
+        # `write_with_retry` (AUDIT-P1-001 / ADR 0004 Decision 4). Safe here
+        # — unlike sync_worker's/enrichment_worker's long, multi-phase
+        # sessions — because nothing in this write step reads anything back
+        # through the session it writes through (the fetch step above
+        # already resolved everything this page needs, via its own
+        # short-lived sessions inside `_fetch_omdb_by_id`).
+        #
+        # `put_keys` dedup is now scoped PER ATTEMPT (declared fresh inside
+        # `_write_page`, reset on every call including a retry) rather than
+        # across the whole run: it exists solely to stop TWO items in the
+        # SAME uncommitted transaction with the same `imdb_id` from each
+        # trying to INSERT a duplicate row (`no_autoflush` means the second
+        # `omdb_scrape_cache.put`'s SELECT can't see the first's still-
+        # pending INSERT). `omdb_scrape_cache.put` itself is select-then-
+        # insert-or-update, so a LATER page/attempt that finds an
+        # already-committed row from an earlier one safely UPDATEs instead
+        # of re-inserting — the cross-attempt persistence the old
+        # same-session code relied on was unnecessary, and would in fact be
+        # WRONG under a retry: a set that survived a FAILED (never
+        # committed) attempt would wrongly make the retry skip re-writing
+        # that row's cache entry, silently losing it forever.
+        #
+        # ⚠️ Known, accepted trade-off: on a genuine lock-triggered retry,
+        # `_write_page` re-runs its whole loop on the fresh session, so
+        # `_bump(job_id, ...)` calls for items processed before the failure
+        # point fire again — the job's progress counters
+        # (`omdbFetched`/`imdbFilled`/`errors`) can be transiently
+        # over-counted for that one page. The actual `Media` writes stay
+        # correct regardless (every update is COALESCE-based and therefore
+        # idempotent to re-apply) — only the operator-facing progress
+        # display can drift, and only across an actual real-lock retry.
+        # Perfecting that display is out of scope for this call-site
+        # migration (the alternative — snapshotting/restoring job counters
+        # per attempt — is real complexity for a cosmetic, self-correcting
+        # counter, given a real lock retry is rare and bounded to 2-3
+        # short-lived attempts).
+        if fetched:
+            async def _write_page(db):
+                put_keys_this_attempt: set[str] = set()
+                # See enrichment_worker._apply_enrichment_results: defer
+                # autoflush so an in-loop query never unexpectedly flushes a
+                # pending write outside this page's own commit.
+                with db.no_autoflush:
+                    for server_id, rating_key, omdb_data, omdb_put in fetched:
+                        job = _jobs.get(job_id)
+                        try:
+                            if omdb_put is not None:
+                                put_imdb_id, put_result = omdb_put
+                                if put_imdb_id not in put_keys_this_attempt:
+                                    put_keys_this_attempt.add(put_imdb_id)
+                                    await omdb_scrape_cache.put(
+                                        db, put_imdb_id, put_result, omdb_data, now_ms(),
+                                    )
 
-                        if omdb_data is None:
-                            continue  # not_found / unconfigured / over budget — fail-open, skip
+                            if omdb_data is None:
+                                continue  # not_found / unconfigured / over budget — fail-open, skip
 
-                        _bump(job_id, omdbFetched=1)
+                            _bump(job_id, omdbFetched=1)
 
-                        new_imdb = omdb_data.imdb_rating
-                        if new_imdb is None:
-                            continue  # OMDb had no usable rating for this id
+                            new_imdb = omdb_data.imdb_rating
+                            if new_imdb is None:
+                                continue  # OMDb had no usable rating for this id
 
-                        new_votes = omdb_data.imdb_votes
-                        update_values: dict = {
-                            "imdb_rating": func.coalesce(Media.imdb_rating, new_imdb),
-                        }
-                        if new_votes is not None:
-                            update_values["imdb_votes"] = func.coalesce(Media.imdb_votes, new_votes)
-                        # tmdb operand: the backfill never introduces a fresh
-                        # tmdb_rating (that is enrichment_worker's job), so the
-                        # persisted column is used as-is — mathematically the
-                        # same as COALESCE(tmdb_rating, NULL).
-                        update_values["display_rating"] = blend_display_rating_case(
-                            func.coalesce(Media.imdb_rating, new_imdb),
-                            Media.tmdb_rating,
-                            Media.display_rating,
-                        )
-                        await db.execute(
-                            update(Media)
-                            .where(Media.server_id == server_id, Media.rating_key == rating_key)
-                            .values(**update_values)
-                        )
-                        pending_writes += 1
-                        _bump(job_id, imdbFilled=1)
-                    except Exception as exc:
-                        logger.warning(
-                            "omdb-backfill: write failed for %s/%s (%s)",
-                            server_id, rating_key, type(exc).__name__,
-                        )
-                        _bump(job_id, errors=1)
-                        if job is not None:
-                            job["lastError"] = f"{type(exc).__name__}: {exc}"
-                        continue
+                            new_votes = omdb_data.imdb_votes
+                            update_values: dict = {
+                                "imdb_rating": func.coalesce(Media.imdb_rating, new_imdb),
+                            }
+                            if new_votes is not None:
+                                update_values["imdb_votes"] = func.coalesce(Media.imdb_votes, new_votes)
+                            # tmdb operand: the backfill never introduces a fresh
+                            # tmdb_rating (that is enrichment_worker's job), so the
+                            # persisted column is used as-is — mathematically the
+                            # same as COALESCE(tmdb_rating, NULL).
+                            update_values["display_rating"] = blend_display_rating_case(
+                                func.coalesce(Media.imdb_rating, new_imdb),
+                                Media.tmdb_rating,
+                                Media.display_rating,
+                            )
+                            await db.execute(
+                                update(Media)
+                                .where(Media.server_id == server_id, Media.rating_key == rating_key)
+                                .values(**update_values)
+                            )
+                            _bump(job_id, imdbFilled=1)
+                        except OperationalError:
+                            # A lock (or other operational DB failure) must
+                            # abort this WHOLE attempt so `write_with_retry`
+                            # retries the page on a fresh session — this is
+                            # NOT a per-item data failure. Swallowing it here
+                            # (like the broad `except Exception` below does
+                            # for genuine per-item failures) would silently
+                            # DROP this row's write on a real lock instead of
+                            # retrying it: `db.execute`'s write statement can
+                            # itself raise "database is locked" (SQLite needs
+                            # the write lock to modify pages as soon as the
+                            # statement runs, not only at commit), so this
+                            # must be checked before the catch-all below.
+                            raise
+                        except Exception as exc:
+                            logger.warning(
+                                "omdb-backfill: write failed for %s/%s (%s)",
+                                server_id, rating_key, type(exc).__name__,
+                            )
+                            _bump(job_id, errors=1)
+                            if job is not None:
+                                job["lastError"] = f"{type(exc).__name__}: {exc}"
+                            continue
+                await db.commit()
 
-                    if pending_writes >= COMMIT_EVERY:
-                        await commit_with_retry(db)
-                        pending_writes = 0
-
-            if pending_writes:
-                await commit_with_retry(db)
+            await write_with_retry(
+                _write_page, session_factory=session_factory,
+                op="enrichment_backfill.write_page",
+            )
 
         if len(rows) < page_limit:
             break
@@ -334,13 +393,21 @@ async def run_backfill(
             media_types=_media_types(media_type), limit=limit,
         )
         if recompute_display_rating:
-            async with session_factory() as db:
-                result = await db.execute(recompute_display_rating_stmt())
-                await commit_with_retry(db)
-                job = _jobs.get(job_id)
-                if job is not None:
-                    rowcount = result.rowcount
-                    job["displayRecomputed"] = rowcount if rowcount and rowcount > 0 else 0
+            # Fresh session via `write_with_retry` (ADR 0004 Decision 4):
+            # single SQL-only statement, no ORM objects, no prior read on
+            # this session to depend on -- a safe, mechanical conversion.
+            async def _recompute(session):
+                result = await session.execute(recompute_display_rating_stmt())
+                await session.commit()
+                return result.rowcount
+
+            rowcount = await write_with_retry(
+                _recompute, session_factory=session_factory,
+                op="enrichment_backfill.recompute_display_rating",
+            )
+            job = _jobs.get(job_id)
+            if job is not None:
+                job["displayRecomputed"] = rowcount if rowcount and rowcount > 0 else 0
         job = _jobs.get(job_id)
         if job is not None:
             job["status"] = "completed"

@@ -13,6 +13,7 @@ import logging
 
 import httpx
 import pytest
+from prometheus_client import REGISTRY, generate_latest
 
 from app.config import settings
 from app.dav import relay as relay_module
@@ -25,6 +26,7 @@ from app.dav.relay import (
     get_client,
     open_upstream,
 )
+from app.utils import metrics
 
 URL = "http://provider.example/movie/u/p/1.mkv"
 BODY = b"0123456789" * 10  # 100 bytes
@@ -407,3 +409,121 @@ class TestNoSecretLeakage:
 
         for record in caplog.records:
             assert self._TOKEN not in record.getMessage()
+
+
+# ─── S5.3 (AUDIT-P8-002): relayed-bytes counter ───────────────────────────
+
+
+def _counter_value(counter) -> float:
+    return counter._value.get()
+
+
+class TestRelayedBytesMetric:
+    """`plexhub_dav_relayed_bytes_total` — unlabelled counter incremented as
+    the DAV client actually drains `UpstreamStream.body` (mirrors how
+    `app/api/dav.py`'s own `body()` generator consumes it chunk by chunk)."""
+
+    async def test_full_200_body_increments_by_exact_body_length(self, xtream_mock):
+        xtream_mock.get(URL).mock(
+            return_value=httpx.Response(200, content=BODY, headers={"Content-Length": str(len(BODY))})
+        )
+        before = _counter_value(metrics.dav_relayed_bytes_total)
+
+        stream = await open_upstream(URL, range_header=None)
+        drained = await _drain(stream)
+
+        assert drained == BODY
+        assert _counter_value(metrics.dav_relayed_bytes_total) == before + len(BODY)
+
+    async def test_206_range_passthrough_increments_by_the_partial_length_only(self, xtream_mock):
+        xtream_mock.get(URL).mock(
+            return_value=httpx.Response(
+                206, content=BODY[10:20],
+                headers={"Content-Range": f"bytes 10-19/{len(BODY)}", "Content-Length": "10"},
+            )
+        )
+        before = _counter_value(metrics.dav_relayed_bytes_total)
+
+        stream = await open_upstream(URL, range_header="bytes=10-19")
+        drained = await _drain(stream)
+
+        assert drained == BODY[10:20]
+        assert _counter_value(metrics.dav_relayed_bytes_total) == before + 10
+
+    async def test_range_shim_increments_only_by_the_sliced_window_not_the_full_upstream_body(
+        self, xtream_mock, monkeypatch,
+    ):
+        """The shim drains and discards bytes outside `[start, end]` while
+        holding the throttle permit (piège 18d) — that upstream cost is
+        real, but it must NOT be double-counted into "bytes relayed to the
+        client": only the 10 bytes the DAV client actually receives count,
+        not the 100-byte upstream body the shim had to read through."""
+        monkeypatch.setattr(settings, "DAV_RANGE_SHIM", True)
+        xtream_mock.get(URL).mock(
+            return_value=httpx.Response(200, content=BODY, headers={"Content-Length": str(len(BODY))})
+        )
+        before = _counter_value(metrics.dav_relayed_bytes_total)
+
+        stream = await open_upstream(URL, range_header="bytes=10-19")
+        drained = await _drain(stream)
+
+        assert stream.status_code == 206
+        assert drained == BODY[10:20]
+        assert _counter_value(metrics.dav_relayed_bytes_total) == before + 10, (
+            "must count only the 10 sliced bytes actually sent to the client, "
+            "not the 100 bytes read from upstream to produce them"
+        )
+
+    async def test_416_empty_body_does_not_increment(self, xtream_mock):
+        xtream_mock.get(URL).mock(
+            return_value=httpx.Response(416, headers={"Content-Range": f"bytes */{len(BODY)}"})
+        )
+        before = _counter_value(metrics.dav_relayed_bytes_total)
+
+        stream = await open_upstream(URL, range_header="bytes=99999-100000")
+        drained = await _drain(stream)
+
+        assert drained == b""
+        assert _counter_value(metrics.dav_relayed_bytes_total) == before
+
+    async def test_partial_consumption_only_counts_bytes_actually_drained(
+        self, xtream_mock, monkeypatch,
+    ):
+        """A caller that stops reading early (mirrors a mid-stream rclone
+        disconnect) must only have the bytes it actually consumed counted —
+        proves the counter is wired on the iterator itself, not pre-computed
+        from Content-Length. Chunk size is shrunk so the 100-byte body is
+        genuinely split into multiple `aiter_bytes` chunks."""
+        monkeypatch.setattr(settings, "DOWNLOAD_CHUNK_BYTES", 10)
+        xtream_mock.get(URL).mock(
+            return_value=httpx.Response(200, content=BODY, headers={"Content-Length": str(len(BODY))})
+        )
+        before = _counter_value(metrics.dav_relayed_bytes_total)
+
+        stream = await open_upstream(URL, range_header=None)
+        first_chunk = await stream.body.__anext__()
+        await stream.aclose()
+
+        assert len(first_chunk) < len(BODY)
+        assert _counter_value(metrics.dav_relayed_bytes_total) == before + len(first_chunk)
+
+    async def test_relayed_bytes_metric_never_carries_a_label_or_the_secret_url(
+        self, xtream_mock,
+    ):
+        """No label at all is possible (the metric is declared without
+        `labelnames=`), and the scraped Prometheus text must never contain
+        the upstream URL/credential this relay just fetched."""
+        token = "SEKRET-BYTES-METRIC-TOKEN"
+        url = f"http://provider.example/movie/u/{token}/1.mkv"
+        xtream_mock.get(url).mock(
+            return_value=httpx.Response(200, content=BODY, headers={"Content-Length": str(len(BODY))})
+        )
+
+        stream = await open_upstream(url, range_header=None)
+        await _drain(stream)
+
+        body = generate_latest(REGISTRY).decode("utf-8")
+        assert token not in body
+        for line in body.splitlines():
+            if line.startswith("plexhub_dav_relayed_bytes_total "):
+                assert "{" not in line

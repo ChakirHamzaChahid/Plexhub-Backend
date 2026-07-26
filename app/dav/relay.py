@@ -26,6 +26,20 @@ leaves an ignored Range as a raw 200 pass-through instead.
 Secrets invariant (mirrors download_service): the upstream URL embeds the
 Xtream account's user/password in its path/query. No exception message or
 log line in this module ever contains `url`/a redirect `Location` value.
+
+Observability (S5.3, AUDIT-P8-002): every body this module hands back
+(plain pass-through AND the range-shim's re-sliced body — see
+`_counted_body`) is wrapped so every chunk actually relayed to the DAV
+client increments `plexhub_dav_relayed_bytes_total`, unlabelled. The
+shim's own extra cost (draining and discarding the bytes before `start`
+and after `end` while still holding the account's throttle permit) is
+NOT double-counted here — only bytes the client actually receives are
+counted — but it shows up anyway: holding the permit longer is exactly
+what makes `plexhub_dav_permit_wait_seconds` (`app/dav/throttle.py`) rise
+for the next request queued behind it, and eventually
+`plexhub_dav_throttle_rejections_total` once that queueing exceeds
+`DAV_QUEUE_TIMEOUT_SECONDS` — the shim's cost is visible through the
+throttle metrics, not hidden by the byte counter.
 """
 from __future__ import annotations
 
@@ -37,6 +51,7 @@ from typing import AsyncIterator, Awaitable, Callable, Optional
 import httpx
 
 from app.config import settings
+from app.utils.metrics import dav_relayed_bytes_total
 from app.utils.ssrf import SsrfBlockedError, assert_public_host
 
 logger = logging.getLogger("plexhub.dav")
@@ -192,6 +207,22 @@ async def _shim_ranged_body(
             yield chunk[slice_start:slice_end]
 
 
+async def _counted_body(body: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
+    """Wrap an upstream byte iterator so every chunk actually handed to the
+    DAV client (`app/api/dav.py`'s `body()` generator drains `Upstream
+    Stream.body`) is counted into `plexhub_dav_relayed_bytes_total` (S5.3,
+    AUDIT-P8-002) — unlabelled, no URL/account/filename anywhere near it
+    (piège 18f). Applied uniformly at every place this module hands back a
+    real body (plain pass-through AND the range-shim's re-sliced body), so
+    a caller draining `UpstreamStream.body` always gets counted bytes
+    regardless of which path produced the stream. Not applied to
+    `_empty_body` (416 responses never carry bytes to count)."""
+    async for chunk in body:
+        if chunk:
+            dav_relayed_bytes_total.inc(len(chunk))
+        yield chunk
+
+
 async def _empty_body() -> AsyncIterator[bytes]:
     """An async generator that yields nothing — used for synthesized 416
     responses, which never have a body."""
@@ -313,7 +344,7 @@ async def open_upstream(url: str, range_header: Optional[str]) -> UpstreamStream
 
     return UpstreamStream(
         resp.status_code, _passthrough_headers(resp),
-        resp.aiter_bytes(settings.DOWNLOAD_CHUNK_BYTES), resp.aclose,
+        _counted_body(resp.aiter_bytes(settings.DOWNLOAD_CHUNK_BYTES)), resp.aclose,
     )
 
 
@@ -331,7 +362,7 @@ async def _apply_range_shim(resp: httpx.Response, range_header: str) -> Upstream
         # pass the 200 through unshimmed rather than guess.
         return UpstreamStream(
             200, _passthrough_headers(resp),
-            resp.aiter_bytes(settings.DOWNLOAD_CHUNK_BYTES), resp.aclose,
+            _counted_body(resp.aiter_bytes(settings.DOWNLOAD_CHUNK_BYTES)), resp.aclose,
         )
 
     start, end = parsed
@@ -350,5 +381,5 @@ async def _apply_range_shim(resp: httpx.Response, range_header: str) -> Upstream
     content_type = resp.headers.get("content-type")
     if content_type is not None:
         headers["Content-Type"] = content_type
-    body = _shim_ranged_body(resp, start, end, settings.DOWNLOAD_CHUNK_BYTES)
+    body = _counted_body(_shim_ranged_body(resp, start, end, settings.DOWNLOAD_CHUNK_BYTES))
     return UpstreamStream(206, headers, body, resp.aclose)

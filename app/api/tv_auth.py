@@ -41,7 +41,7 @@ from app.api.deps import verify_backend_secret as verify_pairing_api_key
 from app.config import settings
 from app.db.database import get_db
 from app.models.database import TvAuthSession
-from app.utils.db_retry import commit_with_retry
+from app.utils.db_retry import commit_with_retry, write_with_retry
 from app.utils.payload_crypto import (
     PayloadDecryptError,
     decrypt_payload,
@@ -161,18 +161,36 @@ async def _expire_if_needed(db: AsyncSession, session: TvAuthSession) -> bool:
     """Lazily flip a stale session to expired and scrub its payload.
 
     Returns True when the session is (now) expired.
+
+    AUDIT-P1-001 (S3.3): the write is converted to `write_with_retry` (ADR
+    0004, Decision 4 — a fresh session per attempt is the only pattern that
+    actually survives a real SQLite lock). This does NOT mutate the
+    `session` ORM object passed in (which belongs to the caller's `db`,
+    the request-scoped session from Depends(get_db)) — it targets the row
+    by id with a blind UPDATE instead. That's safe here because every
+    caller (approve/get_status/complete) only branches on this function's
+    **return value** when it's True (410/EXPIRED), never re-reads
+    `session.status`/`session.payload_encrypted` afterwards in that branch
+    — so there's nothing that depends on the in-memory object reflecting
+    the new state, and no risk of `db`'s own implicit commit (at the end of
+    the request) re-writing the same row a second time.
     """
     if session.status in (STATUS_EXPIRED, STATUS_COMPLETED):
         return session.status == STATUS_EXPIRED
     if _now_ms() <= session.expires_at:
         return False
-    session.status = STATUS_EXPIRED
-    session.payload_encrypted = None  # never deliver a stale payload
-    # CR-C04: this lazy expiry write can race a long-running sync/validation
-    # holding the single WAL writer — retry on "database is locked" like the
-    # workers do, instead of surfacing a raw 500 to every caller (approve/
-    # status/complete all funnel through this helper).
-    await commit_with_retry(db)
+
+    session_id = session.id
+
+    async def _work(fresh_session: AsyncSession) -> None:
+        await fresh_session.execute(
+            update(TvAuthSession)
+            .where(TvAuthSession.id == session_id)
+            .values(status=STATUS_EXPIRED, payload_encrypted=None)
+        )
+        await fresh_session.commit()
+
+    await write_with_retry(_work, op="tv_auth.expire_session")
     return True
 
 
@@ -197,39 +215,70 @@ async def start(
     now = _now_ms()
     ttl_ms = settings.TV_AUTH_TTL_SECONDS * 1000
 
-    # Opportunistic cleanup: drop sessions expired for more than the grace
-    # period (keeps the table tiny and frees unique user codes).
-    await db.execute(
-        delete(TvAuthSession).where(TvAuthSession.expires_at < now - _CLEANUP_GRACE_MS)
-    )
-
     device_code = secrets.token_urlsafe(32)
     device_name = payload.device_name if payload else None
 
-    # user_code is UNIQUE — retry on the (astronomically rare) collision.
-    session = None
-    for _ in range(5):
-        candidate = TvAuthSession(
-            id=uuid.uuid4().hex,
-            device_code=device_code,
-            user_code=_generate_user_code(),
-            status=STATUS_PENDING,
-            payload_encrypted=None,
-            payload_delivered=False,
-            device_name=device_name,
-            created_at=now,
-            expires_at=now + ttl_ms,
+    # AUDIT-P1-001 (S3.3): converted to write_with_retry. The user_code
+    # collision retry (IntegrityError) and the lock retry (OperationalError)
+    # are two DIFFERENT concerns that must not be conflated (ADR 0004,
+    # Decision 4 — the exact "cas délicat" flagged for this endpoint): a
+    # lock-retry must NOT replay the same candidate (that would just trade
+    # one failure mode for another), so the entire 5-attempt collision loop
+    # lives INSIDE `work` and generates a fresh random user_code every time
+    # it runs — including on a brand-new invocation triggered by an outer
+    # lock retry (a fresh session, per write_with_retry's contract). Inside
+    # a single `work` invocation, `session.rollback()` before trying a new
+    # candidate on the SAME session is the normal, safe idiom for a business
+    # constraint violation (IntegrityError) — this is NOT the same trap as
+    # retrying a commit on the same session after a lock (PendingRollbackError,
+    # ADR 0004): IntegrityError doesn't invalidate the transaction the way a
+    # failed commit under a lock does.
+    #
+    # The opportunistic cleanup delete moved IN HERE too (it used to be
+    # staged on the request-scoped `db` session, ahead of the loop). Leaving
+    # it on `db` — uncommitted until get_db's implicit commit at the very
+    # end of the request — turned out to be a genuine self-deadlock, not a
+    # harmless decoupling: SQLite allows only ONE writer at a time across
+    # ALL connections (even from the same process), so `db`'s still-open
+    # write transaction would starve every attempt this fresh session makes
+    # to acquire the write lock for the insert, and `db` never gets to
+    # commit because the endpoint is still awaiting `write_with_retry`
+    # (caught by the real-lock regression test below — it hung/failed until
+    # this fix). Running both in the SAME fresh-session transaction removes
+    # the second writer entirely and mirrors the original single-session
+    # coupling (delete-then-insert, both committed — or rolled back and
+    # retried — together).
+    class _UserCodeExhaustedError(Exception):
+        """All 5 collision attempts failed within one `work` invocation."""
+
+    async def _work(fresh_session: AsyncSession) -> TvAuthSession:
+        await fresh_session.execute(
+            delete(TvAuthSession).where(TvAuthSession.expires_at < now - _CLEANUP_GRACE_MS)
         )
-        db.add(candidate)
-        try:
-            # CR-C04: retry on lock contention; IntegrityError (user_code
-            # collision) is a different exception and still falls through to
-            # the except clause below unchanged.
-            await commit_with_retry(db)
-            session = candidate
-            break
-        except IntegrityError:
-            await db.rollback()
+        for _ in range(5):
+            candidate = TvAuthSession(
+                id=uuid.uuid4().hex,
+                device_code=device_code,
+                user_code=_generate_user_code(),
+                status=STATUS_PENDING,
+                payload_encrypted=None,
+                payload_delivered=False,
+                device_name=device_name,
+                created_at=now,
+                expires_at=now + ttl_ms,
+            )
+            fresh_session.add(candidate)
+            try:
+                await fresh_session.commit()
+                return candidate
+            except IntegrityError:
+                await fresh_session.rollback()
+        raise _UserCodeExhaustedError()
+
+    try:
+        session = await write_with_retry(_work, op="tv_auth.start")
+    except _UserCodeExhaustedError:
+        session = None
     if session is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -288,10 +337,31 @@ async def approve(
             status_code=409, detail=f"Pairing session already {session.status}"
         )
 
-    session.payload_encrypted = encrypt_payload(body.payload)
-    session.status = STATUS_APPROVED
-    session.approved_at = _now_ms()
-    await commit_with_retry(db)  # CR-C04: lock-retry on the request path
+    # AUDIT-P1-001 (S3.3): converted to write_with_retry. Validation above
+    # (unknown code / expired / already-approved) already happened against
+    # `db`, the request-scoped session — this targets the row by id with a
+    # blind UPDATE of the already-computed values instead of mutating the
+    # `session` ORM object, so replaying it whole on a lock retry is a
+    # harmless no-op re-write, and `db`'s own implicit commit at the end of
+    # the request has nothing left dirty to double-write (ADR 0004,
+    # Decision 4).
+    encrypted_payload = encrypt_payload(body.payload)
+    approved_at = _now_ms()
+    session_id = session.id
+
+    async def _work(fresh_session: AsyncSession) -> None:
+        await fresh_session.execute(
+            update(TvAuthSession)
+            .where(TvAuthSession.id == session_id)
+            .values(
+                payload_encrypted=encrypted_payload,
+                status=STATUS_APPROVED,
+                approved_at=approved_at,
+            )
+        )
+        await fresh_session.commit()
+
+    await write_with_retry(_work, op="tv_auth.approve")
 
     logger.info("tv-auth session %s approved", session.id)
     return ApproveResponse(status=STATUS_APPROVED)
@@ -356,6 +426,28 @@ async def get_status(
         # payload. `decrypt_payload` above is pure (no side effect), so
         # computing it twice under contention is harmless; only the DELIVERY
         # is guarded.
+        # AUDIT-P1-001 (S3.3) — deliberately NOT converted to write_with_retry.
+        # This is the CR-F07 atomic one-shot delivery claim: correctness
+        # depends only on `rowcount` from THIS execute() being read before
+        # commit, which holds regardless of which session/connection issues
+        # the UPDATE. The blocker is test/production identity, not
+        # correctness: write_with_retry's fresh session is resolved from a
+        # single process-wide default (app.db.database.async_session_factory)
+        # unless a `session_factory` bound to the SAME engine as `db` is
+        # explicitly derived and threaded through — and the existing
+        # regression test for this exact race
+        # (tests/test_tv_auth.py::test_status_concurrent_polls_deliver_payload_exactly_once)
+        # deliberately drives `get_status` with a hand-built, per-thread
+        # session/engine pointing at a test-only file, specifically to prove
+        # the claim survives real cross-connection contention — swapping in
+        # a different, globally-resolved engine here would silently stop
+        # exercising (or even miswire) that exact scenario. Given the
+        # explicit warning that a fresh session in the wrong place would ruin
+        # this atomicity, the safer choice is zero structural change:
+        # `commit_with_retry` (now honest per ADR 0004) still protects the
+        # common case where SQLite's own busy_timeout resolves the
+        # contention before commit() ever raises; a real, sustained lock now
+        # surfaces the true OperationalError instead of a misleading one.
         claim_result = await db.execute(
             update(TvAuthSession)
             .where(
@@ -405,10 +497,28 @@ async def complete(
     if session.status != STATUS_APPROVED:
         raise HTTPException(status_code=409, detail="Pairing session not approved yet")
 
-    session.status = STATUS_COMPLETED
-    session.completed_at = _now_ms()
-    session.payload_encrypted = None  # scrub the sensitive blob at rest
-    await commit_with_retry(db)  # CR-C04: lock-retry on the request path
+    # AUDIT-P1-001 (S3.3): converted to write_with_retry — same shape as
+    # approve() above: validation already happened against `db`, this
+    # targets the row by id with a blind UPDATE of already-computed values
+    # (never mutating the `session` ORM object), so it's safely replayable
+    # on a lock retry and leaves nothing for get_db's implicit commit to
+    # double-write (ADR 0004, Decision 4).
+    completed_at = _now_ms()
+    session_id = session.id
+
+    async def _work(fresh_session: AsyncSession) -> None:
+        await fresh_session.execute(
+            update(TvAuthSession)
+            .where(TvAuthSession.id == session_id)
+            .values(
+                status=STATUS_COMPLETED,
+                completed_at=completed_at,
+                payload_encrypted=None,  # scrub the sensitive blob at rest
+            )
+        )
+        await fresh_session.commit()
+
+    await write_with_retry(_work, op="tv_auth.complete")
 
     logger.info("tv-auth session %s completed", session.id)
     return CompleteResponse(status=STATUS_COMPLETED)

@@ -9,13 +9,15 @@ and CR-F07 (atomic one-shot payload delivery under concurrency).
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import threading
+import time as _time_module
 from typing import AsyncIterator
 
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.config import settings
@@ -71,6 +73,15 @@ async def tv_client(tv_factory, monkeypatch, tmp_path) -> AsyncIterator[AsyncCli
     from app.main import app
     from app.db import database as db_module
 
+    # AUDIT-P1-001 (S3.3): several tv_auth writes now go through
+    # write_with_retry, whose default session_factory is a fresh
+    # `from app.db.database import async_session_factory` at call time —
+    # it does NOT go through FastAPI's dependency-override mechanism the
+    # way `Depends(get_db)` does. Without this, those writes would silently
+    # hit the REAL (untouched) production async_session_factory instead of
+    # this test's file-backed `tv_factory` (CLAUDE.md isolation rule).
+    monkeypatch.setattr(db_module, "async_session_factory", tv_factory)
+
     async def _override_get_db():
         async with tv_factory() as session:
             try:
@@ -95,19 +106,19 @@ async def _start(client: AsyncClient, device_name: str = "Mi Box S test") -> dic
     return resp.json()
 
 
-async def _spy_commit_with_retry(monkeypatch, calls: dict) -> None:
-    """Wrap app.api.tv_auth.commit_with_retry with a call-counting passthrough
+async def _spy_write_with_retry(monkeypatch, calls: dict) -> None:
+    """Wrap app.api.tv_auth.write_with_retry with a call-counting passthrough
     (still delegates to the real helper, so retry/commit semantics are
     unchanged — only observed)."""
     import app.api.tv_auth as tv_auth_module
 
-    real = tv_auth_module.commit_with_retry
+    real = tv_auth_module.write_with_retry
 
-    async def _spy(db, **kwargs):
+    async def _spy(work, **kwargs):
         calls["n"] += 1
-        return await real(db, **kwargs)
+        return await real(work, **kwargs)
 
-    monkeypatch.setattr(tv_auth_module, "commit_with_retry", _spy)
+    monkeypatch.setattr(tv_auth_module, "write_with_retry", _spy)
 
 
 async def _force_expire(tv_factory, device_code: str) -> None:
@@ -423,19 +434,22 @@ async def test_approve_twice_conflict(tv_client):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# CR-C04: request-path writes commit via commit_with_retry (lock-retry)
+# AUDIT-P1-001 (S3.3): request-path writes commit via write_with_retry
+# (fresh-session-per-attempt lock-retry, ADR 0004 Decision 4)
 # ──────────────────────────────────────────────────────────────────────────────
 
-async def test_approve_and_complete_commit_via_retry_helper(tv_client, monkeypatch):
-    """CR-C04: /approve and /complete must commit through commit_with_retry
-    (not a bare db.commit()), same as the workers, so a transient 'database
-    is locked' during a concurrent sync/validation is retried instead of
-    surfacing as a raw 500. Wraps (doesn't replace) the real helper, so
-    behavior is unchanged — only observed via the call counter."""
+async def test_start_approve_and_complete_commit_via_retry_helper(tv_client, monkeypatch):
+    """AUDIT-P1-001: /start, /approve and /complete must commit through
+    write_with_retry (not a bare db.commit(), and not commit_with_retry —
+    which cannot actually survive a real lock, ADR 0004 Decision 4), same
+    resilience pattern as the workers. Wraps (doesn't replace) the real
+    helper, so behavior is unchanged — only observed via the call counter."""
     calls = {"n": 0}
-    await _spy_commit_with_retry(monkeypatch, calls)
+    await _spy_write_with_retry(monkeypatch, calls)
 
-    started = await _start(tv_client)  # also goes through commit_with_retry
+    before_start = calls["n"]
+    started = await _start(tv_client)
+    assert calls["n"] > before_start
 
     before_approve = calls["n"]
     approve_resp = await tv_client.post(
@@ -452,6 +466,59 @@ async def test_approve_and_complete_commit_via_retry_helper(tv_client, monkeypat
     )
     assert complete_resp.status_code == 200, complete_resp.text
     assert calls["n"] > before_complete
+
+
+async def test_expire_path_commits_via_retry_helper(tv_client, tv_factory, monkeypatch):
+    """AUDIT-P1-001: the lazy-expiry write in `_expire_if_needed` (exercised
+    by /approve on an already-expired session) must also go through
+    write_with_retry."""
+    calls = {"n": 0}
+    await _spy_write_with_retry(monkeypatch, calls)
+
+    started = await _start(tv_client)
+    await _force_expire(tv_factory, started["deviceCode"])
+
+    before = calls["n"]
+    resp = await tv_client.post(
+        "/api/tv-auth/approve",
+        json={"userCode": started["userCode"], "payload": PAYLOAD},
+        headers=AUTH,
+    )
+    assert resp.status_code == 410, resp.text
+    assert calls["n"] > before  # the expire-and-scrub write went through write_with_retry
+
+
+async def test_get_status_claim_still_uses_commit_with_retry(tv_client, monkeypatch):
+    """AUDIT-P1-001 (S3.3) — deliberately NOT converted: the CR-F07 atomic
+    one-shot delivery claim in get_status() stays on commit_with_retry (see
+    the comment at that call site). This guards against an accidental
+    future conversion regressing the atomicity test
+    (test_status_concurrent_polls_deliver_payload_exactly_once)."""
+    import app.api.tv_auth as tv_auth_module
+
+    calls = {"n": 0}
+    real_commit_with_retry = tv_auth_module.commit_with_retry
+
+    async def _spy(db, **kwargs):
+        calls["n"] += 1
+        return await real_commit_with_retry(db, **kwargs)
+
+    monkeypatch.setattr(tv_auth_module, "commit_with_retry", _spy)
+
+    started = await _start(tv_client)
+    await tv_client.post(
+        "/api/tv-auth/approve",
+        json={"userCode": started["userCode"], "payload": PAYLOAD},
+        headers=AUTH,
+    )
+
+    before = calls["n"]
+    resp = await tv_client.get(
+        "/api/tv-auth/status", params={"deviceCode": started["deviceCode"]}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["payload"] == PAYLOAD
+    assert calls["n"] > before  # the delivery claim still committed via commit_with_retry
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -628,3 +695,154 @@ async def test_migration_009_creates_table_and_indexes(tmp_path):
             }.issubset(indexes)
     finally:
         await engine.dispose()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# AUDIT-P1-001 (S3.3): real-lock contention (ADR 0004, Decision 4) — proves
+# write_with_retry actually survives a genuine SQLite writer-vs-writer lock
+# on the converted tv_auth endpoints, not just that a helper is called.
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _hold_write_lock(db_path: str, lock_acquired: threading.Event, hold_seconds: float) -> None:
+    """Real cross-connection write lock on a plain background thread — same
+    harness as tests/test_db_retry_real_lock.py and
+    tests/test_accounts_retry.py."""
+    conn = sqlite3.connect(db_path, timeout=0)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("CREATE TABLE IF NOT EXISTS _lock_probe (id INTEGER PRIMARY KEY)")
+        conn.execute("INSERT INTO _lock_probe DEFAULT VALUES")
+        lock_acquired.set()
+        _time_module.sleep(hold_seconds)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@pytest_asyncio.fixture
+async def tv_client_lockable(monkeypatch, tmp_path) -> AsyncIterator[tuple[AsyncClient, str]]:
+    """Same wiring as `tv_client`, but on a dedicated file-backed engine with
+    a short `busy_timeout` set BEFORE any connection is opened — required so
+    a genuine SQLite lock surfaces quickly within a test's time budget
+    instead of being silently absorbed by a long busy_timeout."""
+    monkeypatch.setattr(settings, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(settings, "LOG_DIR", tmp_path / "logs")
+    (tmp_path / "data").mkdir()
+    (tmp_path / "logs").mkdir()
+
+    monkeypatch.setattr(settings, "AI_API_KEY", API_KEY)
+    monkeypatch.setattr(settings, "TV_AUTH_ENCRYPTION_KEY", "")
+
+    db_path = tmp_path / "tv_auth_lock_test.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}", future=True)
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _set_short_busy_timeout(dbapi_conn, _record):
+        dbapi_conn.execute("PRAGMA busy_timeout=50")
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    from app.main import app
+    from app.db import database as db_module
+
+    monkeypatch.setattr(db_module, "async_session_factory", factory)
+
+    async def _override_get_db():
+        async with factory() as session:
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+
+    app.dependency_overrides[db_module.get_db] = _override_get_db
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            yield client, str(db_path)
+    finally:
+        app.dependency_overrides.pop(db_module.get_db, None)
+        await engine.dispose()
+
+
+async def test_start_survives_real_lock(tv_client_lockable):
+    """AUDIT-P1-001 (S3.3): POST /api/tv-auth/start (the delicate collision
+    + lock-retry endpoint) must succeed despite a genuine SQLite write lock
+    held by an independent connection — proving write_with_retry's
+    fresh-session-per-attempt genuinely recovers the write, including
+    re-running the user_code collision loop from scratch on retry."""
+    client, db_path = tv_client_lockable
+    hold_seconds = 0.35
+    lock_acquired = threading.Event()
+    blocker = threading.Thread(
+        target=_hold_write_lock, args=(db_path, lock_acquired, hold_seconds), daemon=True,
+    )
+    blocker.start()
+    assert lock_acquired.wait(timeout=5), "blocker thread never acquired the write lock"
+
+    resp = await client.post("/api/tv-auth/start", json={"deviceName": "Lock Test TV"})
+
+    blocker.join(timeout=5)
+    assert not blocker.is_alive()
+    assert resp.status_code == 201, resp.text
+    assert len(resp.json()["deviceCode"]) >= 32
+
+
+async def test_approve_survives_real_lock(tv_client_lockable):
+    """AUDIT-P1-001 (S3.3): POST /api/tv-auth/approve must succeed despite a
+    genuine SQLite write lock held by an independent connection."""
+    client, db_path = tv_client_lockable
+    started = await _start(client)
+
+    hold_seconds = 0.35
+    lock_acquired = threading.Event()
+    blocker = threading.Thread(
+        target=_hold_write_lock, args=(db_path, lock_acquired, hold_seconds), daemon=True,
+    )
+    blocker.start()
+    assert lock_acquired.wait(timeout=5), "blocker thread never acquired the write lock"
+
+    resp = await client.post(
+        "/api/tv-auth/approve",
+        json={"userCode": started["userCode"], "payload": PAYLOAD},
+        headers=AUTH,
+    )
+
+    blocker.join(timeout=5)
+    assert not blocker.is_alive()
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "approved"
+
+
+async def test_complete_survives_real_lock(tv_client_lockable):
+    """AUDIT-P1-001 (S3.3): POST /api/tv-auth/complete must succeed despite a
+    genuine SQLite write lock held by an independent connection."""
+    client, db_path = tv_client_lockable
+    started = await _start(client)
+    await client.post(
+        "/api/tv-auth/approve",
+        json={"userCode": started["userCode"], "payload": PAYLOAD},
+        headers=AUTH,
+    )
+
+    hold_seconds = 0.35
+    lock_acquired = threading.Event()
+    blocker = threading.Thread(
+        target=_hold_write_lock, args=(db_path, lock_acquired, hold_seconds), daemon=True,
+    )
+    blocker.start()
+    assert lock_acquired.wait(timeout=5), "blocker thread never acquired the write lock"
+
+    resp = await client.post(
+        "/api/tv-auth/complete", json={"deviceCode": started["deviceCode"]}
+    )
+
+    blocker.join(timeout=5)
+    assert not blocker.is_alive()
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "completed"

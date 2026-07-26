@@ -40,6 +40,7 @@ from app.models.schemas import DownloadJobResponse, apply_adult_prefix
 from app.services.aggregation_service import canonical_title_year
 from app.services.media_service import media_service
 from app.services.stream_service import parse_rating_key
+from app.utils import metrics
 from app.utils.db_retry import run_with_retry
 from app.utils.server_id import parse_server_id
 from app.utils.ssrf import SsrfBlockedError
@@ -85,6 +86,44 @@ class InsufficientDiskSpaceError(DownloadPermanentError):
     won't fix itself within the job's auto-retry budget, so this must not
     consume one of `DOWNLOAD_MAX_RETRIES` — it fails the job immediately,
     same as an upstream 404/403."""
+
+
+# --- Failure-reason classification (S5.2, AUDIT-P8-002/F-103) ---------------
+
+def classify_failure_reason(message: str) -> Optional[str]:
+    """Map a download failure's exception message to one of the CLOSED
+    ``plexhub_download_failures_total{reason}`` values declared in
+    ``app/utils/metrics.py`` (S1.4) — ``http_403 | disk_full | timeout |
+    confinement``. Colocated here rather than in the worker because the
+    exact wording of every message it matches is owned by THIS module:
+    `download_to_disk` and `check_free_disk_space` are the only two call
+    sites that ever raise them.
+
+    Returns `None` for every OTHER real failure mode this module can raise —
+    `upstream 404`, `upstream {5xx}`, `unsafe redirect`, `invalid
+    content-type ...`, a generic `network error` (non-timeout
+    `httpx.TransportError`/`HTTPError`) — and for every caller-side failure
+    that never reaches `download_to_disk` at all (missing Xtream account /
+    Plex source / media row, unresolved stream URL, unexpected exception).
+    None of the 4 declared reasons fit those, and mislabelling e.g. a 404 as
+    `http_403` would be worse than the metric staying silent on it — this is
+    a KNOWN GAP surfaced to the metrics-surface owner rather than papered
+    over here (see `docs/plans/2026-07-26-refacto-audit-v1-plan.md` §VAGUE 5
+    S5.2 — flagged, not resolved unilaterally, per the plan's own rule that
+    label values are S1.4's to add).
+
+    `confinement` (`PathConfinementError`/`DownloadDisabledError`, raised by
+    `resolve_confined`) is classified by the WORKER at its own call site
+    instead of here — those two exception *types* are already unambiguous
+    there, so no message string-match is needed for them.
+    """
+    if message.startswith("upstream 403"):
+        return "http_403"
+    if message.startswith("insufficient free disk space") or message.startswith("disk error"):
+        return "disk_full"
+    if message == "network timeout":
+        return "timeout"
+    return None
 
 
 # --- Path confinement (F-007, security-critical) -----------------------------
@@ -481,6 +520,15 @@ async def download_to_disk(
                                 continue
                             f.write(chunk)
                             bytes_done += len(chunk)
+                            # S5.2 (AUDIT-P8-002/F-103): count REAL bytes
+                            # transferred over the wire this call, not the
+                            # final file size — correct across resumes/retries
+                            # (a job resumed 3x increments by each delta, never
+                            # the same byte twice) and across a cancel (bytes
+                            # already flushed to `.part` before the cancel are
+                            # real bytes written to disk, so they still count
+                            # even though `.part` is never promoted).
+                            metrics.download_bytes_total.inc(len(chunk))
                             if on_progress is not None:
                                 await on_progress(bytes_done, bytes_total)
                             if cancel_check is not None and await cancel_check():

@@ -27,6 +27,62 @@ Secrets invariant: the upstream Xtream URL (user/password in the query
 string) is re-derived here via `stream_service.build_stream_url` and is
 NEVER logged, persisted, or included in any error message — only `job_id`/
 `title`/`dest` appear in log lines.
+
+Metrics (S5.2, AUDIT-P8-002/F-103 — `docs/plans/2026-07-26-refacto-audit-v1-plan.md`
+§VAGUE 5 S5.2). All three metrics are DECLARED and zero-initialised by S1.4
+(`app/utils/metrics.py`); this module only imports and increments/sets them:
+
+  - ``plexhub_download_jobs{state}`` (queue depth) is a Gauge refreshed from a
+    live ``SELECT state, COUNT(*) FROM download_job GROUP BY state`` snapshot
+    once per drain tick (`_refresh_queue_depth_gauge`), NOT maintained as a
+    hand-incremented/decremented counter at every state transition. Two
+    reasons: (1) a state machine this shape (queued->running->completed/
+    failed/canceled, plus a requeue-on-transient-retry edge, plus
+    cross-process cancel/retry/clear_finished writers in
+    `download_service.py` that can run on ANY uvicorn worker) is exactly the
+    kind of bookkeeping that silently drifts the moment one transition is
+    missed or double-counted; a periodic COUNT(*) can never drift, it just
+    re-derives truth every tick. (2) more fundamentally, `prometheus_client`
+    keeps an IN-PROCESS registry — `cancel_job`/`retry_job`/`clear_finished`
+    (request-path, `download_service.py`) can run on a DIFFERENT uvicorn
+    worker process than the one holding the master election and draining the
+    queue, so an inc/dec approach would update a gauge in a process whose
+    `/metrics` may not even be the one an operator scrapes; a periodic read
+    done ONLY by the process that already owns draining sidesteps that
+    entirely. Refresh cadence = `DOWNLOAD_POLL_INTERVAL` (same cadence the
+    loop already polls for new work at).
+  - ``plexhub_download_bytes_total`` is incremented in
+    `download_service.download_to_disk`'s chunk loop (real bytes actually
+    written to `.part` this call — see that module for why).
+  - ``plexhub_download_failures_total{reason}`` is incremented here, at the
+    three points a job's outcome is known: the `PathConfinementError`/
+    `DownloadDisabledError` except-branch (reason="confinement", by
+    exception TYPE — unambiguous, no string match needed), the
+    `DownloadPermanentError` except-branch, and `_handle_transient` (one
+    increment per transient ATTEMPT, whether it goes on to retry or
+    eventually gives up — this surfaces retry churn that self-heals via
+    back-off, which a "final failed state only" counter would hide). The
+    last two go through `download_service.classify_failure_reason`, which
+    returns `None` (no increment) for any failure mode outside the 4 CLOSED
+    label values (`http_403|disk_full|timeout|confinement`) — see that
+    function's docstring for the known gap (404/5xx/network-error/missing-
+    source failures are real but currently unlabelled by this metric).
+
+Never labels/logs a URL, `rating_key`, filename, or full `server_id` (piège
+§9-17c) — `reason` is a closed 4-value enum, `state` a closed 5-value enum,
+`plexhub_download_bytes_total` carries no labels at all.
+
+Worker-is-not-master caveat: this whole module's code only ever RUNS inside
+the process holding the `fcntl` master election (`app/main.py`'s lifespan
+gates `run_drain_loop` under `if is_master:` — piège §9-7). A slave
+process's own `/metrics` therefore keeps these three series at their S1.4
+zero-init value FOREVER — indistinguishable, on that instance alone, from a
+genuinely empty/idle queue. This mirrors the exact same caveat already
+documented for `plexhub_pipeline_last_success_timestamp_seconds`/
+`plexhub_is_master` (S5.1): the fix is NOT per-metric, it's operational —
+alert/dashboard by `instance` label filtered to (or joined with)
+`plexhub_is_master == 1`, not by scraping every replica's queue-depth gauge
+independently.
 """
 from __future__ import annotations
 
@@ -52,6 +108,7 @@ from app.services.download_service import (
     resolve_confined,
 )
 from app.services.stream_service import build_stream_url
+from app.utils import metrics
 from app.utils.db_retry import run_with_retry
 from app.utils.server_id import is_plex_server_id, parse_server_id
 from app.utils.tasks import create_background_task
@@ -95,6 +152,46 @@ async def _fetch_queued(session_factory, *, limit: int, exclude_ids: set) -> lis
     return await run_with_retry(_do, op="fetch_queued")
 
 
+# S5.2 — single source of truth for the 5 `DownloadJob.state` values, shared
+# with `plexhub_download_jobs{state}`'s zero-init in `app/utils/metrics.py`
+# (which hand-maintains its own identical tuple — the two are not
+# structurally linked, but both mirror the same `NON_TERMINAL_STATES` +
+# `TERMINAL_STATES` from `download_service.py`, so drifting the state
+# machine itself would already need touching those two, closer, tuples).
+_QUEUE_STATES: tuple[str, ...] = (
+    download_service.NON_TERMINAL_STATES + download_service.TERMINAL_STATES
+)
+
+
+async def _refresh_queue_depth_gauge(session_factory) -> None:
+    """Set ``plexhub_download_jobs{state}`` from a live ``SELECT state,
+    COUNT(*) FROM download_job GROUP BY state`` snapshot (see module
+    docstring for why this is a periodic re-derivation rather than a
+    hand-incremented/decremented counter). Best-effort: a missed refresh
+    tick must never abort the drain loop — the next tick (≤
+    `DOWNLOAD_POLL_INTERVAL` later) re-derives truth from scratch anyway, so
+    there is nothing to compensate for on the next successful read.
+    """
+    async def _do() -> dict[str, int]:
+        async with session_factory() as db:
+            rows = (
+                await db.execute(
+                    select(DownloadJob.state, func.count())
+                    .group_by(DownloadJob.state)
+                )
+            ).all()
+            return {state: count for state, count in rows}
+
+    try:
+        counts = await run_with_retry(_do, op="queue_depth_gauge")
+    except Exception:
+        logger.debug("Download worker: queue depth gauge refresh skipped", exc_info=True)
+        return
+
+    for state in _QUEUE_STATES:
+        metrics.download_jobs.labels(state=state).set(counts.get(state, 0))
+
+
 async def run_drain_loop(session_factory) -> None:
     """Long-lived master-only coroutine: reap orphans once, then poll for
     `queued` jobs every `DOWNLOAD_POLL_INTERVAL`s and dispatch up to
@@ -108,6 +205,12 @@ async def run_drain_loop(session_factory) -> None:
     if reaped:
         logger.info("Download worker: reaped %d orphaned running job(s) at boot", reaped)
 
+    # S5.2: establish the queue-depth gauge baseline as soon as the drain
+    # loop is live, instead of waiting up to one full `DOWNLOAD_POLL_INTERVAL`
+    # for the first tick — orphans just got reaped above, so this reflects
+    # their requeue immediately.
+    await _refresh_queue_depth_gauge(session_factory)
+
     concurrency = max(1, settings.DOWNLOAD_CONCURRENCY)
     sem = asyncio.Semaphore(concurrency)
     in_flight: dict[str, asyncio.Task] = {}
@@ -116,6 +219,12 @@ async def run_drain_loop(session_factory) -> None:
     try:
         while True:
             try:
+                # S5.2: refreshed once per tick (≈ every DOWNLOAD_POLL_INTERVAL)
+                # from a live COUNT(*) GROUP BY state — see module docstring +
+                # `_refresh_queue_depth_gauge` for why this is a periodic read
+                # rather than a hand-maintained counter.
+                await _refresh_queue_depth_gauge(session_factory)
+
                 for job_id in [jid for jid, task in in_flight.items() if task.done()]:
                     in_flight.pop(job_id, None)
 
@@ -352,6 +461,19 @@ async def _mark_failed(session_factory, job_id: str, message: str) -> None:
 
     await run_with_retry(_do, op="mark_failed")
     logger.warning("Download job %s: failed (%s)", job_id, message)
+    # S5.2: single hook for every call site of `_mark_failed` (permanent
+    # transfer errors AND the pre-transfer "not found" messages below) —
+    # `classify_failure_reason` returns `None` for anything outside the 4
+    # CLOSED label values, so this is a no-op (not a miscount) for the
+    # pre-transfer messages ("compte source introuvable...", "URL de flux
+    # introuvable", "source Plex introuvable...") and for permanent errors
+    # outside the mapped set (404, 5xx, unsafe redirect, bad content-type).
+    # `confinement` is NOT classified from `message` here (it never matches
+    # any pattern) — the confinement except-branch in `_run_job` increments
+    # it directly from the exception TYPE instead.
+    reason = download_service.classify_failure_reason(message)
+    if reason is not None:
+        metrics.download_failures_total.labels(reason=reason).inc()
 
 
 async def _handle_transient(session_factory, job_id: str, message: str) -> None:
@@ -377,6 +499,17 @@ async def _handle_transient(session_factory, job_id: str, message: str) -> None:
          (DOWNLOAD_CONCURRENCY=1 no longer head-of-line-blocks the whole
          queue behind one flaky job).
     """
+    # S5.2: one increment per transient ATTEMPT (not per eventual outcome) —
+    # a job that times out twice then succeeds on the third try still
+    # surfaces 2 real failure events, which a "count only the final `failed`
+    # state" approach would hide entirely. Counted even if the job turns out
+    # to already be canceled below (`attempts is None`): the transfer attempt
+    # genuinely failed with this error regardless of what happened to the
+    # job concurrently.
+    reason = download_service.classify_failure_reason(message)
+    if reason is not None:
+        metrics.download_failures_total.labels(reason=reason).inc()
+
     async def _peek_attempts():
         async with session_factory() as db:
             job = await db.get(DownloadJob, job_id)
@@ -474,6 +607,12 @@ async def _run_job(session_factory, job_id: str, sem: asyncio.Semaphore) -> None
         except (PathConfinementError, DownloadDisabledError) as exc:
             logger.error("Download job %s: destination rejected: %s", job_id, exc)
             await _mark_failed(session_factory, job_id, "chemin de destination invalide")
+            # S5.2: classified by exception TYPE here (unambiguous), not by
+            # `_mark_failed`'s generic message-based `classify_failure_reason`
+            # — "chemin de destination invalide" never matches any of its
+            # patterns, so this increment does not double up with the one
+            # `_mark_failed` would otherwise skip for this message.
+            metrics.download_failures_total.labels(reason="confinement").inc()
             return
 
         last_persist = {"t": 0.0}

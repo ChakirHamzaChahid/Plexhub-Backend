@@ -7,10 +7,14 @@ releasing it once `UpstreamStream.body` is fully drained/`aclose`d; this
 module itself knows nothing about accounts or the throttle).
 
 Reuses the SAME redirect-following + SSRF guard as
-`app.services.download_service.download_to_disk`
-(`assert_public_redirect_host`) — a provider's stream URL can legitimately
-302 to a CDN host, and that hop must be verified to resolve to a public IP
-before being fetched, exactly like a physical download.
+`app.services.download_service.download_to_disk` — both call the shared
+predicate in `app.utils.ssrf` (CR-S08) directly, rather than this module
+importing from `app.services.download_service` (which would recreate the
+`services ⇄ dav` import cycle `app.services.plex_generation_service`
+already has the other way, via a deferred `app.dav.vfs` import — see
+AUDIT-P4-007). A provider's stream URL can legitimately 302 to a CDN host,
+and that hop must be verified to resolve to a public IP before being
+fetched, exactly like a physical download.
 
 Range handling: the client's `Range` header is passed straight through to
 the upstream. Some Xtream panels ignore it and answer 200 with the full
@@ -33,7 +37,7 @@ from typing import AsyncIterator, Awaitable, Callable, Optional
 import httpx
 
 from app.config import settings
-from app.services.download_service import DownloadPermanentError, assert_public_redirect_host
+from app.utils.ssrf import SsrfBlockedError, assert_public_host
 
 logger = logging.getLogger("plexhub.dav")
 
@@ -246,7 +250,7 @@ async def _send(client: httpx.AsyncClient, url: str, headers: dict[str, str]) ->
 
 async def open_upstream(url: str, range_header: Optional[str]) -> UpstreamStream:
     """Fetch `url` (an already-built Xtream stream URL — never logged),
-    following redirects (SSRF-guarded via `assert_public_redirect_host`,
+    following redirects (SSRF-guarded via `app.utils.ssrf.assert_public_host`,
     up to `settings.DOWNLOAD_MAX_REDIRECTS` hops) and passing `range_header`
     (the DAV client's `Range` header, or `None`) through to the upstream.
 
@@ -274,8 +278,8 @@ async def open_upstream(url: str, range_header: Optional[str]) -> UpstreamStream
                 raise UpstreamError("too many redirects (or missing Location)")
             next_url = str(resp.url.join(location))
             try:
-                await assert_public_redirect_host(httpx.URL(next_url).host)
-            except DownloadPermanentError:
+                await assert_public_host(httpx.URL(next_url).host)
+            except SsrfBlockedError:
                 logger.warning("DAV relay: rejected redirect to a non-public host")
                 raise UpstreamError("unsafe redirect target") from None
             current_url = next_url

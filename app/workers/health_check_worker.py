@@ -11,6 +11,7 @@ from app.models.database import DownloadJob, Media, XtreamAccount
 from app.services.stream_service import build_stream_url
 from app.utils.time import now_ms
 from app.utils.db_retry import commit_with_retry, write_with_retry
+from app.utils.ssrf import SsrfBlockedError, vet_request
 
 logger = logging.getLogger("plexhub.health_check")
 
@@ -21,6 +22,16 @@ _client_lock = asyncio.Lock()
 
 
 async def _get_client() -> httpx.AsyncClient:
+    """Module singleton used by `run()`/`run_pipeline_validation()` — vetted
+    against SSRF (CR-S08) via the `vet_request` event hook below, which fires
+    on the initial request AND on every followed redirect hop (`head`/`stream`
+    below both pass `follow_redirects=True`). NOTE: several `_check_one`
+    classification tests (`tests/test_health_check_worker.py`) build their
+    OWN bare `httpx.AsyncClient()` against a non-resolvable test host
+    (`http://acct.test`) rather than going through this singleton — they are
+    intentionally NOT vetted, and `_check_one` itself must never call the
+    SSRF guard directly (only this client's hook does) or those tests would
+    start failing on DNS resolution instead of exercising classification."""
     global _client
     if _client is None or _client.is_closed:
         async with _client_lock:
@@ -28,6 +39,7 @@ async def _get_client() -> httpx.AsyncClient:
                 _client = httpx.AsyncClient(
                     timeout=httpx.Timeout(settings.STREAM_VALIDATION_TIMEOUT, connect=10.0),
                     headers={"User-Agent": settings.XTREAM_USER_AGENT},
+                    event_hooks={"request": [vet_request]},
                     limits=httpx.Limits(
                         max_connections=max(50, settings.STREAM_VALIDATION_CONCURRENCY * 2),
                         # No keep-alive: use a fresh connection per probe, like a
@@ -110,6 +122,7 @@ _DEFINITIVE_PREFIXES = (
     "head_ct_error:", "get_ct_error:",  # error page (text/html, etc.)
     "get_empty",                 # 200 OK but empty body = dead stream
     "get_magic_fail:",           # bytes don't match any video format
+    "unsafe_host",               # SSRF guard rejected the target (CR-S08) — won't self-resolve
 )
 
 
@@ -272,6 +285,12 @@ async def _check_one(client: httpx.AsyncClient, item, account, semaphore):
             # that httpx can't follow — the stream is effectively broken. Expected
             # provider-side garbage, so classify it without a noisy warning.
             return item, True, "bad_redirect", None
+        except SsrfBlockedError:
+            # The client's `vet_request` event hook (CR-S08) rejected the
+            # initial request or a redirect hop as resolving to a non-public
+            # host — classify like any other definitive failure, without
+            # logging the host/url (the hook's exception never carries it).
+            return item, True, "unsafe_host", None
         except Exception as e:
             # Many remote-IPTV failures (RemoteProtocolError, ReadError, SSL…)
             # stringify to an empty message — include the type so the log line

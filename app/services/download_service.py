@@ -19,13 +19,11 @@ it in any exception message.
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import json
 import logging
 import os
 import re
 import shutil
-import socket
 import unicodedata
 import uuid
 from dataclasses import dataclass
@@ -44,6 +42,8 @@ from app.services.media_service import media_service
 from app.services.stream_service import parse_rating_key
 from app.utils.db_retry import run_with_retry
 from app.utils.server_id import parse_server_id
+from app.utils.ssrf import SsrfBlockedError
+from app.utils.ssrf import assert_public_host as _assert_public_host
 from app.utils.time import now_ms
 
 logger = logging.getLogger("plexhub.download")
@@ -292,41 +292,31 @@ async def _assert_public_redirect_host(host: Optional[str]) -> None:
     a provider's 302 can never make us fetch an internal address. The raised
     message never contains the host or the URL (they can embed Xtream creds).
 
-    Residual caveat: this validates the hostname's *current* resolution; a
-    determined attacker could DNS-rebind between this check and httpx's own
-    connect. That is a far more involved attack than the plain "302 to
-    127.0.0.1" this guards against, and out of scope for a self-hosted puller
-    against an operator-chosen provider.
+    Thin delegation to the shared `app.utils.ssrf` predicate (CR-S08) — the
+    resolution/validation logic itself, the DNS-verdict cache, and the
+    allow-list live there now so the DAV relay, library image downloads, and
+    stream health-check probes can all share the exact same guard instead of
+    four independent copies. This function only maps `SsrfBlockedError` to
+    the `DownloadPermanentError` this module's callers already expect.
+
+    Residual caveat (documented in full in `app.utils.ssrf`): this validates
+    the hostname's *current* resolution; a determined attacker could
+    DNS-rebind between this check and httpx's own connect. That is a far more
+    involved attack than the plain "302 to 127.0.0.1" this guards against,
+    and out of scope for a self-hosted puller against an operator-chosen
+    provider.
     """
-    if not host:
-        raise DownloadPermanentError("unsafe redirect")
-    # A bare IP literal in the Location skips DNS but still must be public.
     try:
-        infos = await asyncio.to_thread(
-            socket.getaddrinfo, host, None, type=socket.SOCK_STREAM
-        )
-    except OSError:
+        await _assert_public_host(host)
+    except SsrfBlockedError:
         raise DownloadPermanentError("unsafe redirect") from None
-    for info in infos:
-        try:
-            ip = ipaddress.ip_address(info[4][0])
-        except ValueError:
-            raise DownloadPermanentError("unsafe redirect") from None
-        if (
-            not ip.is_global
-            or ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_reserved
-            or ip.is_multicast
-        ):
-            raise DownloadPermanentError("unsafe redirect")
 
 
 # Public alias (house convention for cross-module reuse of a private
-# helper): the DAV relay reuses this exact SSRF guard on redirect targets
-# rather than duplicating the resolution/validation logic. See
-# app/dav/relay.py.
+# helper), kept for backward compatibility. `app/dav/relay.py` now imports
+# `app.utils.ssrf.assert_public_host` directly instead (breaks the
+# `services -> dav` edge of the `services <-> dav` import cycle,
+# AUDIT-P4-007 — see app/dav/relay.py's module docstring).
 assert_public_redirect_host = _assert_public_redirect_host
 
 

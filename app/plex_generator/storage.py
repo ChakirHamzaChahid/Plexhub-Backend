@@ -8,6 +8,8 @@ from pathlib import Path
 
 import httpx
 
+from app.utils.ssrf import assert_public_host_sync, vet_request_sync
+
 # Folder-level files the generator owns. A title folder containing ONLY these
 # (and per-episode .nfo siblings) and no .strm is a safe-to-remove orphan.
 _GENERATED_FILES = frozenset({"tvshow.nfo", "movie.nfo", "poster.jpg", "fanart.jpg"})
@@ -47,12 +49,19 @@ _all_clients_lock = threading.Lock()
 
 
 def _get_image_client() -> httpx.Client:
-    """Return a per-thread httpx.Client (thread-safe by isolation)."""
+    """Return a per-thread httpx.Client (thread-safe by isolation).
+
+    Poster/fanart URLs are provider-controlled (TMDB/OMDb scrape results),
+    so this is one of two SSRF-relevant download surfaces (CR-S08) — the
+    `vet_request_sync` event hook fires on the initial request AND on every
+    followed redirect hop (`follow_redirects=True` is unchanged; only public
+    targets are ever actually connected to)."""
     client = getattr(_thread_local, "http_client", None)
     if client is None or client.is_closed:
         client = httpx.Client(
             timeout=15.0,
             follow_redirects=True,
+            event_hooks={"request": [vet_request_sync]},
         )
         _thread_local.http_client = client
         with _all_clients_lock:
@@ -146,6 +155,13 @@ class LocalStorage(LibraryStorage):
 
     @staticmethod
     def _download_sync(full: Path, image_url: str) -> None:
+        """Runs in the `_image_pool` worker thread — never on the event
+        loop. `assert_public_host_sync` (CR-S08) is an explicit pre-check on
+        top of the client's `vet_request_sync` hook (belt-and-suspenders:
+        the hook alone already covers this request and any redirect it
+        follows) so a rejected target is refused before httpx even opens a
+        connection for the initial request."""
+        assert_public_host_sync(httpx.URL(image_url).host)
         client = _get_image_client()
         resp = client.get(image_url)
         resp.raise_for_status()

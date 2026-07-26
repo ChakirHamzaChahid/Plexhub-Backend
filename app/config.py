@@ -211,6 +211,21 @@ class Settings:
     DAV_CONNECT_TIMEOUT: float = _safe_float("DAV_CONNECT_TIMEOUT", float(DOWNLOAD_CONNECT_TIMEOUT))
     DAV_READ_TIMEOUT: float = _safe_float("DAV_READ_TIMEOUT", float(DOWNLOAD_READ_TIMEOUT))
 
+    # SSRF guard (CR-S08, app/utils/ssrf.py) — shared by physical downloads,
+    # the DAV relay, library image downloads, and stream health-check probes.
+    # Comma-separated hostnames explicitly allowed to resolve to a private/
+    # loopback/reserved address (operator opt-in for a self-hosted provider
+    # that legitimately lives on a private network). Empty (the default) —
+    # verified against this deployment's actual provider hosts, all public —
+    # means no exception: every private range stays blocked.
+    SSRF_ALLOW_PRIVATE_HOSTS: str = os.getenv("SSRF_ALLOW_PRIVATE_HOSTS", "")
+    # How long a hostname's public/private DNS verdict is cached, in seconds.
+    # A throughput tradeoff for the health-check worker (thousands of probes
+    # against a handful of provider hostnames) — NOT a security control; a
+    # longer cache widens the DNS-rebinding TOCTOU window documented in
+    # app/utils/ssrf.py, it doesn't narrow it. <=0 disables caching entirely.
+    SSRF_DNS_CACHE_SECONDS: int = _safe_int("SSRF_DNS_CACHE_SECONDS", 60)
+
     @property
     def has_xtream_env(self) -> bool:
         return bool(self.XTREAM_BASE_URL and self.XTREAM_USERNAME and self.XTREAM_PASSWORD)

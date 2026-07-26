@@ -171,3 +171,22 @@ def download_dir(tmp_path, monkeypatch):
     d.mkdir()
     monkeypatch.setattr(settings, "DOWNLOAD_DIR", str(d))
     return d
+
+
+# ─── Trailer resolution (Lot A trailers) ─────────────────────────────────
+
+
+@pytest.fixture
+def trailer_dir(tmp_path, monkeypatch):
+    """A tmp_path-backed `settings.TRAILER_CACHE_DIR` for trailer-feature
+    tests. Never the real filesystem. `TRAILER_CACHE_DIR` (unlike
+    `DOWNLOAD_DIR`) is resolved from `DATA_DIR` inside `Settings.__init__`
+    at process-import time, so monkeypatching `settings.DATA_DIR` alone (as
+    `api_client` does) does NOT retroactively move it — every trailer test
+    that touches the cache directory MUST use this fixture."""
+    from app.config import settings
+
+    d = tmp_path / "trailers"
+    d.mkdir()
+    monkeypatch.setattr(settings, "TRAILER_CACHE_DIR", str(d))
+    return d

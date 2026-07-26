@@ -223,6 +223,17 @@ class Settings:
     # only for typing/defaults — the real value is always set in __init__.
     PLEX_CLIENT_IDENTIFIER: str = ""
 
+    # Trailer resolution (feature "trailers popup Home pour les médias
+    # non-Plex", Lot A) — resolves a YouTube trailer key to a cached local
+    # mp4 via yt-dlp, served under /api/media/trailer/*. Unlike DOWNLOAD_DIR
+    # (default "" = off), this one defaults ON: `TRAILER_CACHE_DIR` is
+    # resolved in __init__ to `DATA_DIR/trailers` when the env var is
+    # UNSET, so it rides the already-mounted DATA_DIR volume with no new
+    # docker-compose mount needed. Setting `TRAILER_CACHE_DIR=` (empty)
+    # explicitly opts out (mirrors DOWNLOAD_DIR's convention).
+    TRAILER_CACHE_DIR: str = ""  # resolved in __init__ (depends on DATA_DIR)
+    TRAILER_CACHE_MAX_MB: int = _safe_int("TRAILER_CACHE_MAX_MB", 2048)
+
     # WebDAV virtual filesystem for Plex (see docs/30-ops-plex-webdav.md).
     # Plex ignores .strm files at scan time, so a read-only WebDAV tree is
     # exposed at /dav (rclone-mounted on the same host) presenting Xtream
@@ -333,6 +344,31 @@ class Settings:
             )
         else:
             logger.info("Physical download: DOWNLOAD_DIR not set — feature disabled")
+
+        # `TRAILER_CACHE_DIR` depends on `DATA_DIR` (default `DATA_DIR/trailers`)
+        # so it is resolved here rather than as a class attribute default —
+        # same pattern as `PLEX_CLIENT_IDENTIFIER` above. An explicit env
+        # value (including an explicit empty string) always wins.
+        env_trailer_dir = os.getenv("TRAILER_CACHE_DIR")
+        if env_trailer_dir is None:
+            self.TRAILER_CACHE_DIR = str(self.DATA_DIR / "trailers")
+        else:
+            self.TRAILER_CACHE_DIR = env_trailer_dir
+        if self.TRAILER_CACHE_DIR:
+            try:
+                Path(self.TRAILER_CACHE_DIR).mkdir(parents=True, exist_ok=True)
+                logger.info(
+                    f"Trailer cache: dir={self.TRAILER_CACHE_DIR!r}, "
+                    f"max_mb={self.TRAILER_CACHE_MAX_MB}"
+                )
+            except OSError as exc:
+                logger.warning(
+                    "Could not create TRAILER_CACHE_DIR=%r (%s) — trailer "
+                    "resolution will fail until the directory is writable",
+                    self.TRAILER_CACHE_DIR, exc,
+                )
+        else:
+            logger.info("Trailer cache: TRAILER_CACHE_DIR explicitly empty — feature disabled")
 
         if self.PLEX_ACCOUNT_TOKEN:
             logger.info("Plex download source: enabled (client_id=%s…)", self.PLEX_CLIENT_IDENTIFIER[:8])

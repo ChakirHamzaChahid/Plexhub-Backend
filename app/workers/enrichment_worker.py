@@ -517,6 +517,10 @@ async def _apply_enrichment_results(db, results: list[FetchResult]):
                     ("tmdb_rating", enrichment_data.tmdb_rating),
                     ("tmdb_votes", enrichment_data.tmdb_votes),
                     ("cast_json", enrichment_data.cast_json),
+                    # Lot A trailers: fill-missing only — never clobbers a
+                    # value already captured by the Xtream sync
+                    # (sync_worker.map_vod_to_media / fetch_series_episodes).
+                    ("youtube_trailer", enrichment_data.youtube_trailer),
                 )
                 for col, value in rich:
                     if value is not None:

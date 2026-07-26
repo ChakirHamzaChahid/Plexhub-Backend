@@ -95,6 +95,11 @@ class Media(Base):
     tmdb_votes = Column(Integer)             # <ratings><rating name="themoviedb"><votes>
     cast_json = Column(Text)                 # JSON [{name, role, thumb, profile, tvdbid}]
 
+    # Bare YouTube video id (e.g. "dQw4w9WgXcQ") resolved from the Xtream
+    # sync payload (`get_vod_info`/`get_series_info`) or the TMDB "videos"
+    # append_to_response (fill-missing) — see app/services/trailer_service.py.
+    youtube_trailer = Column(Text)
+
     # Backend-specific
     stream_error_count = Column(Integer, nullable=False, default=0)
     last_stream_check = Column(BigInteger)

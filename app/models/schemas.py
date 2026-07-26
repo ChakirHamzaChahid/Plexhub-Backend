@@ -109,6 +109,9 @@ class MediaResponse(BaseModel):
     tmdb_rating: Optional[float] = None
     tmdb_votes: Optional[int] = None
 
+    # Bare YouTube video id (Lot A trailers) — see app/services/trailer_service.py.
+    youtube_trailer: Optional[str] = None
+
     @model_validator(mode="after")
     def _prefix_adult_title(self) -> "MediaResponse":
         self.title = apply_adult_prefix(self.title, self.is_adult)
@@ -126,6 +129,17 @@ class MediaListResponse(BaseModel):
     # `cursor` and sorts by added_desc/added_asc; null otherwise. Additive and
     # optional — existing clients that page with offset ignore it.
     next_cursor: Optional[str] = None
+
+
+# --- Trailer resolution (Lot A trailers) -----------------------------------
+
+class TrailerResolveResponse(BaseModel):
+    """`GET /api/media/trailer/resolve` response — see
+    `app/services/trailer_service.py` for the full status contract."""
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    status: str  # "ready" | "pending" | "none"
+    url: Optional[str] = None
 
 
 # --- Unified (deduped) media schemas — one entry per title, N versions ---
@@ -173,6 +187,8 @@ class UnifiedMediaResponse(BaseModel):
     tmdb_rating: Optional[float] = None
     tmdb_votes: Optional[int] = None
     cast_json: Optional[str] = None
+    # Bare YouTube video id (Lot A trailers) — see app/services/trailer_service.py.
+    youtube_trailer: Optional[str] = None
     version_count: int = 0
     versions: list[MediaVersionResponse] = []
 

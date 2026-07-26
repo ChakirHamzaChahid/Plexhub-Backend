@@ -48,6 +48,16 @@ services:
       # hôte correspondant se règle via DOWNLOAD_HOST_PATH (volume ci-dessous).
       - DOWNLOAD_DIR=/app/downloads
       - TZ=${TZ:-UTC}
+    # AUDIT-P7-007 (S6.1) : l'image tourne désormais en utilisateur non-root
+    # UID:GID 1000:1000 (voir Dockerfile). Ces 4 volumes hôtes doivent être
+    # accessibles en écriture par 1000:1000 AVANT le premier
+    # `docker compose up` avec cette image, sinon le boot échoue à `init_db`
+    # (SQLite/WAL + verrou d'élection master `fcntl.flock`) ou dégrade en
+    # esclave silencieux (AUDIT-P1-003) :
+    #   chown -R 1000:1000 ./data ./logs ./media ./downloads
+    # (adapter les 2 derniers chemins si PLEX_MEDIA_HOST_PATH/
+    # DOWNLOAD_HOST_PATH sont surchargés). Détail + procédure de migration
+    # d'un déploiement existant : docs/32-ops-docker-nonroot.md.
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs

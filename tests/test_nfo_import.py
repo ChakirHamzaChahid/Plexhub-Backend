@@ -4,11 +4,13 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from sqlalchemy import select
 
 from app.models.database import Media, XtreamAccount
 from app.plex_generator.mapping import MappingStore
 from app.plex_generator.naming import movie_path, series_nfo_path
 from app.services import nfo_import_service
+from app.utils.rating_blend import blend_rating, recompute_display_rating_stmt
 from app.utils.server_id import build_server_id
 
 
@@ -592,3 +594,157 @@ def test_compute_updates_no_unification_churn_when_nothing_written():
     )
     updates = nfo_import_service._compute_updates(row, _nfo(tmdb_id="12345"), overwrite=False)
     assert updates == {}
+
+
+# ---------- display_rating: single source of truth (ADR 0004 Decision 1) ----------
+# AUDIT-P4-005: nfo_import_service and the enrichment pipeline used to disagree
+# on `display_rating` (COALESCE best-pick vs blend_rating average), causing the
+# value to oscillate depending on which writer ran last. nfo_import_service now
+# defers to `rating_blend.blend_rating` whenever it (re)writes an IMDb/TMDB
+# rating, exactly like `enrichment_worker`/`recompute_display_rating_stmt`.
+
+def test_compute_updates_display_rating_uses_blend_not_coalesce():
+    """When both imdb_rating and tmdb_rating are (re)written, display_rating
+    must be blend_rating(imdb, tmdb) — NOT the old COALESCE(scraped, audience,
+    rating), which would have picked scraped_rating (9.0) instead of the
+    blended average (7.0)."""
+    row = Media(
+        rating_key="movie_1", server_id=_SERVER_ID,
+        library_section_id="lib-1", title="Blend Test", type="movie", year=2020,
+        display_rating=0.0,
+    )
+    parsed = _nfo(media_type="movie", imdb_rating=6.0, tmdb_rating=8.0, rating=9.0)
+    updates = nfo_import_service._compute_updates(row, parsed, overwrite=False)
+
+    assert updates["imdb_rating"] == 6.0
+    assert updates["tmdb_rating"] == 8.0
+    assert updates["scraped_rating"] == 9.0
+    assert updates["display_rating"] == blend_rating(6.0, 8.0) == 7.0
+
+
+def test_compute_updates_display_rating_untouched_without_imdb_tmdb_change():
+    """NFO-only rows without any IMDb/TMDB note must keep their existing
+    display_rating (set upstream by sync_worker's COALESCE) — the convergence
+    must not reset it to NULL/0. `blend_rating` has nothing to say here, so no
+    write happens at all (existing value is left exactly as-is)."""
+    row = Media(
+        rating_key="movie_2", server_id=_SERVER_ID,
+        library_section_id="lib-1", title="No IMDb TMDB", type="movie", year=2020,
+        display_rating=5.5,  # e.g. sync_worker's COALESCE(scraped, audience, rating)
+    )
+    parsed = _nfo(media_type="movie", rating=9.0)  # only a plain <rating>, no <ratings>
+    updates = nfo_import_service._compute_updates(row, parsed, overwrite=False)
+
+    assert updates["scraped_rating"] == 9.0
+    assert "display_rating" not in updates
+    assert row.display_rating == 5.5  # untouched, not clobbered by the new scraped value
+
+
+_MOVIE_NFO_DUAL_RATING = """<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<movie>
+  <title>Rating Order Test</title>
+  <year>2015</year>
+  <imdbid>tt1234567</imdbid>
+  <tmdbid>555</tmdbid>
+  <plot>Test movie for display_rating convergence.</plot>
+  <genre>Drama</genre>
+  <ratings>
+    <rating name="imdb"><value>6.0</value><votes>1000</votes></rating>
+    <rating name="themoviedb"><value>8.0</value><votes>500</votes></rating>
+  </ratings>
+</movie>
+"""
+
+
+async def _get_media(db_session, rating_key: str) -> Media:
+    row = (await db_session.execute(
+        select(Media).where(Media.rating_key == rating_key, Media.server_id == _SERVER_ID)
+    )).scalars().one()
+    return row
+
+
+async def test_no_oscillation_nfo_import_then_enrichment_recompute(tmp_path, db_session):
+    """Order A: NFO import runs first (writes imdb_rating=6.0/tmdb_rating=8.0),
+    then a later enrichment run's `recompute_display_rating_stmt()` executes.
+    The blend (7.0) must already be correct after the NFO import — the SQL
+    recompute must be a true no-op (this is the non-oscillation invariant of
+    ADR 0004 Decision 1 / AUDIT-P4-005)."""
+    await _seed_account(db_session)
+    rating_key = "vod_order_a.mkv"
+    _seed_movie_on_disk(
+        tmp_path, rating_key, "Rating Order Test A", 2015,
+        nfo_content=_MOVIE_NFO_DUAL_RATING,
+    )
+    db_session.add(Media(
+        rating_key=rating_key, server_id=_SERVER_ID,
+        filter="all", sort_order="default",
+        library_section_id="lib-1", title="Rating Order Test A",
+        type="movie", year=2015,
+        added_at=1, updated_at=1,
+    ))
+    await db_session.commit()
+
+    await nfo_import_service.import_nfo(
+        db_session, tmp_path, kinds=("movies",), overwrite=False, dry_run=False,
+    )
+    await db_session.commit()
+    db_session.expire_all()
+
+    row = await _get_media(db_session, rating_key)
+    assert row.imdb_rating == 6.0
+    assert row.tmdb_rating == 8.0
+    # Would be 6.0 under the old COALESCE(scraped_rating, ...) formula --
+    # proves the fix actually took effect, not just "some non-zero value".
+    assert row.display_rating == blend_rating(6.0, 8.0) == 7.0
+
+    # Simulate a subsequent enrichment run.
+    await db_session.execute(recompute_display_rating_stmt())
+    await db_session.commit()
+    db_session.expire_all()
+
+    row_after = await _get_media(db_session, rating_key)
+    assert row_after.display_rating == 7.0  # unchanged -> no oscillation
+
+
+async def test_no_oscillation_enrichment_recompute_then_nfo_import(tmp_path, db_session):
+    """Order B (reversed): the row already carries imdb_rating/tmdb_rating and
+    a display_rating set by a PRIOR enrichment run (blend = 7.0). A later NFO
+    import that fills in still-missing fields (scraped_rating, audience_rating,
+    summary, ...) — but does NOT change imdb_rating/tmdb_rating, since they're
+    already set — must NOT re-derive display_rating from the old COALESCE
+    formula (that used to yield 6.0, clobbering the correct 7.0). Converges on
+    the SAME value as Order A."""
+    await _seed_account(db_session)
+    rating_key = "vod_order_b.mkv"
+    _seed_movie_on_disk(
+        tmp_path, rating_key, "Rating Order Test B", 2016,
+        nfo_content=_MOVIE_NFO_DUAL_RATING,
+    )
+    db_session.add(Media(
+        rating_key=rating_key, server_id=_SERVER_ID,
+        filter="all", sort_order="default",
+        library_section_id="lib-1", title="Rating Order Test B",
+        type="movie", year=2016,
+        imdb_id="tt1234567", tmdb_id="555",
+        imdb_rating=6.0, tmdb_rating=8.0,
+        display_rating=blend_rating(6.0, 8.0),  # as if enrichment already ran
+        added_at=1, updated_at=1,
+    ))
+    await db_session.commit()
+
+    await nfo_import_service.import_nfo(
+        db_session, tmp_path, kinds=("movies",), overwrite=False, dry_run=False,
+    )
+    await db_session.commit()
+    db_session.expire_all()
+
+    row = await _get_media(db_session, rating_key)
+    # scraped_rating/audience_rating were missing and got filled by the NFO...
+    assert row.scraped_rating == 6.0
+    assert row.audience_rating == 8.0
+    # ...but display_rating must stay the blend value, not regress to the old
+    # COALESCE(scraped=6.0, audience=8.0, rating=None) = 6.0.
+    assert row.display_rating == blend_rating(6.0, 8.0) == 7.0
+
+    # Same final value as Order A (7.0) -> both orderings converge on the
+    # exact same display_rating regardless of which writer ran first/second.

@@ -6,6 +6,7 @@ from app.db.database import get_db
 from app.models.database import XtreamAccount
 from app.models.schemas import HealthResponse
 from app.services.media_service import media_service
+from app.utils import job_health
 
 router = APIRouter(tags=["health"])
 
@@ -36,4 +37,8 @@ async def health_check(request: Request, db: AsyncSession = Depends(get_db)):
         enriched_media=stats["enriched_media"],
         broken_streams=stats["broken_streams"],
         last_sync_at=last_sync,
+        # S5.1 (AUDIT-P8-005): additive, public-endpoint-safe (no path, no
+        # host, no config — just a bool and a timestamp, house-law piège 10).
+        is_master=job_health.is_master(),
+        last_pipeline_success_at=job_health.last_success_ms("pipeline"),
     )

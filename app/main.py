@@ -33,6 +33,7 @@ from app.api import (
     tv_auth,
 )
 from app.utils.request_context import RequestIdLogFilter, RequestIdMiddleware
+from app.utils.job_health import mark_job_success, set_master, track_job
 
 APP_VERSION = "1.7.1"
 
@@ -290,6 +291,11 @@ async def lifespan(app: FastAPI):
                 lock_fd = None
             is_master = False
 
+        # S5.1 (AUDIT-P8-005): publish the REAL election result verbatim —
+        # `plexhub_is_master` must reflect a slave/OSError fallback exactly,
+        # never re-decide mastership itself (piège §9-7 / AUDIT-P1-003).
+        set_master(is_master)
+
         # Auto-provision Xtream account from env vars
         if settings.has_xtream_env:
             await _auto_provision_xtream_account()
@@ -319,6 +325,7 @@ async def lifespan(app: FastAPI):
                         await _auto_generate_plex_library()
                         logger.info("Scheduled generation done — rebuilding unified-group snapshot")
                         await _rebuild_unified_groups()
+                        mark_job_success("pipeline")  # S5.1: only on a full, exception-free run
                     except Exception as e:
                         logger.error(f"Scheduled sync pipeline failed: {e}", exc_info=True)
 
@@ -336,7 +343,7 @@ async def lifespan(app: FastAPI):
                 misfire_grace_time=300,
             )
             scheduler.add_job(
-                health_check_worker.run,
+                track_job("health_check")(health_check_worker.run),
                 "cron",
                 hour=2,
                 id="health_check",
@@ -345,7 +352,7 @@ async def lifespan(app: FastAPI):
                 misfire_grace_time=3600,
             )
             scheduler.add_job(
-                _cleanup_stale_epg,
+                track_job("epg_cleanup")(_cleanup_stale_epg),
                 "cron",
                 hour=3,
                 id="epg_cleanup",
@@ -360,7 +367,7 @@ async def lifespan(app: FastAPI):
                 await subtitle_service.cleanup_cache(async_session_factory)
 
             scheduler.add_job(
-                _subtitle_cache_cleanup,
+                track_job("subtitle_cache_cleanup")(_subtitle_cache_cleanup),
                 "cron",
                 hour=3,
                 id="subtitle_cache_cleanup",
@@ -377,7 +384,7 @@ async def lifespan(app: FastAPI):
                     await asyncio.to_thread(_run_backup)
 
                 scheduler.add_job(
-                    _scheduled_backup,
+                    track_job("db_backup")(_scheduled_backup),
                     "cron",
                     hour=settings.BACKUP_HOUR,
                     id="db_backup",
@@ -409,7 +416,7 @@ async def lifespan(app: FastAPI):
                     await plex_sync_service.run_full_sync(async_session_factory)
 
                 scheduler.add_job(
-                    _scheduled_plex_sync,
+                    track_job("plex_catalogue_sync")(_scheduled_plex_sync),
                     "interval",
                     hours=settings.PLEX_SYNC_INTERVAL_HOURS,
                     id="plex_catalogue_sync",
@@ -488,6 +495,7 @@ async def lifespan(app: FastAPI):
                     await _auto_generate_plex_library()
                     logger.info("Generation done — rebuilding unified-group snapshot")
                     await _rebuild_unified_groups()
+                    mark_job_success("pipeline")  # S5.1: same freshness gauge as the interval job
 
             from app.utils.tasks import create_background_task
             create_background_task(initial_sync_then_enrich(), name="initial_sync")

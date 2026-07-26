@@ -526,6 +526,14 @@ class HealthResponse(BaseModel):
     enriched_media: int
     broken_streams: int
     last_sync_at: Optional[int] = None
+    # S5.1 (AUDIT-P8-005): additive fields — whether THIS process holds the
+    # `fcntl` master election, and the epoch-ms timestamp of the last fully
+    # successful scheduled pipeline run (sync+enrichment+validation+
+    # generation+snapshot), across the whole process lifetime (not just this
+    # request). `None` = the pipeline has never completed successfully yet on
+    # this process (fresh boot, or a slave — see `app.utils.job_health`).
+    is_master: bool = False
+    last_pipeline_success_at: Optional[int] = None
 
 
 # --- Download Schemas (physical media download — F-008,

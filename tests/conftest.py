@@ -65,6 +65,32 @@ def _reset_rate_limiters():
     rl.tv_auth_start_pending_ip_limiter.reset()
 
 
+# ─── Job freshness / master election (S5.1) ─────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _reset_job_health_state():
+    """`app.utils.job_health` (S5.1) keeps its `_last_success_ms` dict and
+    `_is_master` bool as process-local module state, same as the rate
+    limiters above — the `app.main` import happens once per pytest session,
+    so a test that calls `mark_job_success`/`set_master` would otherwise leak
+    into every later test (e.g. `tests/test_api_health.py`'s `isMaster`/
+    `lastPipelineSuccessAt` default-value assertions)."""
+    from app.utils import job_health as jh
+    from app.utils import metrics
+
+    def _reset():
+        jh._last_success_ms.clear()
+        jh._is_master = False
+        metrics.is_master.set(0)
+        for _job in metrics._PIPELINE_JOB_NAMES:
+            metrics.pipeline_last_success_timestamp_seconds.labels(job=_job).set(0)
+
+    _reset()
+    yield
+    _reset()
+
+
 # ─── FastAPI client ──────────────────────────────────────────────────────
 
 

@@ -557,6 +557,9 @@ app.add_middleware(
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 # Added last so it wraps the others — request_id is set before any other middleware runs.
 app.add_middleware(RequestIdMiddleware)
+# CSRF guard for POST/PUT/PATCH/DELETE /admin* (S4.3, AUDIT-P2-005/CR-S07) — see app/api/csrf.py.
+from app.api.csrf import AdminCsrfMiddleware  # noqa: E402
+app.add_middleware(AdminCsrfMiddleware)
 
 # ─── Routes / auth-per-router (CR-A04) ───────────────────────────────────
 # Three mounting patterns coexist here by necessity (a public health check, a

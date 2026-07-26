@@ -14,7 +14,11 @@ if (wf) process.stdout.write(wf + "\n");
 // 2) Détecteur de péremption CLAUDE.md
 try {
   const claude = read("CLAUDE.md");
-  const m = claude.match(/À JOUR AU\s*:\s*([0-9-]+)\s*\(HEAD\s*[`']?([0-9a-f]{7,40})[`']?\)/i);
+  // Le bandeau réel a la forme : « À JOUR AU : 2026-07-26 (HEAD develop `9da9d46`, release **v1.7.1**). »
+  // → nom de branche OPTIONNEL entre « HEAD » et le hash, et texte libre avant la parenthèse fermante.
+  // Ne surtout PAS réexiger le « ) » juste après le hash : c'est ce qui rendait ce détecteur muet
+  // (regex NO MATCH → `m` null → aucune sortie, échec avalé). Cf. audit v1, AUDIT-P7-003.
+  const m = claude.match(/À JOUR AU\s*:\s*([0-9-]+)\s*\(HEAD\s+(?:[^`'\s)]+\s+)?[`']?([0-9a-f]{7,40})[`']?/i);
   const head = git("rev-parse --short HEAD");
   if (m && head) {
     const bannerDate = m[1], bannerHead = m[2];
@@ -40,5 +44,17 @@ try {
     } else {
       process.stdout.write(`\n✅ CLAUDE.md à jour (HEAD ${head}).\n`);
     }
+  } else if (head) {
+    // Bandeau absent ou non parsable : SANS ce message le détecteur est aveugle en silence
+    // (mode de panne réel constaté par l'audit v1). Un détecteur muet doit se signaler.
+    process.stdout.write(
+      "\n========================================================\n" +
+      "⚠️  CLAUDE.md — bandeau de fraîcheur introuvable ou non parsable\n" +
+      "   Format attendu : « À JOUR AU : <AAAA-MM-JJ> (HEAD [branche] `<hash>` …) »\n" +
+      `   HEAD réel : ${head}\n` +
+      "   → Le détecteur de dérive est INOPÉRANT tant que le bandeau n'est pas remis au format.\n" +
+      "   → Ne te fie à aucun n° de ligne/section de CLAUDE.md sans vérifier dans le code.\n" +
+      "========================================================\n"
+    );
   }
 } catch (e) { /* silencieux : ne jamais bloquer le démarrage */ }

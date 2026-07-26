@@ -48,6 +48,7 @@ async def run_migrations(engine: AsyncEngine) -> None:
     await _migration_020_add_media_file_size(engine)
     await _migration_021_add_plex_media_item_genres(engine)
     await _migration_022_create_omdb_scrape_cache(engine)
+    await _migration_023_analyze(engine)
 
     logger.info("All migrations completed successfully")
 
@@ -1049,3 +1050,35 @@ async def _migration_022_create_omdb_scrape_cache(engine: AsyncEngine) -> None:
             logger.info("Migration 022: omdb_scrape_cache table created")
         except Exception as e:
             logger.warning("Migration 022: table may already exist: %s", e)
+
+
+async def _migration_023_analyze(engine: AsyncEngine) -> None:
+    """One-shot `ANALYZE`, populating `sqlite_stat1` (AUDIT-P3-001,
+    docs/audit/v1/30-perf.md).
+
+    Without planner statistics, SQLite picks `ix_media_category_visible` —
+    a boolean index matching ~90.5% of `media` rows — for virtually every
+    hot list/search/count query, ignoring the 20 composite indexes
+    migration 015 (CR-P02) already created: they exist on disk
+    (`PRAGMA index_list(media)` confirms it) but are simply never chosen
+    without stats. Measured on a real 102,721-row/189MB copy: films
+    `COUNT(*)` 113.5ms -> 0.6ms (x188), search `LIKE` 116.3ms -> 18.2ms,
+    one-shot `ANALYZE` cost 196ms.
+
+    Idempotent / rejouable by nature (house law piège 6): `ANALYZE` only
+    ever fully recomputes the `sqlite_stat1`/`sqlite_stat4` tables it owns
+    (never appends), so it is safe on a brand-new (empty) database — it
+    just has nothing to learn yet, `sqlite_stat1` stays practically empty
+    until real rows exist — and safe to re-run at every boot (this whole
+    chain re-runs on every `init_db()`, cf. piège 7's multi-worker note).
+    Non-destructive: it never touches `media`/any application table or row,
+    only its own bookkeeping tables. Delegates to
+    `app.db.maintenance.run_analyze` (never fatal — a stats refresh must
+    never break the boot sequence), which the end-of-pipeline maintenance
+    call (`app.main._rebuild_unified_groups`) also reuses so both the
+    boot-time and the recurring refresh share one implementation.
+    """
+    logger.info("Migration 023: Running one-shot ANALYZE (sqlite_stat1)")
+    from app.db.maintenance import run_analyze
+
+    await run_analyze(engine)

@@ -140,15 +140,21 @@ async def _rebuild_unified_groups():
     generated Plex library. Non-fatal: the unified list falls back to live
     aggregation if this fails or hasn't run yet, so a failure never breaks
     browsing.
+
+    Also refreshes sqlite_stat1 (AUDIT-P3-001) right after, while both
+    pipeline callers below still hold `_PIPELINE_LOCK`.
     """
     from app.services import unified_group_service
-    from app.db.database import async_session_factory
+    from app.db.database import async_session_factory, engine
+    from app.db.maintenance import run_sqlite_maintenance
 
     try:
         counts = await unified_group_service.rebuild_all(async_session_factory)
         logger.info("Unified-group snapshot rebuilt: %s", counts)
     except Exception as e:
         logger.error("Unified-group snapshot rebuild failed: %s", e, exc_info=True)
+
+    await run_sqlite_maintenance(engine)
 
 
 async def _auto_provision_xtream_account():

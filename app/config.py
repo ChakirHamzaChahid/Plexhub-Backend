@@ -68,6 +68,32 @@ class Settings:
     TV_AUTH_ENCRYPTION_KEY: str = os.getenv("TV_AUTH_ENCRYPTION_KEY", "")
     TV_AUTH_TTL_SECONDS: int = _safe_int("TV_AUTH_TTL_SECONDS", 900)  # 15 min
 
+    # Rate-limit / flood cap on the UNAUTHENTICATED POST /api/tv-auth/start
+    # endpoint (AUDIT-P2-004 / CR-S05, S4.2) — see app/utils/rate_limit.py's
+    # module docstring for the full doctrine. Deliberately narrow in scope:
+    # NO global API rate limiter (PlexHubTV polls several authenticated
+    # endpoints on a legitimate schedule; a blanket limiter risks throttling
+    # that). Generic X-API-Key/Basic-Auth brute-force protection is
+    # delegated to the WAF/ingress (same doctrine already documented for
+    # /dav, CLAUDE.md §9 piège 18b) — this repo does not attempt it.
+    # Per-client-IP request-rate cap: max calls per rolling window.
+    TV_AUTH_START_RATE_LIMIT_MAX: int = _safe_int("TV_AUTH_START_RATE_LIMIT_MAX", 5)
+    TV_AUTH_START_RATE_LIMIT_WINDOW_SECONDS: int = _safe_int(
+        "TV_AUTH_START_RATE_LIMIT_WINDOW_SECONDS", 60
+    )
+    # In-process, per-apparent-IP APPROXIMATION of "sessions this client
+    # started that haven't expired yet" (window = TV_AUTH_TTL_SECONDS,
+    # deliberately an over-count — see rate_limit.py). <=0 disables this
+    # specific check.
+    TV_AUTH_PENDING_SESSIONS_CAP_PER_IP: int = _safe_int(
+        "TV_AUTH_PENDING_SESSIONS_CAP_PER_IP", 20
+    )
+    # THE real bound on unauthenticated table growth: a DB-authoritative
+    # COUNT(status='pending') ceiling, GLOBAL (not per-IP) — correct even if
+    # client identification above is fully spoofed. <=0 disables the cap
+    # (not recommended).
+    TV_AUTH_PENDING_SESSIONS_CAP: int = _safe_int("TV_AUTH_PENDING_SESSIONS_CAP", 500)
+
     # Xtream credential encryption at rest (CR-S03) — see
     # app/utils/crypto_fields.py for full key-resolution semantics.
     # Optional explicit Fernet key (urlsafe base64, 32 bytes) used to encrypt
@@ -280,6 +306,18 @@ class Settings:
             logger.info(f"OMDb API Key loaded: {self.OMDB_API_KEY[:4]}****")
         else:
             logger.warning("OMDB_API_KEY not set — imdb-id consistency validator will be disabled")
+
+        logger.info(
+            "tv-auth/start rate limit: %s reqs/%ss per apparent IP, pending "
+            "cap=%s (global, DB-authoritative) / %s (per-IP approx, %ss "
+            "window) — generic brute-force protection on other endpoints is "
+            "delegated to the WAF/ingress, not enforced here",
+            self.TV_AUTH_START_RATE_LIMIT_MAX,
+            self.TV_AUTH_START_RATE_LIMIT_WINDOW_SECONDS,
+            self.TV_AUTH_PENDING_SESSIONS_CAP,
+            self.TV_AUTH_PENDING_SESSIONS_CAP_PER_IP,
+            self.TV_AUTH_TTL_SECONDS,
+        )
 
         logger.info(f"Ollama LLM: {self.OLLAMA_URL} / model={self.OLLAMA_MODEL}")
         logger.info(

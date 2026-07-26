@@ -33,7 +33,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,6 +41,7 @@ from app.api.deps import verify_backend_secret as verify_pairing_api_key
 from app.config import settings
 from app.db.database import get_db
 from app.models.database import TvAuthSession
+from app.utils import rate_limit
 from app.utils.db_retry import commit_with_retry, write_with_retry
 from app.utils.payload_crypto import (
     PayloadDecryptError,
@@ -58,6 +59,13 @@ _USER_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 _USER_CODE_LENGTH = 8
 _POLL_INTERVAL_SECONDS = 5  # suggested base interval for client backoff
 _CLEANUP_GRACE_MS = 60 * 60 * 1000  # purge sessions expired > 1h ago
+
+# AUDIT-P2-004 (S4.2): heuristic Retry-After for a rejected /start due to the
+# GLOBAL pending-session cap (app.utils.rate_limit.check_pending_cap) — there
+# is no cheap way to compute the exact next-free instant (that would need an
+# extra query per rejection), so this is a fixed, conservative suggestion,
+# not derived from any single row's real expiry.
+_PENDING_CAP_RETRY_AFTER_SECONDS = 30
 
 STATUS_PENDING = "pending"
 STATUS_APPROVED = "approved"
@@ -157,6 +165,19 @@ def _require_crypto_configured() -> None:
         )
 
 
+def _too_many_requests(retry_after_seconds: float, detail: str) -> HTTPException:
+    """429 + Retry-After (AUDIT-P2-004/CR-S05, S4.2) — never a 500/403 for a
+    rate-limit rejection, same HTTP semantics already used by the DAV
+    relay's throttle (503+Retry-After there; 429 here since this IS a rate
+    limit, not an upstream-capacity limit)."""
+    retry_after = max(1, round(retry_after_seconds))
+    return HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail=detail,
+        headers={"Retry-After": str(retry_after)},
+    )
+
+
 async def _expire_if_needed(db: AsyncSession, session: TvAuthSession) -> bool:
     """Lazily flip a stale session to expired and scrub its payload.
 
@@ -209,8 +230,37 @@ async def start(
     payload: StartRequest | None = None,
     db: AsyncSession = Depends(get_db),
 ) -> StartResponse:
-    """Create a pending pairing session. Called by the (unauthenticated) TV."""
+    """Create a pending pairing session. Called by the (unauthenticated) TV.
+
+    AUDIT-P2-004 (S4.2, CR-S05): this is the ONE unauthenticated endpoint
+    that writes a database row on every call, so it is rate-limited + capped
+    — see app/utils/rate_limit.py's module docstring for the full doctrine
+    (targeted, not a global limiter; the WAF/ingress still owns generic
+    brute-force protection on every other surface).
+    """
     _require_crypto_configured()
+
+    client_key = rate_limit.resolve_client_ip(request) or "unknown"
+    try:
+        # Short-window request-rate cap — slows down a naive flood.
+        rate_limit.tv_auth_start_rate_limiter.hit(
+            client_key,
+            max_events=settings.TV_AUTH_START_RATE_LIMIT_MAX,
+            window_seconds=settings.TV_AUTH_START_RATE_LIMIT_WINDOW_SECONDS,
+        )
+        # Long-window (~session TTL) approximation of "sessions this
+        # apparent client hasn't let expire yet" — a courtesy layer; the
+        # DB-authoritative global cap below is the guard that actually
+        # bounds table growth regardless of IP identification.
+        rate_limit.tv_auth_start_pending_ip_limiter.hit(
+            client_key,
+            max_events=settings.TV_AUTH_PENDING_SESSIONS_CAP_PER_IP,
+            window_seconds=settings.TV_AUTH_TTL_SECONDS,
+        )
+    except rate_limit.RateLimitExceeded as exc:
+        raise _too_many_requests(
+            exc.retry_after_seconds, "Too many pairing requests, slow down"
+        ) from None
 
     now = _now_ms()
     ttl_ms = settings.TV_AUTH_TTL_SECONDS * 1000
@@ -255,6 +305,28 @@ async def start(
         await fresh_session.execute(
             delete(TvAuthSession).where(TvAuthSession.expires_at < now - _CLEANUP_GRACE_MS)
         )
+
+        # AUDIT-P2-004 (S4.2): THE actual bound on unauthenticated table
+        # growth — a DB-authoritative COUNT of literal status='pending' rows
+        # (deliberately NOT "not yet individually expired": a flood's rows
+        # sit at status='pending' until either the 1h-grace cleanup just
+        # above or a lazy `_expire_if_needed` call elsewhere flips them —
+        # this counts them anyway, which is exactly the growth this cap
+        # exists to bound). Global, not per-IP; see
+        # app/utils/rate_limit.py's module docstring for why.
+        pending_count = (
+            await fresh_session.execute(
+                select(func.count())
+                .select_from(TvAuthSession)
+                .where(TvAuthSession.status == STATUS_PENDING)
+            )
+        ).scalar_one()
+        rate_limit.check_pending_cap(
+            pending_count,
+            settings.TV_AUTH_PENDING_SESSIONS_CAP,
+            retry_after_seconds=_PENDING_CAP_RETRY_AFTER_SECONDS,
+        )
+
         for _ in range(5):
             candidate = TvAuthSession(
                 id=uuid.uuid4().hex,
@@ -279,6 +351,11 @@ async def start(
         session = await write_with_retry(_work, op="tv_auth.start")
     except _UserCodeExhaustedError:
         session = None
+    except rate_limit.PendingCapExceeded as exc:
+        raise _too_many_requests(
+            exc.retry_after_seconds,
+            "Too many pending pairing sessions, try again later",
+        ) from None
     if session is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

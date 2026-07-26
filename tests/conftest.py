@@ -42,6 +42,29 @@ async def db_factory(db_engine):
     return async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
 
 
+# ─── Rate limiting (S4.2) ────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limiters():
+    """`app.utils.rate_limit`'s two `SlidingWindowLimiter` singletons are
+    process-local module state that persists for the whole pytest session
+    (the `app.main` module — and therefore `app.utils.rate_limit` — is only
+    imported once). Many tests across the suite hit `POST /api/tv-auth/
+    start` from the same apparent client IP (the ASGITransport default,
+    `127.0.0.1`) — without resetting between tests, an early test's hits
+    would count against a later, unrelated test's rate-limit budget and
+    fail it with an unrelated 429. Cheap (two small dicts): safe to run
+    for every test, not just tv-auth ones."""
+    from app.utils import rate_limit as rl
+
+    rl.tv_auth_start_rate_limiter.reset()
+    rl.tv_auth_start_pending_ip_limiter.reset()
+    yield
+    rl.tv_auth_start_rate_limiter.reset()
+    rl.tv_auth_start_pending_ip_limiter.reset()
+
+
 # ─── FastAPI client ──────────────────────────────────────────────────────
 
 

@@ -35,6 +35,15 @@ jobs:
 
   pytest:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # AUDIT-P7-005: the shipped image is python:3.12-slim (see Dockerfile),
+        # but until this matrix the suite only ran on 3.13 — the version that
+        # is actually deployed was never tested. Both are gates; the lint job
+        # stays single-version (ruff is deterministic across 3.12/3.13, running
+        # it twice would just duplicate the same result).
+        python-version: ["3.12", "3.13"]
 
     steps:
       - name: Checkout
@@ -43,7 +52,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: ${{ matrix.python-version }}
           cache: pip
 
       - name: Install dependencies

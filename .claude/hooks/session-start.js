@@ -27,20 +27,37 @@ try {
       const since = git(`rev-parse ${bannerHead}`) ? `${bannerHead}..HEAD` : "";
       const commits = since ? git(`log --oneline ${since}`) : "";
       const nb = commits ? commits.split("\n").length : "?";
-      const zones = since ? git(`diff --name-only ${since}`)
-        .split("\n").map(p=>p.split("/").slice(0,2).join("/")).filter(Boolean) : [];
-      const uniqZones = [...new Set(zones)].slice(0, 12);
-      process.stdout.write(
-        "\n========================================================\n" +
-        "⚠️  CLAUDE.md PÉRIMÉ — dérive détectée\n" +
-        `   Bandeau « À JOUR AU » : ${bannerDate} (HEAD ${bannerHead})\n` +
-        `   HEAD réel             : ${head}\n` +
-        (nb!=="?" ? `   Commits depuis le bandeau : ${nb}\n` : "") +
-        (uniqZones.length ? `   Zones modifiées : ${uniqZones.join(", ")}\n` : "") +
-        "   → Lance **/sync-context** (MAJ légère bandeau+delta) ou **/refresh-context** (re-cartographie complète) AVANT de te fier aux n° de ligne/sections de CLAUDE.md.\n" +
-        "   → Tout fait postérieur au bandeau doit être VÉRIFIÉ dans le code.\n" +
-        "========================================================\n"
-      );
+      const files = since ? git(`diff --name-only ${since}`).split("\n").filter(Boolean) : [];
+      const uniqZones = [...new Set(files.map(p => p.split("/").slice(0, 2).join("/")))].slice(0, 12);
+
+      // Un commit /sync-context ne peut pas contenir son propre hash : le bandeau est
+      // donc TOUJOURS en retard d'au moins ce commit-là. Crier « PÉRIMÉ » là-dessus
+      // rendrait l'alerte permanente — donc du bruit qu'on apprend à survoler, et un
+      // détecteur qu'on ignore ne vaut pas mieux que le détecteur muet qu'on vient de
+      // réparer. On ne dégrade en note informative QUE si la dérive est 100 %
+      // documentaire ; le moindre fichier de code rétablit l'alerte forte.
+      // Défaut sûr : `files` vide (bandeau inconnu de git) ⇒ alerte forte.
+      const DOC_ONLY = /^(CLAUDE\.md$|docs\/|\.claude\/|[^/]+\.md$)/;
+      const docOnly = files.length > 0 && files.every(p => DOC_ONLY.test(p));
+      if (docOnly) {
+        process.stdout.write(
+          `\n✅ CLAUDE.md à jour sur le CODE (HEAD ${head}).\n` +
+          `   ℹ️  ${nb} commit(s) documentaire(s) depuis le bandeau ${bannerHead}` +
+          (uniqZones.length ? ` — ${uniqZones.join(", ")}` : "") + " ; aucune dérive de code.\n"
+        );
+      } else {
+        process.stdout.write(
+          "\n========================================================\n" +
+          "⚠️  CLAUDE.md PÉRIMÉ — dérive détectée\n" +
+          `   Bandeau « À JOUR AU » : ${bannerDate} (HEAD ${bannerHead})\n` +
+          `   HEAD réel             : ${head}\n` +
+          (nb!=="?" ? `   Commits depuis le bandeau : ${nb}\n` : "") +
+          (uniqZones.length ? `   Zones modifiées : ${uniqZones.join(", ")}\n` : "") +
+          "   → Lance **/sync-context** (MAJ légère bandeau+delta) ou **/refresh-context** (re-cartographie complète) AVANT de te fier aux n° de ligne/sections de CLAUDE.md.\n" +
+          "   → Tout fait postérieur au bandeau doit être VÉRIFIÉ dans le code.\n" +
+          "========================================================\n"
+        );
+      }
     } else {
       process.stdout.write(`\n✅ CLAUDE.md à jour (HEAD ${head}).\n`);
     }

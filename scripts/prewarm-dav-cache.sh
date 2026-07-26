@@ -40,10 +40,22 @@
 #   DAV_PREWARM_CONCURRENCY fichiers en parallèle              (déf. 1 = série ;
 #                           NE JAMAIS dépasser le max_connections du compte exposé)
 #   DAV_PREWARM_LIMIT       stoppe après N fichiers (0 = tous) (déf. 0)
+#   DAV_PREWARM_TIMEOUT_S   timeout par lecture (stat/dd), s   (déf. 90) —
+#                           un flux amont mort/lent est ABANDONNÉ après ce délai
+#                           au lieu de figer tout le run (voir NOTE ci-dessous)
 #
 # NOTE : le script ne consomme AUCUN octet upstream « en trop » — il ne lit que
 # les fenêtres header/tail, comme le fait Plex à l'analyse. La lecture de lecture
 # (playback) réelle continue d'aller en direct vers l'amont, non cachée ici.
+#
+# TIMEOUT PAR FICHIER (retour device 2026-07) : sans borne, un flux amont mort
+# fait passer `dd` en état D (uninterruptible) et fige TOUT le run via `wait -n`
+# (bloquage observé de 11 h sur un seul fichier). Chaque lecture est donc
+# enveloppée dans `timeout DAV_PREWARM_TIMEOUT_S` : un fichier bloqué est
+# abandonné (loggé « SKIP … (timeout) ») et la boucle continue. Indispensable
+# sur des catalogues à milliers d'épisodes où les flux morts sont fréquents.
+# (`timeout` ne peut pas tuer un `dd` déjà en état D pur — mais la quasi-totalité
+# des lectures lentes rendent la main et sont bien coupées.)
 
 set -uo pipefail
 
@@ -52,6 +64,7 @@ HEADER_MB="${DAV_PREWARM_HEADER_MB:-16}"
 TAIL_MB="${DAV_PREWARM_TAIL_MB:-32}"
 CONCURRENCY="${DAV_PREWARM_CONCURRENCY:-1}"
 LIMIT="${DAV_PREWARM_LIMIT:-0}"
+TIMEOUT_S="${DAV_PREWARM_TIMEOUT_S:-90}"
 SUBDIR="${1:-}"
 
 TAIL_BYTES=$((TAIL_MB * 1024 * 1024))
@@ -71,7 +84,7 @@ if [ ! -d "$TARGET" ]; then
 fi
 
 echo "▶ Préchauffage DAV : $TARGET"
-echo "  header=${HEADER_MB}Mo  tail=${TAIL_MB}Mo  concurrency=${CONCURRENCY}  limit=${LIMIT:-0}"
+echo "  header=${HEADER_MB}Mo  tail=${TAIL_MB}Mo  concurrency=${CONCURRENCY}  limit=${LIMIT:-0}  timeout=${TIMEOUT_S}s"
 echo "  (Plex doit être INACTIF pendant ce préchauffage.)"
 echo
 
@@ -79,18 +92,21 @@ echo
 warm_one() {
   local f="$1"
   local size
-  size=$(stat -c %s "$f" 2>/dev/null) || { echo "  SKIP (stat KO) : ${f##*/}"; return 1; }
+  # Chaque lecture est bornée par `timeout` : un flux amont bloqué est abandonné
+  # au lieu de figer tout le run (voir en-tête, section TIMEOUT PAR FICHIER).
+  size=$(timeout "$TIMEOUT_S" stat -c %s "$f" 2>/dev/null) \
+    || { echo "  SKIP stat(timeout) : ${f##*/}"; return 1; }
 
   # En-tête : les N premiers Mo (moov MP4 faststart, EBML/Tracks/SeekHead MKV).
-  if ! dd if="$f" of=/dev/null bs=1M count="$HEADER_MB" iflag=fullblock status=none 2>/dev/null; then
-    echo "  WARN header : ${f##*/}"; return 1
+  if ! timeout "$TIMEOUT_S" dd if="$f" of=/dev/null bs=1M count="$HEADER_MB" iflag=fullblock status=none 2>/dev/null; then
+    echo "  SKIP header(timeout) : ${f##*/}"; return 1
   fi
 
   # Fin : les N derniers Mo (moov MP4 non-faststart, Cues MKV) — seulement si le
   # fichier est plus gros que la fenêtre tail (sinon l'en-tête l'a déjà couvert).
   if [ "$size" -gt "$TAIL_BYTES" ]; then
-    if ! dd if="$f" of=/dev/null bs=1M iflag=skip_bytes skip=$((size - TAIL_BYTES)) status=none 2>/dev/null; then
-      echo "  WARN tail : ${f##*/}"; return 1
+    if ! timeout "$TIMEOUT_S" dd if="$f" of=/dev/null bs=1M iflag=skip_bytes skip=$((size - TAIL_BYTES)) status=none 2>/dev/null; then
+      echo "  SKIP tail(timeout) : ${f##*/}"; return 1
     fi
   fi
   return 0

@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+import logging
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,8 +24,16 @@ from app.services.aggregation_service import (
     build_versions, canonical_title_year,
 )
 from app.services.media_service import media_service, encode_media_cursor
+from app.utils.metrics import media_episodes_missing_server_id_total
 
 router = APIRouter(prefix="/media", tags=["media"])
+
+logger = logging.getLogger("plexhub.api.media")
+
+# AUDIT-P5-004 (S2.6): bound the logged User-Agent so a looping/misbehaving
+# legacy client can't inflate log volume (CR-S09 note — client-supplied
+# strings landing in logs must stay bounded).
+_USER_AGENT_LOG_MAX_LEN = 200
 
 
 def _single_pass_json(model: BaseModel) -> JSONResponse:
@@ -191,6 +201,7 @@ async def list_shows(
 
 @router.get("/episodes", response_model=MediaListResponse)
 async def list_episodes(
+    request: Request,
     parent_rating_key: str = Query(...),
     limit: int = Query(500, ge=1, le=5000),
     offset: int = Query(0, ge=0),
@@ -215,6 +226,19 @@ async def list_episodes(
     # parent_rating_key matches rows across every account and returns two
     # different series' episodes mixed together (the MAO/Treadstone bug).
     if not server_id:
+        # AUDIT-P5-004 (S2.6): the 400 itself is unchanged (same status, same
+        # `detail`) — this is pure telemetry so a legacy `PlexHubTV` build
+        # still hitting the pre-server_id contract becomes observable instead
+        # of failing silently. Never log a key/credential; the User-Agent is
+        # length-bounded (piège §9-10 / CR-S09).
+        user_agent = (request.headers.get("user-agent") or "-")[:_USER_AGENT_LOG_MAX_LEN]
+        logger.warning(
+            "GET /api/media/episodes rejected 400 for missing server_id "
+            "(parent_rating_key=%s, user_agent=%s) — possible legacy client "
+            "still on the pre-server_id contract.",
+            parent_rating_key, user_agent,
+        )
+        media_episodes_missing_server_id_total.inc()
         raise HTTPException(
             400,
             "server_id is required to list episodes: a series rating key is "

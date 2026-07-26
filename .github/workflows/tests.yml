@@ -29,10 +29,6 @@ jobs:
         run: |
           ruff check .
 
-      - name: Black (format check)
-        run: |
-          black --check .
-
   pytest:
     runs-on: ubuntu-latest
     strategy:

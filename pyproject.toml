@@ -38,10 +38,13 @@ skip_covered = false
 show_missing = true
 
 # ── CR-C06: lint / format / type tooling ────────────────────────────────────
-# This repo has never run ruff/black; the rulesets below are deliberately
-# conservative so `ruff check .` / `black --check .` are GREEN on the current
-# tree (no big-bang reformat). See docs/audit/cleanroom-2026-07-11/20-conventions.md
-# (CR-C06) for the audit finding this closes.
+# This repo has never run a repo-wide formatter; the ruleset below is
+# deliberately conservative so `ruff check .` is GREEN on the current tree
+# (no big-bang reformat). See docs/audit/cleanroom-2026-07-11/20-conventions.md
+# (CR-C06) for the audit finding this closes. `ruff check` is the sole style/
+# lint gate wired into CI (see [tool.ruff] below and AUDIT-P7-004 further down
+# for why a `[tool.black]` gate that used to sit here was removed instead of
+# fixed).
 
 [tool.ruff]
 line-length = 100
@@ -59,8 +62,8 @@ select = ["E", "F", "W", "I"]
 # violations confined to a handful of files.
 ignore = [
     # No line-length convention has ever been enforced (no formatter run
-    # historically): ~83 of ~115 files exceed 88-100 cols today. Revisit once
-    # black actually reformats the tree (tracked, not blocking this pass).
+    # historically): ~83 of ~115 files exceed 88-100 cols today. Revisit if a
+    # formatter is ever run over the tree (tracked, not blocking this pass).
     "E501",
     # No import-sort (isort) convention has ever been enforced (~70 files would
     # reorder on a first run). Enabling it now would force an unrelated mass diff.
@@ -105,22 +108,18 @@ ignore = [
 "tests/test_sync_worker.py" = ["F401"]
 "tests/test_utilities.py" = ["F401"]
 
-[tool.black]
-line-length = 100
-target-version = ["py312"]
-# CR-C06: the codebase was never run through black. A first `black --check .`
-# reformats 100+ of ~115 files (quote normalization, trailing commas, line
-# splitting) — an unrelated mass diff far outside a fix-forward pass. Rather
-# than reformat blind or fake a pass, black is wired (dependency + config) but
-# scoped to the app/tests trees for now: `black --check .` is a real, green,
-# no-op today. Narrow this exclude file-by-file as modules get reformatted
-# deliberately (tracked as CR-C06 follow-up debt, not a blocking gate).
-extend-exclude = '''
-(
-    ^/app/
-  | ^/tests/
-)
-'''
+# AUDIT-P7-004: `[tool.black]` used to live here with `extend-exclude` covering
+# `^/app/` and `^/tests/` — i.e. every file that matters. The CI step
+# `black --check .` was therefore structurally a no-op: green, but verifying
+# nothing, while reading as a real format gate. Rather than either (a) run
+# black over the whole tree now (100+ files would reformat — quote
+# normalization, trailing commas, line splitting — a mass diff that would
+# collide with every other in-flight refactor step) or (b) keep a config that
+# only pretends to check, the section and the CI step are both removed. `ruff
+# check` (see `[tool.ruff]` below) remains the sole, real style/lint gate.
+# Re-introducing black is legitimate future work, but it should come with an
+# actual repo-wide reformat commit, not a config that quietly excludes the
+# code it claims to check.
 
 [tool.mypy]
 # CR-C06: lenient by design — this is a type-checking *aid*, not a gate. The

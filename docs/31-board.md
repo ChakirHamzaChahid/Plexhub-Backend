@@ -138,3 +138,35 @@ Scopes existants `movie`/`series_all`/`series_seasons` inchangés (non-régressi
 DoD de ces follow-ups (quand ils seront pris) : même gate que tout ticket de ce board (§ Definition of Done ci-dessus)
 + test de garde dédié à chaque finding.
 </content>
+
+---
+
+## Reliquat du lot `/refacto` — remédiation de l'audit v1 (2026-07-26)
+
+Lot clos : **29 étapes / 7 vagues / 33 commits**, `9da9d46`→`5a81455`. Plan `docs/plans/2026-07-26-refacto-audit-v1-plan.md`,
+ADR `docs/architecture/adr/0004-audit-v1-remediation-contracts.md`, audit d'origine `docs/audit/v1/`.
+Suite **1414 → 1656 passed**, couverture **77.98 % → 79.66 %**.
+
+**Fermés au passage** (ne plus les traiter comme dette) : `CR-S02` `/metrics` · `CR-S04` clé Fernet · `CR-S05` rate-limit
+· `CR-S07` CSRF admin (**donc aussi DL-03 et XD-03 ci-dessus**) · `CR-S08` SSRF images/health-check · `AUDIT-P7-004/005/006/007`.
+
+Ce qui reste **sciemment** ouvert — chaque ligne est une décision, pas un oubli :
+
+| ID | Sujet | Prio | Pourquoi ce n'est pas fait, et ce qu'il faudrait | Owner suggéré |
+|---|---|---|---|---|
+| **RF-01** | SSRF non appliqué à 5 clients HTTP | P2 | `tmdb_service`, `omdb_service`, `xtream_service`, `ollama_service`, `plex_api_service` n'ont pas le hook de vetting. Risque plus faible (hôtes fixes configurés par l'opérateur, pas fournis par un tiers) mais réel. Ajouter `event_hooks={"request": [vet_request]}` à leurs clients httpx — le module `app/utils/ssrf.py` est déjà là. | `security-reviewer` puis `backend-developer` |
+| **RF-02** | Rebinding DNS (TOCTOU) non fermé | P3 | La garde résout l'hôte, httpx re-résout à la connexion → un DNS hostile qui répond public puis privé passe encore. `SSRF_DNS_CACHE_SECONDS` **élargit** la fenêtre (compromis de débit assumé). Fermer exigerait résoudre-puis-connecter-sur-IP-épinglée (transport httpx custom). Documenté dans `app/utils/ssrf.py`. | `backend-developer` (effort dédié) |
+| **RF-03** | Recherche filtrée toujours O(catalogue) | P2 | `AUDIT-P3-002` : seule la **visibilité** a été livrée (`plexhub_unified_path{snapshot\|live_filtered\|live_fallback}`). Le `ILIKE '%term%'` leading-wildcard reste non-sargable → ~230-350 ms par frappe. Correctif = FTS5. **Surveiller `live_fallback` en prod** : une hausse signale que le snapshot ne se reconstruit plus. | `backend-developer` + `perf-benchmarker` |
+| **RF-04** | 5 sites `db_retry` CLI/scripts non convertis | P3 | Décision explicite : `app/cli.py` et `app/scripts/*` sont **mono-process**, aucune contention possible → convertir serait un risque gratuit. À revoir seulement si ces scripts venaient à tourner en parallèle du serveur. | — (documenté, pas d'action) |
+| **RF-05** | Cycle `services ⇄ dav` : arête restante | P3 | `app/dav/relay.py` n'importe plus `download_service` (cassé par S4.4), mais `plex_generation_service → app.dav.vfs` subsiste via import différé. | `backend-developer` |
+| **RF-06** | God-files `CR-A03`/`CR-A05` | P2 | `sync_worker.py` 1618 LOC, `ai.py`, `nfo_import_service.py`, `main.py` 689, **+ `download_service.py` ~1400 non tracké**. Le lot a **inversé la trajectoire de `main.py`** (+28 lignes pour 8 comportements, via la règle « ≤10 lignes, logique dans un module neuf »). Prochaine étape utile : **cliquet LOC en CI** plutôt qu'un découpage big-bang. | `tech-lead` |
+| **RF-07** | `CR-S09` echo d'exceptions + request-id non borné | P2 | Non traité par ce lot. | `security-reviewer` |
+| **RF-08** | Ratchet de couverture jamais relevé | P3 | Gate à 70 % alors que le réel est à **79.66 %** (~10 pts de mou). Relever progressivement. | `qa-engineer` |
+
+**⚠️ Ruptures d'exploitation à traiter AU DÉPLOIEMENT** (détail : `CLAUDE.md` §9 piège 19, `docs/32-ops-docker-nonroot.md`) :
+1. `/metrics` est authentifié → poser `METRICS_USERNAME`/`METRICS_PASSWORD` et ajouter `basic_auth` au scraper Prometheus
+   (`METRICS_PUBLIC=true` = filet de transition, pas un état permanent).
+2. Les sessions d'appairage TV **en vol** deviennent indéchiffrables (borné par `TV_AUTH_TTL_SECONDS`, la TV relance seule).
+   Occasion idéale pour poser une vraie `TV_AUTH_ENCRYPTION_KEY` et sortir de la dérivation depuis `AI_API_KEY`.
+3. Image non-root : **`chown -R 1000:1000` obligatoire** sur les volumes existants — sinon `server_start.lock` échoue et
+   l'instance bascule **esclave en silence** (plus de scheduler ni de pipeline, healthcheck pourtant vert).

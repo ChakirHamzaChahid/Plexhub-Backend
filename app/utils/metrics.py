@@ -181,9 +181,36 @@ download_failures_total = Counter(
     "plexhub_download_failures_total",
     "Download job failures, partitioned by reason. Never labelled with a URL, "
     "rating_key, filename or server_id (piège 17c).",
-    labelnames=("reason",),  # reason: http_403 | disk_full | timeout | confinement
+    labelnames=("reason",),
 )
-_DOWNLOAD_FAILURE_REASONS = ("http_403", "disk_full", "timeout", "confinement")
+# CLOSED enumeration — bounded cardinality, safe to zero-init.
+#
+# S5.2 shipped only the first four and left every other real failure mode
+# (404, 5xx, generic network error, blocked redirect, bad content-type,
+# missing source row) UNLABELLED rather than mislabel them — a deliberate,
+# documented gap handed back to this module's owner. It is closed here: a
+# 404 is very likely the single most common download failure in practice,
+# so leaving it invisible would have gutted the point of instrumenting a
+# subsystem the audit called "totally blind" (AUDIT-P8-002).
+#
+# `other` is the catch-all that keeps the metric HONEST: every failure now
+# increments exactly one series, so `sum(download_failures_total)` matches
+# the real failure count. A rising `other` means this enum needs a new
+# value — it is a signal, not a dumping ground.
+_DOWNLOAD_FAILURE_REASONS = (
+    "http_403",          # provider forbids download (Plex share w/o "Allow Downloads")
+    "http_404",          # upstream says the media is gone
+    "http_5xx",          # upstream server error
+    "http_other",        # any other non-2xx status
+    "disk_full",         # no space left / OSError while writing
+    "timeout",           # network timeout (transient)
+    "network",           # other transport error (transient)
+    "unsafe_redirect",   # SSRF guard blocked a redirect target (CR-S08)
+    "invalid_content",   # upstream returned an error page instead of media
+    "source_missing",    # account/media/Plex source row absent or unresolvable
+    "confinement",       # F-007 path confinement / DOWNLOAD_DIR unset
+    "other",             # unmapped — see note above
+)
 for _reason in _DOWNLOAD_FAILURE_REASONS:
     download_failures_total.labels(reason=_reason)
 

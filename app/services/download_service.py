@@ -99,31 +99,52 @@ def classify_failure_reason(message: str) -> Optional[str]:
     `download_to_disk` and `check_free_disk_space` are the only two call
     sites that ever raise them.
 
-    Returns `None` for every OTHER real failure mode this module can raise —
-    `upstream 404`, `upstream {5xx}`, `unsafe redirect`, `invalid
-    content-type ...`, a generic `network error` (non-timeout
-    `httpx.TransportError`/`HTTPError`) — and for every caller-side failure
-    that never reaches `download_to_disk` at all (missing Xtream account /
-    Plex source / media row, unresolved stream URL, unexpected exception).
-    None of the 4 declared reasons fit those, and mislabelling e.g. a 404 as
-    `http_403` would be worse than the metric staying silent on it — this is
-    a KNOWN GAP surfaced to the metrics-surface owner rather than papered
-    over here (see `docs/plans/2026-07-26-refacto-audit-v1-plan.md` §VAGUE 5
-    S5.2 — flagged, not resolved unilaterally, per the plan's own rule that
-    label values are S1.4's to add).
+    NEVER returns `None`: every failure maps to exactly one series, so
+    `sum(plexhub_download_failures_total)` equals the real failure count.
+
+    S5.2 originally mapped only 4 reasons and returned `None` for every
+    other real mode (`upstream 404`, `upstream {5xx}`, `unsafe redirect`,
+    `invalid content-type ...`, generic `network error`) and for caller-side
+    failures that never reach `download_to_disk` (missing Xtream account /
+    Plex source / media row, unresolved stream URL). That was the right call
+    at the time — mislabelling a 404 as `http_403` is worse than silence —
+    but it left the most common failure mode invisible in a subsystem the
+    audit called "totally blind" (AUDIT-P8-002). The enum was therefore
+    widened in `app/utils/metrics.py`, and this function now covers it.
+
+    `other` is the honest catch-all, not a dumping ground: a rising `other`
+    means a new failure mode appeared and the enum needs a value for it.
 
     `confinement` (`PathConfinementError`/`DownloadDisabledError`, raised by
     `resolve_confined`) is classified by the WORKER at its own call site
     instead of here — those two exception *types* are already unambiguous
     there, so no message string-match is needed for them.
     """
-    if message.startswith("upstream 403"):
-        return "http_403"
+    if message.startswith("upstream "):
+        status = message[9:].split()[0] if len(message) > 9 else ""
+        if status == "403":
+            return "http_403"
+        if status == "404":
+            return "http_404"
+        if status.isdigit() and 500 <= int(status) <= 599:
+            return "http_5xx"
+        return "http_other"
     if message.startswith("insufficient free disk space") or message.startswith("disk error"):
         return "disk_full"
     if message == "network timeout":
         return "timeout"
-    return None
+    if message == "network error":
+        return "network"
+    if message == "unsafe redirect":
+        return "unsafe_redirect"
+    if message.startswith("invalid content-type"):
+        return "invalid_content"
+    if "introuvable" in message:
+        # Pre-transfer caller-side failures raised by the worker before
+        # `download_to_disk` is ever reached: missing/inactive Xtream account,
+        # unresolvable stream URL, missing or unsynced Plex source row.
+        return "source_missing"
+    return "other"
 
 
 # --- Path confinement (F-007, security-critical) -----------------------------

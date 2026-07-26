@@ -379,20 +379,21 @@ class TestFailureReasonConfinement:
         assert _failure_count("confinement") == before + 1
 
 
-class TestUnmappedFailureReasonIsNotMislabelled:
-    async def test_404_is_a_real_failure_but_increments_none_of_the_4_known_reasons(
+class TestEveryFailureModeIsLabelled:
+    """The `reason` enum was widened after S5.2 (see
+    `download_service.classify_failure_reason`): a 404 — very likely the most
+    common download failure in practice — used to increment nothing at all,
+    which defeated the point of instrumenting a subsystem the audit called
+    "totally blind". Every failure must now land on exactly one series, and
+    on the RIGHT one."""
+
+    async def test_404_increments_http_404_and_never_http_403(
         self, db_engine, download_dir, xtream_mock,
     ):
-        """Documented gap (`download_service.classify_failure_reason`):
-        `reason` is a CLOSED 4-value enum. A 404 doesn't fit any of them —
-        it must stay unlabelled here rather than being mislabelled onto
-        e.g. `http_403`."""
         factory = await _seeded_factory(db_engine, jobs=[_job("j1", rating_key="vod_1.mkv")])
         xtream_mock.get(_url(1)).mock(return_value=httpx.Response(404))
-        before = {
-            reason: _failure_count(reason)
-            for reason in ("http_403", "disk_full", "timeout", "confinement")
-        }
+        before_404 = _failure_count("http_404")
+        before_403 = _failure_count("http_403")
 
         await _run_job(factory, "j1", asyncio.Semaphore(1))
 
@@ -400,11 +401,35 @@ class TestUnmappedFailureReasonIsNotMislabelled:
             job = await s.get(DownloadJob, "j1")
         assert job.state == "failed"
         assert job.error == "upstream 404"
-        after = {
-            reason: _failure_count(reason)
-            for reason in ("http_403", "disk_full", "timeout", "confinement")
+        assert _failure_count("http_404") == before_404 + 1, "a 404 must be counted"
+        assert _failure_count("http_403") == before_403, "a 404 must never land on http_403"
+
+    def test_classifier_never_returns_none(self):
+        """`sum(download_failures_total)` must equal the real failure count,
+        so no message may fall through unlabelled."""
+        from app.services import download_service as ds
+        from app.utils import metrics as m
+
+        cases = {
+            "upstream 403": "http_403",
+            "upstream 404": "http_404",
+            "upstream 503": "http_5xx",
+            "upstream 418": "http_other",
+            "insufficient free disk space: need 1, have 0": "disk_full",
+            "disk error: ENOSPC": "disk_full",
+            "network timeout": "timeout",
+            "network error": "network",
+            "unsafe redirect": "unsafe_redirect",
+            "invalid content-type text/html": "invalid_content",
+            "compte source introuvable ou inactif": "source_missing",
+            "URL de flux introuvable": "source_missing",
+            "source Plex introuvable ou non synchronisée": "source_missing",
+            "something nobody anticipated": "other",
         }
-        assert after == before, "a 404 must not be mislabelled onto any of the 4 closed reasons"
+        for message, expected in cases.items():
+            got = ds.classify_failure_reason(message)
+            assert got == expected, f"{message!r} -> {got!r}, expected {expected!r}"
+            assert got in m._DOWNLOAD_FAILURE_REASONS, f"{got!r} is not a declared label value"
 
 
 # ─── Secrets never leak into the metric surface ────────────────────────────

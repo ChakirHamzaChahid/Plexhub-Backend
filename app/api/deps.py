@@ -15,6 +15,9 @@ Dependencies:
   verify_admin_basic_auth — HTTP Basic Auth for the browser /admin UI.
   verify_dav_basic_auth — HTTP Basic Auth for the read-only /dav WebDAV
     endpoint (rclone can only send Basic Auth, not a custom header).
+  verify_metrics_basic_auth — HTTP Basic Auth for GET /metrics (Prometheus
+    speaks basic_auth: natively). METRICS_PUBLIC=true is an explicit,
+    logged escape hatch that reopens the endpoint with no credential check.
 
 Constant-time comparison on the master secret avoids timing oracles — plain `==`
 is forbidden and gated by a grep-based acceptance test.
@@ -176,6 +179,55 @@ async def verify_dav_basic_auth(
     pass_ok = secrets.compare_digest(
         credentials.password.encode("utf-8"),
         settings.DAV_PASSWORD.encode("utf-8"),
+    )
+    # Evaluate both before branching to avoid a username-timing oracle.
+    if not (user_ok and pass_ok):
+        raise unauthorized
+
+
+_metrics_basic = HTTPBasic(auto_error=False)
+
+
+async def verify_metrics_basic_auth(
+    credentials: HTTPBasicCredentials | None = Depends(_metrics_basic),
+) -> None:
+    """HTTP Basic Auth guard for GET /metrics (AUDIT-P2-001 / CR-S02, ADR 0004
+    §Décision 3 — fail-closed by default).
+
+    Mirrors verify_admin_basic_auth/verify_dav_basic_auth: Prometheus speaks
+    `basic_auth:` in its scrape config natively, so this uses HTTP Basic Auth
+    with its OWN secret pair (METRICS_USERNAME/METRICS_PASSWORD) — never
+    X-API-Key (no scraper config field for a custom header without a relabel
+    hack) and never ADMIN_* (domain separation: a compromised scraper must not
+    be able to open the admin UI).
+
+    METRICS_PUBLIC=true is an explicit, logged (app/config.py __init__)
+    escape hatch: when set, this guard is a no-op and /metrics stays exposed
+    with NO credential check at all — an operator rollout lever, not a
+    default. Without it, METRICS_PASSWORD empty ⇒ 503 fail-closed, identical
+    convention to ADMIN_PASSWORD/DAV_PASSWORD.
+    """
+    if settings.METRICS_PUBLIC:
+        return
+    if not settings.METRICS_PASSWORD:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Metrics endpoint not configured",
+        )
+    unauthorized = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid metrics credentials",
+        headers={"WWW-Authenticate": "Basic"},
+    )
+    if credentials is None:
+        raise unauthorized
+    user_ok = secrets.compare_digest(
+        credentials.username.encode("utf-8"),
+        settings.METRICS_USERNAME.encode("utf-8"),
+    )
+    pass_ok = secrets.compare_digest(
+        credentials.password.encode("utf-8"),
+        settings.METRICS_PASSWORD.encode("utf-8"),
     )
     # Evaluate both before branching to avoid a username-timing oracle.
     if not (user_ok and pass_ok):

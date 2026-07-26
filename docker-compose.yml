@@ -22,6 +22,13 @@ services:
     # 401). Copier `.env.example` vers `.env` (jamais commité, voir
     # .gitignore) pour peupler ces clés.
     #
+    # S4.1 (AUDIT-P2-001/CR-S02) : /metrics est désormais authentifié par
+    # défaut (METRICS_USERNAME/METRICS_PASSWORD, déjà couverts par
+    # `env_file: .env` ci-dessous comme le reste — rien à ajouter dans le
+    # bloc `environment:` figé). METRICS_PASSWORD vide ⇒ /metrics répond 503
+    # fail-closed ; reconfigurer la job Prometheus en `basic_auth:` avant de
+    # déployer (voir docs/plans/2026-07-26-refacto-audit-v1-plan.md §7.1).
+    #
     # PRÉCÉDENCE : Compose applique `environment:` APRÈS `env_file:`, donc le
     # bloc `environment:` ci-dessous gagne toujours sur `.env`. On l'utilise
     # donc uniquement pour les valeurs qui DOIVENT rester verrouillées au

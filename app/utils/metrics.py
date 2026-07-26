@@ -228,9 +228,22 @@ for _plex_sync_result in _PLEX_SYNC_RESULTS:
     plex_sync_total.labels(result=_plex_sync_result)
 
 
-def setup_instrumentator(app) -> None:
-    """Register the Prometheus instrumentator on the FastAPI app and expose /metrics."""
+def setup_instrumentator(app, *, dependencies: list | None = None) -> None:
+    """Register the Prometheus instrumentator on the FastAPI app and expose /metrics.
+
+    `dependencies` (S4.1, AUDIT-P2-001/CR-S02) is forwarded verbatim to the
+    exposed route's `**kwargs` (see `Instrumentator.expose`, which passes them
+    straight to `FastAPI.get(...)`) — this is how /metrics gets its Basic Auth
+    guard (`app.api.deps.verify_metrics_basic_auth`) without this module
+    importing `app.api.deps` itself. `None`/omitted = unguarded, so existing
+    callers (tests building a bare instrumented app) are unaffected.
+    """
     Instrumentator(
         excluded_handlers=["/metrics"],
         should_group_status_codes=True,
-    ).instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
+    ).instrument(app).expose(
+        app,
+        endpoint="/metrics",
+        include_in_schema=False,
+        dependencies=dependencies or [],
+    )

@@ -33,11 +33,16 @@ never enter the loop below — see `docs/plans/2026-07-26-refacto-audit-v1-plan.
   - `/dav` (WebDAV relay, dedicated HTTP Basic Auth, `verify_dav_basic_auth`).
   - `/docs` / `/openapi.json` (re-exposed behind `verify_admin_basic_auth`,
     `main.py`).
-  - `/metrics` — genuinely public **today**, pending AUDIT-P2-001/CR-S02
-    hardening tracked as plan step **S4.1** ("auth sur `/metrics`"). This is a
-    dated, reviewed decision, not an oversight: do not add it to the
-    allow-list below (it would be a no-op — `/metrics` isn't under `/api/`
-    anyway) but do NOT remove this note until S4.1 actually adds a guard.
+  - `/metrics` — **S4.1 done** (AUDIT-P2-001/CR-S02, ADR 0004 §Décision 3):
+    guarded by its own `verify_metrics_basic_auth` HTTP Basic Auth
+    (`METRICS_USERNAME`/`METRICS_PASSWORD`, fail-closed if the password is
+    empty, escape hatch `METRICS_PUBLIC=true` — see `app/api/deps.py`),
+    wired at the `Instrumentator.expose(..., dependencies=[...])` call site
+    in `main.py`, not at `include_router`. It never carries the `/api/`
+    prefix in the first place, so it was never in scope for the route-walk
+    below or `PUBLIC_API_ALLOWLIST` — this entry only records that the guard
+    exists, since this module used to be the one place noting it as an open
+    gap.
 """
 from __future__ import annotations
 

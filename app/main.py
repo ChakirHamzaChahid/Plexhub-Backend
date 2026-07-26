@@ -567,7 +567,11 @@ app.add_middleware(RequestIdMiddleware)
 # which guard applies to which router. The startup assertion once tracked
 # here as "not done" now runs at the end of this block (AUDIT-P4-001 /
 # CR-A04) — see app/api/route_audit.py.
-from app.api.deps import verify_admin_basic_auth, verify_backend_secret  # noqa: E402
+from app.api.deps import (  # noqa: E402
+    verify_admin_basic_auth,
+    verify_backend_secret,
+    verify_metrics_basic_auth,
+)
 
 # Shared X-API-Key guard for the JSON API (fail-closed, constant-time).
 _guard = [Depends(verify_backend_secret)]
@@ -667,6 +671,8 @@ app.include_router(dav.router)
 from app.api.route_audit import assert_api_routes_authenticated  # noqa: E402
 assert_api_routes_authenticated(app)
 
-# Prometheus /metrics + per-request HTTP metrics
+# Prometheus /metrics + per-request HTTP metrics. Basic Auth guard (S4.1,
+# AUDIT-P2-001/CR-S02): METRICS_USERNAME/METRICS_PASSWORD, escape hatch
+# METRICS_PUBLIC=true — see app/api/deps.py::verify_metrics_basic_auth.
 from app.utils.metrics import setup_instrumentator  # noqa: E402
-setup_instrumentator(app)
+setup_instrumentator(app, dependencies=[Depends(verify_metrics_basic_auth)])

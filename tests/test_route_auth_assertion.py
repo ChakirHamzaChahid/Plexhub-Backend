@@ -172,6 +172,16 @@ def test_allowlist_is_exactly_the_four_documented_public_paths():
     )
 
 
+def test_metrics_is_not_in_the_allowlist():
+    """S4.1 (AUDIT-P2-001/CR-S02): `/metrics` now carries its own
+    `verify_metrics_basic_auth` guard, wired at the `Instrumentator.expose`
+    call site in `main.py` — never via this allow-list (it never carries the
+    `/api/` prefix, so it was never reachable by the route-walk either way).
+    This is the explicit non-regression: the allow-list must not grow to
+    "cover" it as a workaround."""
+    assert "/metrics" not in PUBLIC_API_ALLOWLIST
+
+
 def test_tv_auth_approve_is_not_in_the_allowlist():
     """/approve is guarded (verify_backend_secret), unlike start/status/complete
     — it must NOT be in the allow-list (that would mask a real regression if

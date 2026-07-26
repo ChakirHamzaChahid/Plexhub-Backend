@@ -44,6 +44,23 @@ class Settings:
     ADMIN_USERNAME: str = os.getenv("ADMIN_USERNAME", "admin")
     ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "")
 
+    # /metrics — HTTP Basic Auth, dedicated secret (AUDIT-P2-001 / CR-S02,
+    # ADR 0004 §Décision 3). Prometheus speaks `basic_auth:` natively, so this
+    # mirrors verify_admin_basic_auth rather than reusing X-API-Key — same
+    # rationale as DAV_USERNAME/DAV_PASSWORD for rclone. Deliberately its own
+    # secret pair, separate from ADMIN_* (a compromised scraper must not open
+    # the admin UI) and from AI_API_KEY. Fail-closed by default: an empty
+    # METRICS_PASSWORD 503s /metrics, exactly like ADMIN_PASSWORD/DAV_PASSWORD.
+    METRICS_USERNAME: str = os.getenv("METRICS_USERNAME", "plexhub-metrics")
+    METRICS_PASSWORD: str = os.getenv("METRICS_PASSWORD", "")
+    # Explicit escape hatch (default false = safe): lets an operator deploy
+    # before reconfiguring their Prometheus scraper's basic_auth, or roll back
+    # if needed. When true, /metrics stays open with NO credential check and
+    # boot logs a WARNING naming the debt — never silent. See
+    # docs/plans/2026-07-26-refacto-audit-v1-plan.md §7.1 for the operator
+    # migration procedure.
+    METRICS_PUBLIC: bool = os.getenv("METRICS_PUBLIC", "false").lower() in ("true", "1", "yes")
+
     # TV pairing (device-flow) — Mission 18
     # Optional explicit Fernet key (urlsafe base64, 32 bytes) for payload
     # encryption at rest. When empty, a key is derived from AI_API_KEY.
@@ -283,6 +300,16 @@ class Settings:
             logger.info("Plex download source: enabled (client_id=%s…)", self.PLEX_CLIENT_IDENTIFIER[:8])
         else:
             logger.info("Plex download source: PLEX_ACCOUNT_TOKEN not set — feature disabled")
+
+        if self.METRICS_PUBLIC:
+            logger.warning(
+                "METRICS_PUBLIC=true — /metrics is served WITHOUT authentication "
+                "(escape hatch, AUDIT-P2-001/CR-S02). Set METRICS_USERNAME/"
+                "METRICS_PASSWORD and reconfigure your Prometheus scraper's "
+                "basic_auth, then unset METRICS_PUBLIC."
+            )
+        elif not self.METRICS_PASSWORD:
+            logger.warning("METRICS_PASSWORD not set — /metrics is fail-closed (503)")
 
         if self.DAV_ENABLED:
             logger.info(

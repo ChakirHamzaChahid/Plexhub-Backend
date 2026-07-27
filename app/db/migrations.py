@@ -49,6 +49,7 @@ async def run_migrations(engine: AsyncEngine) -> None:
     await _migration_021_add_plex_media_item_genres(engine)
     await _migration_022_create_omdb_scrape_cache(engine)
     await _migration_023_analyze(engine)
+    await _migration_024_add_media_youtube_trailer(engine)
 
     logger.info("All migrations completed successfully")
 
@@ -1082,3 +1083,36 @@ async def _migration_023_analyze(engine: AsyncEngine) -> None:
     from app.db.maintenance import run_analyze
 
     await run_analyze(engine)
+
+
+async def _migration_024_add_media_youtube_trailer(engine: AsyncEngine) -> None:
+    """Add the `youtube_trailer` column to the media table (feature "trailers
+    Home overlay pour les médias non-Plex", Lot A).
+
+    Purely additive and nullable: `youtube_trailer` (TEXT, a bare YouTube
+    video id such as "dQw4w9WgXcQ") is NOT backfilled by this migration — it
+    stays NULL for every existing row until the next Xtream sync captures it
+    from `get_vod_info`/`get_series_info` (`sync_worker.py`) or the TMDB
+    enrichment fill-missing write (`enrichment_worker.py`) resolves one via
+    `append_to_response=...,videos`. Consumed by the new
+    `GET /api/media/trailer/resolve` endpoint (`app/services/trailer_service.py`)
+    to avoid a live TMDB lookup when a value is already on the row.
+
+    Idempotent: the column is probed (PRAGMA table_info) before ADD COLUMN is
+    attempted, so a column already present (fresh DB via create_all, CR-C05)
+    is a silent no-op instead of a raise-and-warn; the try/except remains as
+    a safety net for a race with another process's init_db().
+    """
+    logger.info("Migration 024: Adding youtube_trailer column to media")
+
+    async with engine.begin() as conn:
+        if await _column_exists(conn, "media", "youtube_trailer"):
+            logger.debug("Migration 024: youtube_trailer already present, skipping ADD COLUMN")
+            return
+        try:
+            await conn.execute(text(
+                "ALTER TABLE media ADD COLUMN youtube_trailer TEXT"
+            ))
+            logger.info("Migration 024: youtube_trailer column added")
+        except Exception as e:
+            logger.warning("Migration 024: youtube_trailer may already exist: %s", e)

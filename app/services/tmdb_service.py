@@ -21,6 +21,15 @@ BACKDROP_BASE = "https://image.tmdb.org/t/p/w1280"
 PROFILE_BASE = "https://image.tmdb.org/t/p/w185"
 PERSON_URL_BASE = "https://www.themoviedb.org/person"
 
+# `include_video_language` for the `videos` append_to_response/endpoint (Lot A
+# trailers): TMDB's `videos.results` is filtered by `language` (== the plain
+# `language` query param, e.g. "fr-FR") UNLESS this is set — with
+# TMDB_LANGUAGE defaulting to "fr-FR", a plain `language=fr-FR` alone returns
+# an almost-always-empty `results` (most trailers are tagged "en"/untagged,
+# not "fr"). "fr,en,null" widens the language filter to French, English, and
+# untagged videos while `_select_youtube_trailer` still prefers French.
+_VIDEO_LANGUAGE_FILTER = "fr,en,null"
+
 # Top-N actors kept for the `cast` / `cast_json` columns (mirrors NFO behaviour).
 _CAST_LIMIT = 20
 
@@ -101,6 +110,7 @@ class TMDBEnrichmentData:
     tmdb_rating: float | None = None  # = vote_average, kept distinct per NFO schema
     tmdb_votes: int | None = None
     cast_json: str | None = None      # JSON [{name, role, thumb, profile}]
+    youtube_trailer: str | None = None  # bare YouTube video id, see _select_youtube_trailer
 
 
 class TMDBService:
@@ -285,26 +295,57 @@ class TMDBService:
         )
 
     async def get_movie_details(self, tmdb_id: int) -> TMDBEnrichmentData:
-        """Fetch movie details + external_ids + certifications in one API call."""
+        """Fetch movie details + external_ids + certifications + videos in one
+        API call (0 extra HTTP request — `videos` rides `append_to_response`,
+        Lot A trailers)."""
         data = await self._request(
             f"/movie/{tmdb_id}",
             params={
-                "append_to_response": "credits,external_ids,release_dates",
+                "append_to_response": "credits,external_ids,release_dates,videos",
                 "language": settings.TMDB_LANGUAGE,
+                "include_video_language": _VIDEO_LANGUAGE_FILTER,
             },
         )
         return self._parse_details(data, tmdb_id, media_kind="movie")
 
     async def get_tv_details(self, tmdb_id: int) -> TMDBEnrichmentData:
-        """Fetch TV details + external_ids + certifications in one API call."""
+        """Fetch TV details + external_ids + certifications + videos in one API
+        call (0 extra HTTP request — `videos` rides `append_to_response`, Lot
+        A trailers)."""
         data = await self._request(
             f"/tv/{tmdb_id}",
             params={
-                "append_to_response": "credits,external_ids,content_ratings",
+                "append_to_response": "credits,external_ids,content_ratings,videos",
                 "language": settings.TMDB_LANGUAGE,
+                "include_video_language": _VIDEO_LANGUAGE_FILTER,
             },
         )
         return self._parse_details(data, tmdb_id, media_kind="tv")
+
+    async def get_videos_trailer(self, tmdb_id: int, media_kind: str) -> str | None:
+        """Lean `/movie|tv/{id}/videos`-only lookup (Lot A trailers, live TMDB
+        repli used by `trailer_service` when a `Media` row has no stored
+        `youtube_trailer` yet — a dedicated call instead of the full
+        `get_movie_details`/`get_tv_details` so a resolve request doesn't pay
+        for credits/external_ids/certifications it doesn't need).
+
+        Returns `None` if TMDB is unconfigured, unreachable, or has no
+        matching trailer. `media_kind` must be "movie" or "tv"."""
+        if not self.is_configured:
+            return None
+        kind = "movie" if media_kind == "movie" else "tv"
+        try:
+            data = await self._request(
+                f"/{kind}/{tmdb_id}/videos",
+                params={
+                    "language": settings.TMDB_LANGUAGE,
+                    "include_video_language": _VIDEO_LANGUAGE_FILTER,
+                },
+            )
+        except Exception as exc:
+            logger.warning("TMDB get_videos_trailer failed for %s/%s: %s", kind, tmdb_id, exc)
+            return None
+        return _select_youtube_trailer(data)
 
     async def find_by_imdb_id(
         self,
@@ -471,6 +512,8 @@ class TMDBService:
         ) or None
         cast_json = self._build_cast_json(cast_list)
 
+        youtube_trailer = _select_youtube_trailer(data.get("videos") or {})
+
         return TMDBEnrichmentData(
             tmdb_id=tmdb_id,
             imdb_id=imdb_id,
@@ -493,6 +536,7 @@ class TMDBService:
             tmdb_rating=vote_average if vote_average else None,
             tmdb_votes=tmdb_votes,
             cast_json=cast_json,
+            youtube_trailer=youtube_trailer,
         )
 
     @staticmethod
@@ -598,6 +642,46 @@ tmdb_service = TMDBService()
 # These are thin wrappers around the classmethods above so that unit tests
 # and the backfill script can validate parsing logic without any HTTP.
 # ---------------------------------------------------------------------------
+
+def _select_youtube_trailer(videos_json: dict) -> str | None:
+    """Pick the best YouTube trailer key from a TMDB `videos` payload (Lot A
+    trailers) — either the `videos` sub-object of an `append_to_response=
+    ...,videos` detail response, or the top-level body of a direct
+    `/movie|tv/{id}/videos` call: both share the exact same
+    `{"results": [...]}` shape, so this one function handles both callers
+    (`_parse_details` and `TMDBService.get_videos_trailer`).
+
+    Candidates are restricted to `site == "YouTube"` and `type == "Trailer"`
+    (teasers/clips/featurettes excluded — a trailer-shaped autoplay wants an
+    actual trailer). Among those, preference order is: official before
+    non-official, then French (`iso_639_1 == "fr"`) before English before any
+    other/untagged language — "official d'abord, fr puis en" (plan). Returns
+    the bare YouTube video `key` (e.g. "dQw4w9WgXcQ"), never a full URL —
+    `trailer_service`/`TrailerUrlBuilder`-equivalent callers build the URL.
+    """
+    results = videos_json.get("results") or []
+    if not isinstance(results, list):
+        return None
+
+    def _lang_rank(video: dict) -> int:
+        lang = (video.get("iso_639_1") or "").lower()
+        if lang == "fr":
+            return 0
+        if lang == "en":
+            return 1
+        return 2
+
+    candidates = [
+        v for v in results
+        if isinstance(v, dict) and v.get("site") == "YouTube" and v.get("type") == "Trailer"
+        and v.get("key")
+    ]
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda v: (0 if v.get("official") else 1, _lang_rank(v)))
+    return candidates[0]["key"]
+
 
 def _parse_movie_certification(release_dates_json: dict) -> str | None:
     """Parse a TMDb /movie/{id}?append_to_response=release_dates response.

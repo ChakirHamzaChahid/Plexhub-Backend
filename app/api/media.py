@@ -1,7 +1,7 @@
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
@@ -14,12 +14,14 @@ from app.models.schemas import (
     MediaUpdate,
     MediaStatsResponse,
     MediaVersionResponse,
+    TrailerResolveResponse,
     UnifiedMediaResponse,
     UnifiedMediaListResponse,
     UnifiedEpisodeResponse,
     UnifiedEpisodeListResponse,
     apply_adult_prefix,
 )
+from app.services import trailer_service
 from app.services.aggregation_service import (
     build_versions, canonical_title_year,
 )
@@ -119,6 +121,7 @@ def _nfo_metadata(best: Media) -> dict:
         tmdb_rating=best.tmdb_rating,
         tmdb_votes=best.tmdb_votes,
         cast_json=best.cast_json,
+        youtube_trailer=best.youtube_trailer,
     )
 
 
@@ -417,6 +420,80 @@ async def list_episodes_unified(
         unification_id=unification_id, series_title=canonical_title_year(group.best)[0],
         items=items, total=len(items),
     ))
+
+
+# --- Trailer resolution (Lot A trailers) ------------------------------------
+# NOTE: both routes MUST stay ABOVE `GET /{rating_key}` below — a future
+# single-segment literal route would otherwise silently collide with that
+# catch-all path parameter (these two are 2/3-segment paths so they don't
+# today, but the ordering convention is kept defensively, matching
+# `/episodes/unified` above).
+
+
+@router.get("/trailer/resolve", response_model=TrailerResolveResponse)
+async def resolve_trailer(
+    rating_key: Optional[str] = Query(None),
+    server_id: Optional[str] = Query(None),
+    youtube_id: Optional[str] = Query(
+        None,
+        description="Bare YouTube video id — generic mode (no DB lookup), "
+                     "for callers that already know the key.",
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    """Resolve a YouTube trailer key to a cached local mp4 (Lot A trailers).
+
+    Two modes:
+      - `youtube_id` supplied -> generic mode, used by callers that already
+        know the key (e.g. Jellyfin `RemoteTrailers`, xtream-direct
+        `getVodInfo`).
+      - `rating_key` + `server_id` -> reads `media.youtube_trailer`, falling
+        back to a live TMDB `/videos` lookup by `tmdb_id` when the column is
+        empty (write-back on success).
+
+    `status`: "ready" (the mp4 is cached, `url` points at the file endpoint)
+    | "pending" (a download was just kicked off in the background — poll
+    again) | "none" (no trailer resolvable for this media/key)."""
+    if youtube_id is not None:
+        result = await trailer_service.resolve_by_youtube_id(youtube_id)
+    elif rating_key is not None and server_id is not None:
+        result = await trailer_service.resolve_by_rating_key(db, rating_key, server_id)
+    else:
+        raise HTTPException(
+            400, "Provide either youtube_id, or both rating_key and server_id",
+        )
+    return TrailerResolveResponse(status=result.status, url=result.url)
+
+
+@router.get("/trailer/file/{cache_key}")
+async def get_trailer_file(cache_key: str):
+    """Serve a cached trailer mp4 — Range-aware (native Starlette
+    `FileResponse`, honours `Range`/`If-Range`, answers 206/416 as needed).
+
+    `cache_key` MUST be a bare YouTube video id (11-char `[A-Za-z0-9_-]`,
+    same shape `resolve` hands back as `url`'s trailing segment) — anything
+    else is rejected as 404 before ever touching the filesystem
+    (`trailer_service.is_valid_youtube_id`), and
+    `resolve_confined_cache_path` additionally *proves* the resolved path
+    sits under `TRAILER_CACHE_DIR` (F-007 invariant) rather than trusting
+    the regex alone.
+
+    `Content-Encoding: identity` stops `GZipMiddleware` (main.py) from
+    trying to gzip an already-compressed mp4 — Starlette's `GZipMiddleware`
+    treats any response that already carries a `Content-Encoding` header as
+    pre-encoded and passes it through untouched
+    (`starlette.middleware.gzip.IdentityResponder`/`GZipResponder`)."""
+    if not trailer_service.is_valid_youtube_id(cache_key):
+        raise HTTPException(404, "Trailer not found")
+    try:
+        path = trailer_service.resolve_confined_cache_path(cache_key)
+    except (trailer_service.TrailerDisabledError, trailer_service.TrailerPathConfinementError):
+        raise HTTPException(404, "Trailer not found")
+    if not path.is_file():
+        raise HTTPException(404, "Trailer not found")
+    return FileResponse(
+        path, media_type="video/mp4", headers={"Content-Encoding": "identity"},
+    )
 
 
 @router.get("/{rating_key}", response_model=MediaResponse)

@@ -1,5 +1,14 @@
 FROM python:3.12-slim
 WORKDIR /app
+# ffmpeg (Lot A trailers): yt-dlp needs it to mux separate video+audio
+# streams into the 720p mp4 the trailer overlay wants — without it, the
+# primary format tier in trailer_service.select_format is unreachable and
+# every download degrades to a pre-muxed progressive stream (itag 18, 360p,
+# too soft for the TV overlay). Installed as root, BEFORE the non-root
+# `USER plexhub` switch below (apt requires root); ~100 MB image growth.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY app/ ./app/

@@ -23,3 +23,9 @@ sqlite-vec>=0.1,<0.2
 numpy>=1.26,<3.0
 psutil>=6.0,<7.0
 cryptography>=42,<46
+# Trailer resolution (Lot A trailers, app/services/trailer_service.py) — pulls
+# a YouTube trailer into a cached local mp4. Unpinned upper bound: yt-dlp
+# ships frequent point releases tracking YouTube's client changes; only the
+# minimum floor is pinned (nightly-cron-refreshed deployments should just
+# take the latest).
+yt-dlp>=2024.1

@@ -23,6 +23,7 @@ from app.utils.unification import (
 )
 from app.utils.time import now_ms
 from app.utils.db_retry import commit_with_retry, write_with_retry
+from app.utils.youtube import extract_youtube_id
 from app.services import job_registry
 
 # --- AUDIT-P1-001 / ADR 0004 Decision 4 -- call-site migration note (Vague 3,
@@ -178,6 +179,12 @@ def map_vod_to_media(dto: dict, account_id: str, index: int, vod_info: dict | No
     tmdb_id_str = info.get("tmdb_id") or info.get("tmdb")
     tmdb_id_int = int(tmdb_id_str) if tmdb_id_str and str(tmdb_id_str).isdigit() else None
 
+    # YouTube trailer key (Lot A trailers). Panels indifferently emit a bare
+    # id, a full `watch?v=`/`youtu.be`/`embed` URL, etc. — normalize at
+    # capture time (code review BB-1) so `trailer_service`'s strict
+    # 11-char lookup never silently misses a provider that sends URLs.
+    youtube_trailer = extract_youtube_id(info.get("youtube_trailer"))
+
     # Thumb/Art
     thumb_url = info.get("movie_image") or info.get("cover_big") or dto.get("stream_icon")
     art_url = info.get("backdrop_path") or None
@@ -215,6 +222,7 @@ def map_vod_to_media(dto: dict, account_id: str, index: int, vod_info: dict | No
         "rating": rating_val,
         "display_rating": rating_val or 0.0,
         "tmdb_id": tmdb_id_int,
+        "youtube_trailer": youtube_trailer,
         "added_at": int(dto.get("added") or 0) * 1000,  # seconds -> ms
         "updated_at": now_ms(),
         "unification_id": unification_id,
@@ -1429,21 +1437,29 @@ async def sync_account(account_id: str, job_id: str | None = None):
                 logger.info(f"Fetching episodes for {len(all_series_dtos)} synced series "
                            f"({len(changed_series)} changed, {unchanged_count} show-hash-unchanged)")
 
-                async def fetch_series_episodes(series_dto) -> tuple[bool, list[dict]]:
+                async def fetch_series_episodes(series_dto) -> tuple[bool, list[dict], str | None]:
                     """Fetch series info and map episodes.
 
-                    Returns (success, rows). `success=False` on any fetch/parse
-                    failure -- the caller must NEVER treat "provider unreachable
-                    this run" the same as "show genuinely has zero episodes".
-                    Note `success=True` alone does NOT guarantee `rows` is
-                    authoritative: some Xtream mirrors return HTTP 200 with an
-                    empty/missing `episodes` payload as a soft failure, so the
-                    caller additionally requires non-empty `rows` before
-                    trusting a listing enough to run CR-F01 differential
+                    Returns (success, rows, youtube_trailer). `success=False` on
+                    any fetch/parse failure -- the caller must NEVER treat
+                    "provider unreachable this run" the same as "show genuinely
+                    has zero episodes". Note `success=True` alone does NOT
+                    guarantee `rows` is authoritative: some Xtream mirrors return
+                    HTTP 200 with an empty/missing `episodes` payload as a soft
+                    failure, so the caller additionally requires non-empty `rows`
+                    before trusting a listing enough to run CR-F01 differential
                     cleanup on it.
+
+                    `youtube_trailer` (Lot A trailers) is the series-level
+                    trailer key from `series_info["info"]["youtube_trailer"]` --
+                    `map_series_to_media` never sees `series_info` (only the
+                    listing `dto`), so it can't set this column itself; the
+                    caller applies it as a separate UPDATE (see below). Always
+                    `None` on a fetch/parse failure -- a transient miss must
+                    never clobber a previously-captured trailer.
                     """
                     if not isinstance(series_dto, dict):
-                        return False, []
+                        return False, [], None
                     try:
                         async with semaphore:  # Only hold semaphore during API call
                             series_info = await xtream_service.get_series_info(
@@ -1453,14 +1469,23 @@ async def sync_account(account_id: str, job_id: str | None = None):
                         logger.warning(
                             f"Failed to fetch series_info for series {series_dto.get('series_id')}: {e}"
                         )
-                        return False, []
+                        return False, [], None
 
                     try:
                         # Mapping happens outside semaphore
+                        info = series_info.get("info") or {} if isinstance(series_info, dict) else {}
+                        # BB-1 (code review): same URL-vs-bare-id normalization
+                        # as the VOD path above (map_vod_to_media) — a series
+                        # trailer key can arrive URL-shaped just as easily.
+                        youtube_trailer = (
+                            extract_youtube_id(info.get("youtube_trailer"))
+                            if isinstance(info, dict) else None
+                        )
+
                         episodes_data = series_info.get("episodes") or {} if isinstance(series_info, dict) else {}
                         if not isinstance(episodes_data, dict):
                             logger.warning(f"Unexpected episodes_data type for series {series_dto.get('series_id')}: {type(episodes_data).__name__}")
-                            return False, []
+                            return False, [], None
                         rows = []
                         for season_str, episodes in episodes_data.items():
                             try:
@@ -1474,11 +1499,11 @@ async def sync_account(account_id: str, job_id: str | None = None):
                                     )
                                     ep_row["is_in_allowed_categories"] = True
                                     rows.append(ep_row)
-                        return True, rows
+                        return True, rows, youtube_trailer
                     except Exception as e:
                         sid = series_dto.get('series_id') if isinstance(series_dto, dict) else '?'
                         logger.error(f"Failed to sync series {sid}: {e}", exc_info=True)
-                        return False, []
+                        return False, [], None
 
                 episode_count = 0
                 episodes_removed = 0
@@ -1508,12 +1533,25 @@ async def sync_account(account_id: str, job_id: str | None = None):
                     # the show-level differential_cleanup, and an empty show
                     # has nothing streamable anyway.
                     cleanup_scopes: list[tuple[str, set[str]]] = []
-                    for series_dto, (success, rows) in zip(batch_series, batch_results):
+                    # Lot A trailers: (series rating_key, youtube_trailer) pairs
+                    # captured this batch. `map_series_to_media` (Series Sync,
+                    # above) never sees `series_info` -- only `fetch_series_
+                    # episodes` does -- so the column is applied here as a
+                    # separate UPDATE instead of being part of `series_rows`.
+                    # Only non-empty values are collected: a fetch failure or a
+                    # show genuinely without a trailer must never clobber a
+                    # previously-captured one.
+                    series_trailer_updates: list[tuple[str, str]] = []
+                    for series_dto, (success, rows, youtube_trailer) in zip(batch_series, batch_results):
                         episode_batch.extend(rows)
                         if success and rows:
                             grandparent_rating_key = f"series_{series_dto['series_id']}"
                             cleanup_scopes.append(
                                 (grandparent_rating_key, {r["rating_key"] for r in rows})
+                            )
+                        if youtube_trailer:
+                            series_trailer_updates.append(
+                                (f"series_{series_dto['series_id']}", youtube_trailer)
                             )
 
                     try:
@@ -1523,6 +1561,15 @@ async def sync_account(account_id: str, job_id: str | None = None):
                             for grandparent_rating_key, live_keys in cleanup_scopes:
                                 episodes_removed += await differential_cleanup_episodes(
                                     db, server_id, grandparent_rating_key, live_keys
+                                )
+                            for series_rating_key, trailer in series_trailer_updates:
+                                await db.execute(
+                                    update(Media)
+                                    .where(
+                                        Media.rating_key == series_rating_key,
+                                        Media.server_id == server_id,
+                                    )
+                                    .values(youtube_trailer=trailer)
                                 )
                         # Same-session coupling -- see module-level note (ADR
                         # 0004 D4): this loop's own next batch, and the Live

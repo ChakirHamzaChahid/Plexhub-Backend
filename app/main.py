@@ -376,6 +376,26 @@ async def lifespan(app: FastAPI):
                 misfire_grace_time=3600,
             )
 
+            # Lot A trailers — nightly LRU purge safety net (the same purge
+            # already runs right after every successful download,
+            # trailer_service._download_and_release; this cron catches drift
+            # from a lowered TRAILER_CACHE_MAX_MB or a crash mid-download).
+            # No-op by construction when the feature is disabled
+            # (trailer_service.purge_lru returns 0 immediately).
+            async def _trailer_cache_purge():
+                from app.services import trailer_service
+                await trailer_service.purge_lru()
+
+            scheduler.add_job(
+                track_job("trailer_cache_purge")(_trailer_cache_purge),
+                "cron",
+                hour=3,
+                id="trailer_cache_purge",
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=3600,
+            )
+
             if settings.BACKUP_ENABLED:
                 from app.scripts.backup_db import run_backup as _run_backup
 

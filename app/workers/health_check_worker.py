@@ -8,6 +8,7 @@ from sqlalchemy import select, update, or_, text, func
 from app.config import settings
 from app.db.database import worker_session_factory
 from app.models.database import DownloadJob, Media, XtreamAccount
+from app.services import account_outage_service
 from app.services.stream_service import build_stream_url
 from app.utils.time import now_ms
 from app.utils.db_retry import commit_with_retry, write_with_retry
@@ -386,6 +387,16 @@ async def _sample_stream_candidates(db, batch_size: int, cutoff: int) -> list:
     return items
 
 
+# Circuit breaker thresholds, shared by BOTH validation entrypoints (the
+# `run()` cron batch and the `run_pipeline_validation` pipeline pass): an
+# account whose failure rate reaches CIRCUIT_BREAKER_THRESHOLD over at least
+# CIRCUIT_BREAKER_MIN_SAMPLE checks is treated as "provider down", not as
+# thousands of individually broken streams — none of its streams is marked
+# broken, and the outage is recorded as a strike (`account_outage_service`).
+CIRCUIT_BREAKER_MIN_SAMPLE = 10
+CIRCUIT_BREAKER_THRESHOLD = 0.90
+
+
 async def _server_ids_with_active_downloads(db) -> set[str]:
     """Server IDs that currently have a queued/running physical download.
 
@@ -486,10 +497,50 @@ async def _run_health_check_batch():
     checked = 0
     broken_count = 0
     pending_updates: list[tuple[str, str, dict]] = []
+
+    # Circuit breaker for the cron path. The pipeline pass evaluates its
+    # breaker inline (it applies results as they arrive); here EVERY result is
+    # already in hand before a single row is written, so the same rule is
+    # simply applied up-front, per account, over the full sample.
+    #
+    # Why this matters: `_is_definitive_failure` treats 404/403 as definitive,
+    # so a provider that answers 404 while it is down had every sampled stream
+    # flipped to `is_broken=True` IMMEDIATELY — bypassing
+    # STREAM_BROKEN_THRESHOLD entirely, and (with STREAM_FILTER_BROKEN on)
+    # deleting them from the generated library. A whole provider failing at
+    # >=90% is an outage, not attrition.
+    tally: dict[str, list[int]] = {}
+    for item, is_broken, _reason, _size in results:
+        if is_broken is None:
+            continue
+        counts = tally.setdefault(item.server_id.replace("xtream_", ""), [0, 0])
+        counts[0] += 1
+        if is_broken:
+            counts[1] += 1
+    tripped_accounts = {
+        acc_id for acc_id, (acc_checked, acc_broken) in tally.items()
+        if acc_checked >= CIRCUIT_BREAKER_MIN_SAMPLE
+        and acc_broken / acc_checked >= CIRCUIT_BREAKER_THRESHOLD
+    }
+    for acc_id in sorted(tripped_accounts):
+        acc_checked, acc_broken = tally[acc_id]
+        logger.warning(
+            "CIRCUIT BREAKER: account %s has %.0f%% failure rate over %d "
+            "sampled checks — server likely down. No streams marked broken, "
+            "no check timestamps advanced.",
+            acc_id, 100 * acc_broken / acc_checked, acc_checked,
+        )
+
     for item, is_broken, reason, size_bytes in results:
         if is_broken is None:
             continue
         reasons[reason] = reasons.get(reason, 0) + 1
+        if item.server_id.replace("xtream_", "") in tripped_accounts:
+            # Write NOTHING for a tripped account — not even
+            # `last_stream_check`, so these items stay candidates for the next
+            # run instead of being pushed out of the recheck window by an
+            # outage they are not responsible for.
+            continue
 
         new_error_count = (
             (item.stream_error_count or 0) + 1 if is_broken else 0
@@ -541,6 +592,14 @@ async def _run_health_check_batch():
             _apply_batch, session_factory=worker_session_factory,
             op="health_check.apply_batch",
         )
+
+    for acc_id in sorted(tally):
+        recorder = (
+            account_outage_service.record_trip
+            if acc_id in tripped_accounts
+            else account_outage_service.record_clear
+        )
+        await recorder(acc_id, session_factory=worker_session_factory)
 
     logger.info(
         f"Health check complete: {checked} checked, {broken_count} broken | "
@@ -655,8 +714,6 @@ async def _run_pipeline_validation_impl():
         # any point in the run and covers small accounts too, while still
         # requiring enough samples to avoid over-tripping on a handful of
         # unlucky checks.
-        circuit_breaker_min_sample = 10  # don't evaluate below this many checks
-        circuit_breaker_threshold = 0.90  # abort if failure rate >= this
         circuit_tripped = False
 
         client = await _get_client()
@@ -729,9 +786,9 @@ async def _run_pipeline_validation_impl():
                 # account, re-evaluate the failure rate after *every* check
                 # (rolling, not a one-shot sample at a fixed count) — the
                 # server is likely down if it stays at/above threshold.
-                if account_checked >= circuit_breaker_min_sample:
+                if account_checked >= CIRCUIT_BREAKER_MIN_SAMPLE:
                     failure_rate = account_broken / account_checked
-                    if failure_rate >= circuit_breaker_threshold:
+                    if failure_rate >= CIRCUIT_BREAKER_THRESHOLD:
                         logger.warning(
                             f"CIRCUIT BREAKER: account {account_id} has "
                             f"{failure_rate:.0%} failure rate after "
@@ -743,6 +800,14 @@ async def _run_pipeline_validation_impl():
                         # Rollback uncommitted changes for this account
                         await db.rollback()
                         pending_updates = 0
+                        # Remember this outage across runs. MUST go through
+                        # `account_outage_service` (fresh session via
+                        # write_with_retry): `db` has just been rolled back
+                        # and expunged, and writing through it here is the
+                        # silent-write-loss trap of ADR 0004 Decision 4.
+                        await account_outage_service.record_trip(
+                            account_id, session_factory=worker_session_factory,
+                        )
                         # Cancel remaining tasks and await them to
                         # release httpx connections cleanly
                         for t in tasks:
@@ -835,6 +900,12 @@ async def _run_pipeline_validation_impl():
                 from app.utils.metrics import streams_alive_ratio
                 streams_alive_ratio.labels(account_id=account_id).set(
                     1.0 - (account_broken / account_checked)
+                )
+                # A completed healthy pass ends any outage streak — this is
+                # what makes recovery automatic (the account's media reappear
+                # in the app on the next read).
+                await account_outage_service.record_clear(
+                    account_id, session_factory=worker_session_factory,
                 )
 
     if circuit_tripped:

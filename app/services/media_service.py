@@ -14,6 +14,7 @@ from app.models.database import (
 from app.services.aggregation_service import (
     MovieGroup, SeriesGroup, aggregate_movies, aggregate_series,
 )
+from app.services import account_outage_service
 from app.utils.metrics import unified_path_total
 from app.utils.server_id import build_server_id
 from app.utils.time import now_ms
@@ -122,6 +123,17 @@ def decode_media_cursor(cursor: str) -> tuple[int, str, str, str, str]:
         raise ValueError(f"malformed cursor: {e}") from e
 
 
+def _outage_clause(masked: frozenset[str]) -> list:
+    """WHERE clause hiding the media of providers in confirmed outage.
+
+    Empty list when nothing is masked, so the generated SQL of the (vast)
+    normal case is byte-identical to before. See `account_outage_service`:
+    only these read paths consume the outage state — generation, sync, DAV
+    and downloads stay deliberately blind to it.
+    """
+    return [Media.server_id.notin_(masked)] if masked else []
+
+
 class MediaService:
 
     async def get_media_list(
@@ -140,6 +152,7 @@ class MediaService:
         missing_imdb: bool = False,
         missing_tmdb: bool = False,
         cursor: Optional[str] = None,
+        apply_outage_mask: bool = True,
     ) -> tuple[list[Media], int]:
         """Get paginated media list with total count.
 
@@ -187,6 +200,13 @@ class MediaService:
                 query = query.where(Media.parent_rating_key == parent_rating_key)
         if not include_filtered:
             query = query.where(Media.is_in_allowed_categories == True)
+        if apply_outage_mask:
+            # Hide the catalogue of a provider that has been down for several
+            # consecutive validation runs. The admin UI passes False: the
+            # operator must still be able to see what an outage is hiding.
+            query = query.where(
+                *_outage_clause(await account_outage_service.masked_server_ids(db))
+            )
 
         # Count total.
         # CR-P03: count with a narrow `func.count()` over the base table using
@@ -300,9 +320,11 @@ class MediaService:
         else:
             unified_path_total.labels(path="live_filtered").inc()
 
+        masked = await account_outage_service.masked_server_ids(db)
         query = select(Media).where(
             Media.type == media_type,
             Media.is_in_allowed_categories == True,  # noqa: E712
+            *_outage_clause(masked),
         )
         if search:
             safe = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
@@ -334,6 +356,10 @@ class MediaService:
         cache_key = (
             id(db.get_bind()), media_type, search, genre, year, include_broken,
             fp_count or 0, fp_max_updated or 0,
+            # The masked set is part of the identity of the result: without it
+            # a cached page would keep serving a provider's media after it went
+            # into outage (and keep hiding them after it recovered).
+            tuple(sorted(masked)),
         )
 
         groups = _unified_groups_cache.get(cache_key, None)
@@ -413,11 +439,18 @@ class MediaService:
         # different `filter`) — only the allowed one is a real version, and the
         # `(server_id, rating_key)` IN-join alone would otherwise re-inflate the
         # non-allowed twin and diverge from the live versions[].
+        #
+        # The snapshot itself carries no outage awareness (it is rebuilt at
+        # pipeline time), so the mask is applied at hydration: a group whose
+        # only members live on a masked provider simply doesn't reproduce and
+        # is dropped below. `total` then slightly over-reports — exactly the
+        # already-accepted stale-snapshot semantics a few lines down.
         media_rows = list((await db.execute(
             select(Media).where(
                 Media.type == media_type,
                 Media.is_in_allowed_categories == True,  # noqa: E712
                 tuple_(Media.server_id, Media.rating_key).in_(pk_pairs),
+                *_outage_clause(await account_outage_service.masked_server_ids(db)),
             )
         )).scalars().all())
 
@@ -455,11 +488,13 @@ class MediaService:
         catalog (unlike ``get_unified_list``) — only rows plausibly linked to
         the requested title.
         """
+        masked = await account_outage_service.masked_server_ids(db)
         seed_rows = list((await db.execute(
             select(Media).where(
                 Media.type == media_type,
                 Media.unification_id == unification_id,
                 Media.is_in_allowed_categories == True,  # noqa: E712
+                *_outage_clause(masked),
             )
         )).scalars().all())
         if not seed_rows:
@@ -511,6 +546,9 @@ class MediaService:
         years = {r.year for r in seed_rows if r.year is not None}
 
         found: dict[tuple[str, str], Media] = {}
+        # Masked here too: a twin row on a provider in outage must not be
+        # folded back into the group the seed query just filtered it out of.
+        outage = _outage_clause(await account_outage_service.masked_server_ids(db))
 
         if imdb_ids or tmdb_ids:
             id_filters = []
@@ -523,6 +561,7 @@ class MediaService:
                     Media.type == media_type,
                     Media.is_in_allowed_categories == True,  # noqa: E712
                     or_(*id_filters),
+                    *outage,
                 )
             )).scalars().all()
             for row in rows:
@@ -534,6 +573,7 @@ class MediaService:
                     Media.type == media_type,
                     Media.is_in_allowed_categories == True,  # noqa: E712
                     Media.year.in_(years),
+                    *outage,
                 )
             )).scalars().all()
             for row in rows:
@@ -547,11 +587,14 @@ class MediaService:
         """Aggregate episodes of a unified show (all member accounts) into
         per-(season, episode) slots. Returns (member_shows, series_group) or
         None if no show carries that unification_id."""
+        # Masking the member shows is enough: the episode query below is
+        # scoped to `server_ids` derived from these rows.
         shows = list((await db.execute(
             select(Media).where(
                 Media.type == "show",
                 Media.unification_id == unification_id,
                 Media.is_in_allowed_categories == True,  # noqa: E712
+                *_outage_clause(await account_outage_service.masked_server_ids(db)),
             )
         )).scalars().all())
         if not shows:

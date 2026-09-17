@@ -50,6 +50,7 @@ async def run_migrations(engine: AsyncEngine) -> None:
     await _migration_022_create_omdb_scrape_cache(engine)
     await _migration_023_analyze(engine)
     await _migration_024_add_media_youtube_trailer(engine)
+    await _migration_025_add_account_outage_tracking(engine)
 
     logger.info("All migrations completed successfully")
 
@@ -1116,3 +1117,52 @@ async def _migration_024_add_media_youtube_trailer(engine: AsyncEngine) -> None:
             logger.info("Migration 024: youtube_trailer column added")
         except Exception as e:
             logger.warning("Migration 024: youtube_trailer may already exist: %s", e)
+
+
+async def _migration_025_add_account_outage_tracking(engine: AsyncEngine) -> None:
+    """Add provider-outage tracking columns to `xtream_accounts`.
+
+    Both columns are purely additive and describe ONE thing: how many
+    consecutive validation runs found this account's provider down (the
+    circuit breaker in `health_check_worker` tripping, i.e. >=90% failures
+    over >=10 checks), and since when.
+
+      - `outage_strikes` (INTEGER NOT NULL DEFAULT 0) -- consecutive tripped
+        runs. Reset to 0 by the first healthy run.
+      - `outage_since`   (BIGINT NULL) -- `now_ms()` of the FIRST trip of the
+        current streak (NULL when not in outage), so the admin UI can say
+        "down since <date>" rather than just "3 strikes".
+
+    No backfill: 0/NULL is the correct neutral state for every existing row
+    (an account genuinely in outage earns its first strike on the next
+    validation run).
+
+    Deliberately NOT reusing `is_active`: that flag is a global kill switch
+    read by the Plex/Jellyfin generator (plex_generator/source.py),
+    sync_worker, the DAV relay and download_service -- flipping it would
+    purge the generated library. These columns are consumed ONLY by the
+    `media_service` read paths (see `account_outage_service`).
+
+    Idempotent: each column is probed (PRAGMA table_info) before ADD COLUMN,
+    so a fresh DB (already created by `Base.metadata.create_all`, CR-C05) is
+    a silent no-op; the try/except stays as a safety net for a race with
+    another process's init_db().
+    """
+    logger.info("Migration 025: Adding outage tracking columns to xtream_accounts")
+
+    columns = (
+        ("outage_strikes", "INTEGER NOT NULL DEFAULT 0"),
+        ("outage_since", "BIGINT"),
+    )
+    async with engine.begin() as conn:
+        for name, ddl in columns:
+            if await _column_exists(conn, "xtream_accounts", name):
+                logger.debug("Migration 025: %s already present, skipping ADD COLUMN", name)
+                continue
+            try:
+                await conn.execute(text(
+                    f"ALTER TABLE xtream_accounts ADD COLUMN {name} {ddl}"
+                ))
+                logger.info("Migration 025: %s column added", name)
+            except Exception as e:
+                logger.warning("Migration 025: %s may already exist: %s", name, e)

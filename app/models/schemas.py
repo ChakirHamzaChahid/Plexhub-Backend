@@ -321,6 +321,11 @@ class AccountResponse(BaseModel):
     last_synced_at: int = 0
     is_active: bool = True
     created_at: int = 0
+    # Provider outage (M025): consecutive failed validation runs, and when the
+    # current streak started. `is_active` is untouched by an outage — see
+    # `account_outage_service`.
+    outage_strikes: int = 0
+    outage_since: Optional[int] = None
 
 
 class AccountTestResponse(BaseModel):

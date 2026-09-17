@@ -18,6 +18,24 @@
       {{ missing_tmdb_count }}
     </span>
   </div>
+  {% if outages %}
+  <div class="w-full border-t border-slate-200 pt-2 mt-1">
+    {% for o in outages %}
+    <div class="text-sm {{ 'text-red-700' if o.masked else 'text-amber-700' }}">
+      <span class="font-semibold">Panne fournisseur</span> ·
+      {{ o.label }} ({{ o.account_id }}) —
+      {{ o.strikes }} run{{ 's' if o.strikes > 1 }} de validation en échec
+      {%- if o.since %}, depuis le {{ o.since | ms }}{% endif %}.
+      {% if o.masked %}
+      Catalogue <span class="font-semibold">masqué</span> côté app ; la
+      bibliothèque générée, le sync et les téléchargements sont intacts.
+      {% else %}
+      Encore visible côté app.
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
   {% if total_movies %}
   <div class="text-xs text-slate-500">
     IMDb : {{ ((total_movies - missing_imdb_count) * 100 // total_movies) }}% scrapés

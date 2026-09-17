@@ -1,6 +1,6 @@
 from sqlalchemy import (
     Column, Text, Integer, BigInteger, Boolean, Float, Index, String,
-    CheckConstraint,
+    CheckConstraint, text,
 )
 from sqlalchemy.orm import DeclarativeBase
 
@@ -153,6 +153,18 @@ class XtreamAccount(Base):
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(BigInteger, nullable=False, default=0)
     category_filter_mode = Column(Text, nullable=False, default="all")  # "all", "whitelist", "blacklist"
+    # Provider-outage tracking (M025) — written ONLY by
+    # `account_outage_service`, read ONLY by the `media_service` read paths.
+    # Deliberately separate from `is_active`, which is a global kill switch
+    # that would also purge the generated Plex/Jellyfin library.
+    # `server_default` (not just the Python-side `default`) so `create_all`
+    # emits "NOT NULL DEFAULT 0" exactly like migration 025's DDL: raw SQL
+    # INSERTs that enumerate columns (tests, one-shot scripts) must not have
+    # to know about a column added for an unrelated feature.
+    outage_strikes = Column(
+        Integer, nullable=False, default=0, server_default=text("0"),
+    )
+    outage_since = Column(BigInteger)  # now_ms() of the first trip of the streak
 
 
 class XtreamCategory(Base):

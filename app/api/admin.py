@@ -20,7 +20,7 @@ from app.config import settings
 from app.db.database import get_db
 from app.models.schemas import MediaUpdate
 from app.services.media_service import media_service
-from app.services import api_key_service, nfo_import_service
+from app.services import account_outage_service, api_key_service, nfo_import_service
 from app.utils.time import now_ms
 
 
@@ -65,6 +65,9 @@ async def _load_movies_page(
         search=search or None,
         missing_imdb=missing_imdb,
         missing_tmdb=missing_tmdb,
+        # The operator's diagnostic view must show what a provider outage is
+        # hiding from the app, not hide it too.
+        apply_outage_mask=False,
     )
     return items, total, offset
 
@@ -154,6 +157,7 @@ async def admin_stats_fragment(
             "total_movies": total,
             "missing_imdb_count": missing_imdb,
             "missing_tmdb_count": missing_tmdb,
+            "outages": await account_outage_service.list_outages(db),
         },
     )
 

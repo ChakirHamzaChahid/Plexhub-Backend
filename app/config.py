@@ -119,6 +119,21 @@ class Settings:
     STREAM_VALIDATION_RECHECK_HOURS: int = _safe_int("STREAM_VALIDATION_RECHECK_HOURS", 24)
     STREAM_FILTER_BROKEN: bool = os.getenv("STREAM_FILTER_BROKEN", "true").lower() in ("true", "1", "yes")
 
+    # Provider outage (M025) — a whole Xtream provider being down for several
+    # consecutive validation runs, as opposed to individual broken streams.
+    # ACCOUNT_OUTAGE_STRIKES: consecutive tripped validation runs (circuit
+    # breaker: >=90% failures over >=10 checks) before the account's media are
+    # hidden from the app's /api/media reads. With a long SYNC_INTERVAL_HOURS
+    # the default of 3 means "down for several days", never a blip.
+    # ACCOUNT_OUTAGE_MASK_ENABLED: kill switch — false still counts strikes,
+    # logs and exports the metric, but hides nothing.
+    # NB: neither ever touches `is_active` / `is_broken`, so the generated
+    # Plex/Jellyfin library is never purged by an outage.
+    ACCOUNT_OUTAGE_STRIKES: int = _safe_int("ACCOUNT_OUTAGE_STRIKES", 3)
+    ACCOUNT_OUTAGE_MASK_ENABLED: bool = os.getenv(
+        "ACCOUNT_OUTAGE_MASK_ENABLED", "true"
+    ).lower() in ("true", "1", "yes")
+
     PLEX_LIBRARY_DIR: str = os.getenv("PLEX_LIBRARY_DIR", "")
     # AUDIT-P6-006: `write_file`/`download_image` (plex_generator/storage.py)
     # preserve any existing generated file forever — a `.nfo` is never

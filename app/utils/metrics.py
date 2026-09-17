@@ -77,6 +77,17 @@ streams_alive_ratio = Gauge(
 )
 # NOTE: `account_id` is open cardinality -> deliberately NOT zero-initialised.
 
+account_outage_strikes = Gauge(
+    "plexhub_account_outage_strikes",
+    "Consecutive validation runs whose circuit breaker tripped for this "
+    "account (0 = provider healthy). At or above ACCOUNT_OUTAGE_STRIKES the "
+    "account's media are hidden from the app's /api/media reads.",
+    labelnames=("account_id",),
+)
+# NOTE: same `account_id` open-cardinality caveat as streams_alive_ratio above
+# -> deliberately NOT zero-initialised. Sibling of that gauge by design: both
+# are written from health_check_worker at the end of a per-account pass.
+
 enrichment_queue_size = Gauge(
     "plexhub_enrichment_queue_size",
     "Pending/skipped/failed item count in enrichment_queue.",

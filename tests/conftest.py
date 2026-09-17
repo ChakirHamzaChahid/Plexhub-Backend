@@ -65,6 +65,23 @@ def _reset_rate_limiters():
     rl.tv_auth_start_pending_ip_limiter.reset()
 
 
+# ─── Provider outage mask (M025) ─────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _reset_outage_mask_cache():
+    """`account_outage_service` memoises the masked-account set for 60s in
+    process-local module state — same leak shape as the rate limiters above.
+    Without a reset, one test's masked account would keep hiding media in the
+    next test (or, worse, a freshly masked account would stay visible because
+    an earlier test warmed the cache with an empty set)."""
+    from app.services import account_outage_service
+
+    account_outage_service.invalidate_mask_cache()
+    yield
+    account_outage_service.invalidate_mask_cache()
+
+
 # ─── Job freshness / master election (S5.1) ─────────────────────────────
 
 

@@ -27,6 +27,33 @@ BATCH_SIZE = 200  # Commit every N items
 CONCURRENCY = 8   # Parallel TMDB requests (free tier ~4 req/s, keep headroom)
 MAX_ATTEMPTS = 3  # Max enrichment attempts before permanently skipping
 
+
+def _media_is_category_visible():
+    """EXISTS clause: the queue item's underlying Media row is currently in
+    an allowed category (`category_service.update_media_category_visibility`
+    keeps `Media.is_in_allowed_categories` in sync with the account's
+    whitelist/blacklist config).
+
+    No declared ORM relationship links `EnrichmentQueue` to `Media` (same
+    correlated-subquery idiom as `sync_worker.cleanup_orphan_enrichment_queue`),
+    so this is added to a query's `.where(...)` alongside the EnrichmentQueue
+    filters, correlated on it there.
+
+    Without this, enrichment spent its daily TMDB/OMDb budget on media the
+    category filter hides from the app anyway -- found 2026-09-18 after
+    narrowing an account to a French-only whitelist while ~134k queued items
+    for now-filtered-out categories kept consuming the budget first.
+    """
+    return (
+        select(Media.rating_key)
+        .where(
+            Media.rating_key == EnrichmentQueue.rating_key,
+            Media.server_id == EnrichmentQueue.server_id,
+            Media.is_in_allowed_categories == True,  # noqa: E712
+        )
+        .exists()
+    )
+
 # --- Anti-recurrence guard (Wave 3, S5 — id-consistency validator design doc §5) --
 # `_IMDB_ID_RE`: cheap shape tripwire for `TMDBEnrichmentData.imdb_id`.
 _IMDB_ID_RE = re.compile(r"^tt\d+$")
@@ -641,6 +668,7 @@ async def run():
                     (EnrichmentQueue.status == "skipped") & (EnrichmentQueue.attempts < MAX_ATTEMPTS),
                 ),
                 EnrichmentQueue.media_type == "movie",
+                _media_is_category_visible(),
             )
             .order_by(EnrichmentQueue.created_at)
             .limit(daily_limit)
@@ -696,6 +724,7 @@ async def run():
                         (EnrichmentQueue.status == "skipped") & (EnrichmentQueue.attempts < MAX_ATTEMPTS),
                     ),
                     EnrichmentQueue.media_type == "show",
+                    _media_is_category_visible(),
                 )
                 .order_by(EnrichmentQueue.created_at)
                 .limit(remaining)

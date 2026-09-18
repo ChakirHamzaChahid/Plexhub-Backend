@@ -511,3 +511,87 @@ class TestRunEndOfRunRecompute:
                 select(Media.display_rating).where(Media.rating_key == "vod_clobbered.mp4")
             )).scalar_one()
         assert healed == 8.0  # blend(9.0, 7.0) == 8.0 — healed, not the clobbered 7.0
+
+
+class TestEnrichmentRespectsCategoryFilter:
+    """2026-09-18: `run()`'s Phase 1 (movie) / Phase 2 (show) candidate
+    queries selected `EnrichmentQueue` items purely by status/media_type,
+    with no regard for whether the underlying `Media` row is currently in
+    an allowed category. Narrowing an account to a whitelist (e.g.
+    French-only) left the daily TMDB/OMDb budget being spent enriching
+    items the category filter hides from the app anyway. Both phases now
+    additionally require `Media.is_in_allowed_categories == True` via
+    `_media_is_category_visible()` — tested here at the query level
+    (`db.execute` directly) rather than through `run()`, so no TMDB/OMDb
+    mocking is needed to prove the filter."""
+
+    @pytest_asyncio.fixture
+    async def db(self, db_engine):
+        factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
+        async with factory() as s:
+            yield s
+
+    async def _phase1_query(self, s):
+        from sqlalchemy import or_
+        from app.workers.enrichment_worker import (
+            EnrichmentQueue, MAX_ATTEMPTS, _media_is_category_visible,
+        )
+        result = await s.execute(
+            select(EnrichmentQueue)
+            .where(
+                or_(
+                    EnrichmentQueue.status == "pending",
+                    (EnrichmentQueue.status == "skipped") & (EnrichmentQueue.attempts < MAX_ATTEMPTS),
+                ),
+                EnrichmentQueue.media_type == "movie",
+                _media_is_category_visible(),
+            )
+        )
+        return list(result.scalars().all())
+
+    @pytest.mark.asyncio
+    async def test_hidden_category_movie_excluded(self, db):
+        db.add_all([
+            Media(
+                rating_key="vod_visible.mp4", server_id="xtream_cat",
+                library_section_id="1", title="Visible Movie", type="movie",
+                is_in_allowed_categories=True, page_offset=0,
+            ),
+            Media(
+                rating_key="vod_hidden.mp4", server_id="xtream_cat",
+                library_section_id="1", title="Hidden Movie", type="movie",
+                is_in_allowed_categories=False, page_offset=1,
+            ),
+            EnrichmentQueue(
+                rating_key="vod_visible.mp4", server_id="xtream_cat",
+                media_type="movie", title="Visible Movie",
+                status="pending", attempts=0, created_at=0,
+            ),
+            EnrichmentQueue(
+                rating_key="vod_hidden.mp4", server_id="xtream_cat",
+                media_type="movie", title="Hidden Movie",
+                status="pending", attempts=0, created_at=0,
+            ),
+        ])
+        await db.commit()
+
+        selected = await self._phase1_query(db)
+        selected_keys = {item.rating_key for item in selected}
+
+        assert selected_keys == {"vod_visible.mp4"}
+
+    @pytest.mark.asyncio
+    async def test_orphan_queue_item_without_media_row_excluded(self, db):
+        # An EnrichmentQueue row whose Media row was deleted out from under
+        # it (differential cleanup) must not be selected either -- the EXISTS
+        # correlated subquery naturally excludes it, same as a hidden one.
+        db.add(EnrichmentQueue(
+            rating_key="vod_orphan.mp4", server_id="xtream_cat",
+            media_type="movie", title="Orphan",
+            status="pending", attempts=0, created_at=0,
+        ))
+        await db.commit()
+
+        selected = await self._phase1_query(db)
+
+        assert selected == []

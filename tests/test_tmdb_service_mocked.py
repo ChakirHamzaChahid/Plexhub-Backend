@@ -202,7 +202,7 @@ async def test_enrichment_halts_on_real_call_budget_not_item_count(monkeypatch):
     the worker after a single item even though 2 queue items are pending."""
     from app.workers import enrichment_worker as ew
     from app.config import settings
-    from app.models.database import EnrichmentQueue
+    from app.models.database import EnrichmentQueue, Media
     from app.services.tmdb_service import TMDBService
 
     monkeypatch.setattr(settings, "ENRICHMENT_DAILY_LIMIT", 3)
@@ -249,6 +249,20 @@ async def test_enrichment_halts_on_real_call_budget_not_item_count(monkeypatch):
 
     async with factory() as s:
         s.add_all([
+            # A queue item is only ever created alongside its Media row in
+            # real operation (sync_worker.enqueue_for_enrichment) and is
+            # only selected when that row is in an allowed category
+            # (_media_is_category_visible) — seed both here to match.
+            Media(
+                rating_key="vod_1.mp4", server_id="xtream_a",
+                library_section_id="1", title="Foo", type="movie",
+                page_offset=0,
+            ),
+            Media(
+                rating_key="vod_2.mp4", server_id="xtream_a",
+                library_section_id="1", title="Bar", type="movie",
+                page_offset=1,
+            ),
             EnrichmentQueue(
                 rating_key="vod_1.mp4", server_id="xtream_a", media_type="movie",
                 title="Foo", year=2020, status="pending", attempts=0, created_at=0,

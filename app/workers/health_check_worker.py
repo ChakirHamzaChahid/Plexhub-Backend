@@ -196,30 +196,45 @@ async def _check_one(client: httpx.AsyncClient, item, account, semaphore):
             # Step 1: HEAD request — fast, checks if the resource exists
             head_resp = await client.head(url, follow_redirects=True)
 
-            if head_resp.status_code >= 400:
+            # 405 Method Not Allowed means THIS PROVIDER doesn't implement
+            # HEAD at all — a protocol mismatch, not a statement about the
+            # stream. Found 2026-09-18: an entire, fully-functioning account
+            # (confirmed healthy via successful catalogue syncs) came back
+            # 100% `head_405` on a random sample, got treated as 100% broken,
+            # and tripped the account-outage circuit breaker on a provider
+            # that was never actually down. Treat it like an ambiguous HEAD
+            # and fall through to the GET-based check instead of declaring
+            # it broken outright — unlike head_404/head_403 (CR-T05), which
+            # DO mean the resource itself is gone/forbidden.
+            head_size = None
+            if head_resp.status_code == 405:
+                ct = ""
+                content_length = None
+            elif head_resp.status_code >= 400:
                 return item, True, f"head_{head_resp.status_code}", None
+            else:
+                # If HEAD returns 200/206, check Content-Type
+                # Don't trust Content-Type when Content-Length is 0 — Xtream
+                # servers return 200 + application/octet-stream + empty body
+                # for dead streams. Fall through to Range GET for verification.
+                ct = head_resp.headers.get("content-type", "")
+                content_length = head_resp.headers.get("content-length")
+                # Best-effort total size from the HEAD alone. On a 200 response
+                # Content-Length IS the total size; on a 206 (some providers HEAD
+                # with a Range too) fall back to the Content-Range total.
+                head_size = _parse_positive_int(content_length)
+                if head_size is None:
+                    head_size = _total_size_from_content_range(
+                        head_resp.headers.get("content-range")
+                    )
+                if _content_type_is_video(ct) and content_length != "0":
+                    return item, False, "head_ct_video", head_size
 
-            # If HEAD returns 200/206, check Content-Type
-            # Don't trust Content-Type when Content-Length is 0 — Xtream
-            # servers return 200 + application/octet-stream + empty body
-            # for dead streams. Fall through to Range GET for verification.
-            ct = head_resp.headers.get("content-type", "")
-            content_length = head_resp.headers.get("content-length")
-            # Best-effort total size from the HEAD alone. On a 200 response
-            # Content-Length IS the total size; on a 206 (some providers HEAD
-            # with a Range too) fall back to the Content-Range total.
-            head_size = _parse_positive_int(content_length)
-            if head_size is None:
-                head_size = _total_size_from_content_range(
-                    head_resp.headers.get("content-range")
-                )
-            if _content_type_is_video(ct) and content_length != "0":
-                return item, False, "head_ct_video", head_size
+                if _content_type_is_error(ct):
+                    return item, True, f"head_ct_error:{ct.split(';')[0].strip()}", None
 
-            if _content_type_is_error(ct):
-                return item, True, f"head_ct_error:{ct.split(';')[0].strip()}", None
-
-            # Step 2: Content-Type ambiguous — do Range GET to inspect bytes
+            # Step 2: Content-Type ambiguous (or HEAD unsupported) — do a
+            # Range GET to inspect bytes
             async with client.stream(
                 "GET",
                 url,

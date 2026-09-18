@@ -516,6 +516,40 @@ async def test_check_one_head_html_error_page_is_definitive_broken(xtream_mock):
 
 
 @pytest.mark.asyncio
+async def test_check_one_head_405_falls_through_to_range_get_video(xtream_mock):
+    # 405 = this provider doesn't implement HEAD at all (found 2026-09-18 on
+    # a fully healthy, syncing account) — NOT a statement the stream is dead.
+    # Must fall through to the GET-based check, same as an ambiguous HEAD.
+    xtream_mock.head(STREAM_URL).respond(405)
+    xtream_mock.get(STREAM_URL).respond(200, headers={"content-type": "video/mp2t"})
+
+    async with httpx.AsyncClient() as client:
+        _, is_broken, reason, _size = await hc._check_one(
+            client, _movie_item(), _fake_account(), asyncio.Semaphore(1)
+        )
+
+    assert is_broken is False
+    assert reason == "get_ct_video"
+
+
+@pytest.mark.asyncio
+async def test_check_one_head_405_with_dead_get_is_still_broken(xtream_mock):
+    # A provider that doesn't support HEAD can still have a genuinely dead
+    # stream — the GET fallback must still be able to catch that.
+    xtream_mock.head(STREAM_URL).respond(405)
+    xtream_mock.get(STREAM_URL).respond(200, content=b"")
+
+    async with httpx.AsyncClient() as client:
+        _, is_broken, reason, _size = await hc._check_one(
+            client, _movie_item(), _fake_account(), asyncio.Semaphore(1)
+        )
+
+    assert is_broken is True
+    assert reason == "get_empty"
+    assert hc._is_definitive_failure(reason) is True
+
+
+@pytest.mark.asyncio
 async def test_check_one_ambiguous_head_falls_through_to_range_get_video(xtream_mock):
     # HEAD with no Content-Type at all is ambiguous -> Range GET decides.
     xtream_mock.head(STREAM_URL).respond(200)

@@ -30,6 +30,21 @@ directly on the event loop. It never mutates the global
 in the process, e.g. `plex_generator/storage.py`'s poster/fanart
 downloader) — the pixel-count cap is enforced locally, before any pixel
 decoding happens.
+
+Memory hardening (2GB Docker container, security review of the initial
+W3 commit): a naively-decoded `POSTER_MAX_PIXELS` image converted to a
+float64 numpy array is ~300MB for a single call, and `asyncio.to_thread`
+uses the process-wide default executor with no concurrency limit of its
+own — several concurrent candidate comparisons could each spawn a
+full-size decode. Mitigated three ways: (1) JPEGs use `Image.draft()`
+to have libjpeg decode directly at a reduced resolution (an IDCT-time
+optimization, not a post-decode resize — the full-resolution buffer is
+never materialized); (2) every format is additionally shrunk via
+`Image.thumbnail()` to `_HASH_REDUCE_SIZE` before the numpy conversion;
+(3) the numpy array itself is float32, not float64, and the actual
+`compute_hashes` call (the only unbounded-fan-out point) is gated by a
+dedicated `POSTER_HASH_CONCURRENCY` semaphore, independent of the
+network-fetch semaphores below.
 """
 from __future__ import annotations
 
@@ -37,7 +52,6 @@ import asyncio
 import hashlib
 import io
 import logging
-import warnings
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Literal, Optional, Sequence
@@ -74,6 +88,12 @@ _PHASH_CORNER = 8
 _LETTERBOX_STDDEV_THRESHOLD = 4.0
 _LETTERBOX_MAX_TRIM_FRACTION = 0.25
 
+# Working-resolution cap applied via `Image.draft()` (JPEG) / `Image.
+# thumbnail()` (every format) BEFORE the numpy conversion — hashing math
+# only ever needs a 32x32 grid, so this is generous headroom, not a
+# quality compromise.
+_HASH_REDUCE_SIZE = (512, 512)
+
 _hash_cache_positive: TTLCache[str, "PosterHash"] = TTLCache(max_size=4000, ttl_seconds=6 * 3600)
 _hash_cache_negative: TTLCache[str, bool] = TTLCache(max_size=4000, ttl_seconds=15 * 60)
 _CACHE_MISS = object()
@@ -90,6 +110,16 @@ _client: Optional[httpx.AsyncClient] = None
 _client_lock = asyncio.Lock()
 _global_semaphore: Optional[asyncio.Semaphore] = None
 _host_semaphores: dict[str, asyncio.Semaphore] = {}
+# Dedicated to the CPU-bound `compute_hashes` thread-pool call — separate
+# from the network-fetch semaphores above, so this is the one knob that
+# actually bounds concurrent decode/hash memory usage regardless of how
+# many fetches are in flight.
+_hash_semaphore: Optional[asyncio.Semaphore] = None
+
+# Restrict Pillow's format sniffing to the handful of formats a poster CDN
+# ever actually serves — narrows the attacker-reachable parser surface
+# (review L5) rather than trusting Pillow's full autodetection.
+_ALLOWED_FORMATS = ("JPEG", "PNG", "WEBP", "GIF")
 
 
 class PosterFetchError(Exception):
@@ -175,7 +205,7 @@ def _resize_gray(arr: np.ndarray, size: tuple[int, int]) -> np.ndarray:
     """`size` = (width, height), same order as `PIL.Image.resize`."""
     img = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8), mode="L")
     resized = img.resize(size, Image.LANCZOS)
-    return np.asarray(resized, dtype=np.float64)
+    return np.asarray(resized, dtype=np.float32)
 
 
 def _compute_dhash(arr: np.ndarray) -> int:
@@ -223,27 +253,49 @@ def compute_hashes(image_bytes: bytes) -> PosterHash:
     `PosterFetchError` (never a raw Pillow exception) on any undecodable/
     oversized image. `Image.MAX_IMAGE_PIXELS` is never mutated globally —
     the pixel-count cap is `settings.POSTER_MAX_PIXELS`, enforced from the
-    header BEFORE any pixel is decoded."""
+    header BEFORE any pixel is decoded.
+
+    Working resolution is bounded to `_HASH_REDUCE_SIZE` before the numpy
+    conversion (review M1): JPEGs use `Image.draft()` so libjpeg decodes
+    directly at reduced resolution (the full-size buffer never exists);
+    every format is then additionally shrunk with `Image.thumbnail()`,
+    which is a no-op if the image was already smaller. Hashing only ever
+    needs a 32x32 grid, so this doesn't affect hash quality.
+
+    Deliberately does NOT touch Python's global `warnings` filter state
+    (that was the initial W3 commit's approach, reverted per review L4 —
+    `warnings.catch_warnings()` mutates process-global state and is not
+    thread-safe, and this function runs concurrently across worker
+    threads via `asyncio.to_thread`). `Image.DecompressionBombError` is
+    still caught explicitly; the (non-raising) `DecompressionBombWarning`
+    is not specially handled — `settings.POSTER_MAX_PIXELS` is enforced
+    well below Pillow's own warning threshold anyway.
+    """
     try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", category=Image.DecompressionBombWarning)
-            img = Image.open(io.BytesIO(image_bytes))
-            width, height = img.size
-            if width <= 0 or height <= 0:
-                raise PosterFetchError("invalid image dimensions")
-            if width * height > settings.POSTER_MAX_PIXELS:
-                raise PosterFetchError("image exceeds pixel cap")
-            img = ImageOps.exif_transpose(img)
-            img = img.convert("L")
-            img.load()
+        img = Image.open(io.BytesIO(image_bytes), formats=_ALLOWED_FORMATS)
+        width, height = img.size
+        if width <= 0 or height <= 0:
+            raise PosterFetchError("invalid image dimensions")
+        if width * height > settings.POSTER_MAX_PIXELS:
+            raise PosterFetchError("image exceeds pixel cap")
+        if img.format == "JPEG":
+            # Must be called before any operation that forces a full
+            # decode. Only shrinks by powers of ~2 and only affects JPEG,
+            # hence the `thumbnail()` pass below for the exact/final size
+            # and for every other format.
+            img.draft("L", _HASH_REDUCE_SIZE)
+        img = ImageOps.exif_transpose(img)
+        img = img.convert("L")
+        img.thumbnail(_HASH_REDUCE_SIZE, Image.LANCZOS)
+        img.load()
     except PosterFetchError:
         raise
-    except (Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+    except Image.DecompressionBombError as exc:
         raise PosterFetchError(f"decompression bomb rejected ({type(exc).__name__})") from None
     except Exception as exc:  # noqa: BLE001 — any Pillow decode failure -> uniform error type
         raise PosterFetchError(f"undecodable image ({type(exc).__name__})") from None
 
-    arr = np.asarray(img, dtype=np.float64)
+    arr = np.asarray(img, dtype=np.float32)
     arr = _trim_letterbox(arr)
     if arr.size == 0:
         raise PosterFetchError("image trimmed to empty")
@@ -332,17 +384,38 @@ def _get_host_semaphore(host: str) -> asyncio.Semaphore:
     return sem
 
 
+def _get_hash_semaphore() -> asyncio.Semaphore:
+    global _hash_semaphore
+    if _hash_semaphore is None:
+        _hash_semaphore = asyncio.Semaphore(settings.POSTER_HASH_CONCURRENCY)
+    return _hash_semaphore
+
+
 async def _download(client: httpx.AsyncClient, url: str, fingerprint: str) -> FetchedImage:
     try:
-        async with client.stream("GET", url) as response:
+        # `Accept-Encoding: identity` + rejecting any `Content-Encoding`
+        # actually returned, PLUS reading via `aiter_raw()` instead of
+        # `aiter_bytes()` (review L3): `aiter_bytes()` transparently
+        # inflates a compressed body, so a small compressed response could
+        # balloon to far more than `POSTER_MAX_BYTES` in memory inside a
+        # SINGLE chunk, before our own running-total check ever sees it.
+        # `aiter_raw()` never inflates anything, so the byte-cap check
+        # below is a true bound on memory regardless of what a malicious
+        # or misconfigured upstream sends.
+        async with client.stream(
+            "GET", url, headers={"Accept-Encoding": "identity"},
+        ) as response:
             if response.status_code >= 400:
                 raise PosterFetchError(f"upstream status {response.status_code}")
+            content_encoding = (response.headers.get("content-encoding") or "").strip().lower()
+            if content_encoding and content_encoding != "identity":
+                raise PosterFetchError("compressed response rejected")
             content_type = (response.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
             if not content_type.startswith("image/"):
                 raise PosterFetchError("non-image content-type")
             buf = bytearray()
             max_bytes = settings.POSTER_MAX_BYTES
-            async for chunk in response.aiter_bytes():
+            async for chunk in response.aiter_raw():
                 buf.extend(chunk)
                 if len(buf) > max_bytes:
                     raise PosterFetchError("image exceeds byte cap")
@@ -359,26 +432,44 @@ async def _download(client: httpx.AsyncClient, url: str, fingerprint: str) -> Fe
 
 async def fetch_image(url: str) -> FetchedImage:
     """Downloads `url` through the dedicated, SSRF-vetted client. Raises
-    `PosterFetchError` on any failure: non-2xx status, non-`image/*`
-    content-type, or a body exceeding `settings.POSTER_MAX_BYTES` (checked
-    while streaming, not just via `Content-Length`, which a server can
-    omit or lie about)."""
+    `PosterFetchError` on any failure: an unparsable URL, non-2xx status,
+    a compressed/non-`image/*` response, a body exceeding
+    `settings.POSTER_MAX_BYTES` (checked while streaming, not just via
+    `Content-Length`, which a server can omit or lie about), or the whole
+    fetch exceeding `settings.POSTER_FETCH_TIMEOUT` as a TOTAL deadline
+    (review L2) — `httpx.Timeout` alone only bounds each individual
+    connect/read operation, so a server trickling one byte just inside
+    that window forever would otherwise hold a concurrency-semaphore slot
+    indefinitely."""
+    try:
+        parsed = httpx.URL(url)
+    except (httpx.InvalidURL, ValueError) as exc:
+        raise PosterFetchError(f"invalid poster url ({type(exc).__name__})") from None
     client = await get_client()
     fingerprint = _url_fingerprint(url)
-    host = (httpx.URL(url).host or "").lower()
+    host = (parsed.host or "").lower()
     global_sem = _get_global_semaphore()
-    async with global_sem:
-        if host in _CDN_HOSTS:
-            return await _download(client, url, fingerprint)
-        async with _get_host_semaphore(host):
-            return await _download(client, url, fingerprint)
+    try:
+        async with global_sem:
+            if host in _CDN_HOSTS:
+                coro = _download(client, url, fingerprint)
+            else:
+                async def _with_host_semaphore() -> FetchedImage:
+                    async with _get_host_semaphore(host):
+                        return await _download(client, url, fingerprint)
+                coro = _with_host_semaphore()
+            return await asyncio.wait_for(coro, timeout=settings.POSTER_FETCH_TIMEOUT)
+    except asyncio.TimeoutError:
+        raise PosterFetchError("fetch exceeded total deadline") from None
 
 
 async def hash_url(url: str) -> Optional[PosterHash]:
     """Fetches + hashes `url`, with a positive (6 h) / negative (15 min)
     TTL cache keyed by URL — an operator re-opening the same scrape panel,
     or the batch worker re-visiting the same candidate poster, never
-    re-downloads it within the cache window."""
+    re-downloads it within the cache window. The CPU-bound hash itself is
+    gated by a dedicated `POSTER_HASH_CONCURRENCY` semaphore (review M1),
+    independent of the network-fetch concurrency above."""
     cached = _hash_cache_positive.get(url, _CACHE_MISS)
     if cached is not _CACHE_MISS:
         return cached  # type: ignore[return-value]
@@ -387,7 +478,8 @@ async def hash_url(url: str) -> Optional[PosterHash]:
 
     try:
         fetched = await fetch_image(url)
-        result = await asyncio.to_thread(compute_hashes, fetched.content)
+        async with _get_hash_semaphore():
+            result = await asyncio.to_thread(compute_hashes, fetched.content)
     except PosterFetchError as exc:
         logger.debug(
             "poster hash unavailable (%s) url_hash=%s", type(exc).__name__, _url_fingerprint(url)
@@ -399,12 +491,28 @@ async def hash_url(url: str) -> Optional[PosterHash]:
     return result
 
 
+def _safe_urlsplit(url: str):
+    """`urlsplit` raises `ValueError` on some malformed inputs (e.g. an
+    unparsable IPv6-literal-looking host) — never let that escape into
+    `compare_posters` uncaught (review L1)."""
+    try:
+        return urlsplit(url)
+    except ValueError:
+        return None
+
+
 def _is_tmdb_image_host(url: str) -> bool:
-    return (urlsplit(url).hostname or "").lower() == "image.tmdb.org"
+    parts = _safe_urlsplit(url)
+    if parts is None:
+        return False
+    return (parts.hostname or "").lower() == "image.tmdb.org"
 
 
 def _basename(url: str) -> str:
-    return urlsplit(url).path.rsplit("/", 1)[-1]
+    parts = _safe_urlsplit(url)
+    if parts is None:
+        return ""
+    return parts.path.rsplit("/", 1)[-1]
 
 
 async def compare_posters(
@@ -429,7 +537,10 @@ async def compare_posters(
     if _is_tmdb_image_host(xtream_url):
         xtream_basename = _basename(xtream_url)
         for candidate_url in variants:
-            if _basename(candidate_url) == xtream_basename:
+            # Both sides must be an image.tmdb.org URL (review nit) — a
+            # same-basename match against a non-TMDB candidate host would
+            # be a coincidence, not evidence of the same image.
+            if _is_tmdb_image_host(candidate_url) and _basename(candidate_url) == xtream_basename:
                 return PosterComparison(
                     badge="identical", phash_distance=0, dhash_distance=0, image_score=1.0,
                     best_poster_url=candidate_url, variants_compared=0,

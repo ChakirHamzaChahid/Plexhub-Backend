@@ -10,19 +10,26 @@ byte-size and pixel-count caps, non-image content-type rejection, the
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import socket
+import time
 
 import httpx
 import numpy as np
 import pytest
+import respx
 from PIL import Image, ImageDraw
 
 from app.config import settings
 from app.services import poster_match_service as pm
 from app.utils import ssrf
 
-pytestmark = pytest.mark.asyncio
+# NB: no `pytestmark = pytest.mark.asyncio` here (unlike some sibling test
+# files) — this module mixes sync (`compute_hashes`, `badge_for`, ...) and
+# async tests, and `pyproject.toml`'s `asyncio_mode = "auto"` already picks
+# up async `def test_*` coroutines without an explicit mark; forcing the
+# mark would incorrectly apply to the sync tests too.
 
 
 # --- fixtures -----------------------------------------------------------------
@@ -35,6 +42,7 @@ async def _reset_poster_state():
     pm._generic_registry.clear()
     pm._host_semaphores.clear()
     pm._global_semaphore = None
+    pm._hash_semaphore = None
     ssrf.clear_cache()
     await pm.close()
     yield
@@ -47,8 +55,6 @@ def image_mock():
     """respx context with no base_url — caller registers full URLs. Mirrors
     `tests/conftest.py`'s `xtream_mock` (same intent: this module's client
     talks to arbitrary provider/CDN hosts, not one fixed base)."""
-    import respx
-
     with respx.mock(assert_all_called=False) as r:
         yield r
 
@@ -127,6 +133,92 @@ class TestComputeHashesSyntheticImages:
         assert pm.badge_for(None, 3) == "unknown"
         assert pm.badge_for(3, None) == "unknown"
         assert pm.badge_for(None, None) == "unknown"
+
+
+class TestLargeImageMemoryHardening:
+    """Review M1: a large decoded image must be reduced to `_HASH_REDUCE_SIZE`
+    before the numpy conversion, not carried around at full resolution."""
+
+    def test_large_flat_png_is_hashed_and_working_array_is_bounded(self, monkeypatch):
+        seen_shapes: list[tuple[int, ...]] = []
+        original_resize = pm._resize_gray
+
+        def _spy(arr, size):
+            seen_shapes.append(arr.shape)
+            return original_resize(arr, size)
+
+        monkeypatch.setattr(pm, "_resize_gray", _spy)
+
+        huge = Image.new("RGB", (5000, 5000), (128, 128, 128))
+        data = _to_bytes(huge, fmt="PNG")
+
+        result = pm.compute_hashes(data)
+
+        assert result is not None
+        assert result.is_generic is True  # flat color
+        assert seen_shapes, "expected _resize_gray to be invoked"
+        for shape in seen_shapes:
+            assert max(shape) <= 512
+
+    def test_large_jpeg_uses_draft_before_full_decode(self, monkeypatch):
+        """`Image.draft()` must be called (JPEG path) BEFORE `img.load()` —
+        proven by spying on the actual `JpegImageFile.draft` override
+        (the base `Image.Image.draft` is a no-op; JPEG's own IDCT-scaling
+        implementation lives on the format-specific subclass)."""
+        from PIL import JpegImagePlugin
+
+        calls: list[tuple] = []
+        original_draft = JpegImagePlugin.JpegImageFile.draft
+
+        def _spy_draft(self, mode, size):
+            calls.append((mode, size))
+            return original_draft(self, mode, size)
+
+        monkeypatch.setattr(JpegImagePlugin.JpegImageFile, "draft", _spy_draft)
+
+        huge = _make_poster(seed=42, size=(3000, 3000))
+        data = _to_bytes(huge, fmt="JPEG", quality=85)
+
+        result = pm.compute_hashes(data)
+
+        assert result is not None
+        assert calls, "expected Image.draft() to be called for a JPEG"
+        assert calls[0][0] == "L"
+
+    async def test_hash_url_serializes_through_dedicated_hash_semaphore(self, monkeypatch):
+        monkeypatch.setattr(settings, "POSTER_HASH_CONCURRENCY", 1)
+        monkeypatch.setattr(ssrf.socket, "getaddrinfo", lambda *a, **k: _addrinfo_for("93.184.216.34"))
+
+        concurrent = {"n": 0, "max": 0}
+        real_compute = pm.compute_hashes
+
+        def _tracked_compute(data: bytes):
+            concurrent["n"] += 1
+            concurrent["max"] = max(concurrent["max"], concurrent["n"])
+            try:
+                time.sleep(0.05)
+                return real_compute(data)
+            finally:
+                concurrent["n"] -= 1
+
+        monkeypatch.setattr(pm, "compute_hashes", _tracked_compute)
+
+        poster_bytes = _to_bytes(_make_poster(seed=13))
+
+        with respx.mock(assert_all_called=False) as r:
+            r.get("http://provider.example/a.jpg").mock(
+                return_value=httpx.Response(200, content=poster_bytes, headers={"Content-Type": "image/jpeg"})
+            )
+            r.get("http://provider.example/b.jpg").mock(
+                return_value=httpx.Response(200, content=poster_bytes, headers={"Content-Type": "image/jpeg"})
+            )
+
+            await asyncio.gather(
+                pm.hash_url("http://provider.example/a.jpg"),
+                pm.hash_url("http://provider.example/b.jpg"),
+            )
+
+        assert concurrent["max"] == 1
 
 
 class TestDecompressionBombAndOversizedDims:
@@ -224,6 +316,108 @@ class TestSizeAndContentTypeGuards:
 
         with pytest.raises(pm.PosterFetchError):
             await pm.fetch_image("http://provider.example/missing.jpg")
+
+    async def test_compressed_response_is_rejected(self, monkeypatch, image_mock):
+        """Review L3: a `Content-Encoding` other than identity/absent is
+        rejected outright rather than transparently inflated — `aiter_raw()`
+        (used by `_download`) never decompresses, so counting raw bytes
+        against `POSTER_MAX_BYTES` is only a real memory bound if a
+        compressed body can't sneak through in the first place."""
+        import gzip
+
+        monkeypatch.setattr(ssrf.socket, "getaddrinfo", lambda *a, **k: _addrinfo_for("93.184.216.34"))
+        # Real gzip bytes (httpx eagerly decodes based on Content-Encoding
+        # when constructing a Response from raw `content=`) — the point of
+        # this test is the header-based rejection in `_download`, not
+        # exercising a malformed-gzip decode error.
+        image_mock.get("http://provider.example/gzipped.jpg").mock(
+            return_value=httpx.Response(
+                200, content=gzip.compress(b"fake-image-bytes"),
+                headers={"Content-Type": "image/jpeg", "Content-Encoding": "gzip"},
+            )
+        )
+
+        with pytest.raises(pm.PosterFetchError):
+            await pm.fetch_image("http://provider.example/gzipped.jpg")
+
+    async def test_requests_send_accept_encoding_identity(self, monkeypatch, image_mock):
+        monkeypatch.setattr(ssrf.socket, "getaddrinfo", lambda *a, **k: _addrinfo_for("93.184.216.34"))
+        route = image_mock.get("http://provider.example/plain.jpg").mock(
+            return_value=httpx.Response(200, content=b"x", headers={"Content-Type": "image/jpeg"})
+        )
+
+        await pm.fetch_image("http://provider.example/plain.jpg")
+
+        assert route.calls[0].request.headers.get("accept-encoding") == "identity"
+
+
+# --- Malformed URLs (review L1) -----------------------------------------------
+
+
+class TestMalformedUrls:
+    async def test_fetch_image_rejects_unparsable_url_without_leaking_it(self, caplog):
+        malformed = "http://[::not-valid-ipv6/poster.jpg"
+
+        with pytest.raises(pm.PosterFetchError) as exc_info:
+            await pm.fetch_image(malformed)
+
+        assert malformed not in str(exc_info.value)
+
+    async def test_hash_url_returns_none_and_caches_negative_for_malformed_url(self):
+        malformed = "http://[::not-valid-ipv6/poster.jpg"
+
+        result = await pm.hash_url(malformed)
+        assert result is None
+
+    def test_is_tmdb_image_host_is_false_for_malformed_url(self):
+        assert pm._is_tmdb_image_host("http://[::not-valid-ipv6/x.jpg") is False
+
+    def test_basename_is_empty_for_malformed_url(self):
+        assert pm._basename("http://[::not-valid-ipv6/x.jpg") == ""
+
+    async def test_compare_posters_does_not_raise_on_malformed_xtream_url(self):
+        result = await pm.compare_posters(
+            "http://[::not-valid-ipv6/poster.jpg",
+            ["https://image.tmdb.org/t/p/w185/x.jpg"],
+        )
+        assert result.badge == "unknown"
+
+
+# --- Total fetch deadline (review L2) -----------------------------------------
+
+
+class _SlowTransport(httpx.AsyncBaseTransport):
+    """A transport that ignores httpx's own per-operation `Timeout`
+    entirely (unlike respx, which would still respect it) — the only thing
+    that can bound this is `fetch_image`'s own `asyncio.wait_for` wrapper."""
+
+    def __init__(self, delay_seconds: float):
+        self._delay = delay_seconds
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(self._delay)
+        return httpx.Response(200, content=b"x", headers={"Content-Type": "image/jpeg"})
+
+
+class TestTotalFetchDeadline:
+    async def test_slow_trickling_upstream_is_bounded_by_total_deadline(self, monkeypatch):
+        monkeypatch.setattr(settings, "POSTER_FETCH_TIMEOUT", 0.05)
+        slow_client = httpx.AsyncClient(transport=_SlowTransport(delay_seconds=2.0))
+
+        async def _fake_get_client() -> httpx.AsyncClient:
+            return slow_client
+
+        monkeypatch.setattr(pm, "get_client", _fake_get_client)
+
+        start = time.monotonic()
+        try:
+            with pytest.raises(pm.PosterFetchError):
+                await pm.fetch_image("http://provider.example/poster.jpg")
+        finally:
+            await slow_client.aclose()
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 1.0, "fetch must be bounded by POSTER_FETCH_TIMEOUT, not the transport's own delay"
 
 
 # --- TMDB filename shortcut ---------------------------------------------------

@@ -305,8 +305,17 @@ class Settings:
     # never via the global `Image.MAX_IMAGE_PIXELS`).
     POSTER_MAX_BYTES: int = _safe_int("POSTER_MAX_BYTES", 5_242_880)  # 5 MiB
     POSTER_MAX_PIXELS: int = _safe_int("POSTER_MAX_PIXELS", 25_000_000)
+    # Total (not per-read) deadline for a single poster fetch — httpx's own
+    # timeout only bounds each individual connect/read operation, so a
+    # trickling upstream could otherwise hold a concurrency-semaphore slot
+    # forever. Wrapped around the whole fetch via `asyncio.wait_for`.
     POSTER_FETCH_TIMEOUT: float = _safe_float("POSTER_FETCH_TIMEOUT", 8.0)
     POSTER_CONCURRENCY: int = _safe_int("POSTER_CONCURRENCY", 8)
+    # Dedicated to the CPU-bound Pillow/numpy hashing step (asyncio.
+    # to_thread), independent of the network-fetch semaphores above — the
+    # one knob that actually bounds concurrent decode/hash memory on a
+    # 2GB Docker container regardless of how many fetches are in flight.
+    POSTER_HASH_CONCURRENCY: int = _safe_int("POSTER_HASH_CONCURRENCY", 3)
     # Per-host cap for any host OUTSIDE the known image CDNs
     # (image.tmdb.org, m.media-amazon.com) — an Xtream provider poster host
     # is untrusted and shouldn't be hammered concurrently by one search.

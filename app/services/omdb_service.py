@@ -34,8 +34,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Optional
+from typing import Generator, Optional
 
 import httpx
 
@@ -97,6 +99,33 @@ def _parse_imdb_rating(value) -> float | None:
         return float(cleaned)
     except ValueError:
         return None
+
+
+@dataclass
+class RequestTally:
+    """Per-context counter of real OMDb HTTP attempts (ADR 0005 D2) — mirrors
+    `app.services.tmdb_service.RequestTally`/`count_requests` exactly, as an
+    independent counter (a caller measuring OMDb spend never shares state
+    with a caller measuring TMDB spend, or vice versa)."""
+    count: int = 0
+
+
+_request_tally: ContextVar["RequestTally | None"] = ContextVar("omdb_request_tally", default=None)
+
+
+@contextmanager
+def count_requests() -> Generator[RequestTally, None, None]:
+    """Count real OMDb HTTP attempts made in this context (and in asyncio
+    tasks created from it). See
+    `app.services.tmdb_service.count_requests` for the exact semantics this
+    mirrors (non-aggregating on nesting, never touches
+    `OMDbService.real_request_count`)."""
+    tally = RequestTally()
+    token = _request_tally.set(tally)
+    try:
+        yield tally
+    finally:
+        _request_tally.reset(token)
 
 
 def _parse_imdb_votes(value) -> int | None:
@@ -194,6 +223,9 @@ class OMDbService:
             # up to 3 retries) — count it here, not once per logical
             # `get_by_imdb_id()` call, mirroring tmdb_service's CR-F03 fix.
             self.real_request_count += 1
+            tally = _request_tally.get()
+            if tally is not None:
+                tally.count += 1
             try:
                 resp = await client.get(url, params=params)
                 if resp.status_code == 429:

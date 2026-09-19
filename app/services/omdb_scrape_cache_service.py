@@ -11,12 +11,15 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+from typing import Callable
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.models.database import OmdbScrapeCache
-from app.services.omdb_service import OMDbData
+from app.services.omdb_service import OMDbData, OMDbService
+from app.utils.time import now_ms
 
 logger = logging.getLogger("plexhub.omdb_scrape_cache")
 
@@ -77,3 +80,41 @@ async def put(
         row.result = result
         row.payload = payload
         row.fetched_at = now_ms
+
+
+async def get_or_fetch(
+    imdb_id: str,
+    *,
+    session_factory: "Callable[[], AsyncSession]",
+    client: OMDbService,
+) -> tuple[OMDbData | None, tuple[str, str] | None]:
+    """Cache-first, budget-gated OMDb lookup by imdb_id (ADR 0005 D3).
+
+    Body is the exact behaviour previously duplicated in
+    `enrichment_worker._fetch_omdb_by_id` /
+    `enrichment_backfill_worker._fetch_omdb_by_id` (both now thin wrappers
+    delegating here): budget guard first (a spent daily budget disables
+    OMDb entirely for the rest of the run), then the persistent cache, then
+    the network. Fail-open: unconfigured / blank id / over budget ->
+    `(None, None)`; `client.get_by_imdb_id` itself is graceful-None on
+    error.
+
+    Returns `(omdb_data, pending_put)` where `pending_put` is
+    `(imdb_id, "found"|"not_found")` to persist via `put()` on a FRESH HTTP
+    call, or `None` on a cache-hit / budget-skip (nothing new to write).
+    This function NEVER writes to the DB itself — the caller persists
+    `pending_put` in its OWN transaction (batch dedup: several items can
+    share one `imdb_id` within the same uncommitted batch, see
+    `enrichment_worker._apply_enrichment_results`'s `omdb_put_keys`)."""
+    if not imdb_id or not client.is_configured:
+        return None, None
+    if client.get_request_count() >= settings.OMDB_DAILY_LIMIT:
+        return None, None
+    ts = now_ms()
+    async with session_factory() as cdb:
+        cached = await get(cdb, imdb_id, ts)
+    if cached is not None:
+        return cached, None
+    omdb_data = await client.get_by_imdb_id(imdb_id)
+    return omdb_data, (imdb_id, "found" if omdb_data is not None else "not_found")
+

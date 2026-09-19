@@ -49,7 +49,6 @@ from typing import Any, Literal
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.exc import OperationalError
 
-from app.config import settings
 from app.db.database import async_session_factory
 from app.models.database import Media
 from app.services import omdb_scrape_cache_service as omdb_scrape_cache
@@ -119,26 +118,16 @@ async def _fetch_omdb_by_id(
 ) -> tuple[Any, tuple[str, str] | None]:
     """Cache-first, budget-gated OMDb lookup by imdb_id.
 
-    Mirrors ``enrichment_worker._fetch_omdb_by_id`` line for line: budget
-    guard first (a spent daily budget disables OMDb for the rest of the
-    run), then the persistent cache, then the network. Fail-open:
-    unconfigured / over budget -> ``(None, None)``; ``get_by_imdb_id`` itself
-    is graceful-None on error (never raises). Returns
-    ``(omdb_data, omdb_put)`` where ``omdb_put`` is ``(imdb_id, result)`` to
-    persist on a FRESH HTTP call, or ``None`` on a cache-hit / budget-skip
-    (nothing new to write).
+    Thin wrapper (ADR 0005 D3) over `omdb_scrape_cache_service.get_or_fetch`
+    — name/signature kept identical (module-level `omdb_service` is still
+    looked up here, at call time, so
+    `monkeypatch.setattr(enrichment_backfill_worker, "omdb_service", fake)`
+    stays effective, see `tests/test_enrichment_backfill.py`). Behaviour is
+    unchanged: see `get_or_fetch`'s docstring.
     """
-    if not imdb_id or not omdb_service.is_configured:
-        return None, None
-    if omdb_service.get_request_count() >= settings.OMDB_DAILY_LIMIT:
-        return None, None
-    ts = now_ms()
-    async with session_factory() as cdb:
-        cached = await omdb_scrape_cache.get(cdb, imdb_id, ts)
-    if cached is not None:
-        return cached, None
-    omdb_data = await omdb_service.get_by_imdb_id(imdb_id)
-    return omdb_data, (imdb_id, "found" if omdb_data is not None else "not_found")
+    return await omdb_scrape_cache.get_or_fetch(
+        imdb_id, session_factory=session_factory, client=omdb_service,
+    )
 
 
 def _bump(job_id: str, **deltas: int) -> None:

@@ -13,12 +13,13 @@ from app.db.database import async_session_factory
 from app.models.database import Media, EnrichmentQueue, XtreamAccount
 from app.services import scrape_cache_service as scrape_cache
 from app.services import omdb_scrape_cache_service as omdb_scrape_cache
+from app.services.media_identity_writer import build_identity_values, build_rating_values
 from app.services.omdb_service import OMDbData, omdb_service
 from app.services.tmdb_service import TMDBEnrichmentData, TMDBSearchOutcome, tmdb_service
 from app.utils.string_normalizer import normalize_for_sorting
 from app.utils.time import now_ms
 from app.utils.db_retry import commit_with_retry, write_with_retry
-from app.utils.rating_blend import blend_display_rating_case, recompute_display_rating_stmt
+from app.utils.rating_blend import recompute_display_rating_stmt
 from app.utils.unification import calculate_unification_id
 
 logger = logging.getLogger("plexhub.enrichment")
@@ -185,24 +186,15 @@ async def _resolve_tmdb(item, media_type: str, get_details) -> FetchResult:
 async def _fetch_omdb_by_id(imdb_id: str) -> tuple[OMDbData | None, tuple[str, str] | None]:
     """Cache-first, budget-gated OMDb lookup by imdb_id.
 
-    Returns `(omdb_data, omdb_put)` where `omdb_put` is `(imdb_id, result)` to
-    persist on a FRESH HTTP call, or None on a cache-hit / budget-skip
-    (nothing new to write). Mirrors the tie-break read/gate order that
-    `_omdb_contradicts` used before this refacto: budget guard first (a spent
-    daily budget disables OMDb entirely for the rest of the run), then the
-    persistent cache, then the network. Fail-open: unconfigured / over budget
-    -> `(None, None)`; `get_by_imdb_id` itself is graceful-None on error."""
-    if not imdb_id or not omdb_service.is_configured:
-        return None, None
-    if omdb_service.get_request_count() >= settings.OMDB_DAILY_LIMIT:
-        return None, None
-    ts = now_ms()
-    async with async_session_factory() as cdb:
-        cached = await omdb_scrape_cache.get(cdb, imdb_id, ts)
-    if cached is not None:
-        return cached, None
-    omdb_data = await omdb_service.get_by_imdb_id(imdb_id)
-    return omdb_data, (imdb_id, "found" if omdb_data is not None else "not_found")
+    Thin wrapper (ADR 0005 D3) over `omdb_scrape_cache_service.get_or_fetch`
+    — name/signature kept identical (module-level `omdb_service`/
+    `async_session_factory` are still looked up here, at call time, so a
+    test's `monkeypatch.setattr(enrichment_worker, "omdb_service", fake)`
+    stays effective). Behaviour is unchanged: see `get_or_fetch`'s
+    docstring."""
+    return await omdb_scrape_cache.get_or_fetch(
+        imdb_id, session_factory=async_session_factory, client=omdb_service,
+    )
 
 
 def _omdb_type_matches(omdb_type: str | None, media_type: str) -> bool:
@@ -497,61 +489,13 @@ async def _apply_enrichment_results(db, results: list[FetchResult]):
 
             if enrichment_data:
                 # --- TMDB match: identity + rich metadata ---
-                tmdb_id = enrichment_data.tmdb_id
-                imdb_id = enrichment_data.imdb_id
-                new_unif = f"imdb://{imdb_id}" if imdb_id else f"tmdb://{tmdb_id}"
-
-                update_values.update({
-                    "tmdb_id": str(tmdb_id),
-                    "imdb_id": imdb_id,
-                    "unification_id": new_unif,
-                    "history_group_key": new_unif,
-                    "tmdb_match_confidence": fr.confidence,
-                })
-                if enrichment_data.overview:
-                    update_values["summary"] = enrichment_data.overview
-                if enrichment_data.genres:
-                    update_values["genres"] = enrichment_data.genres
-                if enrichment_data.poster_url:
-                    update_values["resolved_thumb_url"] = enrichment_data.poster_url
-                if enrichment_data.backdrop_url:
-                    update_values["resolved_art_url"] = enrichment_data.backdrop_url
-                if enrichment_data.vote_average:
-                    # scraped_rating stays = raw TMDB vote_average (durable
-                    # record). display_rating is NO LONGER this — it is the
-                    # blend computed below.
-                    update_values["scraped_rating"] = enrichment_data.vote_average
-                if enrichment_data.year:
-                    update_values["year"] = enrichment_data.year
-                if enrichment_data.cast:
-                    update_values["cast"] = enrichment_data.cast
-
-                # Rich metadata mirroring the NFO columns. Fill-missing-only via
-                # COALESCE so we never clobber richer data already imported from a
-                # tvshow.nfo / movie.nfo, nor the adult tagging's content_rating
-                # ("XXX"). `imdb_rating`/`imdb_votes` come from OMDb below.
-                # (col, value) pairs; skipped when TMDB gave nothing.
-                rich = (
-                    ("content_rating", enrichment_data.content_rating),
-                    ("original_title", enrichment_data.original_title),
-                    ("tagline", enrichment_data.tagline),
-                    ("premiered", enrichment_data.premiered),
-                    ("status", enrichment_data.status),
-                    ("studio", enrichment_data.studio),
-                    ("country", enrichment_data.country),
-                    ("tvdb_id", enrichment_data.tvdb_id),
-                    ("wikidata_id", enrichment_data.wikidata_id),
-                    ("tmdb_rating", enrichment_data.tmdb_rating),
-                    ("tmdb_votes", enrichment_data.tmdb_votes),
-                    ("cast_json", enrichment_data.cast_json),
-                    # Lot A trailers: fill-missing only — never clobbers a
-                    # value already captured by the Xtream sync
-                    # (sync_worker.map_vod_to_media / fetch_series_episodes).
-                    ("youtube_trailer", enrichment_data.youtube_trailer),
-                )
-                for col, value in rich:
-                    if value is not None:
-                        update_values[col] = func.coalesce(getattr(Media, col), value)
+                # ADR 0005 D4: delegates to the single shared identity writer
+                # (`media_identity_writer.build_identity_values`, mode="fill")
+                # instead of building this dict inline — behaviour unchanged,
+                # verified byte-for-byte against the pre-refacto inline body.
+                update_values.update(build_identity_values(
+                    enrichment_data, confidence=fr.confidence, omdb=None, mode="fill",
+                ))
                 item.status = "done"
 
             elif fr.omdb_identity and have_omdb and fr.omdb.imdb_id:
@@ -590,32 +534,21 @@ async def _apply_enrichment_results(db, results: list[FetchResult]):
             # --- OMDb ratings (COALESCE fill-missing) + display_rating blend ---
             # imdb_rating/imdb_votes never clobber a richer NFO value. Applied
             # to every non-downgraded path with OMDb ratings (by-id AND title).
+            # ADR 0005 D4: delegates to `media_identity_writer.build_rating_values`
+            # (mode="fill") — the emission condition below (`enrichment_data is
+            # not None or have_omdb`) is unchanged: it is what decides WHETHER
+            # this block runs at all, matching the pre-refacto behaviour exactly
+            # (a fresh OMDb rating implies `have_omdb`, so the old unconditional
+            # `if new_imdb is not None:` guard was always a subset of this one).
             new_imdb = fr.omdb.imdb_rating if have_omdb else None
             new_votes = fr.omdb.imdb_votes if have_omdb else None
             new_tmdb = enrichment_data.tmdb_rating if enrichment_data is not None else None
 
-            if new_imdb is not None:
-                update_values["imdb_rating"] = func.coalesce(Media.imdb_rating, new_imdb)
-            if new_votes is not None:
-                update_values["imdb_votes"] = func.coalesce(Media.imdb_votes, new_votes)
-
-            # display_rating = blend(imdb, tmdb) computed from the POST-WRITE
-            # persisted columns (COALESCE of the pre-update value with the value
-            # written this pass), so it stays reproducible in SQL. The CASE
-            # `else_` keeps the current value when BOTH sides are absent — safe
-            # to emit on any enrichment write (TMDB match or any OMDb result).
             if enrichment_data is not None or have_omdb:
-                imdb_operand = (
-                    func.coalesce(Media.imdb_rating, new_imdb)
-                    if new_imdb is not None else Media.imdb_rating
-                )
-                tmdb_operand = (
-                    func.coalesce(Media.tmdb_rating, new_tmdb)
-                    if new_tmdb is not None else Media.tmdb_rating
-                )
-                update_values["display_rating"] = blend_display_rating_case(
-                    imdb_operand, tmdb_operand, Media.display_rating,
-                )
+                update_values.update(build_rating_values(
+                    omdb_imdb_rating=new_imdb, omdb_imdb_votes=new_votes,
+                    tmdb_rating=new_tmdb, mode="fill",
+                ))
 
             if update_values:
                 await db.execute(

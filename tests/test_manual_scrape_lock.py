@@ -32,7 +32,7 @@ from app.workers.enrichment_worker import (
     FetchResult,
     MAX_ATTEMPTS,
     _apply_enrichment_results,
-    _media_is_locked,
+    _media_is_unlocked,
 )
 
 
@@ -64,7 +64,7 @@ class TestEnrichmentSelectionExcludesLocked:
                     (EnrichmentQueue.status == "skipped") & (EnrichmentQueue.attempts < MAX_ATTEMPTS),
                 ),
                 EnrichmentQueue.media_type == media_type,
-                _media_is_locked(),
+                _media_is_unlocked(),
             )
         )
         return list(result.scalars().all())
@@ -208,6 +208,93 @@ class TestSyncUpsertPreservesLockedColumns:
         # ...while an unprotected column (title) still follows the provider,
         # proving the UPDATE genuinely fired (content_hash did change).
         assert row.title == "Provider Renamed It"
+
+    async def test_locked_row_with_cleared_tmdb_id_does_not_get_reseeded(self, db_session):
+        """BLOCKING review fix: an operator who cleared a wrong provider
+        tmdb_id (locked row, tmdb_id=NULL, title-based unification_id) must
+        not see the provider's id silently come back on the next
+        content_hash change. The plain COALESCE(Media.tmdb_id, provider)
+        used for UNLOCKED rows would reseed it since Media.tmdb_id is NULL
+        here; a locked row must keep its current (cleared) value outright."""
+        sid = "xtream_acc1"
+        locked = Media(
+            rating_key="vod_cleared.mp4", server_id=sid, library_section_id="xtream_vod",
+            filter="all", sort_order="default", page_offset=0,
+            title="Cleared Wrong Match", type="movie", year=1999,
+            tmdb_id=None,
+            unification_id="title_clearedwrongmatch_1999",
+            history_group_key="title_clearedwrongmatch_1999",
+            content_hash="old", dto_hash="old",
+            match_locked=True, match_source="manual",
+        )
+        db_session.add(locked)
+        await db_session.commit()
+
+        incoming = {
+            "rating_key": "vod_cleared.mp4", "server_id": sid, "library_section_id": "xtream_vod",
+            "filter": "all", "sort_order": "default", "page_offset": 0,
+            "title": "Provider Renamed It Again", "title_sortable": "provider renamed it again",
+            "type": "movie", "year": 2020,
+            "tmdb_id": "77777",  # the provider's (wrong) id, would reseed an unlocked row
+            "unification_id": "title_providerrenameditagain_2020",
+            "history_group_key": "hg_provider2",
+            "media_parts": "[]", "added_at": 1000, "updated_at": 1000,
+        }
+
+        await sync_worker_module.upsert_media_batch(db_session, [incoming])
+        await db_session.commit()
+        db_session.expire_all()
+
+        row = (await db_session.execute(
+            select(Media).where(Media.rating_key == "vod_cleared.mp4", Media.server_id == sid)
+        )).scalars().one()
+
+        assert row.tmdb_id is None  # stays cleared, not reseeded
+        assert row.unification_id == "title_clearedwrongmatch_1999"  # stays title-based
+        assert row.history_group_key == "title_clearedwrongmatch_1999"
+        # Unprotected column still follows the provider (UPDATE genuinely fired).
+        assert row.title == "Provider Renamed It Again"
+
+    async def test_unlocked_row_still_takes_provider_tmdb_id_and_unification(self, db_session):
+        """Non-regression (L4): an UNLOCKED row with no tmdb_id yet still
+        gets the provider's id (and a title-based unification_id still
+        follows a rename) — the blocking fix must not change this existing
+        behaviour."""
+        sid = "xtream_acc1"
+        unlocked = Media(
+            rating_key="vod_free.mp4", server_id=sid, library_section_id="xtream_vod",
+            filter="all", sort_order="default", page_offset=0,
+            title="Unlocked Movie", type="movie", year=1999,
+            tmdb_id=None,
+            unification_id="title_unlockedmovie_1999",
+            history_group_key="title_unlockedmovie_1999",
+            content_hash="old", dto_hash="old",
+        )
+        db_session.add(unlocked)
+        await db_session.commit()
+
+        incoming = {
+            "rating_key": "vod_free.mp4", "server_id": sid, "library_section_id": "xtream_vod",
+            "filter": "all", "sort_order": "default", "page_offset": 0,
+            "title": "Unlocked Movie Renamed", "title_sortable": "unlocked movie renamed",
+            "type": "movie", "year": 2020,
+            "tmdb_id": "88888",
+            "unification_id": "title_unlockedmovierenamed_2020",
+            "history_group_key": "hg_unlocked_renamed",
+            "media_parts": "[]", "added_at": 1000, "updated_at": 1000,
+        }
+
+        await sync_worker_module.upsert_media_batch(db_session, [incoming])
+        await db_session.commit()
+        db_session.expire_all()
+
+        row = (await db_session.execute(
+            select(Media).where(Media.rating_key == "vod_free.mp4", Media.server_id == sid)
+        )).scalars().one()
+
+        assert row.tmdb_id == "88888"
+        assert row.unification_id == "title_unlockedmovierenamed_2020"
+        assert row.history_group_key == "hg_unlocked_renamed"
 
 
 # ─── L5: NFO import forces fill-missing on ids/images for a locked row ─────
@@ -537,9 +624,9 @@ class TestUpdateExternalIdsLocksAndRecomputesUnification:
         )
         assert result is None
 
-    async def test_setting_tmdb_only_prefers_imdb_priority_in_unification(self, db_session):
-        """imdb>tmdb priority: patching tmdb_id alone on a row with no imdb_id
-        yields a tmdb-based unification key."""
+    async def test_setting_tmdb_only_without_imdb_uses_tmdb_based_unification(self, db_session):
+        """No imdb_id in play at all: patching tmdb_id alone yields a
+        tmdb-based unification key."""
         db_session.add(Media(
             rating_key="vod_3.mp4", server_id="xtream_a", library_section_id="1",
             title="Another Movie", type="movie", year=2021,
@@ -552,3 +639,60 @@ class TestUpdateExternalIdsLocksAndRecomputesUnification:
         )
         assert updated.unification_id == "tmdb://42"
         assert updated.match_locked is True
+
+    async def test_patching_tmdb_when_imdb_already_present_keeps_imdb_priority(self, db_session):
+        """imdb>tmdb priority (`calculate_unification_id`): a row that ALREADY
+        carries an imdb_id keeps an imdb-based unification key even when the
+        patch only touches tmdb_id — the recompute must merge the patch with
+        the row's EXISTING ids, not just the patched field(s)."""
+        db_session.add(Media(
+            rating_key="vod_4.mp4", server_id="xtream_a", library_section_id="1",
+            title="Imdb Already Set", type="movie", year=2022,
+            imdb_id="tt2222222", unification_id="imdb://tt2222222",
+            history_group_key="imdb://tt2222222",
+        ))
+        await db_session.commit()
+
+        updated = await media_service.update_external_ids(
+            db_session, "vod_4.mp4", "xtream_a", fields={"tmdb_id": "99"},
+        )
+        assert updated.tmdb_id == "99"
+        assert updated.imdb_id == "tt2222222"
+        assert updated.unification_id == "imdb://tt2222222"
+        assert updated.history_group_key == "imdb://tt2222222"
+        assert updated.match_locked is True
+
+    async def test_updates_every_filter_sort_order_variant(self, db_session):
+        """The composite PK is (rating_key, server_id, filter, sort_order) —
+        the same physical item can have several `media` rows differing only
+        on filter/sort_order (one per category listing). The UPDATE must
+        apply to every variant, not just the first one found."""
+        db_session.add_all([
+            Media(
+                rating_key="vod_5.mp4", server_id="xtream_a", filter="all",
+                sort_order="default", library_section_id="1",
+                title="Multi Variant", type="movie", year=2023,
+            ),
+            Media(
+                rating_key="vod_5.mp4", server_id="xtream_a", filter="7",
+                sort_order="added", library_section_id="1",
+                title="Multi Variant", type="movie", year=2023,
+            ),
+        ])
+        await db_session.commit()
+
+        await media_service.update_external_ids(
+            db_session, "vod_5.mp4", "xtream_a", fields={"imdb_id": "tt3333333"},
+        )
+        await db_session.commit()
+        db_session.expire_all()
+
+        rows = (await db_session.execute(
+            select(Media.filter, Media.imdb_id, Media.match_locked).where(
+                Media.rating_key == "vod_5.mp4", Media.server_id == "xtream_a",
+            )
+        )).all()
+        assert len(rows) == 2
+        for _filter, imdb_id, locked in rows:
+            assert imdb_id == "tt3333333"
+            assert locked is True

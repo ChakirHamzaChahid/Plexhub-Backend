@@ -743,17 +743,37 @@ async def upsert_media_batch(db, rows: list[dict], current_rating_keys: set[str]
         # (and the title may carry no imdb_id to fall back on).
         if "tmdb_id" in set_:
             # Keep an id we already have; only let the provider seed an empty slot.
-            set_["tmdb_id"] = func.coalesce(Media.tmdb_id, stmt.excluded.tmdb_id)
+            # ADR 0005 D7/L4 (review fix): a locked row's tmdb_id is the
+            # operator's decision -- including a DELIBERATELY CLEARED (NULL)
+            # value (clearing a wrong provider match). The plain COALESCE
+            # below would let the provider's id silently reseed that NULL on
+            # the very next content_hash change, undoing the clear. Locked
+            # rows keep their current column value outright, never the
+            # COALESCE fallback.
+            set_["tmdb_id"] = case(
+                (Media.match_locked == True, Media.tmdb_id),  # noqa: E712
+                else_=func.coalesce(Media.tmdb_id, stmt.excluded.tmdb_id),
+            )
         # An id-based unification key (imdb://… / tmdb://…) is enrichment-owned and
         # title-independent — keep it. A title-based key may still follow a rename.
         keep_uni = Media.unification_id.like("%://%")
         if "unification_id" in set_:
+            # ADR 0005 D7/L4 (review fix): same reasoning as tmdb_id above --
+            # a locked row with a title-based unification_id (e.g. the
+            # operator cleared both ids) must not be re-derived from the
+            # provider's title on a rename; keep the current value outright.
             set_["unification_id"] = case(
-                (keep_uni, Media.unification_id), else_=stmt.excluded.unification_id
+                (Media.match_locked == True, Media.unification_id),
+                else_=case(
+                    (keep_uni, Media.unification_id), else_=stmt.excluded.unification_id
+                ),
             )
         if "history_group_key" in set_:
             set_["history_group_key"] = case(
-                (keep_uni, Media.history_group_key), else_=stmt.excluded.history_group_key
+                (Media.match_locked == True, Media.history_group_key),
+                else_=case(
+                    (keep_uni, Media.history_group_key), else_=stmt.excluded.history_group_key
+                ),
             )
 
         # ADR 0005 D7/L4: a manually-locked row (operator fixed it via the

@@ -56,12 +56,15 @@ def _media_is_category_visible():
     )
 
 
-def _media_is_locked():
-    """NOT EXISTS clause: the queue item's underlying Media row has been
-    manually locked (`Media.match_locked`, ADR 0005 D7/L1-L2) — an operator
-    fixed its identity via the manual scraper and enrichment must never touch
-    it again. Same correlated-subquery idiom as `_media_is_category_visible`
-    (no declared ORM relationship between `EnrichmentQueue` and `Media`).
+def _media_is_unlocked():
+    """NOT EXISTS clause (named for what it ASSERTS, not the internal EXISTS
+    it negates -- review feedback on the original `_media_is_locked` name,
+    which read backwards at its `.where(...)` call sites): the queue item's
+    underlying Media row has NOT been manually locked (`Media.match_locked`,
+    ADR 0005 D7/L1-L2) — an operator fixed its identity via the manual
+    scraper and enrichment must never touch it again. Same correlated-
+    subquery idiom as `_media_is_category_visible` (no declared ORM
+    relationship between `EnrichmentQueue` and `Media`).
     """
     return ~(
         select(Media.rating_key)
@@ -626,7 +629,7 @@ async def run():
                 ),
                 EnrichmentQueue.media_type == "movie",
                 _media_is_category_visible(),
-                _media_is_locked(),
+                _media_is_unlocked(),
             )
             .order_by(EnrichmentQueue.created_at)
             .limit(daily_limit)
@@ -683,7 +686,7 @@ async def run():
                     ),
                     EnrichmentQueue.media_type == "show",
                     _media_is_category_visible(),
-                    _media_is_locked(),
+                    _media_is_unlocked(),
                 )
                 .order_by(EnrichmentQueue.created_at)
                 .limit(remaining)

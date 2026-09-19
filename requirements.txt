@@ -29,3 +29,8 @@ cryptography>=42,<46
 # minimum floor is pinned (nightly-cron-refreshed deployments should just
 # take the latest).
 yt-dlp>=2024.1
+# Manual scraper poster-match (ADR 0005 D5/F10) — dHash/pHash comparison of
+# the Xtream poster against TMDB/OMDb candidate posters. Already present
+# transitively via fastembed's own pillow pin; pinned explicitly here so it
+# doesn't silently disappear/shift if fastembed's own bound moves.
+pillow>=10.3,<13

@@ -497,15 +497,25 @@ def _nfo_has_any_data(parsed: NfoEntry) -> bool:
     return any(getattr(parsed, attr) is not None for _col, attr, _ in _FIELD_MAP)
 
 
+#: ADR 0005 D7/L5 — columns forced back to fill-missing-only (regardless of
+#: `overwrite`) on a manually-locked row: the operator's identity/poster
+#: choice must survive even an explicit `--overwrite` NFO re-import.
+_LOCKED_FILL_ONLY_COLS = frozenset((
+    "imdb_id", "tmdb_id", "resolved_thumb_url", "resolved_art_url",
+))
+
+
 def _compute_updates(row: Media, parsed: NfoEntry, overwrite: bool) -> dict:
     """Build the SQL UPDATE values dict, respecting fill-missing-only by default."""
+    is_locked = bool(getattr(row, "match_locked", False))
     updates: dict = {}
     for col, attr, is_missing in _FIELD_MAP:
         new_val = getattr(parsed, attr)
         if new_val is None:
             continue
         current = getattr(row, col, None)
-        if not overwrite and not is_missing(current):
+        effective_overwrite = overwrite and not (is_locked and col in _LOCKED_FILL_ONLY_COLS)
+        if not effective_overwrite and not is_missing(current):
             continue  # already set, don't touch
         if current == new_val:
             continue  # already up-to-date

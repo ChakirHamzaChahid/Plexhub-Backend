@@ -51,6 +51,7 @@ async def run_migrations(engine: AsyncEngine) -> None:
     await _migration_023_analyze(engine)
     await _migration_024_add_media_youtube_trailer(engine)
     await _migration_025_add_account_outage_tracking(engine)
+    await _migration_026_add_media_match_lock(engine)
 
     logger.info("All migrations completed successfully")
 
@@ -1166,3 +1167,47 @@ async def _migration_025_add_account_outage_tracking(engine: AsyncEngine) -> Non
                 logger.info("Migration 025: %s column added", name)
             except Exception as e:
                 logger.warning("Migration 025: %s may already exist: %s", name, e)
+
+
+async def _migration_026_add_media_match_lock(engine: AsyncEngine) -> None:
+    """Add the manual-scrape lock columns to `media` (ADR 0005 D7).
+
+    - `match_locked` (INTEGER NOT NULL DEFAULT 0) -- an operator fixed this
+      row's identity via the manual scraper. Once set, enrichment, the sync
+      upsert, NFO import and the two id-consistency scripts must never
+      overwrite the identity/rich metadata again (see the `_media_is_locked`
+      guard in `enrichment_worker.py`, the `CASE` in `sync_worker.py`'s
+      upsert, and the fill-only branch in `nfo_import_service.py`).
+    - `match_source` (TEXT, nullable) -- 'manual' | 'batch_auto' |
+      'batch_pair' | NULL, set alongside `match_locked=1`.
+
+    `match_locked` carries a `server_default=text("0")` on the ORM column
+    (models/database.py) -- the migration-025 lesson (CLAUDE.md piège 6): a
+    Python-only default lets `create_all` emit the column `NOT NULL` WITHOUT
+    a SQL `DEFAULT`, which breaks any raw `INSERT` enumerating columns.
+
+    No backfill: 0/NULL is the correct neutral state for every existing row.
+
+    Idempotent: each column is probed (PRAGMA table_info) before ADD COLUMN,
+    so a fresh DB (already created by `Base.metadata.create_all`, CR-C05) is
+    a silent no-op; the try/except stays as a safety net for a race with
+    another process's init_db() (piège 7).
+    """
+    logger.info("Migration 026: Adding match_locked/match_source columns to media")
+
+    columns = (
+        ("match_locked", "INTEGER NOT NULL DEFAULT 0"),
+        ("match_source", "TEXT"),
+    )
+    async with engine.begin() as conn:
+        for name, ddl in columns:
+            if await _column_exists(conn, "media", name):
+                logger.debug("Migration 026: %s already present, skipping ADD COLUMN", name)
+                continue
+            try:
+                await conn.execute(text(
+                    f"ALTER TABLE media ADD COLUMN {name} {ddl}"
+                ))
+                logger.info("Migration 026: %s column added", name)
+            except Exception as e:
+                logger.warning("Migration 026: %s may already exist: %s", name, e)

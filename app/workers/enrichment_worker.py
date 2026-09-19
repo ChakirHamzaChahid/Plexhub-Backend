@@ -55,6 +55,24 @@ def _media_is_category_visible():
         .exists()
     )
 
+
+def _media_is_locked():
+    """NOT EXISTS clause: the queue item's underlying Media row has been
+    manually locked (`Media.match_locked`, ADR 0005 D7/L1-L2) — an operator
+    fixed its identity via the manual scraper and enrichment must never touch
+    it again. Same correlated-subquery idiom as `_media_is_category_visible`
+    (no declared ORM relationship between `EnrichmentQueue` and `Media`).
+    """
+    return ~(
+        select(Media.rating_key)
+        .where(
+            Media.rating_key == EnrichmentQueue.rating_key,
+            Media.server_id == EnrichmentQueue.server_id,
+            Media.match_locked == True,  # noqa: E712
+        )
+        .exists()
+    )
+
 # --- Anti-recurrence guard (Wave 3, S5 — id-consistency validator design doc §5) --
 # `_IMDB_ID_RE`: cheap shape tripwire for `TMDBEnrichmentData.imdb_id`.
 _IMDB_ID_RE = re.compile(r"^tt\d+$")
@@ -556,6 +574,12 @@ async def _apply_enrichment_results(db, results: list[FetchResult]):
                     .where(
                         Media.rating_key == item.rating_key,
                         Media.server_id == item.server_id,
+                        # ADR 0005 D7/L3: race guard -- an operator can lock
+                        # a row between the selection queries above and this
+                        # UPDATE; re-check here so the write is a no-op
+                        # (rowcount 0) instead of clobbering a fresh manual
+                        # match.
+                        Media.match_locked == False,  # noqa: E712
                     )
                     .values(**update_values)
                 )
@@ -602,6 +626,7 @@ async def run():
                 ),
                 EnrichmentQueue.media_type == "movie",
                 _media_is_category_visible(),
+                _media_is_locked(),
             )
             .order_by(EnrichmentQueue.created_at)
             .limit(daily_limit)
@@ -658,6 +683,7 @@ async def run():
                     ),
                     EnrichmentQueue.media_type == "show",
                     _media_is_category_visible(),
+                    _media_is_locked(),
                 )
                 .order_by(EnrichmentQueue.created_at)
                 .limit(remaining)

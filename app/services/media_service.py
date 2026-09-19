@@ -3,7 +3,7 @@ import base64
 import binascii
 import json
 import logging
-from typing import Optional
+from typing import Literal, Optional
 
 from sqlalchemy import select, func, delete, update, or_, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,6 +18,7 @@ from app.services import account_outage_service
 from app.utils.metrics import unified_path_total
 from app.utils.server_id import build_server_id
 from app.utils.time import now_ms
+from app.utils.unification import calculate_history_group_key, calculate_unification_id
 from app.utils.ttl_cache import TTLCache
 
 logger = logging.getLogger("plexhub.media")
@@ -663,9 +664,37 @@ class MediaService:
         Depends(get_db).
         """
         if not fields:
+            # ADR 0005 D7/L10: an empty patch is a true no-op — it must NOT
+            # lock the row (a client probing with `{}` must not accidentally
+            # freeze a media item out of future enrichment).
             return await self.get_media_by_key(db, rating_key, server_id)
 
+        current = await self.get_media_by_key(db, rating_key, server_id)
+        if not current:
+            return None
+
+        # ADR 0005 D7/L10 (bugfix): a manual id edit previously left
+        # `unification_id`/`history_group_key` stale (still title-based, or
+        # pointing at the OLD id) — the row never regrouped with its twins
+        # until the next enrichment pass touched it. Recompute from the
+        # post-patch ids/year, same helper the sync/enrichment/NFO paths use.
+        new_imdb = fields.get("imdb_id", current.imdb_id)
+        new_tmdb = fields.get("tmdb_id", current.tmdb_id)
+        new_unification_id = calculate_unification_id(
+            current.title or "", current.year, new_imdb, new_tmdb,
+        )
+        new_history_group_key = calculate_history_group_key(
+            new_unification_id, rating_key, server_id,
+        )
+
         values = dict(fields)
+        values["unification_id"] = new_unification_id
+        values["history_group_key"] = new_history_group_key
+        # A manual id edit is exactly what the verrou (ADR 0005 D7) exists to
+        # protect: from this point on, sync/enrichment/NFO import/the
+        # id-consistency scripts must never silently overwrite it again.
+        values["match_locked"] = True
+        values["match_source"] = "manual"
         values["updated_at"] = now_ms()
         result = await db.execute(
             update(Media)
@@ -675,6 +704,10 @@ class MediaService:
         if result.rowcount == 0:
             return None
         await db.flush()
+        # NOTE (deviation, W1): ADR 0005 D6/L10 also calls
+        # `unified_group_service.schedule_rebuild(...)` here, but that helper
+        # (ADR D9) is scoped to Wave W2 and does not exist yet at this point
+        # in the rollout — left for W2 to wire in.
         return await self.get_media_by_key(db, rating_key, server_id)
 
     async def enqueue_rescrape(
@@ -682,16 +715,20 @@ class MediaService:
         db: AsyncSession,
         rating_key: str,
         server_id: str,
-    ) -> bool:
+    ) -> Literal["queued", "not_found", "locked"]:
         """Mark a movie for re-enrichment.
 
         If an EnrichmentQueue row already exists for (rating_key, server_id), reset it
-        to pending. Otherwise insert a new pending entry. Returns False if the media
-        item doesn't exist.
+        to pending. Otherwise insert a new pending entry. Returns "not_found" if the
+        media item doesn't exist, "locked" (ADR 0005 D7/L8) if the row was manually
+        locked via the manual scraper — nothing written, the operator must unlock it
+        first — otherwise "queued".
         """
         media = await self.get_media_by_key(db, rating_key, server_id)
         if not media:
-            return False
+            return "not_found"
+        if getattr(media, "match_locked", False):
+            return "locked"
 
         existing = await db.execute(
             select(EnrichmentQueue).where(
@@ -725,7 +762,7 @@ class MediaService:
                 existing_summary=media.summary,
             ))
         await db.flush()
-        return True
+        return "queued"
 
     async def get_stats(self, db: AsyncSession) -> dict:
         """Get media statistics for health endpoint."""

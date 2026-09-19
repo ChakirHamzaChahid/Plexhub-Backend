@@ -756,6 +756,20 @@ async def upsert_media_batch(db, rows: list[dict], current_rating_keys: set[str]
                 (keep_uni, Media.history_group_key), else_=stmt.excluded.history_group_key
             )
 
+        # ADR 0005 D7/L4: a manually-locked row (operator fixed it via the
+        # manual scraper) keeps its scraper-written rich metadata across a
+        # provider content_hash flip — the provider's summary/genres/poster
+        # for a mislabeled item are exactly what the operator corrected.
+        # `display_rating` is intentionally NOT protected here: it is healed
+        # by `recompute_display_rating_stmt()` at the end of every
+        # enrichment run, same as for unlocked rows.
+        for col in ("resolved_thumb_url", "resolved_art_url", "summary", "genres", "year"):
+            if col in set_:
+                set_[col] = case(
+                    (Media.match_locked == True, getattr(Media, col)),  # noqa: E712
+                    else_=stmt.excluded[col],
+                )
+
         stmt = stmt.on_conflict_do_update(
             index_elements=["rating_key", "server_id", "filter", "sort_order"],
             set_=set_,

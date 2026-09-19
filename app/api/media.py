@@ -537,7 +537,11 @@ async def rescrape_media(
     db: AsyncSession = Depends(get_db),
 ):
     """Re-queue a media item for enrichment."""
-    ok = await media_service.enqueue_rescrape(db, rating_key, server_id)
-    if not ok:
+    outcome = await media_service.enqueue_rescrape(db, rating_key, server_id)
+    if outcome == "not_found":
         raise HTTPException(404, "Media not found")
+    if outcome == "locked":
+        # ADR 0005 D7/L9: a manually-locked row can't be re-queued for
+        # automatic enrichment — the operator must unlock it first.
+        raise HTTPException(409, "Media match is locked")
     return {"status": "queued"}

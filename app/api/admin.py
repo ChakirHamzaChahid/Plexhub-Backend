@@ -217,10 +217,18 @@ async def admin_rescrape(
     server_id: str = Form(...),
     db: AsyncSession = Depends(get_db),
 ):
-    ok = await media_service.enqueue_rescrape(db, rating_key, server_id)
-    if not ok:
+    outcome = await media_service.enqueue_rescrape(db, rating_key, server_id)
+    if outcome == "not_found":
         raise HTTPException(404, "Media not found")
     item = await media_service.get_media_by_key(db, rating_key, server_id)
+    if outcome == "locked":
+        # ADR 0005 D7/L9: show the locked state instead of silently queueing
+        # nothing — unlocking is a manual-scraper action (W2), not available yet.
+        return templates.TemplateResponse(
+            request,
+            "admin/_movie_row.html",
+            {"item": item, "locked_rescrape": True},
+        )
     return templates.TemplateResponse(
         request,
         "admin/_movie_row.html",

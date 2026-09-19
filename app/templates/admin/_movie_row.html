@@ -79,5 +79,6 @@
     {% if error %}<div class="text-xs text-rose-600 mt-1">{{ error }}</div>{% endif %}
     {% if saved %}<span class="text-xs text-emerald-700 block mt-1">✓ enregistré</span>{% endif %}
     {% if rescraped %}<span class="text-xs text-sky-700 block mt-1">⏱ en file d'attente</span>{% endif %}
+    {% if locked_rescrape %}<span class="text-xs text-amber-700 block mt-1">🔒 verrouillé — déverrouillage requis</span>{% endif %}
   </td>
 </tr>

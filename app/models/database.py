@@ -110,6 +110,14 @@ class Media(Base):
     is_in_allowed_categories = Column(Boolean, nullable=False, default=True)  # Category filtering
     is_adult = Column(Boolean, nullable=False, default=False)  # Adult/X-rated (from adult Xtream category)
 
+    # Manual scraper lock (ADR 0005 D7, migration 026): an operator fixed this
+    # row's identity via the manual scraper. `server_default` mirrors the
+    # migration-025 lesson (CLAUDE.md piège 6): without it, `create_all` emits
+    # this column NOT NULL with no SQL DEFAULT, breaking any raw INSERT that
+    # enumerates columns.
+    match_locked = Column(Boolean, nullable=False, default=False, server_default=text("0"))
+    match_source = Column(Text)  # 'manual' | 'batch_auto' | 'batch_pair' | NULL
+
     __table_args__ = (
         Index("uix_media_pagination", "server_id", "library_section_id", "filter", "sort_order", "page_offset", unique=True),
         Index("ix_media_guid", "guid"),

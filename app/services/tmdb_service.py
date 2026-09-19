@@ -1,8 +1,10 @@
 import asyncio
 import json
 import logging
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import Generator, Literal, Optional
 
 import httpx
 from rapidfuzz import fuzz
@@ -20,6 +22,16 @@ POSTER_BASE = "https://image.tmdb.org/t/p/w342"
 BACKDROP_BASE = "https://image.tmdb.org/t/p/w1280"
 PROFILE_BASE = "https://image.tmdb.org/t/p/w185"
 PERSON_URL_BASE = "https://www.themoviedb.org/person"
+
+# ADR 0005 D2 — poster variants surfaced by `get_match_extras` (manual
+# scraper poster-match, W3) are w185, same size class as PROFILE_BASE.
+POSTER_W185_BASE = "https://image.tmdb.org/t/p/w185"
+_IMAGE_LANGUAGE_FILTER = "fr,en,null"
+# Cap on `MatchExtras.poster_urls` length. Mirrors the future
+# `POSTER_MAX_VARIANTS` config default (ADR 0005 D11, introduced in W3/W5) —
+# hardcoded here rather than reading `settings.POSTER_MAX_VARIANTS` because
+# that config key does not exist yet at this vague (W0).
+_MAX_POSTER_VARIANTS = 10
 
 # `include_video_language` for the `videos` append_to_response/endpoint (Lot A
 # trailers): TMDB's `videos.results` is filtered by `language` (== the plain
@@ -113,6 +125,88 @@ class TMDBEnrichmentData:
     youtube_trailer: str | None = None  # bare YouTube video id, see _select_youtube_trailer
 
 
+@dataclass
+class RequestTally:
+    """Per-context counter of real TMDB HTTP attempts (ADR 0005 D2).
+
+    Distinct from `TMDBService.real_request_count` (a single running total
+    the enrichment worker resets per-run): this is a *scoped* tally so a
+    caller (e.g. the manual-scrape batch worker) can measure exactly how
+    many real TMDB calls happened inside a `with count_requests():` block
+    without touching/disturbing the global counter or any other concurrent
+    caller's tally."""
+    count: int = 0
+
+
+_request_tally: ContextVar["RequestTally | None"] = ContextVar("tmdb_request_tally", default=None)
+
+
+@contextmanager
+def count_requests() -> Generator[RequestTally, None, None]:
+    """Count real TMDB HTTP attempts made in this context AND in asyncio
+    tasks created from it (`ContextVar` is copied into new tasks, so they
+    share the same `RequestTally` instance). Non-aggregating when nested:
+    the innermost `count_requests()` block shadows any outer one for the
+    duration of its `with`. Never affects `TMDBService.real_request_count`
+    (that counter keeps incrementing regardless, independently)."""
+    tally = RequestTally()
+    token = _request_tally.set(tally)
+    try:
+        yield tally
+    finally:
+        _request_tally.reset(token)
+
+
+def title_similarity(query: str, candidate: str) -> float:
+    """Pure wrapper around `TMDBService._title_sim`, importable without a
+    service instance (ADR 0005 D2)."""
+    return TMDBService._title_sim(normalize_for_sorting(query), candidate)
+
+
+def year_score(query_year: int | None, candidate_year: int | None) -> float:
+    """Pure wrapper around `TMDBService._year_score` (ADR 0005 D2)."""
+    return TMDBService._year_score(query_year, candidate_year)
+
+
+@dataclass(frozen=True)
+class ScoredCandidate:
+    """One scored TMDB search hit, surfaced to the manual scraper (ADR 0005
+    D2) — a richer sibling of `TMDBMatch` that keeps the raw fields a UI
+    candidate card needs (overview, poster) alongside the score."""
+    tmdb_id: int
+    kind: Literal["movie", "tv"]
+    title: str
+    original_title: str | None
+    year: int | None
+    overview: str | None
+    poster_path: str | None  # raw TMDB path (e.g. "/abc.jpg"), no host/size
+    vote_count: int
+    title_score: float
+    confidence: float  # 0.7*title + 0.3*year, same formula as TMDBMatch
+
+
+@dataclass
+class CandidateSearch:
+    """Result of `TMDBService.search_candidates` (ADR 0005 D2)."""
+    verdict: TMDBSearchOutcome
+    candidates: list[ScoredCandidate]  # confidence desc, then vote_count desc, <=10
+
+
+@dataclass(frozen=True)
+class MatchExtras:
+    """Result of `TMDBService.get_match_extras` (ADR 0005 D2) — the extra
+    fields a manual-scrape candidate card needs beyond a plain search hit:
+    the resolved imdb_id and every poster variant TMDB has for that title."""
+    tmdb_id: int
+    kind: Literal["movie", "tv"]
+    imdb_id: str | None            # external_ids.imdb_id, "tt" prefix guaranteed
+    title: str
+    original_title: str | None
+    year: int | None
+    overview: str | None
+    poster_urls: list[str]         # w185, main poster first, deduped, <= _MAX_POSTER_VARIANTS
+
+
 class TMDBService:
     BASE_URL = "https://api.themoviedb.org/3"
 
@@ -196,6 +290,9 @@ class TMDBService:
             # `_request()` call, so a rate-limited/5xx-retried item consumes
             # its real TMDB spend from the enrichment budget (CR-F03).
             self.real_request_count += 1
+            tally = _request_tally.get()
+            if tally is not None:
+                tally.count += 1
             try:
                 resp = await client.get(url, params=params)
                 # Handle 429 rate limit with Retry-After header
@@ -561,24 +658,29 @@ class TMDBService:
             return 0.0
         return 0.5
 
-    def _best_match(
+    def _score_results(
         self,
         results: list[dict],
         title: str,
         year: int | None,
-        summary: str | None,
         *,
         title_key: str,
         orig_key: str,
         date_key: str,
-    ) -> TMDBSearchOutcome:
-        """Score candidates (title vs localized+original, weighted with year),
-        enforce anti-ambiguity margin, and break ties with the Xtream summary."""
-        if not results:
-            return TMDBSearchOutcome("nomatch")
+    ) -> list[tuple[TMDBMatch, dict]]:
+        """Score every candidate (title vs localized+original, weighted with
+        year) and sort confidence desc, then vote_count desc.
 
+        ADR 0005 D2: extracted verbatim from the old `_best_match` body
+        (lines 580-600 at HEAD `4e5b04f`) — same scoring/sorting, only the
+        per-candidate payload changed from `(match, overview_str)` to
+        `(match, raw_dict)` so `search_candidates`/`get_match_extras`-style
+        callers can read more than the overview off a candidate (poster
+        path, original title, ...). `_verdict` below reads `raw.get(
+        "overview") or ""`, which is byte-identical to the old inline
+        `r.get("overview") or ""`."""
         query_norm = normalize_for_sorting(title)
-        scored: list[tuple[TMDBMatch, str]] = []  # (match, overview)
+        scored: list[tuple[TMDBMatch, dict]] = []  # (match, raw result dict)
         for r in results[:10]:
             r_date = r.get(date_key, "") or ""
             r_year = int(r_date[:4]) if len(r_date) >= 4 and r_date[:4].isdigit() else None
@@ -593,11 +695,24 @@ class TMDBService:
                     confidence=confidence, title_score=title_score,
                     vote_count=r.get("vote_count", 0) or 0,
                 ),
-                r.get("overview") or "",
+                r,
             ))
 
         # confidence desc, then vote_count desc.
         scored.sort(key=lambda mo: (mo[0].confidence, mo[0].vote_count), reverse=True)
+        return scored
+
+    def _verdict(
+        self, scored: list[tuple[TMDBMatch, dict]], summary: str | None,
+    ) -> TMDBSearchOutcome:
+        """Apply the anti-ambiguity margin and (on a near-tie) the Xtream
+        summary tie-break to already-scored/sorted candidates.
+
+        ADR 0005 D2: extracted verbatim from the old `_best_match` body
+        (lines 601-626 at HEAD `4e5b04f`)."""
+        if not scored:
+            return TMDBSearchOutcome("nomatch")
+
         best = scored[0][0]
         second = scored[1][0] if len(scored) > 1 else None
         margin = best.confidence - (second.confidence if second else 0.0)
@@ -612,7 +727,10 @@ class TMDBService:
 
         # Ambiguous (top-2 too close) → try to break the tie with the Xtream summary.
         if summary:
-            close = [(m, ov) for (m, ov) in scored if best.confidence - m.confidence < MIN_MARGIN]
+            close = [
+                (m, raw.get("overview") or "")
+                for (m, raw) in scored if best.confidence - m.confidence < MIN_MARGIN
+            ]
             sim_ranked = sorted(
                 ((m, self._summary_sim(summary, ov)) for (m, ov) in close),
                 key=lambda ms: ms[1], reverse=True,
@@ -624,6 +742,151 @@ class TMDBService:
                     return TMDBSearchOutcome("matched", match=top_m, best=best)
 
         return TMDBSearchOutcome("ambiguous", match=None, best=best)
+
+    def _best_match(
+        self,
+        results: list[dict],
+        title: str,
+        year: int | None,
+        summary: str | None,
+        *,
+        title_key: str,
+        orig_key: str,
+        date_key: str,
+    ) -> TMDBSearchOutcome:
+        """Score candidates (title vs localized+original, weighted with year),
+        enforce anti-ambiguity margin, and break ties with the Xtream summary.
+
+        Behaviour is byte-identical to before ADR 0005 — this is now a thin
+        wrapper over `_score_results` + `_verdict` (kept as its own method
+        since `search_movie`/`search_tv`/`search_multi` call it directly)."""
+        if not results:
+            return TMDBSearchOutcome("nomatch")
+        scored = self._score_results(
+            results, title, year, title_key=title_key, orig_key=orig_key, date_key=date_key,
+        )
+        return self._verdict(scored, summary)
+
+    async def search_candidates(
+        self,
+        kind: Literal["movie", "tv"],
+        title: str,
+        year: int | None,
+        *,
+        language: str | None = None,
+        summary: str | None = None,
+    ) -> CandidateSearch:
+        """Manual-scrape candidate search (ADR 0005 D2) — ONE `/search/
+        movie|tv` call (no `_search_cache`: a manual search is meant to be
+        fresh, not served from the 24h auto-enrichment cache), scored the
+        same way as `search_movie`/`search_tv`/`_best_match`, returning up
+        to 10 candidates (confidence desc, then vote_count desc) alongside
+        the verdict `_verdict` would have produced for that same result
+        set. TMDB unconfigured -> `CandidateSearch(nomatch, [])`."""
+        if not self.is_configured:
+            return CandidateSearch(verdict=TMDBSearchOutcome("nomatch"), candidates=[])
+
+        lang = language or settings.TMDB_LANGUAGE
+        if kind == "movie":
+            path = "/search/movie"
+            title_key, orig_key, date_key = "title", "original_title", "release_date"
+            year_param = "year"
+        else:
+            path = "/search/tv"
+            title_key, orig_key, date_key = "name", "original_name", "first_air_date"
+            year_param = "first_air_date_year"
+
+        params: dict = {"query": title, "language": lang}
+        if year:
+            params[year_param] = year
+
+        data = await self._request(path, params=params)
+        results = data.get("results", [])
+        scored = self._score_results(
+            results, title, year, title_key=title_key, orig_key=orig_key, date_key=date_key,
+        )
+        verdict = self._verdict(scored, summary)
+        candidates = [
+            ScoredCandidate(
+                tmdb_id=match.tmdb_id,
+                kind=kind,
+                title=raw.get(title_key) or "",
+                original_title=raw.get(orig_key) or None,
+                year=match.year,
+                overview=raw.get("overview") or None,
+                poster_path=raw.get("poster_path") or None,
+                vote_count=match.vote_count,
+                title_score=match.title_score,
+                confidence=match.confidence,
+            )
+            for match, raw in scored
+        ]
+        return CandidateSearch(verdict=verdict, candidates=candidates)
+
+    async def get_match_extras(
+        self, tmdb_id: int, kind: Literal["movie", "tv"],
+    ) -> MatchExtras | None:
+        """Manual-scrape candidate detail (ADR 0005 D2) — ONE `/movie|tv/
+        {id}?append_to_response=external_ids,images` call resolving the
+        imdb_id + every poster TMDB has for that title (main poster first,
+        then `images.posters` in TMDB's own order, deduped, capped at
+        `_MAX_POSTER_VARIANTS`). Returns `None` on 404/any error/
+        unconfigured — logged as exception type only (never `str(exc)`,
+        which embeds the `api_key` query param, see `_get_client`)."""
+        if not self.is_configured:
+            return None
+        path = f"/movie/{tmdb_id}" if kind == "movie" else f"/tv/{tmdb_id}"
+        try:
+            data = await self._request(
+                path,
+                params={
+                    "append_to_response": "external_ids,images",
+                    "include_image_language": _IMAGE_LANGUAGE_FILTER,
+                    "language": settings.TMDB_LANGUAGE,
+                },
+            )
+        except Exception as exc:
+            logger.warning(
+                "TMDB get_match_extras failed for %s/%s (%s)",
+                kind, tmdb_id, type(exc).__name__,
+            )
+            return None
+
+        external = data.get("external_ids") or {}
+        imdb_id = external.get("imdb_id")
+        if imdb_id and not imdb_id.startswith("tt"):
+            imdb_id = f"tt{imdb_id}"
+
+        if kind == "movie":
+            title_key, orig_key, date_key = "title", "original_title", "release_date"
+        else:
+            title_key, orig_key, date_key = "name", "original_name", "first_air_date"
+        r_date = data.get(date_key, "") or ""
+        year = int(r_date[:4]) if len(r_date) >= 4 and r_date[:4].isdigit() else None
+
+        poster_urls: list[str] = []
+        main_poster = data.get("poster_path")
+        if main_poster:
+            poster_urls.append(f"{POSTER_W185_BASE}{main_poster}")
+        for img in (data.get("images") or {}).get("posters") or []:
+            file_path = img.get("file_path")
+            if not file_path:
+                continue
+            url = f"{POSTER_W185_BASE}{file_path}"
+            if url not in poster_urls:
+                poster_urls.append(url)
+        poster_urls = poster_urls[:_MAX_POSTER_VARIANTS]
+
+        return MatchExtras(
+            tmdb_id=tmdb_id,
+            kind=kind,
+            imdb_id=imdb_id,
+            title=data.get(title_key) or "",
+            original_title=data.get(orig_key) or None,
+            year=year,
+            overview=data.get("overview") or None,
+            poster_urls=poster_urls,
+        )
 
     @staticmethod
     def _summary_sim(xtream_summary: str, tmdb_overview: str) -> float:

@@ -9,15 +9,16 @@
       <th class="text-left px-3 py-2 w-48">IMDb ID</th>
       <th class="text-left px-3 py-2 w-40">TMDB ID</th>
       <th class="text-left px-3 py-2 w-40">Actions</th>
+      <th class="text-left px-3 py-2 w-56">Scraper manuel</th>
     </tr>
   </thead>
   <tbody class="divide-y divide-slate-100">
     {% if items %}
       {% for item in items %}
-        {% include "admin/_movie_row.html" %}
+        {% include "admin/_media_row.html" %}
       {% endfor %}
     {% else %}
-      <tr><td colspan="6" class="px-3 py-8 text-center text-slate-500 italic">Aucun résultat.</td></tr>
+      <tr><td colspan="7" class="px-3 py-8 text-center text-slate-500 italic">Aucun résultat.</td></tr>
     {% endif %}
   </tbody>
 </table>

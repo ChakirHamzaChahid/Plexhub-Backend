@@ -253,11 +253,16 @@ class TestBuildRatingValuesReplace:
         assert row.imdb_rating is None
         assert row.imdb_votes is None
 
-    async def test_display_rating_untouched_when_both_absent(self, db_session):
+    async def test_display_rating_reset_to_zero_when_both_absent(self, db_session):
+        """ADR 0005 W0-review follow-up (a): a correction with neither an
+        OMDb nor a TMDB rating in hand must NOT keep the WRONG film's old
+        `display_rating` — it is reset to `0.0` (the column is NOT NULL;
+        `0.0` is the same "absent" sentinel `blend_rating`'s own `<= 0`
+        rule uses everywhere else), never left stale."""
         db_session.add(_row(display_rating=3.3, imdb_rating=None, tmdb_rating=None))
         await db_session.commit()
         values = build_rating_values(
             omdb_imdb_rating=None, omdb_imdb_votes=None, tmdb_rating=None, mode="replace",
         )
         row = await _apply(db_session, "rk1", values)
-        assert row.display_rating == 3.3
+        assert row.display_rating == 0.0

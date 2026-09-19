@@ -831,8 +831,9 @@ class TMDBService:
         imdb_id + every poster TMDB has for that title (main poster first,
         then `images.posters` in TMDB's own order, deduped, capped at
         `_MAX_POSTER_VARIANTS`). Returns `None` on 404/any error/
-        unconfigured — logged as exception type only (never `str(exc)`,
-        which embeds the `api_key` query param, see `_get_client`)."""
+        unconfigured — logged as exception type (+ HTTP status when the
+        exception is an `httpx.HTTPStatusError`) only, never `str(exc)`,
+        which embeds the `api_key` query param (see `_get_client`)."""
         if not self.is_configured:
             return None
         path = f"/movie/{tmdb_id}" if kind == "movie" else f"/tv/{tmdb_id}"
@@ -845,6 +846,12 @@ class TMDBService:
                     "language": settings.TMDB_LANGUAGE,
                 },
             )
+        except httpx.HTTPStatusError as exc:
+            logger.warning(
+                "TMDB get_match_extras failed for %s/%s (HTTP %s)",
+                kind, tmdb_id, exc.response.status_code,
+            )
+            return None
         except Exception as exc:
             logger.warning(
                 "TMDB get_match_extras failed for %s/%s (%s)",

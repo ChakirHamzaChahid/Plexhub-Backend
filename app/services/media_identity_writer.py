@@ -219,9 +219,16 @@ def build_rating_values(
     than SQL, since a correction overwrites `imdb_rating`/`imdb_votes`
     outright (new OMDb value or NULL) rather than coalescing — there is no
     "pre-update value to preserve" logic left to express in SQL. When the
-    blend yields `None` (both ratings absent), `display_rating` is left as
-    the current column value (`Media.display_rating`, a no-op column
-    reference) rather than NULLed."""
+    blend yields `None` (both ratings absent), `display_rating` is reset to
+    `0.0` (ADR 0005 W0-review follow-up (a) — NOT the old `Media.
+    display_rating` no-op reference this used to fall back to, and NOT a
+    literal SQL NULL either: the column is `NOT NULL`, and `0.0` is the
+    SAME "no rating" sentinel `blend_rating`'s own `<= 0` rule already
+    treats as absent everywhere else). A correction exists precisely
+    because the OLD identity was wrong, so its `display_rating` is the
+    WRONG film's rating — carrying it forward would silently keep
+    displaying a stale, mismatched score instead of an honest "no rating
+    yet" until the next enrichment pass finds one."""
     if mode == "fill":
         values: dict[str, Any] = {}
         if omdb_imdb_rating is not None:
@@ -248,5 +255,5 @@ def build_rating_values(
         "imdb_votes": omdb_imdb_votes,
     }
     blended = blend_rating(omdb_imdb_rating, tmdb_rating)
-    values["display_rating"] = blended if blended is not None else Media.display_rating
+    values["display_rating"] = blended if blended is not None else 0.0
     return values

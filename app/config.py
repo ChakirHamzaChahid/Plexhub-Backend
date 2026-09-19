@@ -285,6 +285,13 @@ class Settings:
     DAV_CONNECT_TIMEOUT: float = _safe_float("DAV_CONNECT_TIMEOUT", float(DOWNLOAD_CONNECT_TIMEOUT))
     DAV_READ_TIMEOUT: float = _safe_float("DAV_READ_TIMEOUT", float(DOWNLOAD_READ_TIMEOUT))
 
+    # Manual scraper (ADR 0005 D9/D11) — `unified_group_service.schedule_rebuild`
+    # debounce window: several `apply_candidate` calls in quick succession (a
+    # propagate=True fan-out, or an operator working through several rows)
+    # coalesce into a single snapshot rebuild per media_type instead of one
+    # per write.
+    SCRAPE_REBUILD_DEBOUNCE_SECONDS: float = _safe_float("SCRAPE_REBUILD_DEBOUNCE_SECONDS", 5.0)
+
     # Manual scraper poster-match (ADR 0005 D5/D11) — compares the Xtream
     # poster to TMDB/OMDb candidate posters via dHash/pHash, run through a
     # DEDICATED httpx client (never tmdb_service/omdb_service's, which inject

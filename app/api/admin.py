@@ -17,10 +17,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 logger = logging.getLogger("plexhub.api.admin")
 
 from app.config import settings
-from app.db.database import get_db
+from app.db.database import async_session_factory, get_db
 from app.models.schemas import MediaUpdate
 from app.services.media_service import media_service
-from app.services import account_outage_service, api_key_service, nfo_import_service
+from app.services import account_outage_service, api_key_service, manual_scrape_service, nfo_import_service
 from app.utils.time import now_ms
 
 
@@ -187,7 +187,7 @@ async def admin_update_ids(
             raise HTTPException(404, "Media not found")
         return templates.TemplateResponse(
             request,
-            "admin/_movie_row.html",
+            "admin/_media_row.html",
             {"item": item, "error": str(exc)},
             status_code=422,
         )
@@ -204,7 +204,7 @@ async def admin_update_ids(
 
     return templates.TemplateResponse(
         request,
-        "admin/_movie_row.html",
+        "admin/_media_row.html",
         {"item": updated, "saved": True},
         headers={"HX-Trigger": "refresh-stats"},
     )
@@ -226,12 +226,173 @@ async def admin_rescrape(
         # nothing — unlocking is a manual-scraper action (W2), not available yet.
         return templates.TemplateResponse(
             request,
-            "admin/_movie_row.html",
+            "admin/_media_row.html",
             {"item": item, "locked_rescrape": True},
         )
     return templates.TemplateResponse(
         request,
-        "admin/_movie_row.html",
+        "admin/_media_row.html",
+        {"item": item, "rescraped": True},
+        headers={"HX-Trigger": "refresh-stats"},
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Manual scraper (ADR 0005 D10, W2) — apply/unlock/clear/rescrape by
+# (server_id, rating_key). Writes go through `manual_scrape_service`, which
+# uses its OWN fresh sessions (`write_with_retry`/`load_row`) rather than the
+# request-scoped `db: AsyncSession = Depends(get_db)` used elsewhere in this
+# module — see `manual_scrape_service.load_row`'s docstring (ADR 0005 D6):
+# re-reading through the request session after a fresh-session write can
+# still see a pre-write WAL snapshot.
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@router.post("/media/{server_id}/{rating_key}/apply", response_class=HTMLResponse)
+async def admin_media_apply(
+    server_id: str,
+    rating_key: str,
+    request: Request,
+    tmdb_id: Optional[str] = Form(None),
+    imdb_id: Optional[str] = Form(None),
+    type: str = Form("movie"),  # noqa: A002 — form field name is fixed by the ADR
+    force: Optional[str] = Form(None),
+    propagate: Optional[str] = Form(None),
+):
+    media_type = "show" if type == "show" else "movie"
+
+    parsed_tmdb_id: Optional[int] = None
+    if tmdb_id and tmdb_id.strip():
+        if not tmdb_id.strip().isdigit():
+            item = await manual_scrape_service.load_row(
+                server_id, rating_key, session_factory=async_session_factory,
+            )
+            if item is None:
+                raise HTTPException(404, "Media not found")
+            return templates.TemplateResponse(
+                request, "admin/_media_row.html",
+                {"item": item, "error": "L'id TMDB doit être numérique."},
+                status_code=422,
+            )
+        parsed_tmdb_id = int(tmdb_id.strip())
+
+    parsed_imdb_id = imdb_id.strip() if imdb_id and imdb_id.strip() else None
+
+    if parsed_tmdb_id is None and parsed_imdb_id is None:
+        item = await manual_scrape_service.load_row(
+            server_id, rating_key, session_factory=async_session_factory,
+        )
+        if item is None:
+            raise HTTPException(404, "Media not found")
+        return templates.TemplateResponse(
+            request, "admin/_media_row.html",
+            {"item": item, "error": "Indique un id IMDb ou un id TMDB."},
+            status_code=422,
+        )
+
+    outcome = await manual_scrape_service.apply_candidate(
+        server_id=server_id, rating_key=rating_key, media_type=media_type,
+        tmdb_id=parsed_tmdb_id, imdb_id=parsed_imdb_id,
+        source="manual", force=bool(force), propagate=bool(propagate),
+        session_factory=async_session_factory,
+    )
+
+    if outcome.status == "not_found":
+        raise HTTPException(404, "Media not found")
+
+    item = await manual_scrape_service.load_row(
+        server_id, rating_key, session_factory=async_session_factory,
+    )
+    if item is None:
+        raise HTTPException(404, "Media not found")
+
+    if outcome.status == "applied":
+        return templates.TemplateResponse(
+            request, "admin/_media_row.html",
+            {"item": item, "applied": True, "outcome": outcome},
+            headers={"HX-Trigger": "refresh-stats"},
+        )
+    if outcome.status == "conflict":
+        return templates.TemplateResponse(
+            request, "admin/_media_row.html",
+            {"item": item, "conflict": True, "outcome": outcome},
+            status_code=409,
+        )
+    if outcome.status == "provider_not_found":
+        return templates.TemplateResponse(
+            request, "admin/_media_row.html",
+            {"item": item, "error": "Aucun résultat trouvé pour cet identifiant."},
+            status_code=422,
+        )
+    # skipped_locked
+    return templates.TemplateResponse(
+        request, "admin/_media_row.html",
+        {"item": item, "locked_rescrape": True},
+        status_code=409,
+    )
+
+
+@router.post("/media/{server_id}/{rating_key}/unlock", response_class=HTMLResponse)
+async def admin_media_unlock(server_id: str, rating_key: str, request: Request):
+    ok = await manual_scrape_service.unlock(
+        server_id, rating_key, session_factory=async_session_factory,
+    )
+    if not ok:
+        raise HTTPException(404, "Media not found")
+    item = await manual_scrape_service.load_row(
+        server_id, rating_key, session_factory=async_session_factory,
+    )
+    if item is None:
+        raise HTTPException(404, "Media not found")
+    return templates.TemplateResponse(
+        request, "admin/_media_row.html",
+        {"item": item, "unlocked": True},
+        headers={"HX-Trigger": "refresh-stats"},
+    )
+
+
+@router.post("/media/{server_id}/{rating_key}/clear", response_class=HTMLResponse)
+async def admin_media_clear(
+    server_id: str, rating_key: str, request: Request,
+    lock: Optional[str] = Form(None),
+):
+    ok = await manual_scrape_service.clear_ids(
+        server_id, rating_key, lock=bool(lock), session_factory=async_session_factory,
+    )
+    if not ok:
+        raise HTTPException(404, "Media not found")
+    item = await manual_scrape_service.load_row(
+        server_id, rating_key, session_factory=async_session_factory,
+    )
+    if item is None:
+        raise HTTPException(404, "Media not found")
+    return templates.TemplateResponse(
+        request, "admin/_media_row.html",
+        {"item": item, "cleared": True},
+        headers={"HX-Trigger": "refresh-stats"},
+    )
+
+
+@router.post("/media/{server_id}/{rating_key}/rescrape", response_class=HTMLResponse)
+async def admin_media_rescrape(
+    server_id: str, rating_key: str, request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Same `enqueue_rescrape` behaviour as `/admin/movies/{rk}/rescrape`
+    (ADR 0005 L8/L9), just addressed by (server_id, rating_key) in the path
+    instead of a form field — the W2 companion of the new `_media_row.html`
+    manual-scraper controls."""
+    outcome = await media_service.enqueue_rescrape(db, rating_key, server_id)
+    if outcome == "not_found":
+        raise HTTPException(404, "Media not found")
+    item = await media_service.get_media_by_key(db, rating_key, server_id)
+    if outcome == "locked":
+        return templates.TemplateResponse(
+            request, "admin/_media_row.html",
+            {"item": item, "locked_rescrape": True},
+        )
+    return templates.TemplateResponse(
+        request, "admin/_media_row.html",
         {"item": item, "rescraped": True},
         headers={"HX-Trigger": "refresh-stats"},
     )

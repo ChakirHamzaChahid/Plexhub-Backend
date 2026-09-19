@@ -1,6 +1,6 @@
 {% set row_id = "row-" ~ item.server_id ~ "-" ~ item.rating_key %}
 <tr id="{{ row_id }}" class="hover:bg-slate-50 align-middle
-    {% if saved %}bg-emerald-50{% elif rescraped %}bg-sky-50{% elif error %}bg-rose-50{% endif %}">
+    {% if saved or applied or unlocked or cleared %}bg-emerald-50{% elif rescraped %}bg-sky-50{% elif error or conflict %}bg-rose-50{% endif %}">
   <td class="px-3 py-2">
     <div class="font-medium text-slate-900">{{ item.title }}</div>
     {% if item.summary %}<div class="text-xs text-slate-500 line-clamp-1">{{ item.summary[:120] }}</div>{% endif %}
@@ -80,5 +80,65 @@
     {% if saved %}<span class="text-xs text-emerald-700 block mt-1">✓ enregistré</span>{% endif %}
     {% if rescraped %}<span class="text-xs text-sky-700 block mt-1">⏱ en file d'attente</span>{% endif %}
     {% if locked_rescrape %}<span class="text-xs text-amber-700 block mt-1">🔒 verrouillé — déverrouillage requis</span>{% endif %}
+  </td>
+
+  <td class="px-3 py-2">
+    <div class="flex items-center gap-1 mb-1">
+      {% if item.match_locked %}
+      <span class="px-2 py-0.5 text-xs rounded border border-amber-400 text-amber-700 bg-amber-50" title="{{ item.match_source or 'manual' }}">
+        🔒 verrouillé
+      </span>
+      {% else %}
+      <span class="px-2 py-0.5 text-xs rounded border border-slate-200 text-slate-400">non verrouillé</span>
+      {% endif %}
+    </div>
+
+    <form hx-post="/admin/media/{{ item.server_id }}/{{ item.rating_key }}/apply"
+          hx-target="#{{ row_id }}"
+          hx-swap="outerHTML"
+          class="flex flex-col gap-1 mb-1">
+      <input type="hidden" name="type" value="movie">
+      <div class="flex items-center gap-1">
+        <input name="imdb_id" type="text" placeholder="ttXXXXXXX"
+               class="border border-slate-300 rounded px-2 py-1 text-xs font-mono w-24
+                      focus:outline-none focus:ring-2 focus:ring-slate-400">
+        <input name="tmdb_id" type="text" placeholder="tmdbId" inputmode="numeric"
+               class="border border-slate-300 rounded px-2 py-1 text-xs font-mono w-16
+                      focus:outline-none focus:ring-2 focus:ring-slate-400">
+      </div>
+      <div class="flex items-center gap-2 text-xs text-slate-600">
+        <label class="flex items-center gap-1"><input type="checkbox" name="force" value="1"> forcer</label>
+        <label class="flex items-center gap-1"><input type="checkbox" name="propagate" value="1"> propager</label>
+        <button type="submit"
+                class="px-2 py-1 text-xs rounded bg-emerald-700 text-emerald-50 hover:bg-emerald-600">
+          Appliquer
+        </button>
+      </div>
+    </form>
+
+    <div class="flex items-center gap-1">
+      {% if item.match_locked %}
+      <form hx-post="/admin/media/{{ item.server_id }}/{{ item.rating_key }}/unlock"
+            hx-target="#{{ row_id }}" hx-swap="outerHTML">
+        <button type="submit"
+                class="px-2 py-1 text-xs rounded border border-amber-400 text-amber-700 bg-amber-50 hover:bg-amber-100">
+          Déverrouiller
+        </button>
+      </form>
+      {% endif %}
+      <form hx-post="/admin/media/{{ item.server_id }}/{{ item.rating_key }}/clear"
+            hx-target="#{{ row_id }}" hx-swap="outerHTML"
+            hx-confirm="Effacer les ids IMDb/TMDB de « {{ item.title|e }} » ?">
+        <button type="submit"
+                class="px-2 py-1 text-xs rounded border border-rose-400 text-rose-700 bg-rose-50 hover:bg-rose-100">
+          Effacer les ids
+        </button>
+      </form>
+    </div>
+
+    {% if applied %}<span class="text-xs text-emerald-700 block mt-1">✓ appliqué{% if outcome and outcome.propagated %} (+{{ outcome.propagated }} propagé{{ 's' if outcome.propagated > 1 else '' }}){% endif %}</span>{% endif %}
+    {% if conflict %}<span class="text-xs text-rose-700 block mt-1">⚠ conflit d'identité — cocher « forcer » pour appliquer quand même</span>{% endif %}
+    {% if unlocked %}<span class="text-xs text-amber-700 block mt-1">🔓 déverrouillé</span>{% endif %}
+    {% if cleared %}<span class="text-xs text-rose-700 block mt-1">✓ ids effacés</span>{% endif %}
   </td>
 </tr>

@@ -673,6 +673,15 @@ class MediaService:
         if not current:
             return None
 
+        # ADR 0005 D7/L10 (bugfix, coordinator follow-up on W1 review): the
+        # admin row form always re-posts BOTH ids on every "Save" — without
+        # this guard, re-submitting an already-stored value (or a Save that
+        # clears an id that was already blank) would still lock the row and
+        # bump `unification_id`/`updated_at` for no actual change. Only a
+        # patch that genuinely differs from what's already stored may lock.
+        if not any(getattr(current, k, None) != v for k, v in fields.items()):
+            return current
+
         # ADR 0005 D7/L10 (bugfix): a manual id edit previously left
         # `unification_id`/`history_group_key` stale (still title-based, or
         # pointing at the OLD id) — the row never regrouped with its twins
@@ -704,10 +713,16 @@ class MediaService:
         if result.rowcount == 0:
             return None
         await db.flush()
-        # NOTE (deviation, W1): ADR 0005 D6/L10 also calls
-        # `unified_group_service.schedule_rebuild(...)` here, but that helper
-        # (ADR D9) is scoped to Wave W2 and does not exist yet at this point
-        # in the rollout — left for W2 to wire in.
+        # ADR 0005 D6/D9/L10: a manual id edit changes group membership
+        # (new unification_id) — debounce-schedule a snapshot rebuild for
+        # this type so `/api/media/*/unified` picks it up without waiting
+        # for the next scheduled pipeline run. Lazy import: `db.database`
+        # must not become a module-load-time dependency of this service.
+        from app.db.database import async_session_factory
+        from app.services import unified_group_service
+        unified_group_service.schedule_rebuild(
+            current.type, session_factory=async_session_factory,
+        )
         return await self.get_media_by_key(db, rating_key, server_id)
 
     async def enqueue_rescrape(

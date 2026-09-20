@@ -18,6 +18,7 @@ gets added" half; this file covers the "no noise on fresh boot" half.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 
 import pytest_asyncio
@@ -37,7 +38,31 @@ from app.db.migrations import (
 )
 from app.models.database import Base
 
-MIGRATIONS_LOGGER = "app.db.migrations"
+MIGRATIONS_LOGGER = "plexhub.db.migrations"
+
+
+@contextlib.contextmanager
+def capture_migrations(caplog, level=logging.DEBUG):
+    """Capture the migrations logger even though the "plexhub" tree sets
+    ``propagate = False`` (main.py:87, to avoid duplicate console lines).
+
+    ``caplog`` installs its handler on the ROOT logger, so once ``app.main``
+    has been imported by any earlier test in the session, records emitted
+    under "plexhub.*" never reach it and ``caplog.records`` comes back
+    empty — a false pass or a false failure depending on the assertion.
+    Attaching caplog's own handler directly to the logger under test makes
+    the capture independent of import order.
+    """
+    logger = logging.getLogger(MIGRATIONS_LOGGER)
+    previous = logger.level
+    logger.setLevel(level)
+    logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(level, logger=MIGRATIONS_LOGGER):
+            yield
+    finally:
+        logger.removeHandler(caplog.handler)
+        logger.setLevel(previous)
 
 
 @pytest_asyncio.fixture
@@ -68,7 +93,7 @@ def _duplicate_column_warnings(records) -> list[str]:
 async def test_run_migrations_on_fresh_db_logs_no_duplicate_column_warning(fresh_engine, caplog):
     """CR-C05: the full chain on a fresh (create_all-built) DB must not log
     a single 'duplicate column' WARNING."""
-    with caplog.at_level(logging.WARNING, logger=MIGRATIONS_LOGGER):
+    with capture_migrations(caplog, logging.WARNING):
         await run_migrations(fresh_engine)
 
     dupes = _duplicate_column_warnings(caplog.records)
@@ -81,7 +106,7 @@ async def test_run_migrations_idempotent_rerun_still_no_warning(fresh_engine, ca
     still be silent."""
     await run_migrations(fresh_engine)
 
-    with caplog.at_level(logging.WARNING, logger=MIGRATIONS_LOGGER):
+    with capture_migrations(caplog, logging.WARNING):
         await run_migrations(fresh_engine)
 
     dupes = _duplicate_column_warnings(caplog.records)
@@ -99,7 +124,7 @@ async def test_formerly_noisy_add_column_migrations_skip_silently_on_fresh_db(fr
     """Each migration CR-C05 called out (002/003/004/005/010/013/014) must
     take the column-exists short-circuit path (no ALTER attempted, no
     WARNING) when run directly against a fresh create_all DB."""
-    with caplog.at_level(logging.DEBUG, logger=MIGRATIONS_LOGGER):
+    with capture_migrations(caplog, logging.DEBUG):
         await _migration_002_add_category_filter_mode(fresh_engine)
         await _migration_003_add_media_category_visibility(fresh_engine)
         await _migration_004_add_enrichment_existing_ids(fresh_engine)

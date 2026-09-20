@@ -12,6 +12,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -336,12 +337,42 @@ async def admin_media_apply(
             status_code=422,
         )
 
-    outcome = await manual_scrape_service.apply_candidate(
-        server_id=server_id, rating_key=rating_key, media_type=media_type,
-        tmdb_id=parsed_tmdb_id, imdb_id=parsed_imdb_id,
-        source="manual", force=bool(force), propagate=bool(propagate),
-        session_factory=async_session_factory,
-    )
+    try:
+        outcome = await manual_scrape_service.apply_candidate(
+            server_id=server_id, rating_key=rating_key, media_type=media_type,
+            tmdb_id=parsed_tmdb_id, imdb_id=parsed_imdb_id,
+            source="manual", force=bool(force), propagate=bool(propagate),
+            session_factory=async_session_factory,
+        )
+    except OperationalError as exc:
+        # SQLite has a single writer. When a pipeline pass (or a snapshot
+        # rebuild) holds it, all three `write_with_retry` attempts can burn a
+        # full `busy_timeout=60s` each and the write never lands. Answering
+        # 500 made the button look DEAD: htmx 1.x swaps no 4xx/5xx except the
+        # 409/422 the layout opts in, so the operator saw nothing at all and
+        # could chain right past an item that was never written.
+        if "database is locked" not in str(exc).lower():
+            raise
+        item = await manual_scrape_service.load_row(
+            server_id, rating_key, session_factory=async_session_factory,
+        )
+        if item is None:
+            raise HTTPException(404, "Media not found") from None
+        logger.warning(
+            "manual apply gave up on a locked database for %s/%s",
+            server_id, rating_key,
+        )
+        return templates.TemplateResponse(
+            request, "admin/_media_row.html",
+            {
+                "item": item,
+                "error": (
+                    "Base occupée par une écriture concurrente — rien n'a été "
+                    "enregistré. Réessaie dans un instant."
+                ),
+            },
+            status_code=409,
+        )
 
     if outcome.status == "not_found":
         raise HTTPException(404, "Media not found")

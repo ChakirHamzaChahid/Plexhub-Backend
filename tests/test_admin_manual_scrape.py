@@ -114,6 +114,71 @@ async def test_apply_conflict_returns_409(api_client, db_factory, monkeypatch):
     assert resp.status_code == 409
 
 
+async def test_apply_on_a_locked_database_renders_409_not_500(
+    api_client, db_factory, monkeypatch,
+):
+    """SQLite has one writer: when a pipeline pass holds it, all three
+    `write_with_retry` attempts can burn a full `busy_timeout=60s` each and
+    the write never lands. A 500 made the button look DEAD — htmx 1.x swaps
+    no 5xx, so the operator saw nothing and could chain right past an item
+    that was never written (production, 2026-09-20)."""
+    from sqlalchemy.exc import OperationalError
+
+    async with db_factory() as s:
+        s.add(Media(
+            rating_key="vod_1.mp4", server_id="xtream_a", library_section_id="1",
+            title="Busy", type="movie", year=1999, page_offset=0,
+        ))
+        await s.commit()
+
+    async def _locked(*_a, **_kw):
+        raise OperationalError("UPDATE media ...", {}, Exception("database is locked"))
+
+    monkeypatch.setattr(mss, "apply_candidate", _locked)
+
+    resp = await api_client.post(
+        "/admin/media/xtream_a/vod_1.mp4/apply",
+        data={"tmdb_id": "603", "type": "movie"},
+        auth=ADMIN_AUTH,
+    )
+    assert resp.status_code == 409, resp.text
+    # 409 is one of the two codes the layout opts back into a swap, so the
+    # message actually reaches the screen.
+    assert 'id="row-xtream_a-vod_1.mp4"' in resp.text
+    assert "occup" in resp.text.lower()
+    assert "HX-Trigger" not in resp.headers, (
+        "a failed apply must not fire close-scrape-panel — that would chain "
+        "to the next item as if this one had been written"
+    )
+
+
+async def test_apply_still_raises_on_an_unrelated_db_error(
+    api_client, db_factory, monkeypatch,
+):
+    """Only 'database is locked' is turned into a readable 409. Any other
+    OperationalError is a real bug and must not be disguised as contention."""
+    from sqlalchemy.exc import OperationalError
+
+    async with db_factory() as s:
+        s.add(Media(
+            rating_key="vod_1.mp4", server_id="xtream_a", library_section_id="1",
+            title="Broken", type="movie", year=1999, page_offset=0,
+        ))
+        await s.commit()
+
+    async def _boom(*_a, **_kw):
+        raise OperationalError("UPDATE media ...", {}, Exception("no such column: nope"))
+
+    monkeypatch.setattr(mss, "apply_candidate", _boom)
+
+    with pytest.raises(OperationalError):
+        await api_client.post(
+            "/admin/media/xtream_a/vod_1.mp4/apply",
+            data={"tmdb_id": "603", "type": "movie"},
+            auth=ADMIN_AUTH,
+        )
+
+
 async def test_apply_unknown_row_returns_404(api_client, monkeypatch):
     monkeypatch.setattr(mss, "tmdb_service", FakeTMDB(details_by_id={603: _details()}))
     monkeypatch.setattr(mss, "omdb_service", FakeOMDb())

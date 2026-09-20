@@ -157,7 +157,32 @@ async def rebuild_all(session_factory) -> dict[str, int]:
 # `delay` seconds after the LAST call in the burst.
 _pending_rebuild_tasks: dict[str, asyncio.Task] = {}
 _pending_session_factories: dict[str, Callable[[], AsyncSession]] = {}
-_running_rebuild_tasks: dict[str, asyncio.Task] = {}
+_running_rebuild_tasks: dict[str, set[asyncio.Task]] = {}
+# One lock per media_type SERIALIZES the DELETE+INSERT pass itself, so two
+# rebuilds of the same type can never interleave — whichever started later
+# also COMMITS later, and therefore wins with the fresher read. Without it,
+# a rebuild scheduled while another was running could read older rows (a
+# pysqlite SELECT opens no transaction) and commit last, leaving a stale
+# snapshot until the next pipeline run. Keyed by loop as well as type: the
+# dict outlives an event loop (tests create several), and an `asyncio.Lock`
+# bound to a closed loop raises on the next `await`.
+_rebuild_locks: dict[str, tuple[asyncio.AbstractEventLoop, asyncio.Lock]] = {}
+
+
+def _rebuild_lock(media_type: str) -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    entry = _rebuild_locks.get(media_type)
+    if entry is None or entry[0] is not loop:
+        entry = (loop, asyncio.Lock())
+        _rebuild_locks[media_type] = entry
+    return entry[1]
+
+
+async def _rebuild_one_serialized(media_type: str, session_factory) -> int:
+    """`_rebuild_one` under this type's lock — the only entry point the
+    debounced/flushed paths may use (see `_rebuild_locks`)."""
+    async with _rebuild_lock(media_type):
+        return await _rebuild_one(media_type, session_factory)
 
 
 async def _debounced_rebuild(media_type: str, delay: float, session_factory) -> None:
@@ -177,9 +202,9 @@ async def _debounced_rebuild(media_type: str, delay: float, session_factory) -> 
     _pending_session_factories.pop(media_type, None)
     current = asyncio.current_task()
     if current is not None:
-        _running_rebuild_tasks[media_type] = current
+        _running_rebuild_tasks.setdefault(media_type, set()).add(current)
     try:
-        n = await _rebuild_one(media_type, session_factory)
+        n = await _rebuild_one_serialized(media_type, session_factory)
         logger.info(
             "Unified-group snapshot (debounced): %s -> %d groups", media_type, n
         )
@@ -191,7 +216,14 @@ async def _debounced_rebuild(media_type: str, delay: float, session_factory) -> 
         )
     finally:
         if current is not None:
-            _running_rebuild_tasks.pop(media_type, None)
+            # Discard only OUR OWN entry: a second rebuild for this same type
+            # may already be queued behind us on the lock, and popping the
+            # whole slot would hide it from `flush_scheduled`.
+            running = _running_rebuild_tasks.get(media_type)
+            if running is not None:
+                running.discard(current)
+                if not running:
+                    _running_rebuild_tasks.pop(media_type, None)
 
 
 def schedule_rebuild(
@@ -243,31 +275,42 @@ async def flush_scheduled() -> None:
     cancel there means "superseded", not "run now"). So instead we cancel the
     sleep AND run the rebuild ourselves, directly, using the session_factory
     captured at schedule time — exactly once per still-pending type."""
-    pending_types = list(_pending_rebuild_tasks.keys())
-    for media_type in pending_types:
-        task = _pending_rebuild_tasks.pop(media_type, None)
-        factory = _pending_session_factories.pop(media_type, None)
-        if task is not None and not task.done():
-            task.cancel()
+    for _ in range(10):  # bounded: a rebuild may itself schedule nothing new
+        pending_types = list(_pending_rebuild_tasks.keys())
+        for media_type in pending_types:
+            task = _pending_rebuild_tasks.pop(media_type, None)
+            factory = _pending_session_factories.pop(media_type, None)
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            if factory is not None:
+                try:
+                    # Serialized like every other path: if a rebuild for this
+                    # type is still in flight, this one waits for it instead
+                    # of racing it (see `_rebuild_locks`).
+                    n = await _rebuild_one_serialized(media_type, factory)
+                    logger.info(
+                        "Unified-group snapshot (flushed): %s -> %d groups", media_type, n
+                    )
+                except Exception:
+                    logger.error(
+                        "Flushed unified-group snapshot rebuild failed for %s "
+                        "(browsing falls back to live aggregation for this type)",
+                        media_type, exc_info=True,
+                    )
+        running = [
+            t
+            for tasks in _running_rebuild_tasks.values()
+            for t in tasks
+            if not t.done()
+        ]
+        for t in running:
             try:
-                await task
+                await t
             except asyncio.CancelledError:
                 pass
-        if factory is not None:
-            try:
-                n = await _rebuild_one(media_type, factory)
-                logger.info(
-                    "Unified-group snapshot (flushed): %s -> %d groups", media_type, n
-                )
-            except Exception:
-                logger.error(
-                    "Flushed unified-group snapshot rebuild failed for %s "
-                    "(browsing falls back to live aggregation for this type)",
-                    media_type, exc_info=True,
-                )
-    running = [t for t in _running_rebuild_tasks.values() if not t.done()]
-    for t in running:
-        try:
-            await t
-        except asyncio.CancelledError:
-            pass
+        if not _pending_rebuild_tasks and not running:
+            return

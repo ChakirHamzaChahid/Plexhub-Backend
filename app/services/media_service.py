@@ -679,7 +679,14 @@ class MediaService:
         # clears an id that was already blank) would still lock the row and
         # bump `unification_id`/`updated_at` for no actual change. Only a
         # patch that genuinely differs from what's already stored may lock.
-        if not any(getattr(current, k, None) != v for k, v in fields.items()):
+        # `"" or None` on BOTH sides: a stored empty string and a cleared
+        # field are the same "no id" state, and re-submitting one must not
+        # count as a change (the ids are stored as TEXT, so both spellings
+        # occur in the wild).
+        if not any(
+            (getattr(current, k, None) or None) != (v or None)
+            for k, v in fields.items()
+        ):
             return current
 
         # ADR 0005 D7/L10 (bugfix): a manual id edit previously left

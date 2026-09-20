@@ -12,6 +12,23 @@
     .htmx-request.htmx-indicator { opacity: 1; }
     [aria-busy="true"] { cursor: progress; }
   </style>
+  <script>
+    // htmx 1.x drops 4xx responses on the floor (no swap). Every admin error
+    // path (409 conflict / locked, 422 validation) answers with the SAME
+    // fragment the success path returns, carrying the message the operator
+    // must read — without this, clicking Appliquer on a conflict changes
+    // nothing on screen and looks like a dead button. Only these two codes
+    // are opted in; a 500 keeps htmx's default silence.
+    // Listener on `document` (htmx events bubble): this script runs in
+    // <head>, where `document.body` does not exist yet.
+    document.addEventListener('htmx:beforeSwap', function (evt) {
+      var code = evt.detail.xhr.status;
+      if (code === 409 || code === 422) {
+        evt.detail.shouldSwap = true;
+        evt.detail.isError = false;
+      }
+    });
+  </script>
 </head>
 <body class="bg-slate-50 text-slate-900 min-h-screen">
   <header class="bg-slate-900 text-slate-100 shadow">

@@ -194,6 +194,48 @@ def build_identity_values(
     return values
 
 
+def build_omdb_replace_extras(
+    omdb: OMDbData | None, *, is_adult: bool = False,
+) -> dict[str, Any]:
+    """Metadata slice for a `"replace"` correction resolved through OMDb ALONE
+    (no TMDB match at all — ADR 0005 D6 "identité imdb seule").
+
+    Same contract as `build_identity_values(..., mode="replace")` minus the
+    identity keys, which that path computes itself: nothing from the wrong
+    match may survive. `PROVIDER_ONLY_COLS` are NULLed (OMDb supplies none of
+    them, and the WRONG film's values are sitting in them — including
+    `tmdb_rating`/`scraped_rating`, which `recompute_display_rating_stmt()`
+    would otherwise blend back into `display_rating` on the next enrichment
+    pass). The images are reset to the raw Xtream ones rather than left
+    pointing at the wrong film's poster — the poster being wrong is usually
+    the very reason the operator is correcting this row. `XTREAM_ORIGIN_COLS`
+    take what OMDb has and are otherwise left untouched (never NULLed)."""
+    values: dict[str, Any] = {}
+
+    if omdb is not None:
+        xtream_repl = {
+            "summary": omdb.plot,
+            "genres": omdb.genre,
+            "cast": omdb.actors,
+            "year": _parse_omdb_year(omdb.year),
+        }
+        for col, value in xtream_repl.items():
+            if value is not None:
+                values[col] = value
+
+    if is_adult:
+        values["content_rating"] = settings.ADULT_CONTENT_RATING
+    # else: leave content_rating untouched (OMDb's `Rated` is not mapped).
+
+    values["resolved_thumb_url"] = Media.thumb_url
+    values["resolved_art_url"] = Media.art_url
+
+    for col in PROVIDER_ONLY_COLS:
+        values[col] = None
+
+    return values
+
+
 def build_rating_values(
     *,
     omdb_imdb_rating: float | None,

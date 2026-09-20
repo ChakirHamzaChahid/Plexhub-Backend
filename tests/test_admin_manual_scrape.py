@@ -205,3 +205,35 @@ async def test_unauthenticated_apply_is_rejected(api_client):
         data={"tmdb_id": "603", "type": "movie"},
     )
     assert resp.status_code in (401, 403)
+
+
+async def test_error_responses_are_rendered_not_swallowed(
+    api_client, db_factory, monkeypatch,
+):
+    """ADR 0005 W2 review follow-up: htmx 1.x performs NO swap on a 4xx, so a
+    409/422 answer would leave the screen unchanged and the Appliquer button
+    looking dead. Both routes answer with the row fragment carrying the
+    message, and the admin layout opts those two codes back in."""
+    async with db_factory() as s:
+        s.add(Media(
+            rating_key="vod_1.mp4", server_id="xtream_a", library_section_id="1",
+            title="Target", type="movie", year=1999, page_offset=0,
+        ))
+        await s.commit()
+
+    monkeypatch.setattr(mss, "tmdb_service", FakeTMDB(details_by_id={603: _details()}))
+    monkeypatch.setattr(mss, "omdb_service", FakeOMDb())
+
+    resp = await api_client.post(
+        "/admin/media/xtream_a/vod_1.mp4/apply",
+        data={"type": "movie"}, auth=ADMIN_AUTH,
+    )
+    assert resp.status_code == 422
+    assert 'id="row-xtream_a-vod_1.mp4"' in resp.text
+
+    layout = await api_client.get("/admin", auth=ADMIN_AUTH)
+    assert layout.status_code == 200
+    assert "htmx:beforeSwap" in layout.text, (
+        "without this handler htmx drops every 4xx and the operator sees nothing"
+    )
+    assert "409" in layout.text and "422" in layout.text

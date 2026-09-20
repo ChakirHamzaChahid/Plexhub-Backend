@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Literal
 
 import httpx
@@ -30,7 +30,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.database import EnrichmentQueue, Media
 from app.services import omdb_scrape_cache_service, scrape_cache_service, unified_group_service
-from app.services.media_identity_writer import build_identity_values, build_rating_values
+from app.services.media_identity_writer import (
+    build_identity_values,
+    build_omdb_replace_extras,
+    build_rating_values,
+)
 from app.services.omdb_service import OMDbData, omdb_service
 from app.services.poster_match_service import PosterComparison
 from app.services.tmdb_service import TMDBEnrichmentData, tmdb_service
@@ -294,6 +298,20 @@ async def _fetch_tmdb_details(
         return None
 
 
+def _is_safe_title_key(title: Any) -> bool:
+    """True when `title` yields a title-based unification key specific enough
+    to fan an identity out over (ADR 0005 D6, `propagate`).
+
+    `calculate_unification_id` returns `""` for "Unknown" and a bare
+    `title__<year>` for a title whose characters all normalize away (Arabic,
+    Cyrillic, CJK…) — keys shared by every such title of that year. Mirrors
+    `aggregation_service._absorb_title_groups`'s guard."""
+    base = calculate_unification_id(title or "", None)  # 'title_<norm>' / ''
+    if not base.startswith("title_"):
+        return False
+    return any(c.isalnum() for c in base[len("title_"):])
+
+
 def _normalize_imdb(raw: str | None) -> str | None:
     if not raw:
         return None
@@ -340,9 +358,26 @@ async def apply_candidate(
     old_tmdb_id = current.tmdb_id or None
     old_imdb_id = current.imdb_id or None
     is_adult = bool(current.is_adult)
+    # `media_type` is derived from the row itself, never trusted from the
+    # caller: the row form posts a hardcoded type, and a batch/UI mismatch
+    # would search TMDB's /movie endpoint for a show (or vice versa) and
+    # then write that identity onto the row anyway.
+    media_type = "movie" if (current.type or "") == "movie" else "show"
     # Title-only fallback key ("title_..." or ""), used to find un-identified
     # twins for `propagate=True` — independent of this row's OWN new ids.
     title_key = calculate_unification_id(current.title or "", current.year)
+    if propagate and not _is_safe_title_key(current.title):
+        # Degenerate title (empty/"Unknown", or non-Latin normalizing to a
+        # bare `title__YYYY`): EVERY such title of that year shares the key,
+        # so propagating would stamp this film's identity — and a lock —
+        # onto unrelated films. Same guard as
+        # `aggregation_service._absorb_title_groups` (aggregation_service.py
+        # :236-238), for exactly the same false-merge reason.
+        logger.info(
+            "manual_scrape: propagate disabled for %s/%s (degenerate title key)",
+            server_id, rating_key,
+        )
+        propagate = False
 
     # --- Phase 2: network (zero DB access) ------------------------------
     details: TMDBEnrichmentData | None = None
@@ -439,8 +474,18 @@ async def apply_candidate(
 
     def _identity_values(write_mode: str) -> dict[str, Any]:
         if details is not None:
+            # `details.imdb_id` is None whenever TMDB has no external id for
+            # this title (common on TV and obscure films). Writing that None
+            # would silently DROP the imdb id the operator typed — or the one
+            # `find_by_imdb_id` just resolved this identity from — and leave
+            # the row on a `tmdb://` key although an imdb id is in hand
+            # (`calculate_unification_id` prioritizes imdb). Carry `final_imdb`
+            # into the builder so DB, unification key and ApplyOutcome agree.
+            data = details if details.imdb_id == final_imdb else replace(
+                details, imdb_id=final_imdb,
+            )
             return build_identity_values(
-                details, confidence=confidence_final,
+                data, confidence=confidence_final,
                 omdb=omdb_data if write_mode == "replace" else None,
                 mode=write_mode, is_adult=is_adult,
             )
@@ -450,13 +495,21 @@ async def apply_candidate(
         new_unif = calculate_unification_id(
             current.title or "", current.year, imdb_id=final_imdb,
         )
-        return {
+        values: dict[str, Any] = {
             "tmdb_id": None,
             "imdb_id": final_imdb,
             "unification_id": new_unif,
             "history_group_key": new_unif,
             "tmdb_match_confidence": confidence_final,
         }
+        if write_mode == "replace":
+            # A correction must not leave the WRONG film's poster, summary or
+            # tmdb_rating behind just because the new identity resolved
+            # through OMDb instead of TMDB (ADR 0005 D4 "replace").
+            values.update(
+                build_omdb_replace_extras(omdb_data, is_adult=is_adult)
+            )
+        return values
 
     def _rating_values(write_mode: str) -> dict[str, Any]:
         return build_rating_values(
@@ -554,8 +607,11 @@ async def apply_candidate(
         work, session_factory=session_factory, op="manual_scrape.apply",
     )
     if outcome is None:
+        # A manual apply never filters on `match_locked`, so a zero rowcount
+        # there can only mean the row vanished between phase 1 and phase 3.
         return ApplyOutcome(
-            status="skipped_locked", server_id=server_id, rating_key=rating_key,
+            status="skipped_locked" if source != "manual" else "not_found",
+            server_id=server_id, rating_key=rating_key,
             media_type=media_type,
             old_tmdb_id=old_tmdb_id, old_imdb_id=old_imdb_id,
             new_tmdb_id=final_tmdb, new_imdb_id=final_imdb,

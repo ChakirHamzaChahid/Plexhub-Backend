@@ -44,7 +44,9 @@ def _tick() -> None:
     `TMDBService._request` does."""
     tally = tmdb_module._request_tally.get()
     if tally is not None:
-        tally.count += 1
+        # `add()`, not `count += 1`: nested blocks aggregate, and
+        # `search_candidates` opens its own block (W5 review B1).
+        tally.add()
 
 
 class BatchTMDB:
@@ -688,3 +690,39 @@ async def test_upsert_review_reopens_a_resolved_row(db_factory):
     assert rows[0].status == "pending"
     assert rows[0].reason == "ambiguous_posters"
     assert rows[0].resolved_at is None
+
+
+async def test_tmdb_budget_stops_a_review_only_run(db_factory, patched):
+    """W5 review B1 — the regression the previous budget test could not see.
+
+    Here NOTHING is applied: every item goes to review, so the only TMDB
+    spend happens inside `search_candidates`, which opens its OWN
+    `count_requests()` block. While nesting was non-aggregating, the run
+    tally stayed at 0 forever and `budgetExhausted` could never fire — the
+    worst case on the catalogue, roughly 6 calls x SCRAPE_BATCH_MAX_ITEMS
+    unbudgeted TMDB calls."""
+    for i in range(5):
+        await _add(
+            db_factory, rating_key=f"vod_{i}.mp4", server_id="xtream_a",
+            title=f"Film {i}", year=1999,
+        )
+
+    async def _no_poster_match(xtream_url, variants):
+        return _comparison(badge="different")  # rule A and rule B both fail
+
+    patched.setattr(poster_match_service, "compare_posters", _no_poster_match)
+    patched.setattr(mss, "tmdb_service", BatchTMDB(
+        details_by_id={603: _details()}, hits=[_hit()], matched_id=None,
+    ))
+    patched.setattr(settings, "SCRAPE_BATCH_TMDB_LIMIT", 1)
+    patched.setattr(settings, "SCRAPE_BATCH_CONCURRENCY", 1)
+
+    job = await _run(db_factory)
+
+    assert job["autoAppliedA"] == 0 and job["autoAppliedB"] == 0, (
+        "precondition: this run applies nothing, so only search_candidates spends"
+    )
+    assert job["queuedForReview"] >= 1
+    assert job["tmdbCalls"] >= 1, "pass-2 spend must reach the run tally"
+    assert job["budgetExhausted"] is True
+    assert job["scanned"] < 5

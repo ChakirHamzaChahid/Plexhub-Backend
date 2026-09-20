@@ -134,8 +134,21 @@ class RequestTally:
     caller (e.g. the manual-scrape batch worker) can measure exactly how
     many real TMDB calls happened inside a `with count_requests():` block
     without touching/disturbing the global counter or any other concurrent
-    caller's tally."""
+    caller's tally.
+
+    Nested blocks AGGREGATE: `add()` credits this tally and every enclosing
+    one. A caller enforcing a budget (the batch worker) must see the calls
+    made inside a callee that opens its own block (`search_candidates`
+    does) — otherwise the budget guard silently counts zero on the most
+    expensive path."""
     count: int = 0
+    parent: "RequestTally | None" = None
+
+    def add(self, n: int = 1) -> None:
+        tally: "RequestTally | None" = self
+        while tally is not None:
+            tally.count += n
+            tally = tally.parent
 
 
 _request_tally: ContextVar["RequestTally | None"] = ContextVar("tmdb_request_tally", default=None)
@@ -145,11 +158,12 @@ _request_tally: ContextVar["RequestTally | None"] = ContextVar("tmdb_request_tal
 def count_requests() -> Generator[RequestTally, None, None]:
     """Count real TMDB HTTP attempts made in this context AND in asyncio
     tasks created from it (`ContextVar` is copied into new tasks, so they
-    share the same `RequestTally` instance). Non-aggregating when nested:
-    the innermost `count_requests()` block shadows any outer one for the
-    duration of its `with`. Never affects `TMDBService.real_request_count`
+    share the same `RequestTally` instance). AGGREGATING when nested: an
+    inner block counts into its own tally AND into every enclosing one, so
+    a caller enforcing a budget still sees calls made by a callee that
+    opens its own block. Never affects `TMDBService.real_request_count`
     (that counter keeps incrementing regardless, independently)."""
-    tally = RequestTally()
+    tally = RequestTally(parent=_request_tally.get())
     token = _request_tally.set(tally)
     try:
         yield tally
@@ -292,7 +306,7 @@ class TMDBService:
             self.real_request_count += 1
             tally = _request_tally.get()
             if tally is not None:
-                tally.count += 1
+                tally.add()
             try:
                 resp = await client.get(url, params=params)
                 # Handle 429 rate limit with Retry-After header

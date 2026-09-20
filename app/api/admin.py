@@ -131,6 +131,10 @@ async def admin_index(
     )
     ctx.update(await _stats_ctx(db))
     ctx["tab"] = "review" if tab == "review" else "catalogue"
+    # Reloading /admin while a batch runs must show that batch (with its
+    # polling and its Cancel button), not "Aucun lot lancé" followed by a
+    # 409 on the next Lancer.
+    ctx["job"] = manual_scrape_batch_worker.get_latest()
     return templates.TemplateResponse(request, "admin/index.html", ctx)
 
 

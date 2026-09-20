@@ -267,8 +267,11 @@ def _kind(media_type: str) -> Literal["movie", "tv"]:
     return "movie" if media_type == "movie" else "tv"
 
 
-async def _pair_one(job: dict[str, Any], row, *, session_factory, dry_run: bool) -> None:
-    """Pass 1 — resolve the missing id of an item that has exactly one."""
+async def _pair_one(job: dict[str, Any], row, *, session_factory, dry_run: bool) -> bool:
+    """Pass 1 — resolve the missing id of an item that has exactly one.
+
+    Returns True only when an identity was actually written (the caller
+    uses it to decide whether this media_type needs a snapshot rebuild)."""
     media_type = "movie" if (row.type or "") == "movie" else "show"
     imdb_id = (row.imdb_id or "").strip() or None
     tmdb_id = (row.tmdb_id or "").strip() or None
@@ -301,11 +304,11 @@ async def _pair_one(job: dict[str, Any], row, *, session_factory, dry_run: bool)
             job, row, media_type=media_type, reason=reason, candidates=[],
             session_factory=session_factory, dry_run=dry_run,
         )
-        return
+        return False
 
     job["paired"] += 1
     if dry_run:
-        return
+        return False
 
     outcome = await mss.apply_candidate(
         server_id=row.server_id, rating_key=row.rating_key, media_type=media_type,
@@ -314,10 +317,13 @@ async def _pair_one(job: dict[str, Any], row, *, session_factory, dry_run: bool)
         schedule_rebuild=False, session_factory=session_factory,
     )
     _account_outcome(job, outcome)
+    return outcome.status == "applied"
 
 
-async def _scrape_one(job: dict[str, Any], row, *, session_factory, dry_run: bool) -> None:
-    """Pass 2 — full candidate search + `decide()` on an item with no id."""
+async def _scrape_one(job: dict[str, Any], row, *, session_factory, dry_run: bool) -> bool:
+    """Pass 2 — full candidate search + `decide()` on an item with no id.
+
+    Returns True only when an identity was actually written."""
     media_type = "movie" if (row.type or "") == "movie" else "show"
     query = mss.ScrapeQuery(
         media_type=media_type, title=(row.title or "").strip(), year=row.year,
@@ -345,7 +351,7 @@ async def _scrape_one(job: dict[str, Any], row, *, session_factory, dry_run: boo
             candidates=result.candidates, session_factory=session_factory,
             dry_run=dry_run,
         )
-        return
+        return False
 
     candidate = decision.candidate
     if decision.rule == "A":
@@ -353,7 +359,7 @@ async def _scrape_one(job: dict[str, Any], row, *, session_factory, dry_run: boo
     else:
         job["autoAppliedB"] += 1
     if dry_run:
-        return
+        return False
 
     outcome = await mss.apply_candidate(
         server_id=row.server_id, rating_key=row.rating_key, media_type=media_type,
@@ -363,6 +369,7 @@ async def _scrape_one(job: dict[str, Any], row, *, session_factory, dry_run: boo
         session_factory=session_factory,
     )
     _account_outcome(job, outcome)
+    return outcome.status == "applied"
 
 
 def _account_outcome(job: dict[str, Any], outcome) -> None:
@@ -419,13 +426,14 @@ async def _run_pass(
             if tally.count >= settings.SCRAPE_BATCH_TMDB_LIMIT:
                 job["budgetExhausted"] = True
                 return
+            applied = False
             try:
                 if pass_one:
-                    await _pair_one(
+                    applied = await _pair_one(
                         job, row, session_factory=session_factory, dry_run=dry_run,
                     )
                 else:
-                    await _scrape_one(
+                    applied = await _scrape_one(
                         job, row, session_factory=session_factory, dry_run=dry_run,
                     )
             except Exception as exc:  # one bad item never kills the run
@@ -440,9 +448,18 @@ async def _run_pass(
                     row.server_id, row.rating_key, type(exc).__name__,
                 )
             else:
-                touched.add("movie" if (row.type or "") == "movie" else "show")
+                if applied:
+                    # Only an actual identity write changes group membership.
+                    # An item that went to review wrote nothing, so adding its
+                    # type here would rebuild the snapshot of a type nothing
+                    # touched.
+                    touched.add("movie" if (row.type or "") == "movie" else "show")
             finally:
                 job["scanned"] += 1
+                # Live, not only at the end of the run: the admin status
+                # fragment polls this every 2 s and shows it against the
+                # budget.
+                job["tmdbCalls"] = tally.count
 
     while remaining > 0:
         if job["cancelRequested"] or job["budgetExhausted"]:
@@ -524,8 +541,12 @@ async def run(
     except Exception as exc:
         job["status"] = "failed"
         job["errors"] += 1
-        job["lastError"] = f"{type(exc).__name__}: {exc}"
-        logger.error("scrape-batch %s failed", job_id, exc_info=True)
+        # Type only, same rule as the per-item handler above: a TMDB/OMDb
+        # exception string embeds the request URL, which carries the api key
+        # (ADR 0005 F2) — and `lastError` is rendered straight into the
+        # admin fragment. `exc_info` would put that URL in the log file too.
+        job["lastError"] = type(exc).__name__
+        logger.error("scrape-batch %s failed (%s)", job_id, type(exc).__name__)
     finally:
         job["phase"] = "done"
         job["finishedAt"] = now_ms()

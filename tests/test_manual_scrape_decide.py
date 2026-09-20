@@ -129,10 +129,13 @@ def test_rule_b_applies_behind_the_flag():
 
 
 def test_rule_b_is_off_by_default():
+    """W5 review: the reason must name the REAL cause. An identical poster
+    did exist here — only the flag held the apply back — so
+    "no_identical_poster" would mislead the operator reading the queue."""
     d = mss.decide(
         _result([_candidate(poster=_poster("identical"))]), poster_only_auto=False,
     )
-    assert (d.action, d.reason) == ("review", "no_identical_poster")
+    assert (d.action, d.reason) == ("review", "poster_only_auto_disabled")
 
 
 def test_rule_b_refuses_two_identical_posters():
@@ -151,7 +154,7 @@ def test_rule_b_refuses_a_weak_title():
         _result([_candidate(poster=_poster("identical"), title_score=0.4)]),
         poster_only_auto=True,
     )
-    assert (d.action, d.reason) == ("review", "no_identical_poster")
+    assert (d.action, d.reason) == ("review", "identical_poster_weak_text")
 
 
 @pytest.mark.parametrize(

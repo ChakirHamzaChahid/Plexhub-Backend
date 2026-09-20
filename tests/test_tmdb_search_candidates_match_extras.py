@@ -197,13 +197,18 @@ class TestCountRequestsTally:
         assert tally.count == 3
         assert route.call_count == 3
 
-    async def test_nested_inner_wins_not_aggregating(self, configured_tmdb, tmdb_mock):
+    async def test_nested_blocks_aggregate_into_the_outer_tally(
+        self, configured_tmdb, tmdb_mock,
+    ):
+        """W5 review B1: an inner block counts into its own tally AND into
+        every enclosing one. `search_candidates` opens its own block, so a
+        non-aggregating tally made the batch worker's budget guard count
+        ZERO on the pass-2 path — up to ~12k unbudgeted TMDB calls."""
         tmdb_mock.get("/3/search/movie").respond(200, json={"results": []})
         with count_requests() as outer:
             await configured_tmdb.search_movie("Outer call", None)
             with count_requests() as inner:
                 await configured_tmdb.search_movie("Inner call", None)
             assert inner.count == 1
-            # Outer resumes counting for calls made after the inner block exits.
             await configured_tmdb.search_movie("Outer call 2", None)
-        assert outer.count == 2  # the "Inner call" attempt did NOT count on outer
+        assert outer.count == 3, "the inner attempt must also count on outer"

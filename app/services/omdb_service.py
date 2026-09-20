@@ -122,8 +122,16 @@ class RequestTally:
     """Per-context counter of real OMDb HTTP attempts (ADR 0005 D2) — mirrors
     `app.services.tmdb_service.RequestTally`/`count_requests` exactly, as an
     independent counter (a caller measuring OMDb spend never shares state
-    with a caller measuring TMDB spend, or vice versa)."""
+    with a caller measuring TMDB spend, or vice versa). Nested blocks
+    AGGREGATE, same as TMDB's: `add()` credits every enclosing tally."""
     count: int = 0
+    parent: "RequestTally | None" = None
+
+    def add(self, n: int = 1) -> None:
+        tally: "RequestTally | None" = self
+        while tally is not None:
+            tally.count += n
+            tally = tally.parent
 
 
 _request_tally: ContextVar["RequestTally | None"] = ContextVar("omdb_request_tally", default=None)
@@ -134,9 +142,9 @@ def count_requests() -> Generator[RequestTally, None, None]:
     """Count real OMDb HTTP attempts made in this context (and in asyncio
     tasks created from it). See
     `app.services.tmdb_service.count_requests` for the exact semantics this
-    mirrors (non-aggregating on nesting, never touches
+    mirrors (aggregating on nesting, never touches
     `OMDbService.real_request_count`)."""
-    tally = RequestTally()
+    tally = RequestTally(parent=_request_tally.get())
     token = _request_tally.set(tally)
     try:
         yield tally
@@ -250,7 +258,7 @@ class OMDbService:
             self.real_request_count += 1
             tally = _request_tally.get()
             if tally is not None:
-                tally.count += 1
+                tally.add()
             try:
                 resp = await client.get(url, params=params)
                 if resp.status_code == 429:

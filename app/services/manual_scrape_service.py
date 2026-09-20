@@ -1190,6 +1190,9 @@ class Decision:
         "text_safe_and_identical", "poster_only_identical", "no_candidates",
         "no_xtream_poster", "xtream_poster_generic", "ambiguous_posters",
         "no_identical_poster", "text_safe_no_poster_match",
+        # Identical poster(s) existed but no rule acted on them — the reason
+        # must say which, since the operator reads it in the review queue.
+        "poster_only_auto_disabled", "identical_poster_weak_text",
     ]
 
 
@@ -1265,10 +1268,23 @@ def decide(result: SearchResult, *, poster_only_auto: bool) -> Decision:
             ):
                 return Decision("apply", "B", candidate, "poster_only_identical")
 
-    return Decision(
-        "review", None, None,
-        "text_safe_no_poster_match" if has_text_safe else "no_identical_poster",
-    )
+    # The reason is stored on the review row and shown to the operator, so it
+    # must say what actually happened — "no_identical_poster" would be a lie
+    # whenever identical posters DID exist but a rule declined to act on them.
+    if has_text_safe:
+        # A text-safe candidate exists but rule A did not fire, so its own
+        # poster is not the identical one: the two signals disagree.
+        reason = "text_safe_no_poster_match"
+    elif identical:
+        if not poster_only_auto:
+            reason = "poster_only_auto_disabled"
+        elif len(identical) > 1:
+            reason = "ambiguous_posters"
+        else:
+            reason = "identical_poster_weak_text"
+    else:
+        reason = "no_identical_poster"
+    return Decision("review", None, None, reason)
 
 
 # ─── "A verifier" review queue (ADR 0005 D8) ────────────────────────────────

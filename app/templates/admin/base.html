@@ -17,12 +17,80 @@
     // bubble): this script runs in <head>, where `document.body` does not
     // exist yet.
 
+    // The scrape drawer is a modal overlay: it opens centred on the viewport
+    // wherever the operator clicked in the list, so picking a row at the
+    // bottom of the page no longer means scrolling back to the top.
+    window.plexhubScrape = (function () {
+      function panel() { return document.getElementById('scrape-panel'); }
+
+      // The open modal carries the identity of the row it was opened from.
+      // `getElementById` is deliberate: a movie rating_key ends in `.mkv`,
+      // which makes `#row-…-vod_439568.mkv` an INVALID CSS selector (the dot
+      // parses as a class) — `querySelector` would throw. Same reason the
+      // server-side `css_id` filter exists for hx-target attributes.
+      function currentRow() {
+        var modal = document.getElementById('scrape-modal');
+        if (!modal) { return null; }
+        return document.getElementById(
+          'row-' + modal.dataset.sid + '-' + modal.dataset.rk
+        );
+      }
+
+      function close() {
+        var p = panel();
+        if (p) { p.innerHTML = ''; }
+        document.body.classList.remove('overflow-hidden');
+      }
+
+      function open(url) {
+        htmx.ajax('GET', url, { target: '#scrape-panel', swap: 'innerHTML' });
+      }
+
+      // Chain to the next unresolved item of the current page, so a queue
+      // can be worked through without touching the list between two medias.
+      // `?auto=1` makes the drawer fire its candidate search on load.
+      function next() {
+        var row = currentRow();
+        close();
+        // Opened from the review list rather than the table: nothing to
+        // chain through, stop here instead of jumping somewhere unrelated.
+        if (!row || !row.dataset.scrapeUrl) { return false; }
+        var rows = Array.prototype.slice.call(
+          document.querySelectorAll('#media-table tbody tr[data-scrape-url]')
+        );
+        for (var i = rows.indexOf(row) + 1; i < rows.length; i++) {
+          if (rows[i].dataset.incomplete === '1') {
+            rows[i].scrollIntoView({ block: 'center' });
+            open(rows[i].dataset.scrapeUrl + '?auto=1');
+            return true;
+          }
+        }
+        return false;
+      }
+
+      return { close: close, next: next, open: open };
+    })();
+
     // A successful apply closes the scrape drawer. The event fires on the
     // row's own form, which is NOT an ancestor of #scrape-panel — hence a
     // document-level listener rather than an attribute on the panel.
+    // It fires BEFORE the row swap, so the row read here is still the old
+    // one — harmless, since chaining skips it by position either way.
     document.addEventListener('close-scrape-panel', function () {
-      var panel = document.getElementById('scrape-panel');
-      if (panel) { panel.innerHTML = ''; }
+      window.plexhubScrape.next();
+    });
+
+    document.addEventListener('keydown', function (evt) {
+      if (evt.key === 'Escape') { window.plexhubScrape.close(); }
+    });
+
+    // Freeze the page behind the overlay, and thaw it when the panel empties.
+    document.addEventListener('htmx:afterSwap', function (evt) {
+      if (evt.target && evt.target.id === 'scrape-panel') {
+        document.body.classList.toggle(
+          'overflow-hidden', evt.target.innerHTML.trim() !== ''
+        );
+      }
     });
 
     // Listener on `document` (htmx events bubble): this script runs in

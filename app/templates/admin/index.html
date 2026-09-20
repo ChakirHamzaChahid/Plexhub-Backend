@@ -5,28 +5,52 @@
   {% include "admin/_stats.html" %}
 </section>
 
+{#
+  ADR 0005 F9 / CLAUDE.md §5.10 htmx trap: NEVER use a `from:` selector that
+  contains a space (`from:#filters select`) — htmx mis-tokenises it and
+  silently drops the trigger. And `changed` on a <form> never fires (a form
+  has no `.value`). Events from the inputs bubble to the form, so a bare
+  `change, keyup delay:300ms, submit` is both correct and simpler.
+#}
 <form id="filters"
       class="flex flex-wrap items-end gap-3 bg-white p-3 rounded shadow-sm border border-slate-200 mb-4"
-      hx-get="/admin/movies"
-      hx-target="#movies-table"
+      hx-get="/admin/catalogue"
+      hx-target="#media-table"
       hx-swap="innerHTML"
-      hx-trigger="change from:#filters input[type=checkbox], change from:#filters select, keyup changed delay:300ms from:#filters input[name=search], submit"
+      hx-trigger="change, keyup delay:300ms, submit"
       hx-include="#filters"
       hx-push-url="false">
 
-  <label class="flex items-center gap-2 text-sm">
-    <input type="checkbox" name="missing_imdb" value="true"
-           {% if missing_imdb %}checked{% endif %}
-           class="h-4 w-4 rounded border-slate-300">
-    <span>Sans IMDb</span>
-  </label>
+  <div class="flex flex-col">
+    <span class="text-xs text-slate-500">Type</span>
+    <div class="flex rounded border border-slate-300 overflow-hidden text-sm">
+      <label class="px-3 py-1 cursor-pointer {{ 'bg-slate-900 text-slate-100' if media_type == 'movie' else 'bg-white' }}">
+        <input type="radio" name="type" value="movie" class="sr-only"
+               {% if media_type == 'movie' %}checked{% endif %}>
+        Films
+      </label>
+      <label class="px-3 py-1 cursor-pointer border-l border-slate-300 {{ 'bg-slate-900 text-slate-100' if media_type == 'show' else 'bg-white' }}">
+        <input type="radio" name="type" value="show" class="sr-only"
+               {% if media_type == 'show' %}checked{% endif %}>
+        Séries
+      </label>
+    </div>
+  </div>
 
-  <label class="flex items-center gap-2 text-sm">
-    <input type="checkbox" name="missing_tmdb" value="true"
-           {% if missing_tmdb %}checked{% endif %}
-           class="h-4 w-4 rounded border-slate-300">
-    <span>Sans TMDB</span>
-  </label>
+  <div class="flex flex-col">
+    <label class="text-xs text-slate-500" for="ids">Identifiants</label>
+    <select id="ids" name="ids"
+            class="border border-slate-300 rounded px-2 py-1 text-sm">
+      <option value="incomplete"    {% if ids == 'incomplete' %}selected{% endif %}>Incomplets (défaut)</option>
+      <option value="all"           {% if ids == 'all' %}selected{% endif %}>Tous</option>
+      <option value="missing_imdb"  {% if ids == 'missing_imdb' %}selected{% endif %}>Sans IMDb</option>
+      <option value="missing_tmdb"  {% if ids == 'missing_tmdb' %}selected{% endif %}>Sans TMDB</option>
+      <option value="missing_both"  {% if ids == 'missing_both' %}selected{% endif %}>Sans aucun des deux</option>
+      <option value="locked"        {% if ids == 'locked' %}selected{% endif %}>Verrouillés</option>
+      <option value="batch"         {% if ids == 'batch' %}selected{% endif %}>Appliqués par lot</option>
+      <option value="review"        {% if ids == 'review' %}selected{% endif %}>À vérifier</option>
+    </select>
+  </div>
 
   <div class="flex flex-col">
     <label class="text-xs text-slate-500" for="search">Recherche</label>
@@ -54,7 +78,66 @@
   <span class="htmx-indicator text-xs text-slate-500 self-center">⏳ chargement…</span>
 </form>
 
-<div id="movies-table" class="bg-white rounded shadow-sm border border-slate-200 overflow-hidden">
-  {% include "admin/_movies_table.html" %}
+{# Scrape drawer target: filled by the row "Scraper" button, emptied by an
+   out-of-band swap when an identity is applied (ADR 0005 D10). #}
+{# Emptied by the `close-scrape-panel` listener in base.html (fired by the
+   HX-Trigger of a successful apply). An out-of-band swap can't do it: the
+   apply response is a <tr> fragment, and a sibling <div> gets
+   foster-parented out of the table at parse time. #}
+<div id="scrape-panel" class="mb-4"></div>
+
+<div id="media-table" class="bg-white rounded shadow-sm border border-slate-200 overflow-hidden">
+  {% include "admin/_media_table.html" %}
 </div>
+
+{# ── Lot + file « À vérifier » (ADR 0005 D8/D10, W5) ────────────────────── #}
+<section class="grid gap-4 mt-6 lg:grid-cols-3">
+  <div class="bg-white rounded shadow-sm border border-slate-200 p-3">
+    <h2 class="text-sm font-semibold text-slate-900">Scraping par lot</h2>
+    <p class="text-xs text-slate-500 mt-1">
+      Apparie les médias qui n'ont qu'un identifiant, puis scrape ceux qui n'en
+      ont aucun. N'applique automatiquement que les correspondances sûres ; le
+      reste part dans « À vérifier ». La simulation n'écrit rien et produit
+      l'histogramme de distances qui calibre la règle « poster seul ».
+    </p>
+    <form hx-post="/admin/scrape-batch"
+          hx-target="#scrape-batch-status"
+          hx-swap="outerHTML"
+          class="flex flex-wrap items-end gap-2 mt-3">
+      <label class="flex flex-col text-xs text-slate-500">
+        Type
+        <select name="type" class="border border-slate-300 rounded px-2 py-1 text-sm">
+          <option value="all">Films + séries</option>
+          <option value="movie">Films</option>
+          <option value="show">Séries</option>
+        </select>
+      </label>
+      <label class="flex flex-col text-xs text-slate-500">
+        Max items
+        <input name="max_items" type="number" min="1" placeholder="défaut"
+               class="border border-slate-300 rounded px-2 py-1 text-sm w-24">
+      </label>
+      <label class="flex items-center gap-1 text-xs text-slate-600 pb-1">
+        <input type="checkbox" name="dry_run" value="1" checked> simulation
+      </label>
+      <button type="submit"
+              class="px-3 py-1 text-xs rounded bg-slate-900 text-slate-100 hover:bg-slate-700">
+        Lancer
+      </button>
+    </form>
+    <div class="mt-3">
+      {% include "admin/_scrape_batch_status.html" %}
+    </div>
+  </div>
+
+  <div class="lg:col-span-2 bg-white rounded shadow-sm border border-slate-200 overflow-hidden">
+    <h2 class="text-sm font-semibold text-slate-900 px-3 pt-3">À vérifier</h2>
+    <div id="review-list"
+         hx-get="/admin/review"
+         hx-trigger="load, refresh-review from:body"
+         hx-target="#review-list"
+         hx-swap="innerHTML">
+    </div>
+  </div>
+</section>
 {% endblock %}

@@ -35,7 +35,7 @@ from app.api import (
 from app.utils.request_context import RequestIdLogFilter, RequestIdMiddleware
 from app.utils.job_health import mark_job_success, set_master, track_job
 
-APP_VERSION = "1.9.0"
+APP_VERSION = "1.10.0"
 
 logger = logging.getLogger("plexhub")
 
@@ -541,6 +541,7 @@ async def lifespan(app: FastAPI):
         from app.services.tmdb_service import tmdb_service
         from app.workers import health_check_worker
         from app.dav import relay as dav_relay
+        from app.services import poster_match_service
 
         await xtream_service.close()
         await tmdb_service.close()
@@ -548,6 +549,9 @@ async def lifespan(app: FastAPI):
         # DAV relay's pooled client (`app/dav/relay.py::get_client`) — a
         # no-op if `/dav` was never enabled/hit (lazy client, stays `None`).
         await dav_relay.close_client()
+        # Manual-scrape poster-match's dedicated image client (ADR 0005 D5) —
+        # a no-op if no poster was ever compared (lazy client, stays `None`).
+        await poster_match_service.close()
 
         # Shutdown image download thread pool
         from app.plex_generator.storage import shutdown_image_pool

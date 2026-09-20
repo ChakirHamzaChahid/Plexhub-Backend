@@ -167,6 +167,7 @@ class Report:
     applied: bool
     suspect_group_count: int = 0
     members_examined: int = 0
+    skipped_locked: int = 0
     tmdb_fetches: int = 0
     omdb_fetches: int = 0
     counts: dict[str, int] = field(default_factory=lambda: {c: 0 for c in _ALL_CLASSES})
@@ -434,7 +435,12 @@ async def _apply_fix(db, row, media_type, new_tmdb, new_imdb, new_uid, new_hgk,
 
     await db.execute(
         update(Media)
-        .where(Media.server_id == row.server_id, Media.rating_key == row.rating_key)
+        .where(
+            Media.server_id == row.server_id,
+            Media.rating_key == row.rating_key,
+            # ADR 0005 D7/L6: never overwrite a manually-locked identity.
+            Media.match_locked == False,  # noqa: E712
+        )
         .values(**values)
     )
 
@@ -513,6 +519,12 @@ async def run(
                 )
 
             for u in units:
+                # ADR 0005 D7/L6: a manually-locked row is skipped entirely —
+                # neither classified for action nor written — its identity
+                # was fixed by an operator via the manual scraper.
+                if getattr(u, "match_locked", False):
+                    report.skipped_locked += 1
+                    continue
                 report.members_examined += 1
                 real = own_imdb.get(u.tmdb_id)
                 cls, (new_tmdb, new_imdb) = _classify(

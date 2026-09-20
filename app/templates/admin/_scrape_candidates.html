@@ -1,0 +1,106 @@
+{% set sid = item.server_id %}
+{% set rk = item.rating_key %}
+{% set row_id = "row-" ~ sid ~ "-" ~ rk %}
+{% set old_imdb = item.imdb_id or "aucun" %}
+{% set old_tmdb = item.tmdb_id or "aucun" %}
+
+{% if error %}
+<div class="text-sm text-rose-700 bg-rose-50 border border-rose-200 rounded px-3 py-2">
+  {{ error }}
+</div>
+{% elif result is none or not result.candidates %}
+<div class="text-sm text-slate-500 italic">Aucun candidat trouvé.</div>
+{% else %}
+<div class="text-xs text-slate-500 mb-2">
+  {{ result.candidates | length }} candidat(s) · verdict texte :
+  <span class="font-mono">{{ result.text_verdict }}</span> ·
+  {{ result.tmdb_calls }} appel(s) TMDB, {{ result.omdb_calls }} OMDb
+  {%- if not result.xtream_poster_available %} · pas de poster Xtream à comparer{% endif %}
+  {%- if result.xtream_poster_generic %} · poster Xtream générique (placeholder){% endif %}
+</div>
+
+<div class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+  {% for c in result.candidates %}
+  <article class="border rounded p-3 flex gap-3
+      {{ 'border-emerald-400 bg-emerald-50' if c.recommended else 'border-slate-200 bg-white' }}">
+    {% if c.poster_url %}
+    <img src="{{ c.poster_url }}" loading="lazy" alt=""
+         class="w-20 h-auto rounded border border-slate-200 bg-slate-100 shrink-0">
+    {% else %}
+    <div class="w-20 h-28 rounded border border-dashed border-slate-300 bg-slate-50 shrink-0"></div>
+    {% endif %}
+
+    <div class="min-w-0 flex-1">
+      <div class="font-medium text-slate-900 truncate">{{ c.title }}</div>
+      {% if c.original_title and c.original_title != c.title %}
+      <div class="text-xs text-slate-500 italic truncate">{{ c.original_title }}</div>
+      {% endif %}
+      <div class="text-xs text-slate-600 mt-0.5">
+        {{ c.year or "—" }} · {{ "série" if c.media_type == "show" else "film" }} ·
+        {{ (c.combined_score * 100) | round | int }} %
+      </div>
+
+      <div class="flex flex-wrap gap-1 mt-1">
+        {% if c.recommended %}
+        <span class="px-1.5 py-0.5 text-[10px] rounded bg-emerald-600 text-white">Recommandé</span>
+        {% endif %}
+        {% if c.text_safe %}
+        <span class="px-1.5 py-0.5 text-[10px] rounded bg-sky-100 text-sky-800">texte sûr</span>
+        {% endif %}
+        {% if c.poster %}
+          {% if c.poster.badge == "identical" %}
+          <span class="px-1.5 py-0.5 text-[10px] rounded bg-emerald-100 text-emerald-800">poster identique</span>
+          {% elif c.poster.badge == "close" %}
+          <span class="px-1.5 py-0.5 text-[10px] rounded bg-amber-100 text-amber-800">poster proche</span>
+          {% elif c.poster.badge == "different" %}
+          <span class="px-1.5 py-0.5 text-[10px] rounded bg-rose-100 text-rose-800">poster différent</span>
+          {% endif %}
+          {% if c.poster.phash_distance is not none %}
+          <span class="px-1.5 py-0.5 text-[10px] rounded bg-slate-100 text-slate-600 font-mono"
+                title="distance pHash / dHash">
+            {{ c.poster.phash_distance }}/{{ c.poster.dhash_distance }}
+          </span>
+          {% endif %}
+        {% endif %}
+        <span class="px-1.5 py-0.5 text-[10px] rounded bg-slate-100 text-slate-500">{{ c.provider }}</span>
+      </div>
+
+      {% if c.overview %}
+      <p class="text-xs text-slate-500 mt-1 line-clamp-3">{{ c.overview[:280] }}</p>
+      {% endif %}
+
+      <div class="flex flex-wrap items-center gap-2 mt-2 text-xs">
+        {% if c.tmdb_id %}
+        <a href="https://www.themoviedb.org/{{ 'tv' if c.media_type == 'show' else 'movie' }}/{{ c.tmdb_id }}"
+           target="_blank" rel="noopener" class="text-cyan-700 hover:underline">TMDB ↗</a>
+        {% endif %}
+        {% if c.imdb_id %}
+        <a href="https://www.imdb.com/title/{{ c.imdb_id }}/"
+           target="_blank" rel="noopener" class="text-amber-700 hover:underline">IMDb ↗</a>
+        {% endif %}
+      </div>
+
+      <form hx-post="/admin/media/{{ sid }}/{{ rk }}/apply"
+            hx-target="#{{ row_id|css_id }}"
+            hx-swap="outerHTML"
+            hx-confirm="Appliquer « {{ c.title|e }} » ?&#10;IMDb : {{ old_imdb|e }} → {{ (c.imdb_id or 'aucun')|e }}&#10;TMDB : {{ old_tmdb|e }} → {{ (c.tmdb_id or 'aucun')|e }}"
+            class="flex flex-wrap items-center gap-2 mt-2">
+        <input type="hidden" name="type" value="{{ c.media_type }}">
+        <input type="hidden" name="tmdb_id" value="{{ c.tmdb_id or '' }}">
+        <input type="hidden" name="imdb_id" value="{{ c.imdb_id or '' }}">
+        <label class="flex items-center gap-1 text-xs text-slate-600">
+          <input type="checkbox" name="propagate" value="1"> propager
+        </label>
+        <label class="flex items-center gap-1 text-xs text-slate-600">
+          <input type="checkbox" name="force" value="1"> forcer
+        </label>
+        <button type="submit"
+                class="px-2 py-1 text-xs rounded bg-emerald-700 text-emerald-50 hover:bg-emerald-600">
+          Appliquer
+        </button>
+      </form>
+    </div>
+  </article>
+  {% endfor %}
+</div>
+{% endif %}

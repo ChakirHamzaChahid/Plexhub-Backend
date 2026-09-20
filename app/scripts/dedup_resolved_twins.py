@@ -167,7 +167,9 @@ def main(argv=None) -> int:
                     "history_group_key=?, updated_at=? "
                     "WHERE rating_key=? AND server_id=? "
                     "AND (imdb_id IS NULL OR imdb_id='') "
-                    "AND (tmdb_id IS NULL OR tmdb_id='' OR tmdb_id='0')",
+                    "AND (tmdb_id IS NULL OR tmdb_id='' OR tmdb_id='0') "
+                    # ADR 0005 D7/L7: never overwrite a manually-locked identity.
+                    "AND match_locked = 0",
                     [(p["imdb_id"], p["tmdb_id"], p["unification_id"],
                       p["history_group_key"], now, p["rating_key"], p["server_id"])
                      for p in full_plan],

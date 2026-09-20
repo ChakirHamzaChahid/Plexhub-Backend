@@ -42,7 +42,13 @@ def _configure_secrets(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _wire_db(monkeypatch, db_factory):
+    from app.api import admin as admin_module
+
     monkeypatch.setattr(db_module, "async_session_factory", db_factory)
+    # The manual-scrape routes hold `admin.py`'s own import-time reference to
+    # `async_session_factory`, which patching the module attribute above does
+    # not reach (same reason as tests/test_admin_manual_scrape.py).
+    monkeypatch.setattr(admin_module, "async_session_factory", db_factory)
 
 
 class TestAdminPostBlockedCrossSite:
@@ -138,6 +144,64 @@ class TestAdminGetNeverBlocked:
             headers={"Sec-Fetch-Site": "cross-site"},
         )
         assert resp.status_code == 200
+
+
+MANUAL_SCRAPE_POSTS = [
+    ("/admin/media/xtream_a/vod_1.mp4/apply", {"tmdb_id": "603", "type": "movie"}),
+    ("/admin/media/xtream_a/vod_1.mp4/unlock", {}),
+    ("/admin/media/xtream_a/vod_1.mp4/clear", {}),
+    ("/admin/media/xtream_a/vod_1.mp4/rescrape", {}),
+    ("/admin/media/xtream_a/vod_1.mp4/lookup", {"raw_id": "603", "type": "movie"}),
+    ("/admin/movies/vod_1.mp4/ids", {"server_id": "xtream_a", "imdb_id": "tt1"}),
+    ("/admin/movies/vod_1.mp4/rescrape", {"server_id": "xtream_a"}),
+    # W5 (ADR 0005 D8/D10)
+    ("/admin/review/xtream_a/vod_1.mp4/apply", {"candidate_index": "0"}),
+    ("/admin/review/xtream_a/vod_1.mp4/dismiss", {}),
+    ("/admin/scrape-batch/scrape_batch_unknown/cancel", {}),
+]
+
+
+class TestManualScrapePostsCsrfGuarded:
+    """ADR 0005 D10 (W2/W4): every manual-scraper write route is a POST under
+    `/admin`, so it inherits the same CSRF guard — asserted route by route
+    rather than assumed, since a future route mounted under a different
+    prefix would silently lose it."""
+
+    @pytest.mark.parametrize("path,data", MANUAL_SCRAPE_POSTS)
+    async def test_cross_site_post_rejected_with_403(self, api_client, path, data):
+        resp = await api_client.post(
+            path, data=data, auth=ADMIN_AUTH,
+            headers={"Sec-Fetch-Site": "cross-site"},
+        )
+        assert resp.status_code == 403, path
+        assert resp.json()["detail"] == "Cross-site request rejected"
+
+    @pytest.mark.parametrize("path,data", MANUAL_SCRAPE_POSTS)
+    async def test_same_origin_post_reaches_the_handler(self, api_client, path, data):
+        """Not CSRF-blocked: the route runs and answers 404 for this unknown
+        media row (proving the 403 above came from the guard, not from the
+        route itself)."""
+        resp = await api_client.post(
+            path, data=data, auth=ADMIN_AUTH,
+            headers={"Sec-Fetch-Site": "same-origin"},
+        )
+        assert resp.status_code == 404, path
+
+
+class TestScrapeBatchStartCsrfGuarded:
+    """`POST /admin/scrape-batch` can't join the parametrized list above (a
+    same-origin call would actually LAUNCH a batch), so its cross-site
+    rejection is asserted on its own."""
+
+    async def test_cross_site_post_rejected_with_403(self, api_client):
+        resp = await api_client.post(
+            "/admin/scrape-batch", data={"type": "movie", "dry_run": "1"},
+            auth=ADMIN_AUTH, headers={"Sec-Fetch-Site": "cross-site"},
+        )
+        assert resp.status_code == 403
+        from app.workers import manual_scrape_batch_worker as worker
+
+        assert worker.is_running() is False
 
 
 class TestJsonMirrorUnaffected:

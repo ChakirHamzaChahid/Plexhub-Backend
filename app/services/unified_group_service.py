@@ -15,13 +15,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Callable
 
-from sqlalchemy import delete, insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import delete, insert, select
 
+from app.config import settings
 from app.models.database import Media, MediaGroup, MediaGroupMember
 from app.services.aggregation_service import aggregate_movies
 from app.utils.db_retry import run_with_retry
+from app.utils.tasks import create_background_task
 from app.utils.time import now_ms
 
 logger = logging.getLogger("plexhub.unified_group")
@@ -100,6 +103,22 @@ async def rebuild(db: AsyncSession, media_type: str) -> int:
     return len(groups)
 
 
+async def _rebuild_one(media_type: str, session_factory: Callable[[], AsyncSession]) -> int:
+    """(Re)build + commit ONE media_type's snapshot in its own lock-retried
+    transaction on a FRESH session — so a `database is locked` retry re-opens
+    a clean session (no lingering ``PendingRollbackError``). Shared by
+    `rebuild_all` (every type) and `schedule_rebuild` (one type, debounced,
+    ADR 0005 D9)."""
+
+    async def _attempt() -> int:
+        async with session_factory() as db:
+            n = await rebuild(db, media_type)
+            await db.commit()
+            return n
+
+    return await run_with_retry(_attempt, op=f"rebuild_media_group[{media_type}]")
+
+
 async def rebuild_all(session_factory) -> dict[str, int]:
     """Rebuild the snapshot for every grouped media_type.
 
@@ -109,20 +128,12 @@ async def rebuild_all(session_factory) -> dict[str, int]:
     half-writes another's."""
     counts: dict[str, int] = {}
     for media_type in GROUP_MEDIA_TYPES:
-        async def _attempt(_mt: str = media_type) -> int:
-            async with session_factory() as db:
-                n = await rebuild(db, _mt)
-                await db.commit()
-                return n
-
         # Isolate each type: a failure building one (e.g. an unexpected data
         # shape) must not prevent the other from being built — nor leave the
         # whole snapshot empty. The unified list falls back to live aggregation
         # for any type left unbuilt.
         try:
-            counts[media_type] = await run_with_retry(
-                _attempt, op=f"rebuild_media_group[{media_type}]"
-            )
+            counts[media_type] = await _rebuild_one(media_type, session_factory)
             logger.info(
                 "Unified-group snapshot: %s -> %d groups", media_type, counts[media_type]
             )
@@ -132,3 +143,174 @@ async def rebuild_all(session_factory) -> dict[str, int]:
                 "to live aggregation for this type)", media_type, exc_info=True,
             )
     return counts
+
+
+# ─── ADR 0005 D9 — debounced single-type rebuild (manual-scrape apply) ──────
+#
+# `apply_candidate`/`unlock`/`clear_ids` (and the future batch worker) each
+# touch ONE media_group at a time, but an operator working through several
+# rows (or a propagate=True fan-out) can trigger several applies within a
+# couple of seconds. Rebuilding the WHOLE catalog's snapshot per write would
+# be wasteful; a plain per-write rebuild would also race itself (two
+# concurrent full-table DELETE+INSERT passes for the same media_type). A
+# trailing-edge debounce collapses a burst into ONE rebuild per type, run
+# `delay` seconds after the LAST call in the burst.
+_pending_rebuild_tasks: dict[str, asyncio.Task] = {}
+_pending_session_factories: dict[str, Callable[[], AsyncSession]] = {}
+_running_rebuild_tasks: dict[str, set[asyncio.Task]] = {}
+# One lock per media_type SERIALIZES the DELETE+INSERT pass itself, so two
+# rebuilds of the same type can never interleave — whichever started later
+# also COMMITS later, and therefore wins with the fresher read. Without it,
+# a rebuild scheduled while another was running could read older rows (a
+# pysqlite SELECT opens no transaction) and commit last, leaving a stale
+# snapshot until the next pipeline run. Keyed by loop as well as type: the
+# dict outlives an event loop (tests create several), and an `asyncio.Lock`
+# bound to a closed loop raises on the next `await`.
+_rebuild_locks: dict[str, tuple[asyncio.AbstractEventLoop, asyncio.Lock]] = {}
+
+
+def _rebuild_lock(media_type: str) -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    entry = _rebuild_locks.get(media_type)
+    if entry is None or entry[0] is not loop:
+        entry = (loop, asyncio.Lock())
+        _rebuild_locks[media_type] = entry
+    return entry[1]
+
+
+async def _rebuild_one_serialized(media_type: str, session_factory) -> int:
+    """`_rebuild_one` under this type's lock — the only entry point the
+    debounced/flushed paths may use (see `_rebuild_locks`)."""
+    async with _rebuild_lock(media_type):
+        return await _rebuild_one(media_type, session_factory)
+
+
+async def _debounced_rebuild(media_type: str, delay: float, session_factory) -> None:
+    try:
+        await asyncio.sleep(delay)
+    except asyncio.CancelledError:
+        # Superseded by a newer schedule_rebuild() call for this type before
+        # the debounce window elapsed — that newer task already took over
+        # `_pending_rebuild_tasks[media_type]`; this one has nothing left to
+        # do (never re-add itself to `_running_rebuild_tasks`).
+        return
+    # From here on this task IS the in-flight rebuild for `media_type` — a
+    # NEW schedule_rebuild() call must no longer cancel it (D9: "une
+    # reconstruction DÉJÀ en cours n'est jamais annulée"), only start
+    # another one to run after it.
+    _pending_rebuild_tasks.pop(media_type, None)
+    _pending_session_factories.pop(media_type, None)
+    current = asyncio.current_task()
+    if current is not None:
+        _running_rebuild_tasks.setdefault(media_type, set()).add(current)
+    try:
+        n = await _rebuild_one_serialized(media_type, session_factory)
+        logger.info(
+            "Unified-group snapshot (debounced): %s -> %d groups", media_type, n
+        )
+    except Exception:
+        logger.error(
+            "Debounced unified-group snapshot rebuild failed for %s (browsing "
+            "falls back to live aggregation for this type)", media_type,
+            exc_info=True,
+        )
+    finally:
+        if current is not None:
+            # Discard only OUR OWN entry: a second rebuild for this same type
+            # may already be queued behind us on the lock, and popping the
+            # whole slot would hide it from `flush_scheduled`.
+            running = _running_rebuild_tasks.get(media_type)
+            if running is not None:
+                running.discard(current)
+                if not running:
+                    _running_rebuild_tasks.pop(media_type, None)
+
+
+def schedule_rebuild(
+    media_type: str,
+    *,
+    session_factory: Callable[[], AsyncSession],
+    delay: float | None = None,
+) -> None:
+    """Debounce a snapshot rebuild for ONE `media_type` (ADR 0005 D9).
+
+    Trailing-edge: cancels any still-PENDING (not yet started) debounce task
+    for this same type and schedules a fresh one `delay` seconds out. A
+    rebuild already IN PROGRESS is never cancelled — a call arriving while
+    one is running simply schedules another debounce window to start once
+    the current one finishes settling into the pending slot (so it, in turn,
+    can still be superseded by an even newer call before it starts).
+
+    Types outside `GROUP_MEDIA_TYPES` are a no-op (nothing to rebuild).
+    Failures are logged, never raised — the live aggregation path is always
+    the fallback for browsing, so a rebuild failure must never propagate
+    into (and fail) the caller's own write.
+    """
+    if media_type not in GROUP_MEDIA_TYPES:
+        return
+    if delay is None:
+        delay = settings.SCRAPE_REBUILD_DEBOUNCE_SECONDS
+
+    existing = _pending_rebuild_tasks.get(media_type)
+    if existing is not None and not existing.done():
+        existing.cancel()
+
+    task = create_background_task(
+        _debounced_rebuild(media_type, delay, session_factory),
+        name=f"unified-rebuild-{media_type}",
+    )
+    _pending_rebuild_tasks[media_type] = task
+    _pending_session_factories[media_type] = session_factory
+
+
+async def flush_scheduled() -> None:
+    """Run every still-pending debounced rebuild immediately, and await every
+    currently-running one. Intended for tests (and end-of-batch callers, e.g.
+    the future manual-scrape batch worker) that need the snapshot to reflect
+    every `schedule_rebuild()` call made so far before proceeding.
+
+    A pending task is still sleeping out its debounce window — cancelling it
+    alone would make `_debounced_rebuild` take the `CancelledError` short-
+    circuit and return WITHOUT rebuilding (see that function's docstring: a
+    cancel there means "superseded", not "run now"). So instead we cancel the
+    sleep AND run the rebuild ourselves, directly, using the session_factory
+    captured at schedule time — exactly once per still-pending type."""
+    for _ in range(10):  # bounded: a rebuild may itself schedule nothing new
+        pending_types = list(_pending_rebuild_tasks.keys())
+        for media_type in pending_types:
+            task = _pending_rebuild_tasks.pop(media_type, None)
+            factory = _pending_session_factories.pop(media_type, None)
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            if factory is not None:
+                try:
+                    # Serialized like every other path: if a rebuild for this
+                    # type is still in flight, this one waits for it instead
+                    # of racing it (see `_rebuild_locks`).
+                    n = await _rebuild_one_serialized(media_type, factory)
+                    logger.info(
+                        "Unified-group snapshot (flushed): %s -> %d groups", media_type, n
+                    )
+                except Exception:
+                    logger.error(
+                        "Flushed unified-group snapshot rebuild failed for %s "
+                        "(browsing falls back to live aggregation for this type)",
+                        media_type, exc_info=True,
+                    )
+        running = [
+            t
+            for tasks in _running_rebuild_tasks.values()
+            for t in tasks
+            if not t.done()
+        ]
+        for t in running:
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
+        if not _pending_rebuild_tasks and not running:
+            return

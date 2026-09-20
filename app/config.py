@@ -285,6 +285,81 @@ class Settings:
     DAV_CONNECT_TIMEOUT: float = _safe_float("DAV_CONNECT_TIMEOUT", float(DOWNLOAD_CONNECT_TIMEOUT))
     DAV_READ_TIMEOUT: float = _safe_float("DAV_READ_TIMEOUT", float(DOWNLOAD_READ_TIMEOUT))
 
+    # Manual scraper (ADR 0005 D9/D11) — `unified_group_service.schedule_rebuild`
+    # debounce window: several `apply_candidate` calls in quick succession (a
+    # propagate=True fan-out, or an operator working through several rows)
+    # coalesce into a single snapshot rebuild per media_type instead of one
+    # per write.
+    SCRAPE_REBUILD_DEBOUNCE_SECONDS: float = _safe_float("SCRAPE_REBUILD_DEBOUNCE_SECONDS", 5.0)
+    # How many of the top text-scored candidates get their posters downloaded
+    # and compared (ADR 0005 D6/D11). The interactive value is higher because
+    # an operator is waiting on ONE item and wants the best evidence; the
+    # batch value is lower because it multiplies by thousands of items.
+    SCRAPE_INTERACTIVE_POSTER_CANDIDATES: int = _safe_int(
+        "SCRAPE_INTERACTIVE_POSTER_CANDIDATES", 5,
+    )
+    SCRAPE_BATCH_POSTER_CANDIDATES: int = _safe_int("SCRAPE_BATCH_POSTER_CANDIDATES", 3)
+    # Batch scraper budgets (ADR 0005 D8/D11). The TMDB limit counts REAL
+    # HTTP attempts (retries included) made inside the run, via the
+    # `tmdb_service.count_requests()` ContextVar tally — NOT the global
+    # `real_request_count`, which `enrichment_worker.run()` resets from under
+    # us. Hitting either cap ends the run cleanly (`budgetExhausted`), it is
+    # never an error.
+    SCRAPE_BATCH_TMDB_LIMIT: int = _safe_int("SCRAPE_BATCH_TMDB_LIMIT", 3000)
+    SCRAPE_BATCH_MAX_ITEMS: int = _safe_int("SCRAPE_BATCH_MAX_ITEMS", 2000)
+    SCRAPE_BATCH_CONCURRENCY: int = _safe_int("SCRAPE_BATCH_CONCURRENCY", 4)
+    # Rule B (ADR 0005 D6 `decide`): auto-apply a candidate on the strength of
+    # ONE identical poster alone, with no text-safe verdict backing it. OFF by
+    # default and it must STAY off until a dry-run's distance histogram has
+    # been read on this deployment's real catalogue — a mis-calibrated
+    # threshold here mass-applies wrong identities (and locks them).
+    SCRAPE_BATCH_POSTER_ONLY_AUTO: bool = os.getenv(
+        "SCRAPE_BATCH_POSTER_ONLY_AUTO", "false",
+    ).lower() in ("true", "1", "yes")
+
+    # Manual scraper poster-match (ADR 0005 D5/D11) — compares the Xtream
+    # poster to TMDB/OMDb candidate posters via dHash/pHash, run through a
+    # DEDICATED httpx client (never tmdb_service/omdb_service's, which inject
+    # `api_key` on every request — ADR 0005 F2). Thresholds are LOWER =
+    # stricter (Hamming distance on 64-bit hashes); "identical" requires both
+    # hashes under their threshold, "close" only pHash. Calibrated by the W5
+    # dry-run before SCRAPE_BATCH_POSTER_ONLY_AUTO is ever flipped on.
+    POSTER_PHASH_IDENTICAL: int = _safe_int("POSTER_PHASH_IDENTICAL", 6)
+    POSTER_DHASH_IDENTICAL: int = _safe_int("POSTER_DHASH_IDENTICAL", 10)
+    POSTER_PHASH_CLOSE: int = _safe_int("POSTER_PHASH_CLOSE", 12)
+    # Candidate poster variants (TMDB images.posters) compared per candidate;
+    # distance = MIN over these, with early stop on the first "identical".
+    POSTER_MAX_VARIANTS: int = _safe_int("POSTER_MAX_VARIANTS", 10)
+    # Hard caps on any single fetched image — a compromised/malicious
+    # provider poster URL must not be able to exhaust memory or CPU
+    # (decompression-bomb: huge pixel dimensions decode to gigabytes of RAM
+    # even from a small file, hence the pixel cap ENFORCED BEFORE Image.load(),
+    # never via the global `Image.MAX_IMAGE_PIXELS`).
+    POSTER_MAX_BYTES: int = _safe_int("POSTER_MAX_BYTES", 5_242_880)  # 5 MiB
+    POSTER_MAX_PIXELS: int = _safe_int("POSTER_MAX_PIXELS", 25_000_000)
+    # Total (not per-read) deadline for a single poster fetch — httpx's own
+    # timeout only bounds each individual connect/read operation, so a
+    # trickling upstream could otherwise hold a concurrency-semaphore slot
+    # forever. Wrapped around the whole fetch via `asyncio.wait_for`.
+    POSTER_FETCH_TIMEOUT: float = _safe_float("POSTER_FETCH_TIMEOUT", 8.0)
+    POSTER_CONCURRENCY: int = _safe_int("POSTER_CONCURRENCY", 8)
+    # Dedicated to the CPU-bound Pillow/numpy hashing step (asyncio.
+    # to_thread), independent of the network-fetch semaphores above — the
+    # one knob that actually bounds concurrent decode/hash memory on a
+    # 2GB Docker container regardless of how many fetches are in flight.
+    POSTER_HASH_CONCURRENCY: int = _safe_int("POSTER_HASH_CONCURRENCY", 3)
+    # Per-host cap for any host OUTSIDE the known image CDNs
+    # (image.tmdb.org, m.media-amazon.com) — an Xtream provider poster host
+    # is untrusted and shouldn't be hammered concurrently by one search.
+    POSTER_PER_HOST_CONCURRENCY: int = _safe_int("POSTER_PER_HOST_CONCURRENCY", 2)
+    # A poster whose 32x32 grayscale thumbnail has a standard deviation below
+    # this is treated as a flat placeholder ("coming soon" graphics etc.) —
+    # never reported "identical" even on a byte-for-byte hash match.
+    POSTER_GENERIC_STDDEV: float = _safe_float("POSTER_GENERIC_STDDEV", 8.0)
+    # Same pHash seen across this many DISTINCT Xtream poster URLs also marks
+    # it generic (a provider reusing one placeholder image across titles).
+    POSTER_GENERIC_MIN_REPEAT: int = _safe_int("POSTER_GENERIC_MIN_REPEAT", 5)
+
     # SSRF guard (CR-S08, app/utils/ssrf.py) — shared by physical downloads,
     # the DAV relay, library image downloads, and stream health-check probes.
     # Comma-separated hostnames explicitly allowed to resolve to a private/

@@ -3,21 +3,23 @@
 <table class="min-w-full text-sm">
   <thead class="bg-slate-100 text-slate-600 text-xs uppercase">
     <tr>
+      <th class="text-left px-3 py-2 w-16">Poster</th>
       <th class="text-left px-3 py-2">Titre</th>
       <th class="text-left px-3 py-2 w-20">Année</th>
       <th class="text-left px-3 py-2 w-24">Server</th>
       <th class="text-left px-3 py-2 w-48">IMDb ID</th>
       <th class="text-left px-3 py-2 w-40">TMDB ID</th>
       <th class="text-left px-3 py-2 w-40">Actions</th>
+      <th class="text-left px-3 py-2 w-56">Scraper manuel</th>
     </tr>
   </thead>
   <tbody class="divide-y divide-slate-100">
     {% if items %}
       {% for item in items %}
-        {% include "admin/_movie_row.html" %}
+        {% include "admin/_media_row.html" %}
       {% endfor %}
     {% else %}
-      <tr><td colspan="6" class="px-3 py-8 text-center text-slate-500 italic">Aucun résultat.</td></tr>
+      <tr><td colspan="8" class="px-3 py-8 text-center text-slate-500 italic">Aucun résultat.</td></tr>
     {% endif %}
   </tbody>
 </table>
@@ -28,8 +30,8 @@
   <span class="flex gap-2">
     {% if page > 1 %}
     <button type="button"
-            hx-get="/admin/movies"
-            hx-target="#movies-table"
+            hx-get="/admin/catalogue"
+            hx-target="#media-table"
             hx-include="#filters"
             hx-vals='{"page": {{ page - 1 }} }'
             class="px-2 py-1 rounded border border-slate-300 bg-white hover:bg-slate-100">← Précédent</button>
@@ -38,8 +40,8 @@
     {% endif %}
     {% if page < page_count %}
     <button type="button"
-            hx-get="/admin/movies"
-            hx-target="#movies-table"
+            hx-get="/admin/catalogue"
+            hx-target="#media-table"
             hx-include="#filters"
             hx-vals='{"page": {{ page + 1 }} }'
             class="px-2 py-1 rounded border border-slate-300 bg-white hover:bg-slate-100">Suivant →</button>

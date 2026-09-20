@@ -500,10 +500,19 @@ async def admin_media_poster(server_id: str, rating_key: str, which: str = Query
 
 
 @router.get("/media/{server_id}/{rating_key}/scrape", response_class=HTMLResponse)
-async def admin_media_scrape_panel(server_id: str, rating_key: str, request: Request):
+async def admin_media_scrape_panel(
+    server_id: str,
+    rating_key: str,
+    request: Request,
+    auto: int = Query(0),
+):
     """The scrape drawer: both posters side by side and a search form
     pre-filled from the row (ADR 0005 D10). No network here — candidates are
-    fetched by the `/candidates` route the form targets."""
+    fetched by the `/candidates` route the form targets.
+
+    `auto=1` is set by the post-apply chaining flow only: it makes the search
+    form fire on load, so the operator lands on a filled candidate grid. A
+    plain click keeps the drawer inert (no provider call until asked)."""
     item = await manual_scrape_service.load_row(
         server_id, rating_key, session_factory=async_session_factory,
     )
@@ -511,7 +520,11 @@ async def admin_media_scrape_panel(server_id: str, rating_key: str, request: Req
         raise HTTPException(404, "Media not found")
     return templates.TemplateResponse(
         request, "admin/_scrape_panel.html",
-        {"item": item, "media_type": _norm_type(item.type)},
+        {
+            "item": item,
+            "media_type": _norm_type(item.type),
+            "auto_search": bool(auto),
+        },
     )
 
 

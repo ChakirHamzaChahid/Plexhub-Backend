@@ -336,6 +336,95 @@ async def test_scrape_panel_renders_prefilled_form(api_client, db_factory):
     assert "OMDb" in resp.text
 
 
+async def test_scrape_panel_is_a_modal_overlay_carrying_its_row_identity(
+    api_client, db_factory,
+):
+    """Ergonomics fix: the drawer used to render into a block ABOVE the
+    table, so clicking a row at the bottom of the page put the form off
+    screen and forced a scroll back to the top. It is now a fixed overlay,
+    and it carries the row it was opened from so the controller can chain
+    to the next unresolved item after an apply."""
+    async with db_factory() as s:
+        s.add(_media("vod_1.mp4", "The Matrix", thumb_url="http://xtream/p.jpg"))
+        await s.commit()
+
+    resp = await api_client.get(
+        "/admin/media/xtream_a/vod_1.mp4/scrape", auth=ADMIN_AUTH,
+    )
+    assert resp.status_code == 200
+    assert 'id="scrape-modal"' in resp.text
+    assert "fixed inset-0" in resp.text, "an in-flow block scrolls away again"
+    assert 'data-sid="xtream_a"' in resp.text
+    assert 'data-rk="vod_1.mp4"' in resp.text
+    # Closing must go through the controller, which also thaws body scroll.
+    assert "window.plexhubScrape.close()" in resp.text
+    assert "window.plexhubScrape.next()" in resp.text
+
+
+async def test_scrape_panel_only_auto_searches_when_chaining(
+    api_client, db_factory,
+):
+    """`?auto=1` is set by the post-apply chaining flow only. A plain click
+    must NOT fire the candidate search: it costs up to three TMDB calls, an
+    OMDb fallback and five poster downloads, and the operator may just be
+    looking at the two posters."""
+    async with db_factory() as s:
+        s.add(_media("vod_1.mp4", "The Matrix", thumb_url="http://xtream/p.jpg"))
+        await s.commit()
+
+    manual = await api_client.get(
+        "/admin/media/xtream_a/vod_1.mp4/scrape", auth=ADMIN_AUTH,
+    )
+    assert 'hx-trigger="submit"' in manual.text
+
+    chained = await api_client.get(
+        "/admin/media/xtream_a/vod_1.mp4/scrape?auto=1", auth=ADMIN_AUTH,
+    )
+    assert 'hx-trigger="submit, load"' in chained.text
+
+
+async def test_rows_expose_what_the_chaining_controller_needs(
+    api_client, db_factory,
+):
+    """After an apply the controller walks the rendered page for the next
+    row still missing an id. A locked row counts as settled — re-offering
+    an identity the operator pinned by hand would undo their decision."""
+    async with db_factory() as s:
+        s.add(_media("vod_todo.mp4", "Sans ids"))
+        s.add(_media("vod_done.mp4", "Complet", imdb_id="tt1", tmdb_id="603"))
+        s.add(_media("vod_lock.mp4", "Verrouillé sans tmdb",
+                     imdb_id="tt2", match_locked=True, match_source="manual"))
+        await s.commit()
+
+    resp = await api_client.get("/admin?type=movie&ids=all", auth=ADMIN_AUTH)
+    assert resp.status_code == 200
+    for rk, expected in (
+        ("vod_todo.mp4", "1"), ("vod_done.mp4", "0"), ("vod_lock.mp4", "0"),
+    ):
+        marker = (
+            f'data-scrape-url="/admin/media/xtream_a/{rk}/scrape"\n'
+            f'    data-incomplete="{expected}"'
+        )
+        assert marker in resp.text, f"{rk} should be data-incomplete={expected}"
+
+
+async def test_layout_chains_to_the_next_item_after_an_apply(
+    api_client, db_factory,
+):
+    """`close-scrape-panel` no longer just empties the panel: it hands over
+    to the chaining controller, which opens the next unresolved row with
+    `?auto=1`. Escape and a click on the backdrop still just close."""
+    layout = await api_client.get("/admin", auth=ADMIN_AUTH)
+    assert layout.status_code == 200
+    assert "window.plexhubScrape" in layout.text
+    assert "plexhubScrape.next()" in layout.text
+    assert "'?auto=1'" in layout.text or "?auto=1" in layout.text
+    assert "'Escape'" in layout.text
+    # A rating_key ends in `.mkv`: the controller must resolve rows with
+    # getElementById, never querySelector (an invalid selector throws).
+    assert "getElementById(\n          'row-'" in layout.text
+
+
 async def test_scrape_panel_unknown_row_is_404(api_client, db_factory):
     resp = await api_client.get(
         "/admin/media/xtream_a/nope/scrape", auth=ADMIN_AUTH,

@@ -1,7 +1,14 @@
 {% set row_id = "row-" ~ item.server_id ~ "-" ~ item.rating_key %}
 {% set row_type = "show" if item.type == "show" else "movie" %}
 {% set tmdb_path = "tv" if row_type == "show" else "movie" %}
-<tr id="{{ row_id }}" class="hover:bg-slate-50 align-middle
+{# Read by the chaining controller (base.html) after a successful apply: it
+   walks the rendered page for the next row still missing an id. A locked row
+   counts as settled — the operator decided, chaining must not re-offer it. #}
+{% set row_incomplete = "0" if (item.match_locked or (item.imdb_id and item.tmdb_id)) else "1" %}
+<tr id="{{ row_id }}"
+    data-scrape-url="/admin/media/{{ item.server_id }}/{{ item.rating_key }}/scrape"
+    data-incomplete="{{ row_incomplete }}"
+    class="hover:bg-slate-50 align-middle
     {% if saved or applied or unlocked or cleared %}bg-emerald-50{% elif rescraped %}bg-sky-50{% elif error or conflict %}bg-rose-50{% endif %}">
   <td class="px-3 py-2">
     {% if item.thumb_url %}

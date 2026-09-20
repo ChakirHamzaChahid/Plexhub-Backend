@@ -1,6 +1,17 @@
 {% set sid = item.server_id %}
 {% set rk = item.rating_key %}
-<section class="bg-white border border-slate-200 rounded shadow-sm p-4">
+{#
+  Modal overlay rather than a block above the table: the operator clicks a row
+  anywhere in the list and the drawer opens centred on the viewport, with no
+  scrolling back to the top. `data-sid`/`data-rk` let the JS controller in
+  base.html find the originating row so it can chain to the next unresolved
+  item after an apply.
+#}
+<div id="scrape-modal"
+     data-sid="{{ sid }}" data-rk="{{ rk }}"
+     onclick="if (event.target === this) { window.plexhubScrape.close(); }"
+     class="fixed inset-0 z-50 overflow-y-auto bg-slate-900/60 p-4 sm:p-8">
+<section class="relative w-full max-w-5xl mx-auto bg-white border border-slate-200 rounded shadow-xl p-4">
   <div class="flex items-start justify-between gap-4">
     <div>
       <h2 class="text-base font-semibold text-slate-900">
@@ -8,11 +19,19 @@
       </h2>
       <p class="text-xs text-slate-500 font-mono">{{ sid }} · {{ rk }}</p>
     </div>
-    <button type="button"
-            onclick="document.getElementById('scrape-panel').innerHTML = ''"
-            class="px-2 py-1 text-xs rounded border border-slate-300 hover:bg-slate-100">
-      Fermer
-    </button>
+    <div class="flex items-center gap-2">
+      <button type="button"
+              onclick="window.plexhubScrape.next()"
+              title="Laisser ce média tel quel et ouvrir le suivant sans identifiants"
+              class="px-2 py-1 text-xs rounded border border-slate-300 hover:bg-slate-100">
+        Passer ⏭
+      </button>
+      <button type="button"
+              onclick="window.plexhubScrape.close()"
+              class="px-2 py-1 text-xs rounded border border-slate-300 hover:bg-slate-100">
+        Fermer ✕
+      </button>
+    </div>
   </div>
 
   <div class="flex flex-wrap gap-6 mt-3">
@@ -46,7 +65,10 @@
             hx-get="/admin/media/{{ sid }}/{{ rk }}/candidates"
             hx-target="#scrape-candidates"
             hx-swap="innerHTML"
-            hx-trigger="submit"
+            {# `load` only when the drawer was opened by the chaining flow
+               (`?auto=1`): a manual click must not spend TMDB/OMDb calls and
+               poster downloads for an operator who just wants to look. #}
+            hx-trigger="submit{% if auto_search %}, load{% endif %}"
             hx-indicator="#scrape-indicator"
             class="flex flex-wrap items-end gap-2">
         <div class="flex flex-col">
@@ -106,3 +128,4 @@
 
   <div id="scrape-candidates" class="mt-4"></div>
 </section>
+</div>

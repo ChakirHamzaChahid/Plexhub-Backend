@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.database import (
     XtreamAccount, Media, EnrichmentQueue, XtreamCategory, LiveChannel, EpgEntry,
+    ScrapeReview,
 )
 from app.models.schemas import AccountCreate, AccountUpdate
 from app.services.xtream_credentials import XtreamCredentials
@@ -151,6 +152,11 @@ async def delete_account_cascade(db: AsyncSession, account_id: str) -> None:
     await db.execute(
         delete(XtreamCategory).where(XtreamCategory.account_id == account_id)
     )
+    # Manual-scrape review rows are keyed on (rating_key, server_id) with no
+    # FK to `media` (ADR 0005 D8): without this, deleting an account would
+    # leave orphan reviews that the EXISTS-mask hides from the UI but that
+    # would silently re-surface if a later account reused the same server_id.
+    await db.execute(delete(ScrapeReview).where(ScrapeReview.server_id == server_id))
     await db.execute(delete(LiveChannel).where(LiveChannel.server_id == server_id))
     await db.execute(delete(EpgEntry).where(EpgEntry.server_id == server_id))
     await db.execute(delete(XtreamAccount).where(XtreamAccount.id == account_id))

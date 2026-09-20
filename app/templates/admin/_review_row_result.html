@@ -1,0 +1,21 @@
+{# Error feedback for a review "Appliquer" that didn't go through (409
+   conflict / 422 provider-not-found or locked). htmx only swaps these
+   statuses thanks to the `htmx:beforeSwap` handler in base.html (ADR 0005
+   F8). #}
+<li class="p-3 bg-rose-50 border-l-4 border-rose-400">
+  <div class="text-sm text-rose-800">
+    {% if conflict %}
+    Conflit : ces identifiants appartiennent déjà à un autre média
+    {%- if outcome.conflicts %}
+    ({% for c in outcome.conflicts %}{{ c[1] }}{% if not loop.last %}, {% endif %}{% endfor %})
+    {%- endif %}. Utilise le panneau « Autres… » pour forcer si c'est voulu.
+    {% elif outcome.status == "skipped_locked" %}
+    Média verrouillé — déverrouille-le depuis le catalogue avant d'appliquer.
+    {% else %}
+    Aucun résultat fournisseur pour cet identifiant.
+    {% endif %}
+  </div>
+  <div class="text-[10px] text-rose-500 font-mono mt-1">
+    {{ outcome.server_id }} · {{ outcome.rating_key }}
+  </div>
+</li>

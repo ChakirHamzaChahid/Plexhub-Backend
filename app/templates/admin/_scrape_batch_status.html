@@ -1,0 +1,75 @@
+{# Batch job status (ADR 0005 D8/D10, W5).
+
+   The `every 2s` poll is rendered ONLY while the job is queued/running: a
+   finished job must not keep a browser tab hammering the admin endpoint
+   forever (same discipline as `_plex_sync_status.html`). #}
+<div id="scrape-batch-status"
+     {% if job and job.status in ("queued", "running") %}
+     hx-get="/admin/scrape-batch/status?job_id={{ job.jobId }}"
+     hx-trigger="every 2s"
+     hx-target="#scrape-batch-status"
+     hx-swap="outerHTML"
+     {% endif %}
+     class="text-sm">
+  {% if message %}
+  <div class="mb-2 text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1 text-xs">
+    {{ message }}
+  </div>
+  {% endif %}
+
+  {% if not job %}
+  <p class="text-xs text-slate-500 italic">Aucun lot lancé pour l'instant.</p>
+  {% else %}
+  <div class="flex flex-wrap items-center gap-3">
+    <span class="px-2 py-0.5 text-xs rounded
+        {{ 'bg-sky-100 text-sky-800' if job.status in ('queued', 'running')
+           else 'bg-emerald-100 text-emerald-800' if job.status == 'completed'
+           else 'bg-slate-200 text-slate-700' if job.status == 'canceled'
+           else 'bg-rose-100 text-rose-800' }}">
+      {{ job.status }}{% if job.dryRun %} · simulation{% endif %}
+    </span>
+    <span class="text-xs text-slate-500 font-mono">{{ job.jobId }}</span>
+    <span class="text-xs text-slate-600">phase : {{ job.phase }}</span>
+    {% if job.status in ("queued", "running") %}
+    <button type="button"
+            hx-post="/admin/scrape-batch/{{ job.jobId }}/cancel"
+            hx-target="#scrape-batch-status"
+            hx-swap="outerHTML"
+            class="px-2 py-0.5 text-xs rounded border border-slate-300 bg-white hover:bg-slate-100">
+      Annuler
+    </button>
+    {% endif %}
+  </div>
+
+  <div class="flex flex-wrap gap-4 mt-2 text-xs text-slate-700">
+    <span>{{ job.scanned }} analysé(s)</span>
+    <span>{{ job.paired }} apparié(s)</span>
+    <span>{{ job.autoAppliedA }} auto (A)</span>
+    <span>{{ job.autoAppliedB }} auto (B)</span>
+    <span>{{ job.queuedForReview }} à vérifier</span>
+    {% if job.skippedLocked %}<span>{{ job.skippedLocked }} verrouillé(s)</span>{% endif %}
+    {% if job.errors %}<span class="text-rose-700">{{ job.errors }} erreur(s)</span>{% endif %}
+    <span class="text-slate-500">
+      TMDB {{ job.tmdbCalls }} / {{ job.tmdbBudget }}{% if job.budgetExhausted %} (budget atteint){% endif %}
+      · OMDb {{ job.omdbCalls }}
+    </span>
+  </div>
+
+  {% if job.dryRun %}
+  <div class="mt-2">
+    <div class="text-xs text-slate-500 mb-1">
+      Distance pHash du meilleur candidat (calibration de la règle B) :
+    </div>
+    <div class="flex flex-wrap gap-2 text-xs font-mono">
+      {% for bucket, count in job.distanceHistogram.items() %}
+      <span class="px-1.5 py-0.5 rounded bg-slate-100 text-slate-700">{{ bucket }} : {{ count }}</span>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  {% if job.lastError %}
+  <div class="mt-2 text-xs text-rose-700">Dernière erreur : {{ job.lastError }}</div>
+  {% endif %}
+  {% endif %}
+</div>

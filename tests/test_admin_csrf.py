@@ -154,6 +154,10 @@ MANUAL_SCRAPE_POSTS = [
     ("/admin/media/xtream_a/vod_1.mp4/lookup", {"raw_id": "603", "type": "movie"}),
     ("/admin/movies/vod_1.mp4/ids", {"server_id": "xtream_a", "imdb_id": "tt1"}),
     ("/admin/movies/vod_1.mp4/rescrape", {"server_id": "xtream_a"}),
+    # W5 (ADR 0005 D8/D10)
+    ("/admin/review/xtream_a/vod_1.mp4/apply", {"candidate_index": "0"}),
+    ("/admin/review/xtream_a/vod_1.mp4/dismiss", {}),
+    ("/admin/scrape-batch/scrape_batch_unknown/cancel", {}),
 ]
 
 
@@ -182,6 +186,22 @@ class TestManualScrapePostsCsrfGuarded:
             headers={"Sec-Fetch-Site": "same-origin"},
         )
         assert resp.status_code == 404, path
+
+
+class TestScrapeBatchStartCsrfGuarded:
+    """`POST /admin/scrape-batch` can't join the parametrized list above (a
+    same-origin call would actually LAUNCH a batch), so its cross-site
+    rejection is asserted on its own."""
+
+    async def test_cross_site_post_rejected_with_403(self, api_client):
+        resp = await api_client.post(
+            "/admin/scrape-batch", data={"type": "movie", "dry_run": "1"},
+            auth=ADMIN_AUTH, headers={"Sec-Fetch-Site": "cross-site"},
+        )
+        assert resp.status_code == 403
+        from app.workers import manual_scrape_batch_worker as worker
+
+        assert worker.is_running() is False
 
 
 class TestJsonMirrorUnaffected:

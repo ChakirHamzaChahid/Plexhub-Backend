@@ -299,6 +299,23 @@ class Settings:
         "SCRAPE_INTERACTIVE_POSTER_CANDIDATES", 5,
     )
     SCRAPE_BATCH_POSTER_CANDIDATES: int = _safe_int("SCRAPE_BATCH_POSTER_CANDIDATES", 3)
+    # Batch scraper budgets (ADR 0005 D8/D11). The TMDB limit counts REAL
+    # HTTP attempts (retries included) made inside the run, via the
+    # `tmdb_service.count_requests()` ContextVar tally — NOT the global
+    # `real_request_count`, which `enrichment_worker.run()` resets from under
+    # us. Hitting either cap ends the run cleanly (`budgetExhausted`), it is
+    # never an error.
+    SCRAPE_BATCH_TMDB_LIMIT: int = _safe_int("SCRAPE_BATCH_TMDB_LIMIT", 3000)
+    SCRAPE_BATCH_MAX_ITEMS: int = _safe_int("SCRAPE_BATCH_MAX_ITEMS", 2000)
+    SCRAPE_BATCH_CONCURRENCY: int = _safe_int("SCRAPE_BATCH_CONCURRENCY", 4)
+    # Rule B (ADR 0005 D6 `decide`): auto-apply a candidate on the strength of
+    # ONE identical poster alone, with no text-safe verdict backing it. OFF by
+    # default and it must STAY off until a dry-run's distance histogram has
+    # been read on this deployment's real catalogue — a mis-calibrated
+    # threshold here mass-applies wrong identities (and locks them).
+    SCRAPE_BATCH_POSTER_ONLY_AUTO: bool = os.getenv(
+        "SCRAPE_BATCH_POSTER_ONLY_AUTO", "false",
+    ).lower() in ("true", "1", "yes")
 
     # Manual scraper poster-match (ADR 0005 D5/D11) — compares the Xtream
     # poster to TMDB/OMDb candidate posters via dHash/pHash, run through a

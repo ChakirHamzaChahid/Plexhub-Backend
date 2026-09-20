@@ -701,3 +701,41 @@ class PlexSyncStatus(Base):
     # migration 019's `CHECK (id = 1)` — otherwise the constraint only existed
     # on upgraded DBs (same fresh-vs-migration divergence class as CR-C05).
     __table_args__ = (CheckConstraint("id = 1", name="ck_plex_sync_status_singleton"),)
+
+
+class ScrapeReview(Base):
+    """Manual-scrape "À vérifier" queue (ADR 0005 D8, migration 027).
+
+    One row per media item the batch scraper refused to auto-apply, holding
+    the candidates it had already scored (`candidates_json`, top 5, frozen
+    key set from `Candidate.to_json()`) so the admin review list renders
+    them with ZERO network calls.
+
+    Keyed on `(rating_key, server_id)` only — NOT on `media`'s full 4-column
+    PK (ADR 0005 F1): a review is about the item, not about one of its
+    category-variant rows. `status`/`candidates_json` carry a
+    `server_default` for the same reason migration 025's `outage_strikes`
+    does (CLAUDE.md piège 6): a Python-only default lets `create_all` emit
+    the column NOT NULL with no SQL DEFAULT, breaking raw INSERTs.
+    """
+
+    __tablename__ = "scrape_review"
+
+    rating_key = Column(Text, primary_key=True)
+    server_id = Column(Text, primary_key=True)
+    media_type = Column(Text, nullable=False)         # 'movie' | 'show'
+    title = Column(Text)
+    year = Column(Integer)
+    reason = Column(Text, nullable=False)             # Decision.reason
+    candidates_json = Column(Text, nullable=False, default="[]", server_default=text("'[]'"))
+    best_confidence = Column(Float)
+    best_image_score = Column(Float)
+    status = Column(
+        Text, nullable=False, default="pending", server_default=text("'pending'"),
+    )                                                  # pending | resolved | dismissed
+    created_at = Column(BigInteger, nullable=False)
+    resolved_at = Column(BigInteger)
+
+    __table_args__ = (
+        Index("ix_scrape_review_status_type", "status", "media_type"),
+    )

@@ -28,6 +28,7 @@ from app.services import (
     poster_match_service,
 )
 from app.utils.time import now_ms
+from app.workers import manual_scrape_batch_worker
 
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -333,10 +334,13 @@ async def admin_media_apply(
         raise HTTPException(404, "Media not found")
 
     if outcome.status == "applied":
+        # `refresh-review` too (W5): applying an identity resolves this
+        # item's review row inside the same write, so the "À vérifier" list
+        # is now stale. Both listeners exist (`_stats.html`, `index.html`).
         return templates.TemplateResponse(
             request, "admin/_media_row.html",
             {"item": item, "applied": True, "outcome": outcome},
-            headers={"HX-Trigger": "refresh-stats"},
+            headers={"HX-Trigger": "refresh-stats, refresh-review"},
         )
     if outcome.status == "conflict":
         return templates.TemplateResponse(
@@ -546,6 +550,172 @@ async def admin_media_lookup(
         )
     return templates.TemplateResponse(
         request, "admin/_scrape_candidates.html", {"item": item, "result": result},
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Manual scraper, W5: batch job + "À vérifier" review queue (ADR 0005 D8/D10)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+async def _review_ctx(db: AsyncSession, *, media_type: str | None, page: int,
+                      page_size: int) -> dict:
+    rows, total = await manual_scrape_service.list_reviews(
+        db, media_type=media_type, page=page, page_size=page_size,
+    )
+    return {
+        # Candidates come from the STORED JSON, never from a fresh search:
+        # rendering this list must cost zero TMDB/OMDb/poster calls however
+        # many rows it holds (ADR 0005 D10).
+        "reviews": [
+            {"row": r, "candidates": manual_scrape_service.review_candidates(r)}
+            for r in rows
+        ],
+        "review_total": total,
+        "review_page": page,
+        "review_page_size": page_size,
+        "review_type": media_type,
+    }
+
+
+@router.get("/review", response_class=HTMLResponse)
+async def admin_review_list(
+    request: Request,
+    type: Optional[str] = Query(None),  # noqa: A002 — name fixed by ADR 0005 D10
+    page: int = Query(1, ge=1),
+    page_size: int = Query(25, ge=5, le=200),
+    db: AsyncSession = Depends(get_db),
+):
+    media_type = _norm_type(type) if type else None
+    return templates.TemplateResponse(
+        request, "admin/_review_list.html",
+        await _review_ctx(db, media_type=media_type, page=page, page_size=page_size),
+    )
+
+
+@router.post("/review/{server_id}/{rating_key}/apply", response_class=HTMLResponse)
+async def admin_review_apply(
+    server_id: str,
+    rating_key: str,
+    request: Request,
+    candidate_index: int = Form(0),
+):
+    """Apply one of the candidates frozen on the review row.
+
+    The ids come from the STORED candidate at `candidate_index`, not from the
+    client: the form only picks an index, so a tampered POST can at worst
+    apply a different candidate the batch had already scored for this very
+    item — never an arbitrary identity."""
+    review = await manual_scrape_service.load_review(
+        server_id, rating_key, session_factory=async_session_factory,
+    )
+    if review is None:
+        raise HTTPException(404, "Review not found")
+
+    candidates = manual_scrape_service.review_candidates(review)
+    if candidate_index < 0 or candidate_index >= len(candidates):
+        raise HTTPException(422, "Unknown candidate index")
+    candidate = candidates[candidate_index]
+
+    raw_tmdb = candidate.get("tmdb_id")
+    raw_imdb = candidate.get("imdb_id")
+    tmdb_id = int(raw_tmdb) if isinstance(raw_tmdb, int) or (
+        isinstance(raw_tmdb, str) and raw_tmdb.isdigit()
+    ) else None
+    imdb_id = raw_imdb.strip() if isinstance(raw_imdb, str) and raw_imdb.strip() else None
+    if tmdb_id is None and imdb_id is None:
+        raise HTTPException(422, "Candidate carries no usable id")
+
+    outcome = await manual_scrape_service.apply_candidate(
+        server_id=server_id, rating_key=rating_key,
+        media_type="show" if review.media_type == "show" else "movie",
+        tmdb_id=tmdb_id, imdb_id=imdb_id, source="manual",
+        force=False, propagate=False, session_factory=async_session_factory,
+    )
+    if outcome.status == "not_found":
+        raise HTTPException(404, "Media not found")
+    if outcome.status == "conflict":
+        return templates.TemplateResponse(
+            request, "admin/_review_row_result.html",
+            {"outcome": outcome, "conflict": True}, status_code=409,
+        )
+    if outcome.status in ("provider_not_found", "skipped_locked"):
+        return templates.TemplateResponse(
+            request, "admin/_review_row_result.html",
+            {"outcome": outcome, "conflict": False}, status_code=422,
+        )
+    # Applied: `apply_candidate` already resolved the review row inside its
+    # own write transaction, so the entry simply disappears from the list.
+    return HTMLResponse(
+        "", headers={"HX-Trigger": "refresh-stats, refresh-review"},
+    )
+
+
+@router.post("/review/{server_id}/{rating_key}/dismiss", response_class=HTMLResponse)
+async def admin_review_dismiss(server_id: str, rating_key: str):
+    ok = await manual_scrape_service.dismiss_review(
+        server_id, rating_key, session_factory=async_session_factory,
+    )
+    if not ok:
+        raise HTTPException(404, "Review not found")
+    return HTMLResponse("", headers={"HX-Trigger": "refresh-stats, refresh-review"})
+
+
+def _batch_fragment(request: Request, job: Optional[dict], *,
+                    status_code: int = 200, message: Optional[str] = None):
+    return templates.TemplateResponse(
+        request, "admin/_scrape_batch_status.html",
+        {"job": job, "message": message},
+        status_code=status_code,
+    )
+
+
+@router.post("/scrape-batch", response_class=HTMLResponse)
+async def admin_scrape_batch_start(
+    request: Request,
+    type: str = Form("all"),  # noqa: A002
+    dry_run: Optional[str] = Form(None),
+    max_items: Optional[str] = Form(None),
+):
+    media_type = "all" if (type or "all") == "all" else _norm_type(type)
+    parsed_max: Optional[int] = None
+    if max_items and max_items.strip().isdigit():
+        parsed_max = max(1, int(max_items.strip()))
+
+    try:
+        job_id = manual_scrape_batch_worker.start(
+            media_type=media_type, dry_run=bool(dry_run), max_items=parsed_max,
+            session_factory=async_session_factory,
+        )
+    except manual_scrape_batch_worker.BatchAlreadyRunningError:
+        return _batch_fragment(
+            request, manual_scrape_batch_worker.get_latest(), status_code=409,
+            message="Un lot est déjà en cours.",
+        )
+    return _batch_fragment(
+        request, manual_scrape_batch_worker.get(job_id), status_code=202,
+    )
+
+
+@router.get("/scrape-batch/status", response_class=HTMLResponse)
+async def admin_scrape_batch_status(
+    request: Request, job_id: Optional[str] = Query(None),
+):
+    job = (
+        manual_scrape_batch_worker.get(job_id) if job_id
+        else manual_scrape_batch_worker.get_latest()
+    )
+    return _batch_fragment(request, job)
+
+
+@router.post("/scrape-batch/{job_id}/cancel", response_class=HTMLResponse)
+async def admin_scrape_batch_cancel(job_id: str, request: Request):
+    job = manual_scrape_batch_worker.get(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    manual_scrape_batch_worker.cancel(job_id)
+    return _batch_fragment(
+        request, job, message="Annulation demandée — le lot s'arrête après l'item en cours.",
     )
 
 

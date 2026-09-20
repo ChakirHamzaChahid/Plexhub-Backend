@@ -1,12 +1,9 @@
 """Manual scraper (TMDB + IMDb/OMDb) application service (ADR 0005 D6).
 
-W2 scope only: `lookup` (id/URL -> a single candidate, no poster compare —
-that is W3/W4's job via `search_candidates`), `apply_candidate` (the write
-path), `unlock`, `clear_ids`, `load_row`. `search_candidates` (full
-text-search + poster-compare candidate list), `list_catalogue`,
-`catalogue_stats`, `list_reviews`/`upsert_review`/`dismiss_review` and
-`decide()` are later waves (W4/W5) and are NOT implemented here — this
-module is extended in place by those waves, not replaced.
+Built up over three waves and now complete: `lookup` / `apply_candidate` /
+`unlock` / `clear_ids` / `load_row` (W2), `search_candidates` /
+`list_catalogue` / `catalogue_stats` (W4), and the "À vérifier" queue plus
+the pure `decide()` rule engine the batch worker drives (W5).
 
 `apply_candidate` is the one function with real stakes: it is the ONLY
 writer, besides `enrichment_worker`, that may set `media.match_locked`. Its
@@ -19,17 +16,18 @@ a single logical write.
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Literal
 
 import httpx
-from sqlalchemy import and_, false, func, not_, or_, select, update
+from sqlalchemy import and_, exists, func, not_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.models.database import EnrichmentQueue, Media
+from app.models.database import EnrichmentQueue, Media, ScrapeReview
 from app.services import (
     omdb_scrape_cache_service,
     poster_match_service,
@@ -878,8 +876,20 @@ async def apply_candidate(
             )
             .values(status="done", processed_at=ts)
         )
-        # `scrape_review` (migration 027) doesn't exist yet at this point in
-        # the rollout (ADR 0005 D8/W5) — resolving it here is left to W5.
+        # Close the review row (if any) in the SAME transaction as the write
+        # that settles the identity (ADR 0005 D6 §3) — a separate statement
+        # afterwards could commit the media write and then lose the review
+        # update to a crash/lock, leaving the operator an already-fixed item
+        # still sitting in the "À vérifier" queue forever.
+        await session.execute(
+            update(ScrapeReview)
+            .where(
+                ScrapeReview.rating_key == rating_key,
+                ScrapeReview.server_id == server_id,
+                ScrapeReview.status == "pending",
+            )
+            .values(status="resolved", resolved_at=ts)
+        )
 
         propagated = 0
         if propagate:
@@ -1024,13 +1034,28 @@ _IMDB_MISSING = or_(Media.imdb_id.is_(None), Media.imdb_id == "")
 _TMDB_MISSING = or_(Media.tmdb_id.is_(None), Media.tmdb_id == "")
 
 
-def _id_filter_clause(id_filter: IdFilter):
-    """WHERE fragment for an `IdFilter` (None = no restriction).
+def _pending_review_exists():
+    """Correlated `EXISTS scrape_review(status='pending')` for the current
+    `media` row (ADR 0005 D8/F1).
 
-    `review` is a W5 filter: `scrape_review` (migration 027) does not exist
-    yet, so it deliberately matches NOTHING rather than silently behaving
-    like `all` — an operator must never believe an empty review queue is
-    being shown when the feature simply isn't wired yet."""
+    EXISTS, never a JOIN: `media`'s PK has four columns, so an item present
+    in N categories is N rows — joining `scrape_review` (keyed on the item)
+    would be correct row-wise but is the exact shape that produced duplicate
+    rows elsewhere; and unlike a JOIN an EXISTS can never multiply the
+    catalogue page."""
+    return exists(
+        select(ScrapeReview.rating_key)
+        .where(
+            ScrapeReview.rating_key == Media.rating_key,
+            ScrapeReview.server_id == Media.server_id,
+            ScrapeReview.status == "pending",
+        )
+        .correlate(Media)
+    )
+
+
+def _id_filter_clause(id_filter: IdFilter):
+    """WHERE fragment for an `IdFilter` (None = no restriction)."""
     if id_filter == "missing_imdb":
         return _IMDB_MISSING
     if id_filter == "missing_tmdb":
@@ -1044,7 +1069,7 @@ def _id_filter_clause(id_filter: IdFilter):
     if id_filter == "batch":
         return Media.match_source.in_(("batch_auto", "batch_pair"))
     if id_filter == "review":
-        return false()
+        return _pending_review_exists()
     return None
 
 
@@ -1099,8 +1124,24 @@ async def list_catalogue(
         .offset(offset)
     )).scalars().all()
 
-    # `review_keys` stays empty until migration 027 exists (W5).
-    return CataloguePage(items=list(rows), total=total, offset=offset, review_keys=set())
+    # Which of THIS page's items sit in the review queue — one extra query
+    # scoped to the page's keys (never a join against `media`, ADR 0005 F1).
+    items = list(rows)
+    review_keys: set[tuple[str, str]] = set()
+    if items:
+        keys = {(it.server_id, it.rating_key) for it in items}
+        pending = (await db.execute(
+            select(ScrapeReview.server_id, ScrapeReview.rating_key).where(
+                ScrapeReview.status == "pending",
+                ScrapeReview.server_id.in_({k[0] for k in keys}),
+                ScrapeReview.rating_key.in_({k[1] for k in keys}),
+            )
+        )).all()
+        review_keys = {(r.server_id, r.rating_key) for r in pending} & keys
+
+    return CataloguePage(
+        items=items, total=total, offset=offset, review_keys=review_keys,
+    )
 
 
 async def _distinct_count(db: AsyncSession, clauses, extra=None) -> int:
@@ -1131,15 +1172,282 @@ async def catalogue_stats(db: AsyncSession) -> dict[str, TypeStats]:
                 db, base, and_(not_(_IMDB_MISSING), not_(_TMDB_MISSING)),
             ),
             locked=await _distinct_count(db, base, Media.match_locked == True),  # noqa: E712
-            review_pending=0,  # W5 (migration 027)
+            review_pending=await _distinct_count(db, base, _pending_review_exists()),
         )
     return stats
+
+
+# ─── decide() — the batch auto-apply rule engine (ADR 0005 D6) ──────────────
+
+
+@dataclass(frozen=True)
+class Decision:
+    """What the batch worker should do with one `SearchResult`."""
+    action: Literal["apply", "review"]
+    rule: Literal["A", "B"] | None
+    candidate: Candidate | None
+    reason: Literal[
+        "text_safe_and_identical", "poster_only_identical", "no_candidates",
+        "no_xtream_poster", "xtream_poster_generic", "ambiguous_posters",
+        "no_identical_poster", "text_safe_no_poster_match",
+    ]
+
+
+def _year_compatible(query_year: int | None, candidate_year: int | None) -> bool:
+    """Rule B's year gate: unknown on either side is NOT evidence against
+    (Xtream years are frequently missing or wrong), a known pair must agree
+    within one year (release/production-year drift across providers)."""
+    if query_year is None or candidate_year is None:
+        return True
+    return abs(query_year - candidate_year) <= 1
+
+
+def decide(result: SearchResult, *, poster_only_auto: bool) -> Decision:
+    """Decide whether a batch item can be auto-applied (ADR 0005 D6).
+
+    PURE — no I/O, no DB, no clock — so the whole rule table is unit-testable
+    and an operator can reason about exactly why an item landed in review.
+    The evaluation ORDER is part of the contract (it is what makes "rule A
+    beats a generic Xtream poster" true), so do not reorder these branches.
+
+    Two ways in:
+    - **A** — a candidate the text auto-matcher would have picked on its own
+      (`text_safe`) AND whose poster is the same image. Two independent
+      signals agreeing on the SAME candidate; safe with `poster_only_auto`
+      off.
+    - **B** — exactly one candidate with an identical poster and no text
+      backing, behind `SCRAPE_BATCH_POSTER_ONLY_AUTO` (off by default until a
+      dry-run histogram has calibrated the thresholds on real data).
+
+    Everything else goes to review, with the reason that explains it.
+    """
+    candidates = result.candidates
+    if not candidates:
+        return Decision("review", None, None, "no_candidates")
+
+    has_text_safe = any(c.text_safe for c in candidates)
+
+    if not result.xtream_poster_available:
+        # Nothing to corroborate a text match against. A text-safe candidate
+        # is still reported distinctly: it is the population an operator may
+        # later decide to bulk-accept, which "no poster at all" is not.
+        return Decision(
+            "review", None, None,
+            "text_safe_no_poster_match" if has_text_safe else "no_xtream_poster",
+        )
+
+    # Rule A — both signals on the SAME candidate.
+    for candidate in candidates:
+        if (
+            candidate.text_safe
+            and candidate.poster is not None
+            and candidate.poster.badge == "identical"
+        ):
+            return Decision("apply", "A", candidate, "text_safe_and_identical")
+
+    if result.xtream_poster_generic:
+        # A placeholder poster matches every other title carrying the same
+        # placeholder — image evidence is worthless here, whatever the badge.
+        return Decision("review", None, None, "xtream_poster_generic")
+
+    identical = [
+        c for c in candidates if c.poster is not None and c.poster.badge == "identical"
+    ]
+
+    if poster_only_auto:
+        if len(identical) > 1:
+            return Decision("review", None, None, "ambiguous_posters")
+        if len(identical) == 1:
+            candidate = identical[0]
+            if (
+                candidate.title_score >= RULE_B_MIN_TITLE_SCORE
+                and _year_compatible(result.query.year, candidate.year)
+            ):
+                return Decision("apply", "B", candidate, "poster_only_identical")
+
+    return Decision(
+        "review", None, None,
+        "text_safe_no_poster_match" if has_text_safe else "no_identical_poster",
+    )
+
+
+# ─── "A verifier" review queue (ADR 0005 D8) ────────────────────────────────
+
+MAX_REVIEW_CANDIDATES = 5
+
+
+def _media_exists_for_review():
+    """Correlated `EXISTS media`, used to hide orphan review rows (an item
+    whose `media` rows vanished between the batch run and the read). EXISTS,
+    never an INNER JOIN: `media`'s 4-column PK would multiply the review row
+    once per category variant (ADR 0005 F1/D8)."""
+    return exists(
+        select(Media.rating_key)
+        .where(
+            Media.rating_key == ScrapeReview.rating_key,
+            Media.server_id == ScrapeReview.server_id,
+        )
+        .correlate(ScrapeReview)
+    )
+
+
+async def list_reviews(
+    db: AsyncSession,
+    *,
+    media_type: MediaKind | None = None,
+    page: int = 1,
+    page_size: int = 25,
+) -> tuple[list[ScrapeReview], int]:
+    """One page of PENDING reviews, newest first, orphans masked."""
+    clauses = [ScrapeReview.status == "pending", _media_exists_for_review()]
+    if media_type is not None:
+        clauses.append(ScrapeReview.media_type == media_type)
+
+    total = (await db.execute(
+        select(func.count()).select_from(
+            select(ScrapeReview.rating_key, ScrapeReview.server_id)
+            .where(*clauses).subquery()
+        )
+    )).scalar() or 0
+
+    offset = max(0, (max(1, page) - 1) * page_size)
+    rows = (await db.execute(
+        select(ScrapeReview)
+        .where(*clauses)
+        .order_by(ScrapeReview.created_at.desc())
+        .limit(page_size)
+        .offset(offset)
+    )).scalars().all()
+    return list(rows), total
+
+
+def review_candidates(row: ScrapeReview) -> list[dict[str, Any]]:
+    """Decode `candidates_json` for rendering. Never raises: a malformed or
+    truncated payload degrades to "no candidates" (the operator still gets
+    the row, its title and the "Autres..." escape hatch into the live scrape
+    panel) rather than 500-ing the whole review page."""
+    try:
+        data = json.loads(row.candidates_json or "[]")
+    except (ValueError, TypeError):
+        logger.warning(
+            "manual_scrape: unreadable candidates_json for %s/%s",
+            row.server_id, row.rating_key,
+        )
+        return []
+    return [c for c in data if isinstance(c, dict)] if isinstance(data, list) else []
+
+
+async def upsert_review(
+    *,
+    server_id: str,
+    rating_key: str,
+    media_type: MediaKind,
+    title: str | None,
+    year: int | None,
+    reason: str,
+    candidates: list[Candidate],
+    session_factory: Callable[[], AsyncSession],
+) -> None:
+    """Queue (or re-open) an item for manual review (ADR 0005 D8).
+
+    Re-running a batch over an item whose review was `resolved`/`dismissed`
+    puts it back to `pending` with fresh candidates — the batch selection
+    query already excludes both states, so this only happens when the
+    operator deliberately re-queues it."""
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+    top = candidates[:MAX_REVIEW_CANDIDATES]
+    payload = json.dumps([c.to_json() for c in top], ensure_ascii=False)
+    best_confidence = max((c.text_confidence for c in top), default=None)
+    image_scores = [
+        c.poster.image_score for c in top
+        if c.poster is not None and c.poster.image_score is not None
+    ]
+    best_image_score = max(image_scores) if image_scores else None
+    ts = now_ms()
+
+    async def work(session: AsyncSession) -> None:
+        stmt = sqlite_insert(ScrapeReview).values(
+            rating_key=rating_key, server_id=server_id, media_type=media_type,
+            title=title, year=year, reason=reason, candidates_json=payload,
+            best_confidence=best_confidence, best_image_score=best_image_score,
+            status="pending", created_at=ts, resolved_at=None,
+        )
+        await session.execute(stmt.on_conflict_do_update(
+            index_elements=["rating_key", "server_id"],
+            set_={
+                "media_type": media_type, "title": title, "year": year,
+                "reason": reason, "candidates_json": payload,
+                "best_confidence": best_confidence,
+                "best_image_score": best_image_score,
+                "status": "pending", "created_at": ts, "resolved_at": None,
+            },
+        ))
+        await session.commit()
+
+    await write_with_retry(
+        work, session_factory=session_factory, op="manual_scrape.upsert_review",
+    )
+
+
+async def _set_review_status(
+    server_id: str, rating_key: str, status: str, *, session_factory,
+) -> bool:
+    async def work(session: AsyncSession) -> bool:
+        result = await session.execute(
+            update(ScrapeReview)
+            .where(
+                ScrapeReview.rating_key == rating_key,
+                ScrapeReview.server_id == server_id,
+                ScrapeReview.status == "pending",
+            )
+            .values(status=status, resolved_at=now_ms())
+        )
+        await session.commit()
+        return result.rowcount > 0
+
+    return await write_with_retry(
+        work, session_factory=session_factory, op=f"manual_scrape.review_{status}",
+    )
+
+
+async def dismiss_review(server_id: str, rating_key: str, *, session_factory) -> bool:
+    """Operator says "leave this one alone": the item stays un-identified but
+    drops out of the queue AND out of the batch's selection (the worker skips
+    `pending` and `dismissed` alike), so a later run won't re-queue it."""
+    return await _set_review_status(
+        server_id, rating_key, "dismissed", session_factory=session_factory,
+    )
+
+
+async def resolve_review(server_id: str, rating_key: str, *, session_factory) -> bool:
+    """Mark a review settled. Normally NOT called directly: `apply_candidate`
+    resolves the row inside its own write transaction (ADR 0005 D6 §3). Kept
+    for the paths that settle an item without going through it."""
+    return await _set_review_status(
+        server_id, rating_key, "resolved", session_factory=session_factory,
+    )
+
+
+async def load_review(
+    server_id: str, rating_key: str, *, session_factory,
+) -> ScrapeReview | None:
+    """Read one review row on a FRESH session (same reason as `load_row`)."""
+    async with session_factory() as db:
+        return (await db.execute(
+            select(ScrapeReview).where(
+                ScrapeReview.rating_key == rating_key,
+                ScrapeReview.server_id == server_id,
+            ).limit(1)
+        )).scalars().first()
 
 
 __all__ = [
     "MediaKind", "Provider", "MatchSource", "IdFilter",
     "Candidate", "SearchResult", "ScrapeQuery", "ApplyOutcome",
-    "CataloguePage", "TypeStats",
+    "CataloguePage", "TypeStats", "Decision",
     "search_candidates", "lookup", "apply_candidate", "unlock", "clear_ids",
     "load_row", "list_catalogue", "catalogue_stats",
+    "decide", "list_reviews", "upsert_review", "dismiss_review",
+    "resolve_review", "load_review", "review_candidates",
 ]

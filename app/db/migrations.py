@@ -52,6 +52,7 @@ async def run_migrations(engine: AsyncEngine) -> None:
     await _migration_024_add_media_youtube_trailer(engine)
     await _migration_025_add_account_outage_tracking(engine)
     await _migration_026_add_media_match_lock(engine)
+    await _migration_027_create_scrape_review(engine)
 
     logger.info("All migrations completed successfully")
 
@@ -1211,3 +1212,59 @@ async def _migration_026_add_media_match_lock(engine: AsyncEngine) -> None:
                 logger.info("Migration 026: %s column added", name)
             except Exception as e:
                 logger.warning("Migration 026: %s may already exist: %s", name, e)
+
+
+async def _migration_027_create_scrape_review(engine: AsyncEngine) -> None:
+    """Create the manual-scrape review queue table (ADR 0005 D8).
+
+    `scrape_review` holds one row per media item the batch scraper could not
+    settle automatically (`decide()` returned `review`), with the top-5
+    candidates it had already scored frozen as JSON so the admin "À vérifier"
+    view can render them with ZERO network calls.
+
+    - PK `(rating_key, server_id)` is the plan's UNIQUE constraint: one review
+      per media item, `upsert_review` re-opens it with `ON CONFLICT DO UPDATE`.
+      It deliberately does NOT include `filter`/`sort_order` (unlike `media`'s
+      4-column PK, ADR 0005 F1) — a review is about the ITEM, not about one of
+      its category-variant rows.
+    - `status`/`candidates_json` carry a SQL-level `DEFAULT` (not just a Python
+      one): the migration-025 lesson (CLAUDE.md piège 6) — a `NOT NULL` column
+      whose default lives only in the ORM breaks every raw `INSERT` that
+      enumerates columns.
+    - Index `(status, media_type)` serves the only two hot reads: "pending
+      reviews for movies/shows" (the admin list) and the `review_pending`
+      counter.
+
+    Orphans (rows whose media disappeared) are masked at read time by an
+    `EXISTS media` correlation (ADR 0005 F1 forbids an INNER JOIN here: a
+    4-column-PK item would multiply rows) and purged for real when the owning
+    account is deleted (`account_service.delete_account_cascade`).
+
+    Idempotent (`IF NOT EXISTS` on both the table and the index): a fresh DB
+    already has the table from `Base.metadata.create_all` (CR-C05), an
+    upgraded one gets it here, and a re-run is a silent no-op.
+    """
+    logger.info("Migration 027: Creating scrape_review table")
+
+    async with engine.begin() as conn:
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS scrape_review (
+                rating_key       TEXT    NOT NULL,
+                server_id        TEXT    NOT NULL,
+                media_type       TEXT    NOT NULL,
+                title            TEXT,
+                year             INTEGER,
+                reason           TEXT    NOT NULL,
+                candidates_json  TEXT    NOT NULL DEFAULT '[]',
+                best_confidence  REAL,
+                best_image_score REAL,
+                status           TEXT    NOT NULL DEFAULT 'pending',
+                created_at       INTEGER NOT NULL,
+                resolved_at      INTEGER,
+                PRIMARY KEY (rating_key, server_id)
+            )
+        """))
+        await conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_scrape_review_status_type "
+            "ON scrape_review(status, media_type)"
+        ))

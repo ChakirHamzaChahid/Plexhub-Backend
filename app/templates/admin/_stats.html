@@ -24,6 +24,12 @@
     <span class="text-xs uppercase text-slate-500">Verrouillés</span>
     <span class="text-2xl font-semibold text-slate-700 ml-2">{{ s.locked }}</span>
   </div>
+  <div>
+    <span class="text-xs uppercase text-slate-500">À vérifier</span>
+    <span class="text-2xl font-semibold {{ 'text-amber-600' if s.review_pending else 'text-slate-400' }} ml-2">
+      {{ s.review_pending }}
+    </span>
+  </div>
   {% if s.total %}
   <div class="text-xs text-slate-500">
     {{ (s.with_both * 100 // s.total) }} % avec les deux identifiants

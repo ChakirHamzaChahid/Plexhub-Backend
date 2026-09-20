@@ -1,0 +1,115 @@
+{# "À vérifier" queue (ADR 0005 D8/D10, W5).
+
+   Every candidate here is read from `scrape_review.candidates_json`, frozen
+   by the batch run — rendering this list makes ZERO network calls however
+   many rows it holds. "Autres…" is the escape hatch into the live scrape
+   panel when none of the stored candidates is right. #}
+{% set review_page_count = ((review_total - 1) // review_page_size) + 1 if review_total else 1 %}
+
+<div class="flex items-center justify-between px-3 py-2 bg-slate-100 text-xs text-slate-600">
+  <span>{{ review_total }} média(s) à vérifier · page {{ review_page }} / {{ review_page_count }}</span>
+  {% if review_page_count > 1 %}
+  <span class="flex gap-2">
+    {% if review_page > 1 %}
+    <button type="button"
+            hx-get="/admin/review"
+            hx-target="#review-list"
+            hx-vals='{"page": {{ review_page - 1 }}{% if review_type %}, "type": "{{ review_type }}"{% endif %} }'
+            class="px-2 py-1 rounded border border-slate-300 bg-white hover:bg-slate-200">← Précédent</button>
+    {% endif %}
+    {% if review_page < review_page_count %}
+    <button type="button"
+            hx-get="/admin/review"
+            hx-target="#review-list"
+            hx-vals='{"page": {{ review_page + 1 }}{% if review_type %}, "type": "{{ review_type }}"{% endif %} }'
+            class="px-2 py-1 rounded border border-slate-300 bg-white hover:bg-slate-200">Suivant →</button>
+    {% endif %}
+  </span>
+  {% endif %}
+</div>
+
+{% if not reviews %}
+<div class="px-3 py-8 text-center text-slate-500 italic text-sm">
+  Rien à vérifier.
+</div>
+{% else %}
+<ul class="divide-y divide-slate-100">
+  {% for entry in reviews %}
+  {% set r = entry.row %}
+  {% set entry_id = "review-" ~ r.server_id ~ "-" ~ r.rating_key %}
+  <li id="{{ entry_id }}" class="p-3">
+    <div class="flex flex-wrap items-baseline gap-2">
+      <span class="font-medium text-slate-900">{{ r.title or r.rating_key }}</span>
+      <span class="text-xs text-slate-500">{{ r.year or "—" }} ·
+        {{ "série" if r.media_type == "show" else "film" }}</span>
+      <span class="px-1.5 py-0.5 text-[10px] rounded bg-amber-100 text-amber-800">{{ r.reason }}</span>
+      <span class="text-[10px] text-slate-400 font-mono">{{ r.server_id }} · {{ r.rating_key }}</span>
+    </div>
+
+    {% if entry.candidates %}
+    <div class="grid gap-2 md:grid-cols-2 xl:grid-cols-3 mt-2">
+      {% for c in entry.candidates %}
+      <article class="border border-slate-200 rounded p-2 flex gap-2 bg-white">
+        {% if c.poster_url %}
+        <img src="{{ c.poster_url }}" loading="lazy" alt=""
+             class="w-16 h-auto rounded border border-slate-200 bg-slate-100 shrink-0">
+        {% else %}
+        <div class="w-16 h-24 rounded border border-dashed border-slate-300 bg-slate-50 shrink-0"></div>
+        {% endif %}
+        <div class="min-w-0 flex-1">
+          <div class="text-sm font-medium text-slate-900 truncate">{{ c.title }}</div>
+          <div class="text-xs text-slate-600">
+            {{ c.year or "—" }} · {{ ((c.combined_score or 0) * 100) | round | int }} %
+          </div>
+          <div class="flex flex-wrap gap-1 mt-1">
+            {% if c.text_safe %}
+            <span class="px-1.5 py-0.5 text-[10px] rounded bg-sky-100 text-sky-800">texte sûr</span>
+            {% endif %}
+            {% if c.badge == "identical" %}
+            <span class="px-1.5 py-0.5 text-[10px] rounded bg-emerald-100 text-emerald-800">poster identique</span>
+            {% elif c.badge == "close" %}
+            <span class="px-1.5 py-0.5 text-[10px] rounded bg-amber-100 text-amber-800">poster proche</span>
+            {% elif c.badge == "different" %}
+            <span class="px-1.5 py-0.5 text-[10px] rounded bg-rose-100 text-rose-800">poster différent</span>
+            {% endif %}
+            <span class="px-1.5 py-0.5 text-[10px] rounded bg-slate-100 text-slate-500">{{ c.provider }}</span>
+          </div>
+          <form hx-post="/admin/review/{{ r.server_id }}/{{ r.rating_key }}/apply"
+                hx-target="#{{ entry_id }}"
+                hx-swap="outerHTML"
+                hx-confirm="Appliquer « {{ (c.title or '')|e }} » ?&#10;IMDb : {{ (c.imdb_id or 'aucun')|e }}&#10;TMDB : {{ (c.tmdb_id or 'aucun')|e }}"
+                class="mt-2">
+            <input type="hidden" name="candidate_index" value="{{ loop.index0 }}">
+            <button type="submit"
+                    class="px-2 py-1 text-xs rounded bg-emerald-700 text-emerald-50 hover:bg-emerald-600">
+              Appliquer
+            </button>
+          </form>
+        </div>
+      </article>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="text-xs text-slate-500 italic mt-2">Aucun candidat mémorisé pour ce média.</div>
+    {% endif %}
+
+    <div class="flex items-center gap-2 mt-2">
+      <button type="button"
+              hx-get="/admin/media/{{ r.server_id }}/{{ r.rating_key }}/scrape"
+              hx-target="#scrape-panel"
+              hx-swap="innerHTML"
+              class="px-2 py-1 text-xs rounded border border-slate-300 bg-white hover:bg-slate-100">
+        Autres…
+      </button>
+      <button type="button"
+              hx-post="/admin/review/{{ r.server_id }}/{{ r.rating_key }}/dismiss"
+              hx-target="#{{ entry_id }}"
+              hx-swap="outerHTML"
+              class="px-2 py-1 text-xs rounded border border-slate-300 bg-white hover:bg-slate-100">
+        Ignorer
+      </button>
+    </div>
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}

@@ -59,7 +59,9 @@ async def test_apply_by_tmdb_id_renders_applied_row(api_client, db_factory, monk
         auth=ADMIN_AUTH,
     )
     assert resp.status_code == 200, resp.text
-    assert resp.headers.get("HX-Trigger") == "refresh-stats"
+    # W5: applying also resolves this item's `scrape_review` row (inside the
+    # same write), so the review list must refresh too.
+    assert resp.headers.get("HX-Trigger") == "refresh-stats, refresh-review"
     assert "tt0133093" in resp.text
     assert "verrouill" in resp.text.lower()
 

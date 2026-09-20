@@ -71,6 +71,22 @@ class OMDbData:
     imdb_id: str | None = None
 
 
+@dataclass(frozen=True)
+class OMDbHit:
+    """One entry of an OMDb `?s=` list search (ADR 0005 D3).
+
+    Deliberately NOT an `OMDbData`: the list endpoint returns only five
+    fields per hit (no plot/rating/runtime/genre), so a separate, honest
+    shape avoids handing callers an `OMDbData` whose interesting columns are
+    all `None` for a reason they cannot distinguish from "OMDb had no data".
+    """
+    imdb_id: str
+    title: str
+    year: int | None  # first 4 digits of "Year" ("2015–2019" -> 2015)
+    type: str  # "movie" | "series" | "episode" — passed through as-is
+    poster_url: str | None  # "N/A" -> None
+
+
 def _clean_str(value) -> str | None:
     """OMDb's "N/A" sentinel -> None; blank/missing -> None; else stripped str."""
     if not isinstance(value, str):
@@ -126,6 +142,15 @@ def count_requests() -> Generator[RequestTally, None, None]:
         yield tally
     finally:
         _request_tally.reset(token)
+
+
+def _parse_year_prefix(value) -> int | None:
+    """OMDb's "Year" field -> leading 4-digit year. Series return ranges
+    ("2015–2019", "2015–"), so only the first four digits are meaningful."""
+    cleaned = _clean_str(value)
+    if cleaned is None or len(cleaned) < 4 or not cleaned[:4].isdigit():
+        return None
+    return int(cleaned[:4])
 
 
 def _parse_imdb_votes(value) -> int | None:
@@ -389,6 +414,70 @@ class OMDbService:
             type=data.get("Type") or "",
             imdb_id=_clean_str(data.get("imdbID")),
         )
+
+    async def search_list(
+        self, query: str, year: int | None, media_type: str,
+    ) -> list[OMDbHit]:
+        """OMDb `?s=<query>[&y=][&type=movie|series]` — page 1 only (<=10
+        hits), used by the manual scraper when TMDB returned nothing or the
+        operator forced the OMDb provider (ADR 0005 D3).
+
+        Same guarantees as `search_by_title`: no-op (`[]`) when OMDb is
+        unconfigured or `query` is blank, `_budget_exhausted()` gate, `[]`
+        on any transport/HTTP failure or on OMDb's `Response: "False"`, one
+        `plexhub_omdb_requests_total{result}` increment per call. The API
+        key never reaches a log line — exception TYPE / HTTP status only,
+        never `str(exc)` (which embeds the `apikey` query param)."""
+        if not query:
+            return []
+        if not self.is_configured:
+            return []
+        if self._budget_exhausted():
+            omdb_requests_total.labels(result="budget_exhausted").inc()
+            return []
+
+        params: dict = {"s": query}
+        if year is not None:
+            params["y"] = str(year)
+        omdb_type = {"movie": "movie", "show": "series"}.get(media_type)
+        if omdb_type is not None:
+            params["type"] = omdb_type
+
+        try:
+            data = await self._request("/", params=params)
+        except httpx.HTTPStatusError as exc:
+            omdb_requests_total.labels(
+                result="rate_limited" if exc.response.status_code == 429 else "error"
+            ).inc()
+            logger.warning(
+                "OMDb search_list failed for %r (HTTP %s)", query, exc.response.status_code,
+            )
+            return []
+        except Exception as exc:
+            omdb_requests_total.labels(result="error").inc()
+            logger.warning("OMDb search_list failed for %r (%s)", query, type(exc).__name__)
+            return []
+
+        if data.get("Response") != "True":
+            omdb_requests_total.labels(result="not_found").inc()
+            return []
+
+        omdb_requests_total.labels(result="ok").inc()
+        hits: list[OMDbHit] = []
+        for raw in data.get("Search") or []:
+            if not isinstance(raw, dict):
+                continue
+            imdb_id = _clean_str(raw.get("imdbID"))
+            if not imdb_id:
+                continue  # an entry without an id is unusable as an identity
+            hits.append(OMDbHit(
+                imdb_id=imdb_id,
+                title=_clean_str(raw.get("Title")) or "",
+                year=_parse_year_prefix(raw.get("Year")),
+                type=_clean_str(raw.get("Type")) or "",
+                poster_url=_clean_str(raw.get("Poster")),
+            ))
+        return hits
 
 
 # Singleton

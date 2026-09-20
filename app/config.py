@@ -291,6 +291,14 @@ class Settings:
     # coalesce into a single snapshot rebuild per media_type instead of one
     # per write.
     SCRAPE_REBUILD_DEBOUNCE_SECONDS: float = _safe_float("SCRAPE_REBUILD_DEBOUNCE_SECONDS", 5.0)
+    # How many of the top text-scored candidates get their posters downloaded
+    # and compared (ADR 0005 D6/D11). The interactive value is higher because
+    # an operator is waiting on ONE item and wants the best evidence; the
+    # batch value is lower because it multiplies by thousands of items.
+    SCRAPE_INTERACTIVE_POSTER_CANDIDATES: int = _safe_int(
+        "SCRAPE_INTERACTIVE_POSTER_CANDIDATES", 5,
+    )
+    SCRAPE_BATCH_POSTER_CANDIDATES: int = _safe_int("SCRAPE_BATCH_POSTER_CANDIDATES", 3)
 
     # Manual scraper poster-match (ADR 0005 D5/D11) — compares the Xtream
     # poster to TMDB/OMDb candidate posters via dHash/pHash, run through a

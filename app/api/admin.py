@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,7 +20,13 @@ from app.config import settings
 from app.db.database import async_session_factory, get_db
 from app.models.schemas import MediaUpdate
 from app.services.media_service import media_service
-from app.services import account_outage_service, api_key_service, manual_scrape_service, nfo_import_service
+from app.services import (
+    account_outage_service,
+    api_key_service,
+    manual_scrape_service,
+    nfo_import_service,
+    poster_match_service,
+)
 from app.utils.time import now_ms
 
 
@@ -45,76 +51,110 @@ def _fmt_ms(ms: Optional[int]) -> str:
 templates.env.filters["ms"] = _fmt_ms
 
 
-async def _load_movies_page(
+_ID_FILTERS = (
+    "all", "missing_imdb", "missing_tmdb", "missing_both", "incomplete",
+    "locked", "batch", "review",
+)
+
+
+def _norm_type(value: Optional[str]) -> str:
+    """Query/form `type` -> `Media.type` vocabulary. Anything unknown falls
+    back to "movie" rather than 422-ing a browse URL."""
+    return "show" if (value or "").lower() in ("show", "series", "tv") else "movie"
+
+
+def _norm_ids(value: Optional[str]) -> str:
+    return value if value in _ID_FILTERS else "incomplete"
+
+
+async def _catalogue_ctx(
     db: AsyncSession,
     *,
-    missing_imdb: bool,
-    missing_tmdb: bool,
+    media_type: str,
+    ids: str,
     search: Optional[str],
     sort: str,
     page: int,
     page_size: int,
-):
-    offset = max(0, (page - 1) * page_size)
-    items, total = await media_service.get_media_list(
-        db,
-        media_type="movie",
-        limit=page_size,
-        offset=offset,
-        sort=sort,
-        search=search or None,
-        missing_imdb=missing_imdb,
-        missing_tmdb=missing_tmdb,
-        # The operator's diagnostic view must show what a provider outage is
-        # hiding from the app, not hide it too.
-        apply_outage_mask=False,
+) -> dict:
+    page_obj = await manual_scrape_service.list_catalogue(
+        db, media_type=media_type, id_filter=ids, search=search or None,
+        sort=sort, page=page, page_size=page_size,
     )
-    return items, total, offset
+    return {
+        "items": page_obj.items,
+        "total": page_obj.total,
+        "offset": page_obj.offset,
+        "review_keys": page_obj.review_keys,
+        "page": page,
+        "page_size": page_size,
+        "media_type": media_type,
+        "ids": ids,
+        "search": search or "",
+        "sort": sort,
+    }
+
+
+async def _stats_ctx(db: AsyncSession) -> dict:
+    stats = await manual_scrape_service.catalogue_stats(db)
+    movie = stats["movie"]
+    return {
+        "stats": stats,
+        "movie_stats": movie,
+        "show_stats": stats["show"],
+        # Back-compat keys for the pre-ADR-0005 movie-only counters (the
+        # `/admin/movies/stats` alias and its tests still read these).
+        "total_movies": movie.total,
+        "missing_imdb_count": movie.missing_imdb,
+        "missing_tmdb_count": movie.missing_tmdb,
+        "outages": await account_outage_service.list_outages(db),
+    }
 
 
 @router.get("", response_class=HTMLResponse)
 @router.get("/", response_class=HTMLResponse)
 async def admin_index(
     request: Request,
-    missing_imdb: bool = Query(True),
-    missing_tmdb: bool = Query(False),
+    type: str = Query("movie"),  # noqa: A002 — query name fixed by ADR 0005 D10
+    ids: str = Query("incomplete"),
+    search: Optional[str] = Query(None),
+    sort: str = Query("added_desc"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=10, le=500),
+    tab: str = Query("catalogue"),
+    db: AsyncSession = Depends(get_db),
+):
+    ctx = await _catalogue_ctx(
+        db, media_type=_norm_type(type), ids=_norm_ids(ids),
+        search=search, sort=sort, page=page, page_size=page_size,
+    )
+    ctx.update(await _stats_ctx(db))
+    ctx["tab"] = "review" if tab == "review" else "catalogue"
+    return templates.TemplateResponse(request, "admin/index.html", ctx)
+
+
+@router.get("/catalogue", response_class=HTMLResponse)
+async def admin_catalogue_fragment(
+    request: Request,
+    type: str = Query("movie"),  # noqa: A002
+    ids: str = Query("incomplete"),
     search: Optional[str] = Query(None),
     sort: str = Query("added_desc"),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=10, le=500),
     db: AsyncSession = Depends(get_db),
 ):
-    items, total, offset = await _load_movies_page(
-        db, missing_imdb=missing_imdb, missing_tmdb=missing_tmdb,
+    ctx = await _catalogue_ctx(
+        db, media_type=_norm_type(type), ids=_norm_ids(ids),
         search=search, sort=sort, page=page, page_size=page_size,
     )
-    total_movies, missing_imdb_count, missing_tmdb_count = (
-        await media_service.count_movies_missing_external(db)
-    )
-    return templates.TemplateResponse(
-        request,
-        "admin/index.html",
-        {
-            "items": items,
-            "total": total,
-            "offset": offset,
-            "page": page,
-            "page_size": page_size,
-            "missing_imdb": missing_imdb,
-            "missing_tmdb": missing_tmdb,
-            "search": search or "",
-            "sort": sort,
-            "total_movies": total_movies,
-            "missing_imdb_count": missing_imdb_count,
-            "missing_tmdb_count": missing_tmdb_count,
-        },
-    )
+    return templates.TemplateResponse(request, "admin/_media_table.html", ctx)
 
 
 @router.get("/movies", response_class=HTMLResponse)
 async def admin_movies_fragment(
     request: Request,
-    missing_imdb: bool = Query(True),
+    missing_imdb: bool = Query(False),
     missing_tmdb: bool = Query(False),
     search: Optional[str] = Query(None),
     sort: str = Query("added_desc"),
@@ -122,44 +162,30 @@ async def admin_movies_fragment(
     page_size: int = Query(50, ge=10, le=500),
     db: AsyncSession = Depends(get_db),
 ):
-    items, total, offset = await _load_movies_page(
-        db, missing_imdb=missing_imdb, missing_tmdb=missing_tmdb,
-        search=search, sort=sort, page=page, page_size=page_size,
+    """Pre-ADR-0005 alias (ADR 0005 D10): the old boolean pair maps onto the
+    new `ids` filter — both set means "either id missing" (`incomplete`),
+    neither means `all`."""
+    if missing_imdb and missing_tmdb:
+        ids = "incomplete"
+    elif missing_imdb:
+        ids = "missing_imdb"
+    elif missing_tmdb:
+        ids = "missing_tmdb"
+    else:
+        ids = "all"
+    ctx = await _catalogue_ctx(
+        db, media_type="movie", ids=ids, search=search, sort=sort,
+        page=page, page_size=page_size,
     )
-    return templates.TemplateResponse(
-        request,
-        "admin/_movies_table.html",
-        {
-            "items": items,
-            "total": total,
-            "offset": offset,
-            "page": page,
-            "page_size": page_size,
-            "missing_imdb": missing_imdb,
-            "missing_tmdb": missing_tmdb,
-            "search": search or "",
-            "sort": sort,
-        },
-    )
+    return templates.TemplateResponse(request, "admin/_media_table.html", ctx)
 
 
+@router.get("/stats", response_class=HTMLResponse)
 @router.get("/movies/stats", response_class=HTMLResponse)
 async def admin_stats_fragment(
     request: Request, db: AsyncSession = Depends(get_db),
 ):
-    total, missing_imdb, missing_tmdb = (
-        await media_service.count_movies_missing_external(db)
-    )
-    return templates.TemplateResponse(
-        request,
-        "admin/_stats.html",
-        {
-            "total_movies": total,
-            "missing_imdb_count": missing_imdb,
-            "missing_tmdb_count": missing_tmdb,
-            "outages": await account_outage_service.list_outages(db),
-        },
-    )
+    return templates.TemplateResponse(request, "admin/_stats.html", await _stats_ctx(db))
 
 
 @router.post("/movies/{rating_key}/ids", response_class=HTMLResponse)
@@ -395,6 +421,131 @@ async def admin_media_rescrape(
         request, "admin/_media_row.html",
         {"item": item, "rescraped": True},
         headers={"HX-Trigger": "refresh-stats"},
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Manual scraper, W4: poster proxy + search panel + candidate cards
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@router.get("/media/{server_id}/{rating_key}/poster")
+async def admin_media_poster(server_id: str, rating_key: str, which: str = Query("xtream")):
+    """Proxy the media's own poster (ADR 0005 D10).
+
+    The URL is read from the DB row addressed by the media PK — a client
+    NEVER supplies a URL (that would be an open SSRF/credential-probing
+    proxy). Fetching goes through `poster_match_service`'s dedicated,
+    SSRF-vetted client: never `tmdb_service`'s, which injects `api_key` on
+    every request (ADR 0005 F2). Any failure (no URL, blocked host, decode/
+    size/content-type rejection) is a 404 — the template renders the
+    thumbnail with a plain `<img>`, and an error body would be rendered as a
+    broken image either way."""
+    item = await manual_scrape_service.load_row(
+        server_id, rating_key, session_factory=async_session_factory,
+    )
+    if item is None:
+        raise HTTPException(404, "Media not found")
+    url = item.resolved_thumb_url if which == "current" else item.thumb_url
+    if not url:
+        raise HTTPException(404, "No poster for this media")
+    try:
+        image = await poster_match_service.fetch_image(url)
+    except poster_match_service.PosterFetchError:
+        # Never echo the exception message/URL: an Xtream poster URL can
+        # embed the account credentials.
+        raise HTTPException(404, "Poster unavailable") from None
+    return Response(
+        content=image.content,
+        media_type=image.content_type,
+        headers={
+            "Cache-Control": "private, max-age=86400",
+            # GZipMiddleware would otherwise try to re-compress an already
+            # compressed image (same guard as the trailer FileResponse).
+            "Content-Encoding": "identity",
+        },
+    )
+
+
+@router.get("/media/{server_id}/{rating_key}/scrape", response_class=HTMLResponse)
+async def admin_media_scrape_panel(server_id: str, rating_key: str, request: Request):
+    """The scrape drawer: both posters side by side and a search form
+    pre-filled from the row (ADR 0005 D10). No network here — candidates are
+    fetched by the `/candidates` route the form targets."""
+    item = await manual_scrape_service.load_row(
+        server_id, rating_key, session_factory=async_session_factory,
+    )
+    if item is None:
+        raise HTTPException(404, "Media not found")
+    return templates.TemplateResponse(
+        request, "admin/_scrape_panel.html",
+        {"item": item, "media_type": _norm_type(item.type)},
+    )
+
+
+@router.get("/media/{server_id}/{rating_key}/candidates", response_class=HTMLResponse)
+async def admin_media_candidates(
+    server_id: str,
+    rating_key: str,
+    request: Request,
+    title: Optional[str] = Query(None),
+    year: Optional[str] = Query(None),
+    type: str = Query("movie"),  # noqa: A002
+    provider: str = Query("auto"),
+):
+    item = await manual_scrape_service.load_row(
+        server_id, rating_key, session_factory=async_session_factory,
+    )
+    if item is None:
+        raise HTTPException(404, "Media not found")
+
+    parsed_year: Optional[int] = None
+    if year and year.strip().isdigit():
+        parsed_year = int(year.strip())
+
+    query = manual_scrape_service.ScrapeQuery(
+        media_type=_norm_type(type),
+        title=(title or item.title or "").strip(),
+        year=parsed_year,
+        provider=provider if provider in ("auto", "tmdb", "omdb") else "auto",
+    )
+    result = await manual_scrape_service.search_candidates(
+        query, xtream_poster_url=item.thumb_url, summary=item.summary,
+    )
+    return templates.TemplateResponse(
+        request, "admin/_scrape_candidates.html", {"item": item, "result": result},
+    )
+
+
+@router.post("/media/{server_id}/{rating_key}/lookup", response_class=HTMLResponse)
+async def admin_media_lookup(
+    server_id: str,
+    rating_key: str,
+    request: Request,
+    raw_id: str = Form(...),
+    type: str = Form("movie"),  # noqa: A002
+):
+    item = await manual_scrape_service.load_row(
+        server_id, rating_key, session_factory=async_session_factory,
+    )
+    if item is None:
+        raise HTTPException(404, "Media not found")
+    try:
+        result = await manual_scrape_service.lookup(
+            raw_id, media_type=_norm_type(type), xtream_poster_url=item.thumb_url,
+        )
+    except ValueError:
+        return templates.TemplateResponse(
+            request, "admin/_scrape_candidates.html",
+            {
+                "item": item, "result": None,
+                "error": "Identifiant illisible — attendu ttXXXXXXX, un id TMDB, "
+                         "ou une URL IMDb/TMDB.",
+            },
+            status_code=422,
+        )
+    return templates.TemplateResponse(
+        request, "admin/_scrape_candidates.html", {"item": item, "result": result},
     )
 
 

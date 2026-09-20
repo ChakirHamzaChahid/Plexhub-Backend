@@ -25,19 +25,34 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Literal
 
 import httpx
-from sqlalchemy import and_, func, not_, or_, select, update
+from sqlalchemy import and_, false, func, not_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.models.database import EnrichmentQueue, Media
-from app.services import omdb_scrape_cache_service, scrape_cache_service, unified_group_service
+from app.services import (
+    omdb_scrape_cache_service,
+    poster_match_service,
+    scrape_cache_service,
+    unified_group_service,
+)
 from app.services.media_identity_writer import (
     build_identity_values,
     build_omdb_replace_extras,
     build_rating_values,
 )
 from app.services.omdb_service import OMDbData, omdb_service
+from app.services.omdb_service import count_requests as omdb_count_requests
 from app.services.poster_match_service import PosterComparison
-from app.services.tmdb_service import TMDBEnrichmentData, tmdb_service
+from app.services.tmdb_service import (
+    POSTER_W185_BASE,
+    TITLE_WEIGHT,
+    YEAR_WEIGHT,
+    TMDBEnrichmentData,
+    tmdb_service,
+)
+from app.services.tmdb_service import count_requests as tmdb_count_requests
+from app.services.tmdb_service import title_similarity, year_score
 from app.utils.db_retry import write_with_retry
 from app.utils.time import now_ms
 from app.utils.unification import calculate_history_group_key, calculate_unification_id
@@ -51,6 +66,20 @@ logger = logging.getLogger("plexhub.manual_scrape")
 MediaKind = Literal["movie", "show"]
 Provider = Literal["auto", "tmdb", "omdb"]
 MatchSource = Literal["manual", "batch_auto", "batch_pair"]
+IdFilter = Literal[
+    "all", "missing_imdb", "missing_tmdb", "missing_both", "incomplete",
+    "locked", "batch", "review",
+]
+
+# Combined score weights (ADR 0005 D6) — text score dominates, the poster
+# comparison refines it. A candidate with no usable poster comparison keeps
+# its text score unchanged rather than being penalised: "no image evidence"
+# must never rank below "image evidence says different".
+TEXT_WEIGHT, IMAGE_WEIGHT = 0.6, 0.4
+RULE_B_MIN_TITLE_SCORE = 0.6
+
+# Hard cap on candidates returned to the UI / persisted to a review row.
+MAX_CANDIDATES = 10
 
 
 def _tmdb_kind(media_type: MediaKind) -> Literal["movie", "tv"]:
@@ -145,6 +174,285 @@ class ApplyOutcome:
     new_imdb_id: str | None = None
     propagated: int = 0
     conflicts: list[tuple[str, str, str | None, str | None]] = field(default_factory=list)
+
+
+@dataclass
+class CataloguePage:
+    """One page of the admin catalogue (ADR 0005 D6). `items` holds ONE row
+    per `(server_id, rating_key)` — `media`'s PK has four columns, so an item
+    present in N categories exists as N rows (ADR 0005 F1)."""
+    items: list[Media]
+    total: int
+    offset: int
+    review_keys: set[tuple[str, str]] = field(default_factory=set)
+
+
+@dataclass(frozen=True)
+class TypeStats:
+    """Per-media-type identity coverage, counted on DISTINCT items (not on
+    `media` rows — the old `count_movies_missing_external` counted
+    category-variant rows and is deliberately not reused, ADR 0005 D6)."""
+    total: int
+    missing_imdb: int
+    missing_tmdb: int
+    with_both: int
+    locked: int
+    review_pending: int = 0
+
+
+# ─── search_candidates — text search + poster re-ranking (ADR 0005 D6) ──────
+
+
+async def _safe_tmdb_search(
+    kind: Literal["movie", "tv"], title: str, year: int | None,
+    *, language: str | None, summary: str | None,
+):
+    """`tmdb_service.search_candidates`, never raising.
+
+    NOTE (ADR 0005 F2): the TMDB client injects `api_key` as a query param on
+    every request and `httpx.HTTPStatusError.__str__` embeds the full request
+    URL — so the raw exception text is NEVER logged here, only its type (and
+    the HTTP status when there is one)."""
+    from app.services.tmdb_service import CandidateSearch, TMDBSearchOutcome
+
+    try:
+        return await tmdb_service.search_candidates(
+            kind, title, year, language=language, summary=summary,
+        )
+    except httpx.HTTPStatusError as exc:
+        logger.warning(
+            "manual_scrape: TMDB search failed for %s (HTTP %s)",
+            kind, exc.response.status_code,
+        )
+    except Exception as exc:
+        logger.warning(
+            "manual_scrape: TMDB search failed for %s (%s)", kind, type(exc).__name__,
+        )
+    return CandidateSearch(verdict=TMDBSearchOutcome("nomatch"), candidates=[])
+
+
+async def _safe_match_extras(tmdb_id: int, kind: Literal["movie", "tv"]):
+    """`get_match_extras` already returns None on failure; this only guards
+    against an unexpected raise (same no-`str(exc)` rule as above)."""
+    try:
+        return await tmdb_service.get_match_extras(tmdb_id, kind)
+    except Exception as exc:
+        logger.warning(
+            "manual_scrape: TMDB extras failed for %s/%s (%s)",
+            kind, tmdb_id, type(exc).__name__,
+        )
+        return None
+
+
+async def _safe_omdb_search(title: str, year: int | None, media_type: MediaKind) -> list:
+    """`omdb_service.search_list`, never raising. Same secret-safety rule:
+    OMDb's key rides on the URL as `apikey`, so no `str(exc)` either."""
+    try:
+        return await omdb_service.search_list(title, year, media_type)
+    except Exception as exc:
+        logger.warning("manual_scrape: OMDb search failed (%s)", type(exc).__name__)
+        return []
+
+
+async def _safe_compare_posters(
+    xtream_poster_url: str | None, variants: list[str],
+) -> PosterComparison | None:
+    """`poster_match_service.compare_posters`, never raising — a poster
+    comparison is an ADVISORY signal, a failure must degrade the candidate
+    card to "no image evidence", never fail the whole search. Never logs a
+    URL (an Xtream poster URL can embed account credentials)."""
+    try:
+        return await poster_match_service.compare_posters(xtream_poster_url, variants)
+    except Exception as exc:
+        logger.warning("manual_scrape: poster compare failed (%s)", type(exc).__name__)
+        return None
+
+
+async def search_candidates(
+    query: ScrapeQuery,
+    *,
+    xtream_poster_url: str | None,
+    summary: str | None = None,
+    poster_top_n: int | None = None,
+) -> SearchResult:
+    """Full manual-scrape candidate search (ADR 0005 D6).
+
+    1. TMDB (unless `provider == "omdb"`): with the year, then without it,
+       then in `en-US` — the same widening chain
+       `enrichment_worker._search_with_fallback` uses, minus `/search/multi`
+       (a manual search shows candidates, it doesn't need a last-resort
+       auto-match). Results are merged and deduped by `tmdb_id`, keeping the
+       best confidence seen for each.
+    2. OMDb `?s=` when `provider == "omdb"`, or when `provider == "auto"`
+       produced zero TMDB candidates. `provider == "tmdb"` never calls OMDb.
+    3. Poster comparison on the `poster_top_n` best candidates BY TEXT SCORE
+       (default `SCRAPE_INTERACTIVE_POSTER_CANDIDATES`), via
+       `get_match_extras` (which also resolves each candidate's imdb_id).
+    4. `combined_score = 0.6*text + 0.4*image`, sorted, at most one
+       `recommended`.
+    """
+    kind = _tmdb_kind(query.media_type)
+    language = query.language or settings.TMDB_LANGUAGE
+    top_n = (
+        poster_top_n if poster_top_n is not None
+        else settings.SCRAPE_INTERACTIVE_POSTER_CANDIDATES
+    )
+
+    text_verdict: Literal["matched", "ambiguous", "nomatch"] = "nomatch"
+    candidates: list[Candidate] = []
+
+    with tmdb_count_requests() as tmdb_tally, omdb_count_requests() as omdb_tally:
+        best_by_id: dict[int, Any] = {}
+        matched_ids: set[int] = set()
+
+        if query.provider != "omdb":
+            attempts = [await _safe_tmdb_search(
+                kind, query.title, query.year, language=language, summary=summary,
+            )]
+            if attempts[-1].verdict.result != "matched" and query.year is not None:
+                attempts.append(await _safe_tmdb_search(
+                    kind, query.title, None, language=language, summary=summary,
+                ))
+            if attempts[-1].verdict.result != "matched":
+                attempts.append(await _safe_tmdb_search(
+                    kind, query.title, query.year, language="en-US", summary=summary,
+                ))
+
+            for attempt in attempts:
+                for scored in attempt.candidates:
+                    previous = best_by_id.get(scored.tmdb_id)
+                    if previous is None or scored.confidence > previous.confidence:
+                        best_by_id[scored.tmdb_id] = scored
+
+            for attempt in attempts:
+                if attempt.verdict.result == "matched":
+                    text_verdict = "matched"
+                    if attempt.verdict.match is not None:
+                        matched_ids.add(attempt.verdict.match.tmdb_id)
+                    break
+            else:
+                if any(a.verdict.result == "ambiguous" for a in attempts):
+                    text_verdict = "ambiguous"
+
+            ordered = sorted(
+                best_by_id.values(),
+                key=lambda sc: (sc.confidence, sc.vote_count), reverse=True,
+            )[:MAX_CANDIDATES]
+            candidates = [
+                Candidate(
+                    provider="tmdb",
+                    tmdb_id=sc.tmdb_id,
+                    imdb_id=None,
+                    media_type=query.media_type,
+                    title=sc.title,
+                    original_title=sc.original_title,
+                    year=sc.year,
+                    overview=sc.overview,
+                    poster_url=(
+                        f"{POSTER_W185_BASE}{sc.poster_path}" if sc.poster_path else None
+                    ),
+                    title_score=sc.title_score,
+                    text_confidence=sc.confidence,
+                    poster=None,
+                    combined_score=sc.confidence,
+                    # `text_safe` means "the auto-matcher would have picked
+                    # THIS candidate on its own" — not merely "some attempt
+                    # matched something".
+                    text_safe=sc.tmdb_id in matched_ids,
+                    recommended=False,
+                )
+                for sc in ordered
+            ]
+
+        if query.provider == "omdb" or (query.provider == "auto" and not candidates):
+            for hit in (await _safe_omdb_search(
+                query.title, query.year, query.media_type,
+            ))[:MAX_CANDIDATES]:
+                hit_title_score = title_similarity(query.title, hit.title)
+                confidence = (
+                    TITLE_WEIGHT * hit_title_score
+                    + YEAR_WEIGHT * year_score(query.year, hit.year)
+                )
+                candidates.append(Candidate(
+                    provider="omdb",
+                    tmdb_id=None,
+                    imdb_id=hit.imdb_id,
+                    media_type=query.media_type,
+                    title=hit.title,
+                    original_title=None,
+                    year=hit.year,
+                    overview=None,
+                    poster_url=hit.poster_url,
+                    title_score=hit_title_score,
+                    text_confidence=confidence,
+                    poster=None,
+                    combined_score=confidence,
+                    text_safe=False,
+                    recommended=False,
+                ))
+
+        # --- poster comparison on the top-N by TEXT score -------------------
+        xtream_poster_generic = False
+        for candidate in sorted(
+            candidates, key=lambda c: c.text_confidence, reverse=True,
+        )[:max(0, top_n)]:
+            variants: list[str] = []
+            if candidate.provider == "tmdb" and candidate.tmdb_id is not None:
+                extras = await _safe_match_extras(candidate.tmdb_id, kind)
+                if extras is not None:
+                    candidate.imdb_id = extras.imdb_id or candidate.imdb_id
+                    variants = list(extras.poster_urls)
+                    if not candidate.poster_url and extras.poster_urls:
+                        candidate.poster_url = extras.poster_urls[0]
+            elif candidate.poster_url:
+                # An OMDb hit has exactly one poster (ADR 0005 D6).
+                variants = [candidate.poster_url]
+
+            if not xtream_poster_url or not variants:
+                # No Xtream reference poster (or no candidate poster at all):
+                # skip the download entirely rather than fetch images whose
+                # comparison could only ever be "unknown".
+                continue
+            comparison = await _safe_compare_posters(xtream_poster_url, variants)
+            if comparison is None:
+                continue
+            candidate.poster = comparison
+            xtream_poster_generic = xtream_poster_generic or comparison.xtream_generic
+
+        tmdb_calls = tmdb_tally.count
+        omdb_calls = omdb_tally.count
+
+    for candidate in candidates:
+        image_score = (
+            candidate.poster.image_score
+            if candidate.poster is not None and candidate.poster.badge != "unknown"
+            else None
+        )
+        candidate.combined_score = (
+            TEXT_WEIGHT * candidate.text_confidence + IMAGE_WEIGHT * image_score
+            if image_score is not None
+            else candidate.text_confidence
+        )
+
+    candidates.sort(key=lambda c: (c.combined_score, c.text_confidence), reverse=True)
+    candidates = candidates[:MAX_CANDIDATES]
+    if candidates:
+        top = candidates[0]
+        # At most one recommendation, and only when there is a real reason:
+        # the text auto-matcher chose it, or its poster is the same image.
+        top.recommended = bool(
+            top.text_safe or (top.poster is not None and top.poster.badge == "identical")
+        )
+
+    return SearchResult(
+        query=query,
+        candidates=candidates,
+        text_verdict=text_verdict,
+        xtream_poster_available=bool(xtream_poster_url),
+        xtream_poster_generic=xtream_poster_generic,
+        tmdb_calls=tmdb_calls,
+        omdb_calls=omdb_calls,
+    )
 
 
 # ─── lookup — id/URL -> single candidate, no poster compare (ADR 0005 D6) ───
@@ -702,8 +1010,136 @@ async def load_row(server_id: str, rating_key: str, *, session_factory) -> Media
         )).scalars().first()
 
 
+# ─── catalogue listing / stats (ADR 0005 D6, W4) ────────────────────────────
+
+_SORTS = {
+    "added_desc": lambda: Media.added_at.desc(),
+    "added_asc": lambda: Media.added_at.asc(),
+    "title_asc": lambda: Media.title.asc(),
+    "title_desc": lambda: Media.title.desc(),
+    "year_desc": lambda: Media.year.desc(),
+}
+
+_IMDB_MISSING = or_(Media.imdb_id.is_(None), Media.imdb_id == "")
+_TMDB_MISSING = or_(Media.tmdb_id.is_(None), Media.tmdb_id == "")
+
+
+def _id_filter_clause(id_filter: IdFilter):
+    """WHERE fragment for an `IdFilter` (None = no restriction).
+
+    `review` is a W5 filter: `scrape_review` (migration 027) does not exist
+    yet, so it deliberately matches NOTHING rather than silently behaving
+    like `all` — an operator must never believe an empty review queue is
+    being shown when the feature simply isn't wired yet."""
+    if id_filter == "missing_imdb":
+        return _IMDB_MISSING
+    if id_filter == "missing_tmdb":
+        return _TMDB_MISSING
+    if id_filter == "missing_both":
+        return and_(_IMDB_MISSING, _TMDB_MISSING)
+    if id_filter == "incomplete":
+        return or_(_IMDB_MISSING, _TMDB_MISSING)
+    if id_filter == "locked":
+        return Media.match_locked == True  # noqa: E712
+    if id_filter == "batch":
+        return Media.match_source.in_(("batch_auto", "batch_pair"))
+    if id_filter == "review":
+        return false()
+    return None
+
+
+def _catalogue_where(media_type: MediaKind, id_filter: IdFilter, search: str | None):
+    # No outage mask (CLAUDE.md piège 20): the operator's diagnostic view
+    # must show exactly what a provider outage hides from the app.
+    clauses = [
+        Media.type == media_type,
+        Media.is_in_allowed_categories == True,  # noqa: E712
+    ]
+    if search:
+        safe = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        clauses.append(Media.title.ilike(f"%{safe}%", escape="\\"))
+    extra = _id_filter_clause(id_filter)
+    if extra is not None:
+        clauses.append(extra)
+    return clauses
+
+
+async def list_catalogue(
+    db: AsyncSession,
+    *,
+    media_type: MediaKind,
+    id_filter: IdFilter = "incomplete",
+    search: str | None = None,
+    sort: str = "added_desc",
+    page: int = 1,
+    page_size: int = 50,
+) -> CataloguePage:
+    """One page of items of `media_type`, deduplicated to one row per
+    `(server_id, rating_key)` (ADR 0005 F1: `media`'s PK carries `filter`
+    and `sort_order`, so an item in N categories is N rows)."""
+    clauses = _catalogue_where(media_type, id_filter, search)
+    offset = max(0, (max(1, page) - 1) * page_size)
+
+    distinct_items = (
+        select(Media.server_id, Media.rating_key)
+        .where(*clauses)
+        .group_by(Media.server_id, Media.rating_key)
+    )
+    total = (await db.execute(
+        select(func.count()).select_from(distinct_items.subquery())
+    )).scalar() or 0
+
+    order_by = _SORTS.get(sort, _SORTS["added_desc"])()
+    rows = (await db.execute(
+        select(Media)
+        .where(*clauses)
+        .group_by(Media.server_id, Media.rating_key)
+        .order_by(order_by)
+        .limit(page_size)
+        .offset(offset)
+    )).scalars().all()
+
+    # `review_keys` stays empty until migration 027 exists (W5).
+    return CataloguePage(items=list(rows), total=total, offset=offset, review_keys=set())
+
+
+async def _distinct_count(db: AsyncSession, clauses, extra=None) -> int:
+    where = list(clauses) if extra is None else [*clauses, extra]
+    sub = (
+        select(Media.server_id, Media.rating_key)
+        .where(*where)
+        .group_by(Media.server_id, Media.rating_key)
+        .subquery()
+    )
+    return (await db.execute(select(func.count()).select_from(sub))).scalar() or 0
+
+
+async def catalogue_stats(db: AsyncSession) -> dict[str, TypeStats]:
+    """Identity coverage per media type, on DISTINCT items in allowed
+    categories (ADR 0005 D6)."""
+    stats: dict[str, TypeStats] = {}
+    for media_type in ("movie", "show"):
+        base = [
+            Media.type == media_type,
+            Media.is_in_allowed_categories == True,  # noqa: E712
+        ]
+        stats[media_type] = TypeStats(
+            total=await _distinct_count(db, base),
+            missing_imdb=await _distinct_count(db, base, _IMDB_MISSING),
+            missing_tmdb=await _distinct_count(db, base, _TMDB_MISSING),
+            with_both=await _distinct_count(
+                db, base, and_(not_(_IMDB_MISSING), not_(_TMDB_MISSING)),
+            ),
+            locked=await _distinct_count(db, base, Media.match_locked == True),  # noqa: E712
+            review_pending=0,  # W5 (migration 027)
+        )
+    return stats
+
+
 __all__ = [
-    "MediaKind", "Provider", "MatchSource",
+    "MediaKind", "Provider", "MatchSource", "IdFilter",
     "Candidate", "SearchResult", "ScrapeQuery", "ApplyOutcome",
-    "lookup", "apply_candidate", "unlock", "clear_ids", "load_row",
+    "CataloguePage", "TypeStats",
+    "search_candidates", "lookup", "apply_candidate", "unlock", "clear_ids",
+    "load_row", "list_catalogue", "catalogue_stats",
 ]

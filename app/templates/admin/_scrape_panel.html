@@ -1,0 +1,108 @@
+{% set sid = item.server_id %}
+{% set rk = item.rating_key %}
+<section class="bg-white border border-slate-200 rounded shadow-sm p-4">
+  <div class="flex items-start justify-between gap-4">
+    <div>
+      <h2 class="text-base font-semibold text-slate-900">
+        Scraper manuel — {{ item.title }}
+      </h2>
+      <p class="text-xs text-slate-500 font-mono">{{ sid }} · {{ rk }}</p>
+    </div>
+    <button type="button"
+            onclick="document.getElementById('scrape-panel').innerHTML = ''"
+            class="px-2 py-1 text-xs rounded border border-slate-300 hover:bg-slate-100">
+      Fermer
+    </button>
+  </div>
+
+  <div class="flex flex-wrap gap-6 mt-3">
+    <div class="flex gap-4">
+      <figure class="text-center">
+        <figcaption class="text-xs text-slate-500 mb-1">Poster Xtream</figcaption>
+        {% if item.thumb_url %}
+        <img src="/admin/media/{{ sid }}/{{ rk }}/poster?which=xtream"
+             loading="lazy" alt=""
+             class="w-28 rounded border border-slate-200 bg-slate-100">
+        {% else %}
+        <div class="w-28 h-40 rounded border border-dashed border-slate-300 bg-slate-50
+                    flex items-center justify-center text-xs text-slate-400">aucun</div>
+        {% endif %}
+      </figure>
+      <figure class="text-center">
+        <figcaption class="text-xs text-slate-500 mb-1">Poster actuel</figcaption>
+        {% if item.resolved_thumb_url %}
+        <img src="/admin/media/{{ sid }}/{{ rk }}/poster?which=current"
+             loading="lazy" alt=""
+             class="w-28 rounded border border-slate-200 bg-slate-100">
+        {% else %}
+        <div class="w-28 h-40 rounded border border-dashed border-slate-300 bg-slate-50
+                    flex items-center justify-center text-xs text-slate-400">aucun</div>
+        {% endif %}
+      </figure>
+    </div>
+
+    <div class="flex-1 min-w-[22rem]">
+      <form id="scrape-search"
+            hx-get="/admin/media/{{ sid }}/{{ rk }}/candidates"
+            hx-target="#scrape-candidates"
+            hx-swap="innerHTML"
+            hx-trigger="submit"
+            hx-indicator="#scrape-indicator"
+            class="flex flex-wrap items-end gap-2">
+        <div class="flex flex-col">
+          <label class="text-xs text-slate-500" for="scrape-title">Titre</label>
+          <input id="scrape-title" name="title" type="text" value="{{ item.title or '' }}"
+                 class="border border-slate-300 rounded px-2 py-1 text-sm w-64">
+        </div>
+        <div class="flex flex-col">
+          <label class="text-xs text-slate-500" for="scrape-year">Année</label>
+          <input id="scrape-year" name="year" type="text" inputmode="numeric"
+                 value="{{ item.year or '' }}"
+                 class="border border-slate-300 rounded px-2 py-1 text-sm w-20 font-mono">
+        </div>
+        <div class="flex flex-col">
+          <label class="text-xs text-slate-500" for="scrape-type">Type</label>
+          <select id="scrape-type" name="type"
+                  class="border border-slate-300 rounded px-2 py-1 text-sm">
+            <option value="movie" {% if media_type == 'movie' %}selected{% endif %}>Film</option>
+            <option value="show"  {% if media_type == 'show' %}selected{% endif %}>Série</option>
+          </select>
+        </div>
+        <div class="flex flex-col">
+          <label class="text-xs text-slate-500" for="scrape-provider">Fournisseur</label>
+          <select id="scrape-provider" name="provider"
+                  class="border border-slate-300 rounded px-2 py-1 text-sm">
+            <option value="auto">Auto</option>
+            <option value="tmdb">TMDb</option>
+            <option value="omdb">OMDb</option>
+          </select>
+        </div>
+        <button type="submit"
+                class="px-3 py-1 text-sm rounded bg-slate-900 text-slate-100 hover:bg-slate-700">
+          Rechercher
+        </button>
+        <span id="scrape-indicator" class="htmx-indicator text-xs text-slate-500">⏳ recherche…</span>
+      </form>
+
+      <form hx-post="/admin/media/{{ sid }}/{{ rk }}/lookup"
+            hx-target="#scrape-candidates"
+            hx-swap="innerHTML"
+            hx-indicator="#scrape-indicator"
+            class="flex flex-wrap items-end gap-2 mt-3 border-t border-slate-100 pt-3">
+        <input type="hidden" name="type" value="{{ media_type }}">
+        <div class="flex flex-col">
+          <label class="text-xs text-slate-500" for="scrape-raw-id">Identifiant direct</label>
+          <input id="scrape-raw-id" name="raw_id" type="text"
+                 placeholder="tt0133093, 603, ou une URL IMDb/TMDB"
+                 class="border border-slate-300 rounded px-2 py-1 text-sm font-mono w-80">
+        </div>
+        <button type="submit"
+                class="px-3 py-1 text-sm rounded border border-slate-300 hover:bg-slate-100">
+          Chercher cet id
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <div id="scrape-candidates" class="mt-4"></div>
+</section>

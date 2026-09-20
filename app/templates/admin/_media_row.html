@@ -1,9 +1,33 @@
 {% set row_id = "row-" ~ item.server_id ~ "-" ~ item.rating_key %}
+{% set row_type = "show" if item.type == "show" else "movie" %}
+{% set tmdb_path = "tv" if row_type == "show" else "movie" %}
 <tr id="{{ row_id }}" class="hover:bg-slate-50 align-middle
     {% if saved or applied or unlocked or cleared %}bg-emerald-50{% elif rescraped %}bg-sky-50{% elif error or conflict %}bg-rose-50{% endif %}">
   <td class="px-3 py-2">
+    {% if item.thumb_url %}
+    <img src="/admin/media/{{ item.server_id }}/{{ item.rating_key }}/poster?which=xtream"
+         loading="lazy" alt=""
+         class="w-12 h-auto rounded border border-slate-200 bg-slate-100">
+    {% else %}
+    <div class="w-12 h-16 rounded border border-dashed border-slate-300 bg-slate-50"></div>
+    {% endif %}
+  </td>
+
+  <td class="px-3 py-2">
     <div class="font-medium text-slate-900">{{ item.title }}</div>
     {% if item.summary %}<div class="text-xs text-slate-500 line-clamp-1">{{ item.summary[:120] }}</div>{% endif %}
+    <div class="flex flex-wrap items-center gap-1 mt-1">
+      <span class="px-1.5 py-0.5 text-[10px] rounded {{ 'bg-emerald-100 text-emerald-800' if item.imdb_id else 'bg-slate-100 text-slate-400' }}">IMDb</span>
+      <span class="px-1.5 py-0.5 text-[10px] rounded {{ 'bg-emerald-100 text-emerald-800' if item.tmdb_id else 'bg-slate-100 text-slate-400' }}">TMDB</span>
+      {% if item.match_source %}
+      <span class="px-1.5 py-0.5 text-[10px] rounded bg-indigo-100 text-indigo-800">{{ item.match_source }}</span>
+      {% endif %}
+      {% if item.tmdb_match_confidence %}
+      <span class="px-1.5 py-0.5 text-[10px] rounded bg-slate-100 text-slate-600">
+        {{ (item.tmdb_match_confidence * 100) | round | int }} %
+      </span>
+      {% endif %}
+    </div>
   </td>
   <td class="px-3 py-2 text-slate-700">{{ item.year or "—" }}</td>
   <td class="px-3 py-2 text-slate-500 text-xs font-mono">{{ item.server_id }}</td>
@@ -59,17 +83,16 @@
       </a>
       {% endif %}
       {% if item.tmdb_id %}
-      <a href="https://www.themoviedb.org/movie/{{ item.tmdb_id }}"
+      <a href="https://www.themoviedb.org/{{ tmdb_path }}/{{ item.tmdb_id }}"
          target="_blank" rel="noopener"
          class="px-2 py-1 text-xs rounded border border-cyan-400 text-cyan-700 bg-cyan-50 hover:bg-cyan-100">
         TMDB ↗
       </a>
       {% endif %}
-      <form hx-post="/admin/movies/{{ item.rating_key }}/rescrape"
+      <form hx-post="/admin/media/{{ item.server_id }}/{{ item.rating_key }}/rescrape"
             hx-target="#{{ row_id }}"
             hx-swap="outerHTML"
             hx-confirm="Relancer le scrape pour « {{ item.title|e }} » ?">
-        <input type="hidden" name="server_id" value="{{ item.server_id }}">
         <button type="submit"
                 class="px-2 py-1 text-xs rounded border border-sky-400 text-sky-700 bg-sky-50 hover:bg-sky-100">
           Re-scrape
@@ -93,11 +116,30 @@
       {% endif %}
     </div>
 
+    <div class="flex items-center gap-1 mb-1">
+      <button type="button"
+              hx-get="/admin/media/{{ item.server_id }}/{{ item.rating_key }}/scrape"
+              hx-target="#scrape-panel"
+              hx-swap="innerHTML"
+              class="px-2 py-1 text-xs rounded bg-slate-900 text-slate-100 hover:bg-slate-700">
+        🔍 Scraper
+      </button>
+      {% if item.match_locked %}
+      <form hx-post="/admin/media/{{ item.server_id }}/{{ item.rating_key }}/unlock"
+            hx-target="#{{ row_id }}" hx-swap="outerHTML">
+        <button type="submit"
+                class="px-2 py-1 text-xs rounded border border-amber-400 text-amber-700 bg-amber-50 hover:bg-amber-100">
+          Déverrouiller
+        </button>
+      </form>
+      {% endif %}
+    </div>
+
     <form hx-post="/admin/media/{{ item.server_id }}/{{ item.rating_key }}/apply"
           hx-target="#{{ row_id }}"
           hx-swap="outerHTML"
           class="flex flex-col gap-1 mb-1">
-      <input type="hidden" name="type" value="movie">
+      <input type="hidden" name="type" value="{{ row_type }}">
       <div class="flex items-center gap-1">
         <input name="imdb_id" type="text" placeholder="ttXXXXXXX"
                class="border border-slate-300 rounded px-2 py-1 text-xs font-mono w-24
@@ -117,15 +159,6 @@
     </form>
 
     <div class="flex items-center gap-1">
-      {% if item.match_locked %}
-      <form hx-post="/admin/media/{{ item.server_id }}/{{ item.rating_key }}/unlock"
-            hx-target="#{{ row_id }}" hx-swap="outerHTML">
-        <button type="submit"
-                class="px-2 py-1 text-xs rounded border border-amber-400 text-amber-700 bg-amber-50 hover:bg-amber-100">
-          Déverrouiller
-        </button>
-      </form>
-      {% endif %}
       <form hx-post="/admin/media/{{ item.server_id }}/{{ item.rating_key }}/clear"
             hx-target="#{{ row_id }}" hx-swap="outerHTML"
             hx-confirm="Effacer les ids IMDb/TMDB de « {{ item.title|e }} » ?">
@@ -142,3 +175,9 @@
     {% if cleared %}<span class="text-xs text-rose-700 block mt-1">✓ ids effacés</span>{% endif %}
   </td>
 </tr>
+{% if applied %}
+{# Out-of-band: close the scrape drawer once the identity is applied
+   (ADR 0005 D10). Only ever emitted on the apply response — never while
+   rendering the table, where `applied` is undefined. #}
+<div id="scrape-panel" hx-swap-oob="true"></div>
+{% endif %}

@@ -1,22 +1,44 @@
-<div hx-get="/admin/movies/stats"
-     hx-trigger="refresh-stats from:body"
-     hx-swap="outerHTML"
-     class="flex flex-wrap items-center gap-6 bg-white border border-slate-200 rounded p-3 shadow-sm">
+{% macro type_stats(label, s) %}
+<div class="flex flex-wrap items-center gap-6">
   <div>
-    <span class="text-xs uppercase text-slate-500">Films</span>
-    <span class="text-2xl font-semibold text-slate-900 ml-2">{{ total_movies }}</span>
+    <span class="text-xs uppercase text-slate-500">{{ label }}</span>
+    <span class="text-2xl font-semibold text-slate-900 ml-2">{{ s.total }}</span>
   </div>
   <div>
     <span class="text-xs uppercase text-slate-500">Sans IMDb</span>
-    <span class="text-2xl font-semibold {{ 'text-amber-600' if missing_imdb_count else 'text-emerald-600' }} ml-2">
-      {{ missing_imdb_count }}
+    <span class="text-2xl font-semibold {{ 'text-amber-600' if s.missing_imdb else 'text-emerald-600' }} ml-2">
+      {{ s.missing_imdb }}
     </span>
   </div>
   <div>
     <span class="text-xs uppercase text-slate-500">Sans TMDB</span>
-    <span class="text-2xl font-semibold {{ 'text-amber-600' if missing_tmdb_count else 'text-emerald-600' }} ml-2">
-      {{ missing_tmdb_count }}
+    <span class="text-2xl font-semibold {{ 'text-amber-600' if s.missing_tmdb else 'text-emerald-600' }} ml-2">
+      {{ s.missing_tmdb }}
     </span>
+  </div>
+  <div>
+    <span class="text-xs uppercase text-slate-500">Les deux</span>
+    <span class="text-2xl font-semibold text-emerald-600 ml-2">{{ s.with_both }}</span>
+  </div>
+  <div>
+    <span class="text-xs uppercase text-slate-500">Verrouillés</span>
+    <span class="text-2xl font-semibold text-slate-700 ml-2">{{ s.locked }}</span>
+  </div>
+  {% if s.total %}
+  <div class="text-xs text-slate-500">
+    {{ (s.with_both * 100 // s.total) }} % avec les deux identifiants
+  </div>
+  {% endif %}
+</div>
+{% endmacro %}
+
+<div hx-get="/admin/stats"
+     hx-trigger="refresh-stats from:body"
+     hx-swap="outerHTML"
+     class="flex flex-col gap-3 bg-white border border-slate-200 rounded p-3 shadow-sm">
+  {{ type_stats("Films", movie_stats) }}
+  <div class="border-t border-slate-100 pt-2">
+    {{ type_stats("Séries", show_stats) }}
   </div>
   {% if outages %}
   <div class="w-full border-t border-slate-200 pt-2 mt-1">
@@ -34,12 +56,6 @@
       {% endif %}
     </div>
     {% endfor %}
-  </div>
-  {% endif %}
-  {% if total_movies %}
-  <div class="text-xs text-slate-500">
-    IMDb : {{ ((total_movies - missing_imdb_count) * 100 // total_movies) }}% scrapés
-    · TMDB : {{ ((total_movies - missing_tmdb_count) * 100 // total_movies) }}% scrapés
   </div>
   {% endif %}
 </div>

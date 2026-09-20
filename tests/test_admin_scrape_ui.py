@@ -468,3 +468,45 @@ async def test_row_hx_targets_escape_the_dot_in_rating_key(
     assert 'hx-target="#row-xtream_a-vod_439568.mkv"' not in resp.text, (
         "an unescaped dot makes the selector match nothing"
     )
+
+
+async def test_catalogue_stats_keep_row_level_semantics_when_variants_disagree(
+    db_factory,
+):
+    """`catalogue_stats` runs ONE pass over `media` instead of twelve
+    GROUP BY scans (x18 on the production catalogue). The per-item
+    aggregation is deliberately NOT a uniform MAX: an item is one row per
+    category, those rows can disagree, and the old row-level counters
+    treated the two families differently. Production data contains exactly
+    such an item, and a plain MAX shifted `missing_imdb` by one.
+
+    Here: one item, two category rows, only one of which carries the imdb
+    id. It must count as `missing_imdb` (some row lacks it) AND as
+    `with_both` (some row has both) — which is what twelve separate
+    row-level COUNTs used to report."""
+    from app.services import manual_scrape_service as mss
+
+    async with db_factory() as s:
+        s.add_all([
+            _media(
+                "vod_1.mp4", "Split Identity", filter="cat-a",
+                imdb_id="tt0133093", tmdb_id="603",
+                is_in_allowed_categories=True,
+            ),
+            _media(
+                "vod_1.mp4", "Split Identity", filter="cat-b",
+                imdb_id=None, tmdb_id="603",
+                is_in_allowed_categories=True,
+            ),
+        ])
+        await s.commit()
+
+    async with db_factory() as s:
+        stats = await mss.catalogue_stats(s)
+
+    movie = stats["movie"]
+    assert movie.total == 1, "one item, not two rows"
+    assert movie.missing_imdb == 1, "a row without the imdb id => still counted missing"
+    assert movie.missing_tmdb == 0
+    assert movie.with_both == 1, "a row with both ids => still counted complete"
+    assert movie.locked == 0

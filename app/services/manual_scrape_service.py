@@ -23,7 +23,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Literal
 
 import httpx
-from sqlalchemy import and_, exists, func, not_, or_, select, update
+from sqlalchemy import and_, case, exists, func, not_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -1155,24 +1155,93 @@ async def _distinct_count(db: AsyncSession, clauses, extra=None) -> int:
     return (await db.execute(select(func.count()).select_from(sub))).scalar() or 0
 
 
+def _flag(condition) -> Any:
+    """1/0 marker for one `media` ROW, aggregated per item below."""
+    return case((condition, 1), else_=0)
+
+
 async def catalogue_stats(db: AsyncSession) -> dict[str, TypeStats]:
     """Identity coverage per media type, on DISTINCT items in allowed
-    categories (ADR 0005 D6)."""
+    categories (ADR 0005 D6).
+
+    ONE pass over `media` for the five id/lock counters, instead of the
+    twelve `GROUP BY` scans this used to run (6 counters x 2 types). That
+    mattered: on the production catalogue (867k rows / 44.5k items) the old
+    shape took 1.7-2.9 s uncontended and **22 s while the pipeline was
+    writing** — and `/admin` recomputes it on load AND on every
+    `refresh-stats` (so after each apply/save/rescrape/unlock/clear).
+    Measured on that same database: **0.12-0.16 s, x18**, with all twelve
+    counters byte-identical.
+
+    The per-item aggregation reproduces the old row-level semantics exactly,
+    which is why it is NOT a uniform `MAX`: a `media` item is one row per
+    category (4-column PK, ADR 0005 F1) and those rows can disagree.
+    `missing_*` used to count an item as soon as ONE of its rows lacked the
+    id (`MIN`), while `with_both`/`locked` counted it as soon as ONE row
+    qualified (`MAX`). Real production data contains such an item — a plain
+    `MAX` everywhere shifted `missing_imdb` by one."""
+    imdb_row_ok = _flag(and_(Media.imdb_id.isnot(None), Media.imdb_id != ""))
+    tmdb_row_ok = _flag(and_(Media.tmdb_id.isnot(None), Media.tmdb_id != ""))
+    per_item = (
+        select(
+            Media.type.label("type"),
+            func.min(imdb_row_ok).label("imdb_ok"),
+            func.min(tmdb_row_ok).label("tmdb_ok"),
+            func.max(
+                _flag(and_(not_(_IMDB_MISSING), not_(_TMDB_MISSING)))
+            ).label("both_ok"),
+            func.max(_flag(Media.match_locked == True)).label("locked"),  # noqa: E712
+        )
+        .where(
+            Media.type.in_(("movie", "show")),
+            Media.is_in_allowed_categories == True,  # noqa: E712
+        )
+        .group_by(Media.rating_key, Media.server_id, Media.type)
+        .subquery()
+    )
+    rows = (await db.execute(
+        select(
+            per_item.c.type,
+            func.count(),
+            func.sum(_flag(per_item.c.imdb_ok == 0)),
+            func.sum(_flag(per_item.c.tmdb_ok == 0)),
+            func.sum(per_item.c.both_ok),
+            func.sum(per_item.c.locked),
+        ).group_by(per_item.c.type)
+    )).all()
+    by_type = {r[0]: r for r in rows}
+
+    # Pending reviews come from their own (small) table rather than a sixth
+    # pass over `media`; the correlated EXISTS keeps the old rule that a
+    # review whose item no longer exists — or left the allowed categories —
+    # is not counted.
+    review_rows = (await db.execute(
+        select(ScrapeReview.media_type, func.count())
+        .where(
+            ScrapeReview.status == "pending",
+            exists(
+                select(Media.rating_key).where(
+                    Media.rating_key == ScrapeReview.rating_key,
+                    Media.server_id == ScrapeReview.server_id,
+                    Media.type == ScrapeReview.media_type,
+                    Media.is_in_allowed_categories == True,  # noqa: E712
+                )
+            ),
+        )
+        .group_by(ScrapeReview.media_type)
+    )).all()
+    reviews = {r[0]: r[1] for r in review_rows}
+
     stats: dict[str, TypeStats] = {}
     for media_type in ("movie", "show"):
-        base = [
-            Media.type == media_type,
-            Media.is_in_allowed_categories == True,  # noqa: E712
-        ]
+        row = by_type.get(media_type)
         stats[media_type] = TypeStats(
-            total=await _distinct_count(db, base),
-            missing_imdb=await _distinct_count(db, base, _IMDB_MISSING),
-            missing_tmdb=await _distinct_count(db, base, _TMDB_MISSING),
-            with_both=await _distinct_count(
-                db, base, and_(not_(_IMDB_MISSING), not_(_TMDB_MISSING)),
-            ),
-            locked=await _distinct_count(db, base, Media.match_locked == True),  # noqa: E712
-            review_pending=await _distinct_count(db, base, _pending_review_exists()),
+            total=row[1] if row else 0,
+            missing_imdb=(row[2] or 0) if row else 0,
+            missing_tmdb=(row[3] or 0) if row else 0,
+            with_both=(row[4] or 0) if row else 0,
+            locked=(row[5] or 0) if row else 0,
+            review_pending=reviews.get(media_type, 0),
         )
     return stats
 

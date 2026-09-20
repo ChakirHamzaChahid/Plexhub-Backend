@@ -35,7 +35,7 @@ from app.api import (
 from app.utils.request_context import RequestIdLogFilter, RequestIdMiddleware
 from app.utils.job_health import mark_job_success, set_master, track_job
 
-APP_VERSION = "1.10.3"
+APP_VERSION = "1.10.4"
 
 logger = logging.getLogger("plexhub")
 
@@ -114,6 +114,27 @@ logger.info("Logging configured: plexhub=DEBUG, third-party=WARNING")
 # racing on the generated tree / .plex_mapping.json. Plain asyncio.Lock (no loop
 # binding at import time on 3.10+), shared by both runners below.
 _PIPELINE_LOCK = asyncio.Lock()
+
+
+@asynccontextmanager
+async def _pipeline_guard():
+    """Hold `_PIPELINE_LOCK` AND flag the pipeline as owning the SQLite writer.
+
+    Without the flag, the admin scraper's debounced snapshot rebuild competes
+    with the pipeline for the single writer: its transaction reloads every row
+    of a type and replaces ~25k snapshot rows, so the operator's own
+    "Appliquer" can burn all three `write_with_retry` attempts (one full
+    `busy_timeout=60s` each) and answer 500. Observed in production
+    2026-09-20. Skipping costs nothing — every pipeline pass ends with
+    `_rebuild_unified_groups`, which rebuilds every type."""
+    from app.services import unified_group_service
+
+    async with _PIPELINE_LOCK:
+        unified_group_service.set_pipeline_active(True)
+        try:
+            yield
+        finally:
+            unified_group_service.set_pipeline_active(False)
 
 
 async def _auto_generate_plex_library():
@@ -314,7 +335,7 @@ async def lifespan(app: FastAPI):
                         "interval tick) is already in progress"
                     )
                     return
-                async with _PIPELINE_LOCK:
+                async with _pipeline_guard():
                     try:
                         await sync_worker.run_all_accounts()
                         logger.info("Scheduled sync done — starting enrichment")
@@ -505,7 +526,7 @@ async def lifespan(app: FastAPI):
                         "Initial sync skipped — a pipeline run is already in progress"
                     )
                     return
-                async with _PIPELINE_LOCK:
+                async with _pipeline_guard():
                     await sync_worker.run_all_accounts()
                     logger.info("Initial sync done — starting enrichment")
                     await enrichment_worker.run()

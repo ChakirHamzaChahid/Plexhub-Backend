@@ -290,7 +290,18 @@ class Settings:
     # propagate=True fan-out, or an operator working through several rows)
     # coalesce into a single snapshot rebuild per media_type instead of one
     # per write.
-    SCRAPE_REBUILD_DEBOUNCE_SECONDS: float = _safe_float("SCRAPE_REBUILD_DEBOUNCE_SECONDS", 5.0)
+    #
+    # Raised 5s -> 60s after production use on 2026-09-20: a rebuild is NOT a
+    # small write (it reloads every row of the type, re-aggregates ~25k groups
+    # and replaces that type's whole snapshot), and an operator scraping
+    # interactively applies roughly one identity every 30s — so a 5s window
+    # fired a FULL rebuild per media. With SQLite's single writer that rebuild
+    # then blocked the NEXT apply, which burned all three `write_with_retry`
+    # attempts (one full `busy_timeout=60s` each) and answered 500. A trailing
+    # -edge 60s window collapses a whole scraping session into one rebuild,
+    # fired once the operator pauses; the snapshot is therefore at most ~1min
+    # behind, and browsing falls back to live aggregation meanwhile.
+    SCRAPE_REBUILD_DEBOUNCE_SECONDS: float = _safe_float("SCRAPE_REBUILD_DEBOUNCE_SECONDS", 60.0)
     # How many of the top text-scored candidates get their posters downloaded
     # and compared (ADR 0005 D6/D11). The interactive value is higher because
     # an operator is waiting on ONE item and wants the best evidence; the

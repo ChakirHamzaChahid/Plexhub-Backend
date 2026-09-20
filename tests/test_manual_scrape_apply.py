@@ -813,6 +813,77 @@ async def test_schedule_rebuild_debounces_a_burst_into_one_rebuild(db_factory, m
     assert calls == ["movie"]  # 3 calls in a burst -> exactly 1 rebuild
 
 
+async def test_schedule_rebuild_stands_down_while_a_pipeline_runs(
+    db_factory, monkeypatch,
+):
+    """A snapshot rebuild reloads every row of the type and replaces ~25k
+    snapshot rows. SQLite has ONE writer, so competing with a pipeline pass
+    starves the operator's own `apply` — which burns three
+    `write_with_retry` attempts at a full `busy_timeout=60s` each and
+    answers 500 (observed in production 2026-09-20).
+
+    Skipping is loss-less: every pipeline pass ends with `rebuild_all`."""
+    from app.models.database import Media as M
+
+    async with db_factory() as s:
+        s.add(M(
+            rating_key="vod_1.mp4", server_id="xtream_a", library_section_id="1",
+            title="X", type="movie", year=2020, page_offset=0,
+            is_in_allowed_categories=True,
+        ))
+        await s.commit()
+
+    calls = []
+
+    async def _counted(media_type, session_factory):
+        calls.append(media_type)
+        return 0
+
+    monkeypatch.setattr(unified_group_service, "_rebuild_one", _counted)
+    monkeypatch.setattr(
+        unified_group_service.settings, "SCRAPE_REBUILD_DEBOUNCE_SECONDS", 0.01,
+    )
+
+    unified_group_service.set_pipeline_active(True)
+    try:
+        unified_group_service.schedule_rebuild("movie", session_factory=db_factory)
+        # Await the debounce task itself rather than `flush_scheduled()`:
+        # flush means "rebuild NOW" (the batch worker uses it to guarantee a
+        # fresh snapshot once its run is over) and deliberately bypasses the
+        # stand-down. The guard belongs to the automatic, debounced path —
+        # the one that fired a full rebuild per applied media.
+        task = unified_group_service._pending_rebuild_tasks.get("movie")
+        assert task is not None
+        await task
+        assert calls == [], "no rebuild may run while the pipeline owns the writer"
+    finally:
+        unified_group_service.set_pipeline_active(False)
+
+    # ...and the very next schedule, once the pipeline is done, rebuilds again.
+    unified_group_service.schedule_rebuild("movie", session_factory=db_factory)
+    await unified_group_service.flush_scheduled()
+    assert calls == ["movie"]
+
+
+async def test_pipeline_guard_flags_and_always_clears(monkeypatch):
+    """`app.main._pipeline_guard` must raise the flag for the whole pass and
+    lower it even when the pipeline body raises — a stuck flag would disable
+    the snapshot rebuild for the rest of the process's life."""
+    from app import main as main_module
+
+    assert unified_group_service.is_pipeline_active() is False
+
+    async with main_module._pipeline_guard():
+        assert unified_group_service.is_pipeline_active() is True
+    assert unified_group_service.is_pipeline_active() is False
+
+    with pytest.raises(RuntimeError):
+        async with main_module._pipeline_guard():
+            assert unified_group_service.is_pipeline_active() is True
+            raise RuntimeError("pipeline blew up")
+    assert unified_group_service.is_pipeline_active() is False
+
+
 async def test_schedule_rebuild_ignores_unsupported_type(db_factory):
     unified_group_service.schedule_rebuild("episode", session_factory=db_factory)
     assert "episode" not in unified_group_service._pending_rebuild_tasks

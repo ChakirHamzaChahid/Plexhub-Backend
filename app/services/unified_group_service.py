@@ -34,6 +34,30 @@ logger = logging.getLogger("plexhub.unified_group")
 # aggregate_movies — it groups Media rows generically by unification key.
 GROUP_MEDIA_TYPES = ("movie", "show")
 
+# Set by `app.main` around `_PIPELINE_LOCK`. A `rebuild()` is NOT a small
+# write: it reloads every row of the type, re-aggregates ~25k groups, then
+# DELETEs and re-INSERTs this type's whole snapshot. SQLite has one writer,
+# so while the pipeline is mid-upsert that transaction can sit on the write
+# lock far past `busy_timeout=60s` — and the operator's own "Appliquer"
+# (three attempts, one full busy_timeout each) then dies after ~3 minutes
+# with a 500. Observed in production on 2026-09-20 while manual scraping ran
+# against a live pipeline.
+#
+# Skipping is loss-less, not a compromise: every pipeline pass ENDS with
+# `rebuild_all` (main.py `_rebuild_unified_groups`), so the snapshot this
+# call would have built is rebuilt a few minutes later anyway.
+_pipeline_active = False
+
+
+def set_pipeline_active(active: bool) -> None:
+    """Tell the debounced rebuild that a full pipeline pass owns the writer."""
+    global _pipeline_active
+    _pipeline_active = active
+
+
+def is_pipeline_active() -> bool:
+    return _pipeline_active
+
 
 async def rebuild(db: AsyncSession, media_type: str) -> int:
     """Rebuild the snapshot for one media_type on the given session (no commit).
@@ -204,6 +228,16 @@ async def _debounced_rebuild(media_type: str, delay: float, session_factory) -> 
     if current is not None:
         _running_rebuild_tasks.setdefault(media_type, set()).add(current)
     try:
+        if _pipeline_active:
+            # The pipeline owns the single SQLite writer and will rebuild
+            # every type when it finishes — competing for the lock here only
+            # starves the operator's own writes (see `_pipeline_active`).
+            logger.info(
+                "Unified-group snapshot (debounced) skipped for %s — a pipeline "
+                "pass is running and rebuilds every type when it ends",
+                media_type,
+            )
+            return
         n = await _rebuild_one_serialized(media_type, session_factory)
         logger.info(
             "Unified-group snapshot (debounced): %s -> %d groups", media_type, n

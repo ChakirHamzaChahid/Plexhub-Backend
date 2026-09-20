@@ -310,6 +310,24 @@ class TestSizeAndContentTypeGuards:
         with pytest.raises(pm.PosterFetchError):
             await pm.fetch_image("http://provider.example/notimage")
 
+    async def test_svg_content_type_is_rejected(self, monkeypatch, image_mock):
+        """W4 review B2: SVG is an image AND a scriptable document. The admin
+        poster proxy serves these bytes back from the /admin origin, so a
+        provider-controlled thumb_url answering image/svg+xml would run
+        script under the operator's ambient Basic Auth when the image is
+        opened in a tab."""
+        monkeypatch.setattr(ssrf.socket, "getaddrinfo", lambda *a, **k: _addrinfo_for("93.184.216.34"))
+        image_mock.get("http://provider.example/evil.svg").mock(
+            return_value=httpx.Response(
+                200,
+                content=b'<svg xmlns="http://www.w3.org/2000/svg"><script>1</script></svg>',
+                headers={"Content-Type": "image/svg+xml"},
+            )
+        )
+
+        with pytest.raises(pm.PosterFetchError):
+            await pm.fetch_image("http://provider.example/evil.svg")
+
     async def test_upstream_error_status_is_rejected(self, monkeypatch, image_mock):
         monkeypatch.setattr(ssrf.socket, "getaddrinfo", lambda *a, **k: _addrinfo_for("93.184.216.34"))
         image_mock.get("http://provider.example/missing.jpg").mock(return_value=httpx.Response(404))

@@ -80,6 +80,10 @@
 
 {# Scrape drawer target: filled by the row "Scraper" button, emptied by an
    out-of-band swap when an identity is applied (ADR 0005 D10). #}
+{# Emptied by the `close-scrape-panel` listener in base.html (fired by the
+   HX-Trigger of a successful apply). An out-of-band swap can't do it: the
+   apply response is a <tr> fragment, and a sibling <div> gets
+   foster-parented out of the table at parse time. #}
 <div id="scrape-panel" class="mb-4"></div>
 
 <div id="media-table" class="bg-white rounded shadow-sm border border-slate-200 overflow-hidden">

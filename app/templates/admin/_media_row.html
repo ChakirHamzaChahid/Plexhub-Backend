@@ -175,9 +175,8 @@
     {% if cleared %}<span class="text-xs text-rose-700 block mt-1">✓ ids effacés</span>{% endif %}
   </td>
 </tr>
-{% if applied %}
-{# Out-of-band: close the scrape drawer once the identity is applied
-   (ADR 0005 D10). Only ever emitted on the apply response — never while
-   rendering the table, where `applied` is undefined. #}
-<div id="scrape-panel" hx-swap-oob="true"></div>
-{% endif %}
+{# The drawer is closed by the `close-scrape-panel` event carried on the
+   apply response's HX-Trigger header, NOT by an out-of-band swap: this
+   fragment starts with <tr>, so htmx 1.x parses it inside a table, and the
+   HTML parser foster-parents any sibling <div> OUT of that table — the
+   whole swap then throws and the row itself never updates either. #}

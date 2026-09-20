@@ -337,10 +337,15 @@ async def admin_media_apply(
         # `refresh-review` too (W5): applying an identity resolves this
         # item's review row inside the same write, so the "À vérifier" list
         # is now stale. Both listeners exist (`_stats.html`, `index.html`).
+        # `close-scrape-panel` closes the drawer — an out-of-band swap can't
+        # (this response is a <tr> fragment; a sibling <div> is
+        # foster-parented out of the table and breaks the whole swap).
         return templates.TemplateResponse(
             request, "admin/_media_row.html",
             {"item": item, "applied": True, "outcome": outcome},
-            headers={"HX-Trigger": "refresh-stats, refresh-review"},
+            headers={
+                "HX-Trigger": "refresh-stats, refresh-review, close-scrape-panel",
+            },
         )
     if outcome.status == "conflict":
         return templates.TemplateResponse(
@@ -467,6 +472,10 @@ async def admin_media_poster(server_id: str, rating_key: str, which: str = Query
             # GZipMiddleware would otherwise try to re-compress an already
             # compressed image (same guard as the trailer FileResponse).
             "Content-Encoding": "identity",
+            # These bytes come from the provider and are served from the
+            # /admin origin: never let a browser sniff them into something
+            # scriptable. (`poster_match_service` also rejects SVG outright.)
+            "X-Content-Type-Options": "nosniff",
         },
     )
 

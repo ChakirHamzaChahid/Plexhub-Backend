@@ -60,8 +60,11 @@ async def test_apply_by_tmdb_id_renders_applied_row(api_client, db_factory, monk
     )
     assert resp.status_code == 200, resp.text
     # W5: applying also resolves this item's `scrape_review` row (inside the
-    # same write), so the review list must refresh too.
-    assert resp.headers.get("HX-Trigger") == "refresh-stats, refresh-review"
+    # same write), so the review list must refresh too. W4 review B1: the
+    # drawer is closed by `close-scrape-panel`, not by an OOB swap.
+    assert resp.headers.get("HX-Trigger") == (
+        "refresh-stats, refresh-review, close-scrape-panel"
+    )
     assert "tt0133093" in resp.text
     assert "verrouill" in resp.text.lower()
 
@@ -239,3 +242,38 @@ async def test_error_responses_are_rendered_not_swallowed(
         "without this handler htmx drops every 4xx and the operator sees nothing"
     )
     assert "409" in layout.text and "422" in layout.text
+
+
+async def test_apply_closes_the_drawer_without_an_oob_swap(
+    api_client, db_factory, monkeypatch,
+):
+    """ADR 0005 W4 review B1: the drawer must be closed by the
+    `close-scrape-panel` HX-Trigger event, NEVER by an out-of-band swap.
+
+    This response is a `<tr>` fragment: htmx 1.x parses it inside a table,
+    and the HTML parser foster-parents any sibling `<div>` OUT of that
+    table, which makes the whole swap throw — the row itself would then
+    never update either, after a write that already happened."""
+    async with db_factory() as s:
+        s.add(Media(
+            rating_key="vod_1.mp4", server_id="xtream_a", library_section_id="1",
+            title="The Matrix", type="movie", year=1999, page_offset=0,
+        ))
+        await s.commit()
+
+    monkeypatch.setattr(mss, "tmdb_service", FakeTMDB(details_by_id={603: _details()}))
+    monkeypatch.setattr(mss, "omdb_service", FakeOMDb())
+
+    resp = await api_client.post(
+        "/admin/media/xtream_a/vod_1.mp4/apply",
+        data={"tmdb_id": "603", "type": "movie"}, auth=ADMIN_AUTH,
+    )
+    assert resp.status_code == 200
+    assert "close-scrape-panel" in resp.headers["HX-Trigger"]
+    assert "hx-swap-oob" not in resp.text, (
+        "an OOB div next to a <tr> is foster-parented out of the table and "
+        "breaks the swap entirely"
+    )
+
+    layout = await api_client.get("/admin", auth=ADMIN_AUTH)
+    assert "close-scrape-panel" in layout.text, "the listener must exist"

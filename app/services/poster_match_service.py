@@ -120,6 +120,9 @@ _hash_semaphore: Optional[asyncio.Semaphore] = None
 # ever actually serves — narrows the attacker-reachable parser surface
 # (review L5) rather than trusting Pillow's full autodetection.
 _ALLOWED_FORMATS = ("JPEG", "PNG", "WEBP", "GIF")
+# `image/*` content types that are also scriptable documents — rejected at
+# fetch time so they can never reach the admin poster proxy's response.
+_SCRIPTABLE_IMAGE_TYPES = frozenset({"image/svg+xml", "image/svg", "image/svg-xml"})
 
 
 class PosterFetchError(Exception):
@@ -413,6 +416,14 @@ async def _download(client: httpx.AsyncClient, url: str, fingerprint: str) -> Fe
             content_type = (response.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
             if not content_type.startswith("image/"):
                 raise PosterFetchError("non-image content-type")
+            if content_type in _SCRIPTABLE_IMAGE_TYPES:
+                # SVG is an image AND a scriptable document. Pillow can't
+                # hash it anyway, and the admin poster proxy serves these
+                # bytes back from the /admin origin: a provider-controlled
+                # `thumb_url` answering image/svg+xml would run script under
+                # the operator's ambient Basic Auth as soon as the image is
+                # opened in a tab.
+                raise PosterFetchError("scriptable image content-type rejected")
             buf = bytearray()
             max_bytes = settings.POSTER_MAX_BYTES
             async for chunk in response.aiter_raw():

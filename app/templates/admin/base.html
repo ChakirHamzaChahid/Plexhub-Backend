@@ -13,14 +13,26 @@
     [aria-busy="true"] { cursor: progress; }
   </style>
   <script>
+    // Both listeners sit on `document` (htmx events and HX-Trigger events
+    // bubble): this script runs in <head>, where `document.body` does not
+    // exist yet.
+
+    // A successful apply closes the scrape drawer. The event fires on the
+    // row's own form, which is NOT an ancestor of #scrape-panel — hence a
+    // document-level listener rather than an attribute on the panel.
+    document.addEventListener('close-scrape-panel', function () {
+      var panel = document.getElementById('scrape-panel');
+      if (panel) { panel.innerHTML = ''; }
+    });
+
+    // Listener on `document` (htmx events bubble): this script runs in
+    // <head>, where `document.body` does not exist yet.
     // htmx 1.x drops 4xx responses on the floor (no swap). Every admin error
     // path (409 conflict / locked, 422 validation) answers with the SAME
     // fragment the success path returns, carrying the message the operator
     // must read — without this, clicking Appliquer on a conflict changes
     // nothing on screen and looks like a dead button. Only these two codes
     // are opted in; a 500 keeps htmx's default silence.
-    // Listener on `document` (htmx events bubble): this script runs in
-    // <head>, where `document.body` does not exist yet.
     document.addEventListener('htmx:beforeSwap', function (evt) {
       var code = evt.detail.xhr.status;
       if (code === 409 || code === 422) {

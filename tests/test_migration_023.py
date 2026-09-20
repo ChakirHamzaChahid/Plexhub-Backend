@@ -11,6 +11,7 @@ not a synthetic exception).
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import sqlite3
 import threading
@@ -25,7 +26,33 @@ from app.db.maintenance import run_analyze, run_sqlite_maintenance
 from app.db.migrations import _migration_023_analyze, run_migrations
 from app.models.database import Base
 
-MIGRATIONS_LOGGER = "app.db.migrations"
+MIGRATIONS_LOGGER = "plexhub.db.migrations"
+
+
+@contextlib.contextmanager
+def capture_migrations(caplog, level=logging.DEBUG):
+    """Capture the migrations logger even though the "plexhub" tree sets
+    ``propagate = False`` (main.py:87, to avoid duplicate console lines).
+
+    ``caplog`` installs its handler on the ROOT logger, so once ``app.main``
+    has been imported by any earlier test in the session, records emitted
+    under "plexhub.*" never reach it and ``caplog.records`` comes back
+    empty — a false pass or a false failure depending on the assertion.
+    Attaching caplog's own handler directly to the logger under test makes
+    the capture independent of import order.
+    """
+    logger = logging.getLogger(MIGRATIONS_LOGGER)
+    previous = logger.level
+    logger.setLevel(level)
+    logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(level, logger=MIGRATIONS_LOGGER):
+            yield
+    finally:
+        logger.removeHandler(caplog.handler)
+        logger.setLevel(previous)
+
+
 MAINTENANCE_LOGGER = "plexhub.db.maintenance"
 
 
@@ -70,6 +97,79 @@ async def test_migration_023_idempotent_rerun_no_error(fresh_engine, caplog):
         assert await _table_exists(conn, "sqlite_stat1") is True
 
 
+async def _seed_analyzable_rows(engine) -> None:
+    """Give ANALYZE something to actually record, so `sqlite_stat1` ends up
+    with a ROW (an empty database leaves the table created but empty, which
+    is precisely the case the guard must NOT treat as "already analyzed")."""
+    async with engine.begin() as conn:
+        await conn.execute(text("CREATE TABLE IF NOT EXISTS _guard_t (a INTEGER)"))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS _guard_ti ON _guard_t(a)"))
+        await conn.execute(
+            text("INSERT INTO _guard_t (a) VALUES (1), (2), (3), (4), (5)")
+        )
+
+
+async def test_migration_023_skips_analyze_once_stats_exist(
+    fresh_engine, monkeypatch, caplog,
+):
+    """ANALYZE is semantically replayable but NOT cheap to replay: it reads
+    every index in full, in rowid order. Measured in production on
+    2026-09-20 (1.9 GB, 876k media, cold cache, contended spinning disk):
+    535 MB of random 4 KiB reads = **14 minutes of downtime on the boot
+    path**, on every container restart. It must run at most once per DB."""
+    await _seed_analyzable_rows(fresh_engine)
+    await _migration_023_analyze(fresh_engine)
+
+    async with fresh_engine.connect() as conn:
+        assert (await conn.execute(
+            text("SELECT COUNT(*) FROM sqlite_stat1")
+        )).scalar() > 0, "the fixture must leave real statistics behind"
+
+    calls = []
+
+    async def _spy(engine):
+        calls.append(engine)
+
+    monkeypatch.setattr("app.db.maintenance.run_analyze", _spy)
+
+    with capture_migrations(caplog, logging.INFO):
+        await _migration_023_analyze(fresh_engine)
+
+    assert calls == [], "ANALYZE must not re-run once sqlite_stat1 is populated"
+    assert any("skipping ANALYZE" in r.getMessage() for r in caplog.records), (
+        "the skip must be visible in the logs — a boot stuck in migrations "
+        "showed nothing at all until this logger was moved under 'plexhub'"
+    )
+
+
+async def test_migration_023_still_analyzes_when_stats_are_empty(
+    fresh_engine, monkeypatch,
+):
+    """An empty `sqlite_stat1` (fresh DB, nothing to learn yet) must NOT be
+    mistaken for "already analyzed" — otherwise a database that grew after
+    its first boot would never get planner statistics at all, which is the
+    ×188 regression AUDIT-P3-001 exists to prevent."""
+    calls = []
+
+    async def _spy(engine):
+        calls.append(engine)
+
+    monkeypatch.setattr("app.db.maintenance.run_analyze", _spy)
+    await _migration_023_analyze(fresh_engine)
+
+    assert len(calls) == 1, "a DB without statistics must still be analyzed"
+
+
+async def test_migrations_logger_reaches_the_plexhub_hierarchy():
+    """`getLogger(__name__)` would be "app.db.migrations" — outside the
+    "plexhub" tree, so it inherits the root WARNING level and every
+    migration INFO line is discarded. That blindness is what made a real
+    14-minute outage impossible to diagnose from the logs."""
+    from app.db import migrations as migrations_module
+
+    assert migrations_module.logger.name.startswith("plexhub.")
+
+
 async def test_run_migrations_full_chain_populates_stat1_on_fresh_db(fresh_engine):
     """The full 001->023 chain must run end to end on a fresh (create_all)
     DB and leave sqlite_stat1 present."""
@@ -85,7 +185,7 @@ async def test_run_migrations_rerun_twice_no_error_no_warning(fresh_engine, capl
     must not warn on its own idempotent re-run."""
     await run_migrations(fresh_engine)
 
-    with caplog.at_level(logging.WARNING, logger=MIGRATIONS_LOGGER):
+    with capture_migrations(caplog, logging.WARNING):
         await run_migrations(fresh_engine)
 
     dupes = [

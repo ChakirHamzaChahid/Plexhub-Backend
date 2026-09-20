@@ -7,7 +7,14 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.utils.crypto_fields import get_xtream_fernet, looks_encrypted
 
-logger = logging.getLogger(__name__)
+# NOT `getLogger(__name__)`: that is "app.db.migrations", OUTSIDE the
+# "plexhub" hierarchy, so it inherits the root logger's WARNING level
+# (main.py pins third-party noise to WARNING) and EVERY migration INFO line
+# is discarded. A boot stuck inside `run_migrations()` then shows nothing at
+# all after uvicorn's "Waiting for application startup" — which is exactly
+# what turned a 14-minute production outage into a blind hunt on
+# 2026-09-20. Stay under "plexhub" so these lines actually reach the logs.
+logger = logging.getLogger("plexhub.db.migrations")
 
 
 async def run_migrations(engine: AsyncEngine) -> None:
@@ -1069,12 +1076,31 @@ async def _migration_023_analyze(engine: AsyncEngine) -> None:
     `COUNT(*)` 113.5ms -> 0.6ms (x188), search `LIKE` 116.3ms -> 18.2ms,
     one-shot `ANALYZE` cost 196ms.
 
-    Idempotent / rejouable by nature (house law piège 6): `ANALYZE` only
-    ever fully recomputes the `sqlite_stat1`/`sqlite_stat4` tables it owns
-    (never appends), so it is safe on a brand-new (empty) database — it
-    just has nothing to learn yet, `sqlite_stat1` stays practically empty
-    until real rows exist — and safe to re-run at every boot (this whole
-    chain re-runs on every `init_db()`, cf. piège 7's multi-worker note).
+    ⚠️ **Runs AT MOST ONCE per database — never again once `sqlite_stat1`
+    holds a row.** `ANALYZE` is semantically safe to replay, but it is not
+    *cheap* to replay: it reads every index in full, in rowid order, which
+    on a large catalogue is hundreds of megabytes of RANDOM 4 KiB reads.
+    The 196 ms measured below was a 189 MB / 102k-row copy with a warm page
+    cache. Measured in production on 2026-09-20 (1.9 GB, 876k media, cold
+    cache, spinning disk shared with Jellyfin): **535 MB read at ~200 random
+    IOPS — 14 minutes of `Waiting for application startup`, with the API
+    down the whole time.** It ran on the boot path, before the app serves
+    its first request, on every single container restart.
+
+    This is also, retroactively, the real cause of the "17-minute restart"
+    blamed on WAL replay at the v1.10.0 deploy: a replay would have WRITTEN
+    hundreds of MB, and only 86 KB were written. Checkpointing the WAL
+    "fixed" it only because the retry found a warm page cache.
+
+    Stats still refresh over time: `app.main._rebuild_unified_groups` calls
+    `run_sqlite_maintenance` at the end of every pipeline pass, whose
+    `PRAGMA optimize` re-analyzes only the tables SQLite judges to have
+    drifted — off the boot path, and incremental by design.
+
+    Idempotent / rejouable (house law piège 6): the guard makes a re-run a
+    metadata-only probe. On a brand-new (empty) database `sqlite_stat1` does
+    not exist yet, so `ANALYZE` runs — instantly, there is nothing to learn —
+    and the guard engages once real rows have been analyzed.
     Non-destructive: it never touches `media`/any application table or row,
     only its own bookkeeping tables. Delegates to
     `app.db.maintenance.run_analyze` (never fatal — a stats refresh must
@@ -1082,9 +1108,25 @@ async def _migration_023_analyze(engine: AsyncEngine) -> None:
     call (`app.main._rebuild_unified_groups`) also reuses so both the
     boot-time and the recurring refresh share one implementation.
     """
-    logger.info("Migration 023: Running one-shot ANALYZE (sqlite_stat1)")
     from app.db.maintenance import run_analyze
 
+    async with engine.begin() as conn:
+        has_stats = (await conn.execute(text(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='sqlite_stat1' LIMIT 1"
+        ))).first() is not None
+        if has_stats:
+            has_stats = (await conn.execute(
+                text("SELECT 1 FROM sqlite_stat1 LIMIT 1")
+            )).first() is not None
+
+    if has_stats:
+        logger.info(
+            "Migration 023: sqlite_stat1 already populated — skipping ANALYZE"
+        )
+        return
+
+    logger.info("Migration 023: Running one-shot ANALYZE (sqlite_stat1)")
     await run_analyze(engine)
 
 

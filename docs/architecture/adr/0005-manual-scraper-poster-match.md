@@ -583,3 +583,79 @@ Chaque vague : commit(s) verts sur `develop` via `git commit --only`, `pytest -v
 - Un seul rédacteur d'identité (`media_identity_writer`) pour le worker, le scraper et le lot : pas de troisième formule.
 - Coût : 2 migrations additives, 1 dépendance explicite (Pillow, déjà présente), ~4 modules neufs ; `main.py` ne gagne qu'un `close()` (règle ≤10 lignes).
 - Rupture de contrat mineure côté app : `POST /api/media/{rk}/rescrape` peut renvoyer **409** — à coordonner avec PlexHubTV.
+
+---
+
+## Écarts constatés à la livraison (W6, HEAD `53b56e8`)
+
+Statut réel : **accepté / livré** (W0→W5, 14 commits `a156cb3`→`53b56e8`, `develop`). Le corps de l'ADR ci-dessus
+reste le contrat de référence ; cette section liste **tout** ce que le code livré fait différemment, preuve à l'appui.
+En cas de divergence, **le code fait foi**.
+
+### 1. Contradiction interne de l'ADR — l'appariement (passe 1) **verrouille**
+
+Le récapitulatif du lot annonçait que l'appariement de passe 1 ne devait **pas** verrouiller (il ne fait que compléter
+un id manquant à partir de l'autre, sans jugement d'identité). Mais **D6 §3 écrit inconditionnellement**
+`{match_locked: True, match_source: source, …}` — sans distinguer `source`, donc y compris `batch_pair`, que D8 assigne
+justement à la passe 1. L'ADR se contredit lui-même.
+
+**Comportement livré : LOCK**, délibérément conservé (`manual_scrape_service.py:831-834` — `target_values` pose
+`match_locked: True` quel que soit `source` ; `manual_scrape_batch_worker.py:313-318` appelle `apply_candidate(source="batch_pair")`).
+Raison : sans verrou, la paire `(imdb_id, tmdb_id)` que l'appariement vient de résoudre **par id** (`find_by_imdb_id` /
+`get_match_extras`, signal fort) reste éligible à l'enrichissement automatique, qui la ré-attaque **par recherche de titre**
+et peut donc la réécrire avec une identité fausse — exactement le sinistre que le verrou existe pour empêcher. Le coût
+(un lot verrouille en masse) est reporté comme précaution d'exploitation, le bloc « Précaution d'exploitation » de `docs/31-board.md` (section ADR 0005).
+
+### 2. `id_filter="review"` / `review_pending` : stubés en W4, câblés en W5
+
+D6 et D10 décrivent `review` comme un filtre de premier ordre, sans dire qu'il ne peut pas exister avant la migration 027.
+W4 (`24d4c19`) a livré l'UI du catalogue **avant** la table : `id_filter == "review"` ne matchait alors rien et
+`TypeStats.review_pending` était figé à `0` (choix explicite plutôt qu'un repli silencieux sur `all` — un opérateur ne doit
+jamais croire à une file vide). W5 (`729ae95`) les a câblés pour de bon : `_pending_review_exists()`
+(`manual_scrape_service.py:1037`), branche `review` de `_id_filter_clause` (`:1057`), `review_pending` de `catalogue_stats`
+(`:1175`). Idem pour l'événement `HX-Trigger: refresh-review`, émis dès W4 mais sans auditeur avant
+`index.html:136-137`.
+
+### 3. Vocabulaire des `reason` de `decide()` étendu (3 valeurs en plus)
+
+D6 fige huit `reason`. Le code en expose **dix** (`manual_scrape_service.py:1188-1196`) :
+`poster_only_auto_disabled` et `identical_poster_weak_text` ajoutés, et `ambiguous_posters` **réutilisé hors de son
+emplacement d'origine**. Motif (revue W5, `53b56e8`) : quand des posters `identical` existaient bel et bien mais qu'aucune
+règle n'a agi, le `no_identical_poster` prévu par l'ADR **ment** à l'opérateur — or c'est ce texte qu'il lit dans la file
+« À vérifier ». La branche terminale (`:1274-1288`) nomme désormais la cause réelle, dans cet ordre : `text_safe_no_poster_match`
+(un candidat text-safe existe, donc rule A a échoué sur la seule preuve image) → sinon, s'il y a des `identical` :
+`poster_only_auto_disabled` (règle B désactivée) / `ambiguous_posters` (plusieurs identiques, règle B active) /
+`identical_poster_weak_text` (un seul identique, mais `title_score < 0.6` ou année incompatible) → sinon `no_identical_poster`.
+L'ordre d'évaluation des branches 1-6 de D6 est **inchangé**.
+
+### 4. `count_requests()` est **AGRÉGEANT** en imbrication (D2 disait l'inverse)
+
+D2 spécifie « Non agrégeant en imbrication : le plus interne gagne ». Livré à l'inverse : `RequestTally` porte un `parent`
+et `add()` crédite **toutes** les tallies englobantes (`tmdb_service.py:137-151`, `omdb_service.py:122-134`).
+La spec était un **bug fonctionnel** : `manual_scrape_service.search_candidates` ouvre son propre bloc `count_requests()`
+(`:302`), donc le tally du lot voyait **zéro** appel de passe 2 — `budgetExhausted` ne pouvait jamais se déclencher sur
+un catalogue qui part intégralement en review (le cas par défaut, règle B éteinte), et la ligne de progression « TMDB n / 3000 »
+mentait du même facteur. Corrigé en `53b56e8`, test de non-régression dédié (le test pré-existant passait par accident, via
+le chemin apply).
+
+### 5. Écarts mineurs, déjà consignés par les vagues
+
+- **W1 (D7/L4)** — la protection de l'upsert de sync ne couvrait d'abord que 5 colonnes ; `tmdb_id`, `unification_id` et
+  `history_group_key` ont dû être enveloppés à leur tour (`sync_worker.py:745-792`) : la `COALESCE` ne distingue pas
+  « jamais rempli » de « vidé exprès ». Détail complet dans le bloc « Déviations constatées à W1 » de D7.
+- **W1** — `_media_is_locked()` renommé `_media_is_unlocked()` (`enrichment_worker.py:59`) : la fonction renvoie un `NOT EXISTS`.
+- **D11** — une clé de configuration **non prévue par l'ADR** a été ajoutée : `POSTER_HASH_CONCURRENCY` (défaut 3,
+  `config.py:350`), sémaphore dédié à l'étape de hachage Pillow/numpy en `to_thread`, indépendant des sémaphores réseau —
+  c'est le seul bouton qui borne réellement la mémoire de décodage concurrente sur un conteneur limité à 2 Go.
+  Les 18 autres clés de D11 sont livrées telles quelles ; `.env.example` couvre les 19.
+- **D5** — durcissement ajouté par la revue sécurité (`1e786ce`, `b85c1d5`) : liste blanche de formats Pillow
+  (`_ALLOWED_FORMATS`, `poster_match_service.py:122`) et **rejet explicite des types image scriptables**
+  (`_SCRIPTABLE_IMAGE_TYPES` = SVG, `:125,419`) — un `thumb_url` fournisseur répondant `image/svg+xml` serait servi par le
+  proxy depuis l'origine `/admin` et exécuterait du script. Le proxy ajoute `X-Content-Type-Options: nosniff`
+  (`admin.py:482`).
+- **D10** — la fermeture du tiroir de scrape après un apply réussi ne se fait **pas** par le `hx-swap-oob` prévu :
+  un `<div hx-swap-oob>` voisin d'un `<tr>` est **foster-parenté hors du tableau** par le parseur HTML, donc jamais
+  appliqué. Remplacé par un événement `HX-Trigger: close-scrape-panel` et un auditeur `document` (`base.html:23`,
+  `b85c1d5`). L'opt-in `htmx:beforeSwap` pour les statuts 409/422 (F8) est livré tel que spécifié (`base.html:36`).
+- **D12** — limite confirmée et **non traitée** : les NFO/posters déjà générés ne sont pas réécrits après une correction
+  d'identité (`LocalStorage`, AUDIT-P6-006) — l'opérateur doit vider les fichiers générés correspondants.

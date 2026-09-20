@@ -75,7 +75,7 @@
             <span class="px-1.5 py-0.5 text-[10px] rounded bg-slate-100 text-slate-500">{{ c.provider }}</span>
           </div>
           <form hx-post="/admin/review/{{ r.server_id }}/{{ r.rating_key }}/apply"
-                hx-target="#{{ entry_id }}"
+                hx-target="#{{ entry_id|css_id }}"
                 hx-swap="outerHTML"
                 hx-confirm="Appliquer « {{ (c.title or '')|e }} » ?&#10;IMDb : {{ (c.imdb_id or 'aucun')|e }}&#10;TMDB : {{ (c.tmdb_id or 'aucun')|e }}"
                 class="mt-2">
@@ -103,7 +103,7 @@
       </button>
       <button type="button"
               hx-post="/admin/review/{{ r.server_id }}/{{ r.rating_key }}/dismiss"
-              hx-target="#{{ entry_id }}"
+              hx-target="#{{ entry_id|css_id }}"
               hx-swap="outerHTML"
               class="px-2 py-1 text-xs rounded border border-slate-300 bg-white hover:bg-slate-100">
         Ignorer

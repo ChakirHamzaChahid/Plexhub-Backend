@@ -445,3 +445,26 @@ async def test_scrape_routes_require_auth(api_client):
     ):
         resp = await api_client.get(path)
         assert resp.status_code == 401, path
+
+
+async def test_row_hx_targets_escape_the_dot_in_rating_key(
+    api_client, db_factory,
+):
+    """A movie/episode rating_key carries its file extension
+    (`vod_439568.mkv`). `#row-xtream_a-vod_439568.mkv` is parsed by
+    `querySelector` as "id row-…-vod_439568 WITH CLASS mkv" — no match, so
+    htmx fires `htmx:targetError` and the swap is silently dropped.
+    Verified in a real browser before the fix: Sauver / Appliquer /
+    Re-scrape / Déverrouiller updated nothing at all on every movie row.
+    The id attribute stays raw; only the SELECTOR is escaped."""
+    async with db_factory() as s:
+        s.add(_media("vod_439568.mkv", "Scarlet", thumb_url="http://xtream/p.jpg"))
+        await s.commit()
+
+    resp = await api_client.get("/admin?type=movie&ids=all", auth=ADMIN_AUTH)
+    assert resp.status_code == 200
+    assert 'id="row-xtream_a-vod_439568.mkv"' in resp.text, "the id itself stays raw"
+    assert r'hx-target="#row-xtream_a-vod_439568\.mkv"' in resp.text
+    assert 'hx-target="#row-xtream_a-vod_439568.mkv"' not in resp.text, (
+        "an unescaped dot makes the selector match nothing"
+    )

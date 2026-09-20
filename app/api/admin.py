@@ -5,6 +5,7 @@ HTML fragments rather than JSON; they call the same `media_service` functions
 the API uses, so business logic isn't duplicated.
 """
 import logging
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -49,7 +50,21 @@ def _fmt_ms(ms: Optional[int]) -> str:
     )
 
 
+def _css_id(value: object) -> str:
+    """Escape an id so it is usable in a CSS selector ({{ id | css_id }}).
+
+    Element ids here embed a `rating_key`, and a movie/episode rating_key
+    carries the file extension (`vod_439568.mkv`, `sync_worker.py:115,347`).
+    `#row-xtream_1-vod_439568.mkv` is parsed by `querySelector` as "id
+    row-xtream_1-vod_439568 with class mkv" — no match, so htmx raises
+    `htmx:targetError` and the swap is silently lost (verified in-browser:
+    Sauver/Appliquer/Re-scrape did nothing at all on every movie row).
+    The id attribute itself stays raw; only SELECTORS go through this."""
+    return re.sub(r"([^a-zA-Z0-9_-])", r"\\\1", str(value))
+
+
 templates.env.filters["ms"] = _fmt_ms
+templates.env.filters["css_id"] = _css_id
 
 
 _ID_FILTERS = (

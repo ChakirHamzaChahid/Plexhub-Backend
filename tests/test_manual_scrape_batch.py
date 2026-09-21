@@ -358,6 +358,23 @@ async def test_locked_rows_are_never_touched(db_factory, patched):
     assert (await _row(db_factory)).tmdb_id in (None, "")
 
 
+async def test_adult_rows_are_never_scanned(db_factory, patched):
+    # Adult VOD is absent from TMDB, so batching it spends the whole search
+    # chain plus a poster fetch to reach the review queue every time.
+    await _add(
+        db_factory, rating_key="vod_1.mp4", server_id="xtream_a",
+        title="The Matrix", year=1999, is_adult=True,
+    )
+    patched.setattr(mss, "tmdb_service", BatchTMDB(
+        details_by_id={603: _details()}, hits=[_hit()], matched_id=603,
+    ))
+
+    job = await _run(db_factory)
+
+    assert job["scanned"] == 0
+    assert (await _row(db_factory)).tmdb_id in (None, "")
+
+
 # ─── budgets, cancellation, dry run ────────────────────────────────────────
 
 

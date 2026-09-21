@@ -217,6 +217,12 @@ def _selection_where(media_types: tuple[str, ...], *, pass_one: bool):
         Media.is_in_allowed_categories == True,  # noqa: E712
         # Never touch a row an operator fixed by hand (ADR 0005 D7).
         Media.match_locked == False,  # noqa: E712
+        # Adult VOD is not in TMDB, so every one of these items costs the
+        # full search chain (with year -> without year -> en-US) plus a
+        # poster download, and ends in the review queue regardless. They are
+        # pure budget burn. The INTERACTIVE scraper still lists them: an
+        # operator who wants to fix one by hand can.
+        Media.is_adult == False,  # noqa: E712
         id_clause,
         _no_open_review(),
     ]

@@ -52,7 +52,16 @@ from app.models.database import Media, ScrapeReview
 from app.services import manual_scrape_service as mss
 from app.services import unified_group_service
 from app.services.omdb_service import count_requests as omdb_count_requests
+from app.services.omdb_service import omdb_service
 from app.services.tmdb_service import count_requests as tmdb_count_requests
+# The OMDb-by-title identity thresholds are NOT restated here: the enrichment
+# worker already owns them, and two copies would drift apart silently.
+from app.workers.enrichment_worker import (
+    _OMDB_TITLE_STRONG_SIM,
+    _omdb_title_sim,
+    _omdb_type_matches,
+    _parse_omdb_year,
+)
 from app.utils.tasks import create_background_task
 from app.utils.time import now_ms
 
@@ -119,6 +128,10 @@ def _new_job(job_id: str, *, media_type: str, dry_run: bool) -> dict[str, Any]:
         "phase": "pairing",
         "scanned": 0,
         "paired": 0,
+        # Subset of `paired` whose imdb_id came from the OMDb fallback rather
+        # than from TMDB's own external_ids — reported separately so the
+        # fallback's real yield stays measurable instead of assumed.
+        "omdbPaired": 0,
         "autoAppliedA": 0,
         "autoAppliedB": 0,
         "queuedForReview": 0,
@@ -273,6 +286,57 @@ def _kind(media_type: str) -> Literal["movie", "tv"]:
     return "movie" if media_type == "movie" else "tv"
 
 
+async def _imdb_from_omdb(extras, media_type: str) -> str | None:
+    """Last resort for pass 1: TMDB knows the title but carries no
+    `external_ids.imdb_id`. OMDb is derived from IMDb, so it frequently does.
+
+    Measured in prod (2026-09-21): 852 of the 1 788 movies waiting in the
+    review queue sat on exactly this, i.e. they already had a trusted
+    `tmdb_id` and were one identifier short.
+
+    Two rules make this safe, and neither is negotiable:
+
+    1. **Query with TMDB's own title, never the Xtream one.** The row title
+       carries panel noise ("FR ... FHD") that would poison an exact `?t=`
+       lookup.
+    2. **Accept only on the STRONG criteria** the enrichment worker already
+       uses (exact year, similarity >= 0.90, matching type). We are attaching
+       an imdb_id to an ALREADY CORRECT tmdb_id: a wrong answer here builds
+       precisely the mismatched pair that `validate_id_consistency` exists to
+       clean up, and it would be written with `match_locked=1`, so the
+       automatic passes could never undo it.
+
+    Returns the imdb_id, or None on any doubt. Never raises: `search_by_title`
+    is fail-open (unconfigured, budget exhausted, transport error -> None).
+    """
+    if extras is None or extras.year is None:
+        # No year means no independent check is left, and a bare-title match
+        # is exactly how wrong pairs are born.
+        return None
+    # Prefer the original title: OMDb indexes the original/English form, while
+    # TMDB's `title` is localized by `TMDB_LANGUAGE` (fr-FR here).
+    query_title = extras.original_title or extras.title
+    if not query_title:
+        return None
+
+    data = await omdb_service.search_by_title(query_title, extras.year, media_type)
+    if data is None or not data.imdb_id or not data.title:
+        return None
+    if not _omdb_type_matches(data.type, media_type):
+        return None
+    # OMDb already filtered on `y`, but re-check: the filter is theirs, the
+    # guarantee has to be ours.
+    if _parse_omdb_year(data.year) != extras.year:
+        return None
+    sim = max(
+        _omdb_title_sim(extras.title, data.title),
+        _omdb_title_sim(query_title, data.title),
+    )
+    if sim < _OMDB_TITLE_STRONG_SIM:
+        return None
+    return data.imdb_id
+
+
 async def _pair_one(job: dict[str, Any], row, *, session_factory, dry_run: bool) -> bool:
     """Pass 1 — resolve the missing id of an item that has exactly one.
 
@@ -302,6 +366,10 @@ async def _pair_one(job: dict[str, Any], row, *, session_factory, dry_run: bool)
         else:
             extras = await tmdb.get_match_extras(resolved_tmdb, _kind(media_type))
             resolved_imdb = extras.imdb_id if extras is not None else None
+            if not resolved_imdb:
+                resolved_imdb = await _imdb_from_omdb(extras, media_type)
+                if resolved_imdb:
+                    job["omdbPaired"] += 1
             if not resolved_imdb:
                 reason = "no_imdb_for_tmdb"
 

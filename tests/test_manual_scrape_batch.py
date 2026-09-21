@@ -21,6 +21,7 @@ from app.config import settings
 from app.models.database import Media, ScrapeReview, TmdbScrapeCache
 from app.services import manual_scrape_service as mss
 from app.services import poster_match_service, unified_group_service
+from app.services.omdb_service import OMDbData
 from app.services import tmdb_service as tmdb_module
 from app.services.poster_match_service import PosterComparison
 from app.services.tmdb_service import (
@@ -221,6 +222,105 @@ async def test_pairing_resolves_imdb_from_a_lone_tmdb_id(db_factory, patched):
     row = await _row(db_factory)
     assert row.imdb_id == "tt0133093"
     assert row.match_source == "batch_pair"
+
+
+class OMDbTitleDouble:
+    """Double for the pass-1 OMDb fallback (`search_by_title`)."""
+
+    is_configured = True
+
+    def __init__(self, result=None):
+        self.result = result
+        self.calls: list[tuple] = []
+
+    def get_request_count(self):
+        return 0
+
+    async def search_by_title(self, title, year, media_type):
+        self.calls.append((title, year, media_type))
+        return self.result
+
+
+def _omdb(title="The Matrix", year="1999", imdb_id="tt0133093", type_="movie"):
+    return OMDbData(
+        title=title, year=year, runtime_minutes=136, genre="Action",
+        director=None, actors=None, plot=None, imdb_rating=8.7,
+        imdb_votes=2_000_000, type=type_, imdb_id=imdb_id,
+    )
+
+
+async def test_omdb_fallback_pairs_when_tmdb_has_no_imdb(db_factory, patched):
+    # 852 prod movies sat here: a trusted tmdb_id, and TMDB simply carries no
+    # external imdb_id for the title.
+    await _add(
+        db_factory, rating_key="vod_1.mp4", server_id="xtream_a",
+        title="FR The Matrix FHD", year=1999, tmdb_id="603",
+    )
+    patched.setattr(mss, "tmdb_service", BatchTMDB(
+        details_by_id={603: _details(imdb_id=None)},
+    ))
+    fake = OMDbTitleDouble(_omdb())
+    patched.setattr(worker, "omdb_service", fake)
+
+    job = await _run(db_factory)
+
+    assert job["paired"] == 1
+    assert job["omdbPaired"] == 1
+    row = await _row(db_factory)
+    assert row.imdb_id == "tt0133093"
+    assert row.match_source == "batch_pair"
+    # Queried with TMDB's OWN title, never the panel-polluted row title.
+    assert fake.calls == [("The Matrix", 1999, "movie")]
+
+
+@pytest.mark.parametrize("omdb_result, why", [
+    (None, "omdb a repondu not_found / budget epuise"),
+    (_omdb(title="A Completely Different Film"), "titre trop eloigne"),
+    (_omdb(year="2003"), "annee differente"),
+    (_omdb(type_="series"), "type incoherent"),
+    (_omdb(imdb_id=None), "pas d'imdb_id dans la reponse"),
+])
+async def test_omdb_fallback_refuses_a_doubtful_match(
+    db_factory, patched, omdb_result, why,
+):
+    # Attaching a WRONG imdb_id to a CORRECT tmdb_id builds the mismatched
+    # pair `validate_id_consistency` exists to clean up — and it would be
+    # written with match_locked=1, so no automatic pass could undo it.
+    await _add(
+        db_factory, rating_key="vod_1.mp4", server_id="xtream_a",
+        title="The Matrix", year=1999, tmdb_id="603",
+    )
+    patched.setattr(mss, "tmdb_service", BatchTMDB(
+        details_by_id={603: _details(imdb_id=None)},
+    ))
+    patched.setattr(worker, "omdb_service", OMDbTitleDouble(omdb_result))
+
+    job = await _run(db_factory)
+
+    assert job["paired"] == 0, why
+    assert job["omdbPaired"] == 0, why
+    assert (await _row(db_factory)).imdb_id in (None, ""), why
+    assert [r.reason for r in await _reviews(db_factory)] == ["no_imdb_for_tmdb"]
+
+
+async def test_omdb_fallback_needs_a_year_to_check_against(db_factory, patched):
+    # Without a year the only remaining evidence is a bare title, which is
+    # exactly how wrong pairs are born — so we must not even spend the call.
+    await _add(
+        db_factory, rating_key="vod_1.mp4", server_id="xtream_a",
+        title="The Matrix", tmdb_id="603",
+    )
+    patched.setattr(mss, "tmdb_service", BatchTMDB(
+        details_by_id={603: _details(imdb_id=None, year=None)},
+    ))
+    fake = OMDbTitleDouble(_omdb())
+    patched.setattr(worker, "omdb_service", fake)
+
+    job = await _run(db_factory)
+
+    assert fake.calls == []
+    assert job["paired"] == 0
+    assert (await _row(db_factory)).imdb_id in (None, "")
 
 
 async def test_unpairable_item_goes_to_review(db_factory, patched):

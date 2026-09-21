@@ -67,7 +67,10 @@ def normalize_for_sorting(title: str) -> str:
 # Quality / language / release tags stripped ANYWHERE (case-insensitive, whole
 # word). Order matters in the regex: longer alternatives first (WEB-DL > WEB).
 _QUALITY_TAGS = (
-    "2160P", "1080P", "720P", "480P", "4K", "UHD", "HDLIGHT", "HDR", "HD", "SD",
+    # FHD sits before HD so the longer alternative wins. It was present in
+    # `_TRAIL_QUALITY_RE` (the older parser) but missing here, so `clean_title`
+    # shipped "The Captain FHD" to TMDB and got `no_candidates` every time.
+    "2160P", "1080P", "720P", "480P", "4K", "FHD", "UHD", "HDLIGHT", "HDR", "HD", "SD",
     "HQ", "LQ", "X264", "X265", "H264", "H265", "HEVC", "WEB-DL", "WEBRIP", "WEB",
     "BLURAY", "BRRIP", "BDRIP", "DVDRIP", "AC3", "DTS", "MULTI",
     "TRUEFRENCH", "SUBFRENCH", "VOSTFR", "VOST", "VFF", "VFQ", "VFI", "VFB",

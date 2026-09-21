@@ -38,6 +38,13 @@ class TestCleanTitle:
         # quality tags are only stripped after the prefix pass.
         ("4K FR Avatar", "Avatar"),
         ("FR - Le Parrain", "Le Parrain"),
+        # FHD was listed in the older trailing-tag parser but NOT in the tag
+        # set `clean_title` uses, so these reached TMDB verbatim and always
+        # came back `no_candidates` (21 distinct catalogue titles).
+        ("FR The Captain FHD", "The Captain"),
+        ("FR The Bombardment FHD", "The Bombardment"),
+        ("Avatar FHD MULTI", "Avatar"),
+        ("FHD Le Parrain", "Le Parrain"),
     ])
     def test_strips_panel_language_prefixes(self, raw, expected_title):
         assert clean_title(raw)[0] == expected_title

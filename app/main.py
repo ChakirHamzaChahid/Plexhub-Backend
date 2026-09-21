@@ -35,7 +35,7 @@ from app.api import (
 from app.utils.request_context import RequestIdLogFilter, RequestIdMiddleware
 from app.utils.job_health import mark_job_success, set_master, track_job
 
-APP_VERSION = "1.10.6"
+APP_VERSION = "1.10.7"
 
 logger = logging.getLogger("plexhub")
 

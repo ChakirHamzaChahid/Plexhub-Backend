@@ -43,11 +43,12 @@ from __future__ import annotations
 import re
 from typing import Any, Literal
 
-from sqlalchemy import func
+from sqlalchemy import case, func
 from sqlalchemy.sql.elements import ColumnElement
 
 from app.config import settings
 from app.models.database import Media
+from app.services.aggregation_service import IMPLAUSIBLE_DURATION_MS
 from app.services.omdb_service import OMDbData
 from app.services.tmdb_service import TMDBEnrichmentData
 from app.utils.rating_blend import blend_display_rating_case, blend_rating
@@ -77,6 +78,27 @@ def _parse_omdb_year(raw: str | None) -> int | None:
         return None
     m = re.match(r"^(\d{4})", raw)
     return int(m.group(1)) if m else None
+
+
+def _apply_episode_runtime(values: dict[str, Any], data: TMDBEnrichmentData) -> None:
+    """Write TMDB's typical episode length onto a SHOW row's `duration`.
+
+    Implicitly TV-only: `episode_runtime_ms` is parsed from `episode_run_time`,
+    which TMDB only returns for series.
+
+    Deliberately NOT a COALESCE fill-missing. 14 931 show rows already carry a
+    duration published by the Xtream panel, and that value IS the unreliable
+    one — a COALESCE would preserve every single one of them and change
+    nothing. Only a missing or implausible value is replaced, so a believable
+    panel figure (more specific than a series-wide average) still wins.
+    """
+    if not data.episode_runtime_ms:
+        return
+    values["duration"] = case(
+        (Media.duration.is_(None), data.episode_runtime_ms),
+        (Media.duration < IMPLAUSIBLE_DURATION_MS, data.episode_runtime_ms),
+        else_=Media.duration,
+    )
 
 
 def build_identity_values(
@@ -146,6 +168,8 @@ def build_identity_values(
         for col, value in rich:
             if value is not None:
                 values[col] = func.coalesce(getattr(Media, col), value)
+
+        _apply_episode_runtime(values, data)
         return values
 
     # --- mode == "replace" ---

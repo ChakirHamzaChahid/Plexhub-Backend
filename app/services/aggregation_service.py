@@ -43,6 +43,43 @@ def best_row(rows: list[Media]) -> Media:
     return max(rows, key=lambda r: (key(r), r.server_id or "", r.rating_key or ""))
 
 
+#: Below this, a panel-published duration is not believable for a real
+#: episode or film — it is the "I don't know" value Xtream panels emit.
+#: Measured on the real catalogue: 2 s and 2 min are the two common ones.
+IMPLAUSIBLE_DURATION_MS = 5 * 60 * 1000
+
+
+def consolidated_duration(rows: list[Media], *, floor_ms: int | None = None) -> int | None:
+    """Best duration for a group, across every source that serves it.
+
+    A duration belongs to the CONTENT, not to the source streaming it, so it
+    must NOT ride on `best_row` — that election weighs enrichment, poster,
+    rating and title length, never duration, and its alphabetical tie-break
+    then picks a representative essentially at random. Real case: MAO S01E01
+    is served by three sources carrying 1 519 000 ms, 125 000 ms and 2 000 ms,
+    and the API was exposing **2 000**.
+
+    The longest value wins: a panel that does not know the duration publishes
+    0, a couple of seconds, or a truncated value — it practically never
+    publishes an inflated one, so the maximum is the best estimator.
+
+    `floor_ms` (typically TMDB's `episode_run_time` for the parent show) is
+    used only when every source is implausible, i.e. when there is nothing
+    left to consolidate. It is never allowed to override a believable panel
+    value, which is more specific than a series-wide average.
+    """
+    values = [r.duration for r in rows if r.duration and r.duration > 0]
+    best = max(values) if values else None
+    if best is not None and best >= IMPLAUSIBLE_DURATION_MS:
+        return best
+    # The floor itself has to clear the bar: until enrichment overwrites it,
+    # a show row still carries whatever the panel published, which is exactly
+    # the unreliable value this function exists to reject.
+    if floor_ms and floor_ms >= IMPLAUSIBLE_DURATION_MS:
+        return floor_ms
+    return best
+
+
 def canonical_title_year(row: Media) -> tuple[str, int | None]:
     """Clean display title + year for a group's representative row.
 

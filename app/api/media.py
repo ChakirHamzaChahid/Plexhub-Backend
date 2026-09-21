@@ -23,7 +23,7 @@ from app.models.schemas import (
 )
 from app.services import trailer_service
 from app.services.aggregation_service import (
-    build_versions, canonical_title_year,
+    build_versions, canonical_title_year, consolidated_duration,
 )
 from app.services.media_service import media_service, encode_media_cursor
 from app.utils.metrics import media_episodes_missing_server_id_total
@@ -410,7 +410,14 @@ async def list_episodes_unified(
             season=slot.season, episode=slot.episode,
             title=slot.best.title, summary=slot.best.summary,
             thumb_url=slot.best.resolved_thumb_url or slot.best.thumb_url,
-            duration=slot.best.duration,
+            # NOT `slot.best.duration`: the representative row is elected on
+            # enrichment/poster/rating/title, never on duration, so the value
+            # was effectively picked at random among the sources. See
+            # `consolidated_duration` (real case: MAO S01E01 exposed 2 000 ms
+            # while a sibling source carried 1 519 000).
+            duration=consolidated_duration(
+                slot.members, floor_ms=group.best.duration,
+            ),
             versions=_build_versions(slot.members, labels),
             version_count=len(slot.members),
         )

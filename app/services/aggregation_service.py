@@ -63,21 +63,22 @@ def consolidated_duration(rows: list[Media], *, floor_ms: int | None = None) -> 
     0, a couple of seconds, or a truncated value — it practically never
     publishes an inflated one, so the maximum is the best estimator.
 
-    `floor_ms` (typically TMDB's `episode_run_time` for the parent show) is
-    used only when every source is implausible, i.e. when there is nothing
-    left to consolidate. It is never allowed to override a believable panel
-    value, which is more specific than a series-wide average.
+    `floor_ms` (TMDB's `episode_run_time` for the parent show) fills in ONLY
+    when no source reports any duration at all.
+
+    ⚠️ It deliberately does NOT override a short-but-reported duration, even
+    an absurd-looking one. That was this function's first design, and an
+    `ffprobe` on the real stream disproved its premise: for MAO S01E01 the
+    panel's 125 000 ms is EXACT — the file really is 2 min 05 (49.9 MB,
+    1920x1080, 2 993 frames). The provider is not publishing bad metadata,
+    it is serving a **truncated file**. Substituting TMDB's 24 minutes there
+    would advertise a runtime no available source can actually play, which is
+    worse than showing the unflattering truth.
     """
     values = [r.duration for r in rows if r.duration and r.duration > 0]
-    best = max(values) if values else None
-    if best is not None and best >= IMPLAUSIBLE_DURATION_MS:
-        return best
-    # The floor itself has to clear the bar: until enrichment overwrites it,
-    # a show row still carries whatever the panel published, which is exactly
-    # the unreliable value this function exists to reject.
-    if floor_ms and floor_ms >= IMPLAUSIBLE_DURATION_MS:
-        return floor_ms
-    return best
+    if values:
+        return max(values)
+    return floor_ms if floor_ms and floor_ms > 0 else None
 
 
 def canonical_title_year(row: Media) -> tuple[str, int | None]:

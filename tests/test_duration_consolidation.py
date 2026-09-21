@@ -41,24 +41,28 @@ class TestConsolidatedDuration:
 
 
 class TestTmdbFloor:
-    def test_floor_rescues_a_slot_where_every_source_is_garbage(self):
-        # The 120 series whose every episode reads < 5 min.
-        rows = [_row(2_000), _row(125_000)]
-        assert consolidated_duration(rows, floor_ms=1_320_000) == 1_320_000
+    """The floor fills a HOLE. It never rewrites a reported duration.
 
-    def test_a_believable_source_beats_the_series_average(self):
-        # Per-episode truth is more specific than a series-wide figure.
-        rows = [_row(2_400_000)]
-        assert consolidated_duration(rows, floor_ms=1_320_000) == 2_400_000
+    First design did override short durations, on the assumption that panels
+    publish garbage. An `ffprobe` on the real stream disproved it: MAO S01E01
+    from xtream_8fb2c0f3 genuinely is 125.1 s (49.9 MB, 1920x1080, 2 993
+    frames). The panel is honest; the FILE is truncated. Advertising TMDB's
+    24 minutes there would promise a runtime nothing can play.
+    """
 
-    def test_an_implausible_floor_is_refused(self):
-        # Until enrichment overwrites it, a show row still carries the panel
-        # value — the very thing this guards against. It must not be promoted
-        # to a floor just because it sits on the parent row.
-        assert consolidated_duration([_row(2_000)], floor_ms=3_000) == 2_000
+    def test_fills_in_when_no_source_reports_anything(self):
+        assert consolidated_duration([_row(None), _row(0)], floor_ms=1_320_000) == 1_320_000
 
-    def test_floor_of_none_changes_nothing(self):
-        assert consolidated_duration([_row(2_000)], floor_ms=None) == 2_000
+    def test_never_overrides_a_reported_short_duration(self):
+        # The 2 min 05 really is what the file contains.
+        assert consolidated_duration([_row(125_000)], floor_ms=1_440_000) == 125_000
+
+    def test_a_complete_sibling_still_wins(self):
+        rows = [_row(1_519_000), _row(125_000), _row(2_000)]
+        assert consolidated_duration(rows, floor_ms=1_440_000) == 1_519_000
+
+    def test_no_floor_and_no_source_yields_none(self):
+        assert consolidated_duration([_row(None)], floor_ms=None) is None
 
 
 class TestEpisodeRuntimeParsing:

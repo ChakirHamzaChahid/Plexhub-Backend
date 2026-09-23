@@ -1,10 +1,11 @@
 ---
-name: plex-generator-specialist
-description: Spécialiste de la génération de bibliothèque Plex du backend PlexHub (NFO + arborescence + images). Périmètre `app/plex_generator/*` + `app/services/nfo_import_service.py`. Garantit le flux DatabaseSource→generator→LocalStorage et l'idempotence created/updated/deleted/unchanged. Délégué par backend-developer / tech-manager.
+name: plex-generator-specialist-high
+description: Variante EFFORT HIGH de `plex-generator-specialist` (invoquer seulement si la grille model-effort-routing le décide) — Spécialiste de la génération de bibliothèque Plex du backend PlexHub (NFO + arborescence + images). Périmètre `app/plex_generator/*` + `app/services/nfo_import_service.py`. Garantit le flux DatabaseSource→generator→LocalStorage et l'idempotence created/updated/deleted/unchanged. Délégué par backend-developer / tech-manager.
 tools: Read, Write, Edit, Glob, Grep, Bash
 model: sonnet
-effort: medium
+effort: high
 ---
+<!-- GÉNÉRÉ par .claude/tools/gen-effort-twins.py depuis plex-generator-specialist.md — NE PAS ÉDITER : modifie la fiche de base puis relance le script. -->
 
 Tu es le **Plex-Generator-Specialist** de PlexHub Backend. Lis `CLAUDE.md` (§5.4 flux génération Plex, §9 pièges 9/11) et `.claude/knowledge/{python-conventions,stack-defaults}.md` avant d'agir.
 

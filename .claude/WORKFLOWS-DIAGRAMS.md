@@ -2,6 +2,8 @@
 
 > Compagnon visuel de `.claude/WORKFLOWS.md`. Chaque workflow détaillé sous forme de flowchart Mermaid (rendu natif dans VS Code / Cursor / GitHub) avec agents, modèles+effort de départ, gates, livrables et boucles d'escalade. Backend **FastAPI / Python 3.13**, dév direct sur `develop`.
 
+> 🎚️ **Couples modèle · effort affichés = points de départ INDICATIFS.** Depuis le 2026-09-23, le couple réel est décidé **tâche par tâche** par la grille de la skill `model-effort-routing` (plage `haiku`..`opus` × `medium`..`high`, ligne `ROUTAGE` tracée avant chaque appel ; effort `high` = fiche jumelle `<agent>-high`). `low`, `xhigh`, `max` et `fable` sont hors routage.
+
 ## Légende commune
 
 ```mermaid
@@ -28,7 +30,7 @@ flowchart LR
 flowchart TD
   T([🎯 /audit-full]) --> R[[📖 Read CLAUDE.md §9/§10<br/>+ lignées CR-* / AUDIT-*]]
   R --> RT[[⚙️ Runtime : pytest -v<br/>+ boot uvicorn + /api/health + /metrics]]
-  RT --> FA[[🕵️ full-auditor<br/>fable · xhigh]]
+  RT --> FA[[🕵️ full-auditor<br/>opus · high]]
   FA --> A1[Cartographie modules §2]
   FA --> A2[Diagnostic sécurité<br/>auth fail-closed, secrets,<br/>SSRF, confinement F-007]
   FA --> A3[Diagnostic perf<br/>chemins chauds, boucle<br/>d'événements, SQL]
@@ -45,7 +47,7 @@ flowchart TD
   FIX -->|plus tard| END([✔️ Backlog priorisé])
 ```
 
-**Escalade routage** : `full-auditor` en `fable/xhigh` par défaut. Si le rapport rate un axe → cross-check `code-reviewer opus/high`. Si findings vagues → 2ᵉ passe `full-auditor fable/max` (via override `CLAUDE_CODE_EFFORT_LEVEL=max`).
+**Escalade routage** : `full-auditor` en `opus/high` par défaut. Si le rapport rate un axe → cross-check `code-reviewer opus/high`. Si findings vagues → 2ᵉ passe `full-auditor` avec prompt enrichi ; `xhigh`/`max` = décision humaine uniquement (`CLAUDE_CODE_EFFORT_LEVEL`).
 
 ---
 
@@ -76,7 +78,7 @@ flowchart TD
   GATE -.->|oui, P0| INCIDENT([/incident])
 ```
 
-**Escalade routage** : `full-auditor opus/high` par défaut (scope réduit vs `/audit-full`). Si le diff touche schéma/migrations, sécurité (auth/secrets/downloads) ou worker partagé → `opus/xhigh`. Si mystère persistant → `fable/xhigh`.
+**Escalade routage** : `full-auditor opus/high` par défaut (scope réduit vs `/audit-full`). Si le diff touche schéma/migrations, sécurité (auth/secrets/downloads) ou worker partagé → `opus/high`. Si mystère persistant → `/incident` (cause racine `tech-lead`).
 
 ---
 
@@ -104,7 +106,7 @@ flowchart TD
   GATE -.->|non, tout vert| END([✔️ Baseline archivée])
 ```
 
-**Escalade routage** : `perf-benchmarker opus/high`. Si un goulot est ambigu (cause racine floue, ex. « pourquoi ce endpoint prend 4 s ? ») → escalade à `full-auditor fable/xhigh` OU `/incident`.
+**Escalade routage** : `perf-benchmarker opus/high`. Si un goulot est ambigu (cause racine floue, ex. « pourquoi ce endpoint prend 4 s ? ») → escalade à `full-auditor opus/high` OU `/incident`.
 
 ---
 
@@ -157,7 +159,7 @@ flowchart TD
   P3A & P3B -->|parallèle<br/>périmètres disjoints| CODE[/💻 Code commité<br/>develop/]
   CODE --> P4[[🧪 qa-engineer<br/>sonnet · high<br/>pytest + tests HTTP]]
   P4 --> P5A[[🔎 code-reviewer<br/>opus · high]]
-  P4 --> P5B[[🔒 security-reviewer<br/>opus · xhigh<br/>si surface sensible]]
+  P4 --> P5B[[🔒 security-reviewer<br/>opus · high<br/>si surface sensible]]
   P4 --> P5C[[⚡ perf-benchmarker<br/>opus · high<br/>si chemin chaud]]
   P5A & P5B & P5C --> GATE3[(🚦 Gate DoD :<br/>pytest -v + boot uvicorn<br/>+ /api/health 200<br/>+ migrations + ruff)]
   GATE3 -.->|❌ cycle 1..2| ESC[[🔁 escalade orchestrée par cto/tm<br/>prompt+ · model override · autre agent]]
@@ -167,11 +169,11 @@ flowchart TD
   MERGE --> SC[/sync-context si<br/>modules/§5/§9 touchés]
 ```
 
-**Escalade routage** (cap 2 cycles avant BLOCKED) :
-1. `sonnet/high` KO → même agent, prompt enrichi
-2. Encore KO → override `model: "opus"` à l'invocation
-3. `opus/high` KO → spécialiste domaine ou `tech-lead` opus/xhigh
-4. Encore KO → `BLOCKED`, `🚨 needs-approval` humain
+**Escalade routage** (un cran à la fois, une ligne `ROUTAGE` par cran) :
+1. KO → même couple, prompt enrichi
+2. Encore KO → effort `high` (fiche jumelle `<agent>-high`)
+3. Encore KO → modèle +1 (`haiku` → `sonnet` → `opus`) ou spécialiste domaine
+4. `opus`·`high` KO → `BLOCKED`, `🚨 needs-approval` humain (`xhigh`/`max` = décision de Chakir seul)
 
 ---
 
@@ -183,7 +185,7 @@ flowchart TD
 ```mermaid
 flowchart TD
   T([🎯 /refacto « périmètre »]) --> SKILL[/📖 skill model-effort-routing<br/>lue par tech-lead/]
-  SKILL --> TL[[🏗️ tech-lead<br/>opus · xhigh<br/>cartographie]]
+  SKILL --> TL[[🏗️ tech-lead<br/>opus · high<br/>cartographie]]
   TL --> CART[/📄 Cartographie<br/>+ plan migration<br/>+ contrats stables + ADR/]
   CART --> RISK{Risky ?<br/>schéma DB / auth / worker partagé}
   RISK -->|oui| HUM[🚨 needs-approval humain]
@@ -195,7 +197,7 @@ flowchart TD
   V1 --> DEV1[[🔧 backend-developer<br/>sonnet · high<br/>fichier par fichier]]
   DEV1 --> QA1[[🧪 qa-engineer<br/>sonnet · high<br/>non-régression pytest]]
   QA1 --> PB1[[⚡ perf-benchmarker<br/>opus · high<br/>si chemin chaud]]
-  PB1 --> REV1[[🔎 code-reviewer<br/>opus · xhigh<br/>invariants §9 préservés ?]]
+  PB1 --> REV1[[🔎 code-reviewer<br/>opus · high<br/>invariants §9 préservés ?]]
   REV1 --> G1[(🚦 Gate V1)]
   G1 -.->|KO cycle 1..2| ESC1[[🔁 escalade routage]]
   ESC1 --> DEV1
@@ -209,7 +211,7 @@ flowchart TD
   ADR --> SC[/sync-context §9 + bandeau]
 ```
 
-**Escalade routage** : refacto = `opus/xhigh` sur toute la chaîne (cartographie ET review). Le dev peut rester `sonnet/high` sur les vagues isolées à impact borné. Si une vague touche invariants §9 (migrations, db_retry, master-worker, secrets) → `opus/xhigh` sur le dev aussi.
+**Escalade routage** : refacto = cartographie ET review typiquement `opus/high` (notées par la grille). Le dev peut rester `sonnet/high` sur les vagues isolées à impact borné. Si une vague touche invariants §9 (migrations, db_retry, master-worker, secrets) → le dev passe en `opus/high` aussi.
 
 ---
 
@@ -221,10 +223,10 @@ flowchart TD
 ```mermaid
 flowchart TD
   T([🎯 /incident « symptôme »]) --> MON[[📊 Monitor<br/>logs/plexhub.log request_id<br/>+ /metrics + repro curl]]
-  MON --> TRIAGE[[🏗️ tech-lead<br/>opus · xhigh<br/>sévérité S0/S1/S2]]
+  MON --> TRIAGE[[🏗️ tech-lead<br/>opus · high<br/>sévérité S0/S1/S2]]
   TRIAGE --> SEV{Sévérité}
   SEV -->|S0 prod down| HOT[🚨 hotfix depuis main<br/>needs-approval]
-  SEV -->|S1/S2| ROOT[[🔬 tech-lead<br/>opus · xhigh<br/>skill systematic-debugging<br/>cause racine fichier:ligne]]
+  SEV -->|S1/S2| ROOT[[🔬 tech-lead<br/>opus · high<br/>skill systematic-debugging<br/>cause racine fichier:ligne]]
   HOT --> ROOT
   ROOT --> HYP[/📄 Hypothèses<br/>+ preuves code/]
   HYP --> REPRO{Reproductible<br/>pytest ou curl ?}
@@ -244,7 +246,7 @@ flowchart TD
   P9 --> SC[/sync-context bandeau]
 ```
 
-**Escalade routage** : cause racine = `tech-lead opus/xhigh` (souvent Fable 5 si mystère persistant — locks SQLite, races async). Correctif = `sonnet/high` typique. Test de garde = incontournable (« un test qui reproduit RED d'abord »).
+**Escalade routage** : cause racine = `tech-lead` (typiquement `opus/high`, noté par la grille) (`xhigh`/`max` seulement sur décision de Chakir si mystère persistant — locks SQLite, races async). Correctif = `sonnet/high` typique. Test de garde = incontournable (« un test qui reproduit RED d'abord »).
 
 ---
 

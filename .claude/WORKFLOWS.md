@@ -57,20 +57,22 @@ Détecte l'intention dans le prompt de l'utilisateur et propose le workflow **av
 Chaque workflow multi-agents DOIT décider un couple `(modèle, effort)` par sous-tâche AVANT invocation. Ne PAS démarrer tout le monde en `opus + xhigh` par principe.
 
 **Deux axes indépendants** (doc Anthropic 2026-07) :
-- **Modèle** = capacité brute (`haiku` < `sonnet` < `opus` < `fable`)
-- **Effort** = énergie cognitive dépensée (`low` < `medium` < `high` (défaut) < `xhigh` < `max`)
+- **Modèle** = capacité brute — plage autorisée **`haiku` < `sonnet` < `opus`** (`fable` retiré le 2026-09-23 : plus cher qu'Opus 5.5 sans gain mesuré)
+- **Effort** = énergie cognitive dépensée — plage autorisée **`medium` < `high`** (`low`, `xhigh`, `max` hors routage ; `xhigh`/`max` = décision de Chakir seul, par session)
+- ⚠️ **Décision de Chakir (2026-09-23) : chaque tâche est notée** (grille 5 critères de la skill `model-effort-routing`) avant d'être confiée à un subagent, et reçoit le couple le plus bas qui la fera réussir — **jamais un couple fixé par rôle ou par workflow**. Chaque appel est précédé d'une ligne `ROUTAGE <tâche> : model=… effort=… agent=… — C1..C5 (raison)`.
 
 **Précédence** : `CLAUDE_CODE_EFFORT_LEVEL` (env var) > `effortLevel` (settings) > `effort:` (frontmatter agent) > défaut modèle.
 
-⚠️ **Contrainte SDK à retenir** : le Task/Agent tool expose un paramètre `model:` override par invocation, mais **PAS de paramètre `effort` override**. L'effort d'un subagent = son frontmatter statique (ou l'env var si posée). Le routage runtime porte donc sur le CHOIX D'AGENT et l'OVERRIDE MODÈLE, pas sur l'effort par invocation.
+⚠️ **Contrainte SDK à retenir** : le Task/Agent tool expose un paramètre `model:` override par invocation, mais **PAS de paramètre `effort` override**. L'effort d'un subagent = son frontmatter statique (ou l'env var si posée). Le routage runtime porte donc sur le CHOIX D'AGENT et l'OVERRIDE MODÈLE, pas sur l'effort par invocation. **D'où les jumeaux** : chaque agent existe en `<agent>` (`effort: medium`, fiche SOURCE) et `<agent>-high` (`effort: high`, **générée** par `python .claude/tools/gen-effort-twins.py`, ne jamais l'éditer à la main ; `--check` détecte un jumeau absent, périmé ou orphelin). Choisir l'effort = choisir la fiche ; choisir le modèle = passer `model:` explicitement à chaque appel.
 
 **Doctrine complète** (matrice + escalade) = skill **`model-effort-routing`** (`.claude/skills/model-effort-routing/SKILL.md`), **consultée par les orchestrateurs** (`tech-lead` pour /refacto et /incident, `cto`+`tech-manager` pour /feature, `full-auditor` pour /audit-full et /wf-audit-incremental, Manager principal pour /sync-context).
 
 **Règle d'or** = partir au plus bas couple viable, escalader ciblé sur `KO` de revue :
 1. **1er échec** = même agent + **prompt enrichi** (rapport de revue + hints « considère 3 hypothèses »)
-2. **2e échec** = **override modèle** via param `model:` du Task tool (ex. `backend-developer` sonnet → passe `model: "opus"`)
-3. **3e échec** = **changement d'agent** vers une variante plus musclée (spécialiste domaine, `tech-lead`/`full-auditor` opus/fable)
-4. **4e échec** = `BLOCKED` + recommander `CLAUDE_CODE_EFFORT_LEVEL=xhigh|max` en env var puis relance session (cap 2 relances)
+2. **2e échec** = **effort +1** : passer à la fiche jumelle `<agent>-high` (si déjà `high`, aller à l'étape 3)
+3. **3e échec** = **modèle +1** via `model:` (`haiku` → `sonnet` → `opus`), en gardant `high` — ou confier à un spécialiste domaine si le problème sort du périmètre de l'agent
+4. **4e échec** (ou `opus`·`high` déjà atteint) = `BLOCKED` + remontée à Chakir, qui décide seul d'un éventuel `CLAUDE_CODE_EFFORT_LEVEL=xhigh` pour une session
+Un seul cran à la fois, chaque cran = une nouvelle ligne `ROUTAGE`.
 
 **Qui lit cette skill** :
 - `/feature` → `cto` et `tech-manager` la lisent avant de dispatcher les devs
@@ -79,7 +81,7 @@ Chaque workflow multi-agents DOIT décider un couple `(modèle, effort)` par sou
 - `/audit-full` → `full-auditor` monolithique (pas de sous-invocation, applique la matrice à lui-même)
 - `/sync-context`, `/benchmark`, `/wf-audit-incremental` → workflows mono-agent, la matrice guide le CHOIX de l'agent unique
 
-**Override manuel** : `$env:CLAUDE_CODE_EFFORT_LEVEL="xhigh"` (PowerShell) avant la session pour forcer partout — utile pour un audit exhaustif ou un refacto bloqué.
+**Override manuel (Chakir uniquement)** : `$env:CLAUDE_CODE_EFFORT_LEVEL="xhigh"` (PowerShell) avant la session force tous les agents à ce niveau et **court-circuite la grille** — réservé à un blocage après escalade complète, jamais posé par un agent.
 
 ## Détail des workflows « à orchestration » (dans `.claude/commands/<nom>.md`)
 - **`/feature`** — *Requirements (`cpo`) → Architecture (`cto`/`tech-lead`) **délègue le découpage à `/app-plan`** → **exécution + review + QA via `/app-build`** (`backend-developer` + spécialistes domaine ; + `security-reviewer`/`perf-benchmarker` si surface sensible/chemin chaud) → **gate final `integration-agent`***. **Tout commité sur `develop`.** Réutilise réellement les briques `/app-plan`, `/app-build`, `/app-review`.

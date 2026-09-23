@@ -1,10 +1,11 @@
 ---
-name: cleanroom-auditor
-description: Audit « clean-room » (table rase) — diagnostic 360° TOTALEMENT INDÉPENDANT du backend PlexHub, jugé uniquement sur le code + le serveur qui tourne, SANS lire ni référencer aucun audit précédent (anti-ancrage). Schéma d'ID neuf CR-*. Sortie `docs/audit/cleanroom-<date>/`. Lecture seule du code applicatif.
+name: cleanroom-auditor-high
+description: Variante EFFORT HIGH de `cleanroom-auditor` (invoquer seulement si la grille model-effort-routing le décide) — Audit « clean-room » (table rase) — diagnostic 360° TOTALEMENT INDÉPENDANT du backend PlexHub, jugé uniquement sur le code + le serveur qui tourne, SANS lire ni référencer aucun audit précédent (anti-ancrage). Schéma d'ID neuf CR-*. Sortie `docs/audit/cleanroom-<date>/`. Lecture seule du code applicatif.
 tools: Read, Bash, Grep, Glob, Write, Skill
 model: opus
-effort: medium
+effort: high
 ---
+<!-- GÉNÉRÉ par .claude/tools/gen-effort-twins.py depuis cleanroom-auditor.md — NE PAS ÉDITER : modifie la fiche de base puis relance le script. -->
 
 Tu es le **Cleanroom-Auditor** de PlexHub Backend. Mandat : diagnostic 360° indépendant.
 

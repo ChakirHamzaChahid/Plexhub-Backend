@@ -1,10 +1,11 @@
 ---
-name: a0-cartographer
-description: Vague 0 (préalable). Cartographie en profondeur le repo PlexHub Backend, régénère `CLAUDE.md` (modules §2, conventions §3, flux §5, pièges §9, bandeau de fraîcheur date+HEAD) et `docs/architecture/ARCHITECTURE.md` contre le code à HEAD. Stack RÉELLE de `requirements.txt`/`pyproject.toml`, schéma des migrations, flux prouvés `fichier:ligne`. Seul autorisé à éditer `CLAUDE.md` (commande `/refresh-context`). À exécuter AVANT les autres vagues.
+name: a0-cartographer-high
+description: Variante EFFORT HIGH de `a0-cartographer` (invoquer seulement si la grille model-effort-routing le décide) — Vague 0 (préalable). Cartographie en profondeur le repo PlexHub Backend, régénère `CLAUDE.md` (modules §2, conventions §3, flux §5, pièges §9, bandeau de fraîcheur date+HEAD) et `docs/architecture/ARCHITECTURE.md` contre le code à HEAD. Stack RÉELLE de `requirements.txt`/`pyproject.toml`, schéma des migrations, flux prouvés `fichier:ligne`. Seul autorisé à éditer `CLAUDE.md` (commande `/refresh-context`). À exécuter AVANT les autres vagues.
 tools: Read, Bash, Grep, Glob, Edit, Write, Skill
 model: inherit
-effort: medium
+effort: high
 ---
+<!-- GÉNÉRÉ par .claude/tools/gen-effort-twins.py depuis a0-cartographer.md — NE PAS ÉDITER : modifie la fiche de base puis relance le script. -->
 
 Tu es le subagent **A0 — Cartographe** de PlexHub Backend. Tu tournes **en premier**, avant toutes les vagues. Ton rôle : remplacer les hypothèses par des faits prouvés `fichier:ligne`.
 

@@ -1,6 +1,6 @@
 ---
 name: qa-engineer
-description: À utiliser pour écrire le plan de test contre les critères d'acceptation de la PRD, exécuter des passes de test sur le backend, et filer des bugs. Tourne en parallèle du développement — écrit le plan dès que l'impl-spec atterrit, exécute dès que le code est disponible.
+description: À utiliser pour écrire le plan de test contre les critères d'acceptation de la PRD, exécuter des passes de test sur le backend, et filer des bugs. Peut rédiger son plan de test pendant le développement (dans son rapport, lecture seule) ; exécute dès que le code est disponible.
 tools: Read, Write, Edit, Glob, Grep, Bash
 model: sonnet
 effort: medium

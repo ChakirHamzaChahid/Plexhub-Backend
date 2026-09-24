@@ -7,6 +7,8 @@ allowed-tools: Read, Write, Edit, Glob, Grep, Bash, Task
 
 # /refresh-context — re-cartographie complète @ HEAD
 
+> ⚠️ **Depuis le 2026-09-24, `CLAUDE.md` est un noyau** : le détail du §5 vit dans `docs/architecture/flux-cles.md` (même numérotation §5.x), l'état de la dette (§10) dans `docs/context/etat-reel.md`, et les bandeaux des lots précédents dans `docs/context/journal.md` (le plus récent en tête). Mets à jour la section concernée **là-bas** ; dans `CLAUDE.md`, seulement l'index §5, la stack du §10 et **un seul** bandeau courant.
+
 Objectif : remettre la documentation de contexte **à jour avec le code à HEAD**, pour qu'aucun agent
 ne travaille sur une carte périmée. **Re-cartographie complète** (≠ `/sync-context` léger).
 

@@ -19,7 +19,7 @@ Imprime l'équipe dans cet ordre, chaque ligne au format `<rôle> — <charte en
 - tech-manager — sprint plan, board, rapport quotidien, gate de lot, standups, coordination du pod
 
 **Build**
-- backend-developer — implémentation FastAPI : endpoints, services, workers, modèles, migrations, tests pytest (plusieurs en parallèle sur périmètres disjoints)
+- backend-developer — implémentation FastAPI : endpoints, services, workers, modèles, migrations, tests pytest (un seul agent dev écrit à la fois)
 - db-migration-specialist — schéma SQLite, chaîne de migrations idempotentes (001→N), entités ORM
 - sync-specialist — sync Xtream, enrichissement TMDB, validation de flux
 - ai-recsys-specialist — embeddings fastembed, ranking, sqlite-vec, motifs 503

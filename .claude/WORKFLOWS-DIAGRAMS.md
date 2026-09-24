@@ -1,14 +1,16 @@
 # 📊 Graphes détaillés des 7 workflows canoniques PlexHub Backend
 
-> Compagnon visuel de `.claude/WORKFLOWS.md`. Chaque workflow détaillé sous forme de flowchart Mermaid (rendu natif dans VS Code / Cursor / GitHub) avec agents, modèles+effort de départ, gates, livrables et boucles d'escalade. Backend **FastAPI / Python 3.13**, dév direct sur `develop`.
+> Compagnon visuel de `.claude/WORKFLOWS.md`. Chaque workflow détaillé sous forme de flowchart Mermaid (rendu natif dans VS Code / Cursor / GitHub) avec agents, gates, livrables et boucles d'escalade. Backend **FastAPI / Python 3.13**, dév direct sur `develop`.
 
-> 🎚️ **Couples modèle · effort affichés = points de départ INDICATIFS.** Depuis le 2026-09-23, le couple réel est décidé **tâche par tâche** par la grille de la skill `model-effort-routing` (plage `haiku`..`opus` × `medium`..`high`, ligne `ROUTAGE` tracée avant chaque appel ; effort `high` = fiche jumelle `<agent>-high`). `low`, `xhigh`, `max` et `fable` sont hors routage.
+> 🎚️ **Les nœuds affichent « couple = grille » au lieu d'un couple fixe** (revue 2026-09-24). Depuis le 2026-09-23, le couple réel est décidé **tâche par tâche** par la grille de la skill `model-effort-routing` (plage `haiku`..`opus` × `medium`..`high`, ligne `ROUTAGE` tracée avant chaque appel ; effort `high` = fiche jumelle `<agent>-high`). `low`, `xhigh`, `max` et `fable` sont hors routage.
+
+> ✍️ **Un seul rédacteur à la fois** : les devs s'enchaînent, seules les relectures et les audits partent en parallèle. **Échec = compteur unique** de 3 tentatives (sous-agent neuf + effort `high` → modèle +1 → `BLOCKED`).
 
 ## Légende commune
 
 ```mermaid
 flowchart LR
-  T([🎯 Trigger / mot-clé]) --> A[[👤 Agent<br/>modèle · effort]]
+  T([🎯 Trigger / mot-clé]) --> A[[👤 Agent<br/>couple = grille]]
   A --> D{🔀 Décision}
   D -->|✅ OK| L[/📄 Livrable/]
   D -->|❌ KO| E[[🔁 Escalade routage]]
@@ -30,7 +32,7 @@ flowchart LR
 flowchart TD
   T([🎯 /audit-full]) --> R[[📖 Read CLAUDE.md §9/§10<br/>+ lignées CR-* / AUDIT-*]]
   R --> RT[[⚙️ Runtime : pytest -v<br/>+ boot uvicorn + /api/health + /metrics]]
-  RT --> FA[[🕵️ full-auditor<br/>opus · high]]
+  RT --> FA[[🕵️ full-auditor<br/>couple = grille]]
   FA --> A1[Cartographie modules §2]
   FA --> A2[Diagnostic sécurité<br/>auth fail-closed, secrets,<br/>SSRF, confinement F-007]
   FA --> A3[Diagnostic perf<br/>chemins chauds, boucle<br/>d'événements, SQL]
@@ -38,7 +40,7 @@ flowchart TD
   FA --> A5[Diagnostic dette<br/>god-files, TODO, deps]
   A1 & A2 & A3 & A4 & A5 --> S[[📊 Scorecard + Top-10 P0/P1<br/>+ DELTA CR-*/AUDIT-*]]
   S --> RPT[/📄 docs/audit/vN/FINAL-REPORT.md/]
-  RPT --> CX[[🔍 code-reviewer<br/>opus · high<br/>cross-check indépendant]]
+  RPT --> CX[[🔍 code-reviewer<br/>couple = grille<br/>cross-check indépendant]]
   CX --> GATE[(🚦 Gate : findings actionnables ?)]
   GATE ==>|oui| BOARD[/📋 docs/31-board.md/]
   GATE -.->|non| FA
@@ -64,9 +66,10 @@ flowchart TD
   CL --> Z2[app/api<br/>auth fail-closed, contrats]
   CL --> Z3[app/workers, app/services<br/>sync, IA, downloads]
   CL --> Z4[requirements, Dockerfile,<br/>.github — bornes liées, CI]
-  CL --> Z5[docs/, .claude/<br/>doc, orchestration]
-  Z1 & Z2 & Z3 & Z4 --> FA[[🕵️ full-auditor<br/>opus · high<br/>mode incrémental]]
-  Z5 -.->|skip si<br/>seule doc| SKIP([✔️ Aucun risque code])
+  CL --> Z5[docs/, .claude agents/commands/skills<br/>doc seule]
+  CL --> Z6[.claude hooks · settings · tools<br/>garde-fous exécutables]
+  Z1 & Z2 & Z3 & Z4 & Z6 --> FA[[🕵️ full-auditor<br/>couple = grille<br/>mode incrémental]]
+  Z5 -.->|pas de revue de code<br/>cohérence seule| CROSS
   FA --> CROSS{Check<br/>CLAUDE.md<br/>à jour ?}
   CROSS -->|non| WARN[⚠️ Doc périmée<br/>→ /sync-context requis]
   CROSS -->|oui| SC[[📊 Scorecard delta<br/>+ Top findings]]
@@ -92,15 +95,15 @@ flowchart TD
   T([🎯 /benchmark]) --> SRV{Serveur bootable ?<br/>.env minimal + DB peuplée}
   SRV -.->|non| BLK[🚨 BLOCKED<br/>env/DB manquants]
   SRV -->|oui| BOOT[[⚙️ uvicorn app.main:app<br/>+ /api/health 200]]
-  BOOT --> PB[[⚡ perf-benchmarker<br/>opus · high]]
+  BOOT --> PB[[⚡ perf-benchmarker<br/>couple = grille]]
   PB --> SC1[Scénario 1<br/>listes /unified<br/>movies + shows p50/p90]
   PB --> SC2[Scénario 2<br/>recherche + filtres<br/>ILIKE, count]
   PB --> SC3[Scénario 3<br/>IA /rank cold + warm<br/>hydrate, sqlite-vec]
-  PB --> SC4[Scénario 4<br/>génération Plex<br/>+ sync (boucle bloquée ?)]
+  PB --> SC4[Scénario 4<br/>génération Plex<br/>+ sync · boucle bloquée ?]
   SC1 & SC2 & SC3 & SC4 --> METRICS[/📊 Métriques<br/>p50/p90 par étape,<br/>logs request_id, /metrics/]
   METRICS --> ANALYSE[[🔬 perf-benchmarker<br/>isolation goulots fichier:ligne]]
   ANALYSE --> RPT[/📄 docs/audit/benchmark-DATE/REPORT.md/]
-  RPT --> OA[[📈 observability-analyst<br/>sonnet · medium<br/>cross-check chiffres]]
+  RPT --> OA[[📈 observability-analyst<br/>couple = grille<br/>cross-check chiffres]]
   OA --> GATE[(🚦 Gate : goulots identifiés ?)]
   GATE ==>|oui| FIX([/fix-bench-perf])
   GATE -.->|non, tout vert| END([✔️ Baseline archivée])
@@ -120,7 +123,7 @@ flowchart TD
   T([🎯 /sync-context]) --> DIFF[[🔍 git log HEAD<br/>vs bandeau CLAUDE.md HEAD]]
   DIFF --> CHECK{Delta<br/>structurel ?}
   CHECK -.->|non, trivial| END([✔️ Rien à faire])
-  CHECK -->|oui| MGR[[✍️ Manager sonnet · high<br/>édition ciblée]]
+  CHECK -->|oui| MGR[[✍️ Manager<br/>couple = grille<br/>édition ciblée]]
   MGR --> B[/Bandeau<br/>date + HEAD/]
   MGR --> S{Section<br/>impactée}
   S -->|modules| S2[/§2 modules/]
@@ -133,7 +136,7 @@ flowchart TD
   COMMIT --> END2([✔️ Doc alignée sur HEAD])
 ```
 
-**Escalade routage** : mono-agent, `Manager sonnet/high`. Si le delta est massif (>1000 lignes doc, refonte structurelle) → escalade `/refresh-context` (re-cartographie complète via `a0-cartographer`).
+**Escalade routage** : mono-agent (session principale ; la grille donne le plus souvent `haiku`/`sonnet` · `medium`). Si le delta est massif (>1000 lignes doc, refonte structurelle) → escalade `/refresh-context` (re-cartographie complète via `a0-cartographer`).
 
 ---
 
@@ -141,39 +144,53 @@ flowchart TD
 
 **Trigger** : « feature », « implémente », « ajoute », « nouvel endpoint », « livre X »
 **Sortie** : commits sur `develop` + `docs/10-prd-<feature>.md` + tests + boot vert
+**🚀 Chemin mineur** : si l'éligibilité est remplie (C1≤1, C2≤1, C3=0, un ticket, ni migration ni route `/api/*` ni auth/secrets ni worker), tout se fait en **une session** sans PRD ni board.
+**🎯 Revues spécialisées** : `security-reviewer` et `perf-benchmarker` ne partent que si le diff coche un déclencheur (liste dans `commands/feature.md`).
 
 ```mermaid
 flowchart TD
-  T([🎯 /feature « objectif »]) --> SKILL[/📖 skill model-effort-routing<br/>lue par cto + tech-manager/]
-  SKILL --> P1[[📝 cpo<br/>opus · high<br/>skill prd-builder]]
+  T([🎯 /feature « objectif »]) --> TRI{{🔀 Chemin mineur éligible ?<br/>C1≤1 · C2≤1 · C3=0 · 1 ticket<br/>ni migration · ni route /api · ni auth/secrets · ni worker}}
+  TRI -->|oui · 1 session| M1[[🔧 backend-developer<br/>couple = grille · pytest ciblé + ruff]]
+  M1 --> M2[[🔎 code-reviewer<br/>diff du ticket]]
+  M2 --> M3{{🚦 pytest -v · boot uvicorn<br/>/api/health 200}}
+  M3 -->|OK| MC([✔️ commit develop])
+  M1 -.->|critère perdu en route| SKILL
+  TRI -->|non| SKILL[/📖 skill model-effort-routing<br/>ligne ROUTAGE avant chaque appel/]
+  SKILL --> P1[📝 Session principale<br/>skill write-spec · PRD]
   P1 --> PRD[/📄 docs/10-prd-feature.md/]
   PRD --> GATE1[(🚦 Gate produit :<br/>user stories + AC clairs ?)]
   GATE1 -.->|❌| P1
-  GATE1 ==>|✅| P2[[🏗️ cto + tech-lead<br/>opus · high<br/>skill architecture-builder]]
+  GATE1 ==>|✅| P2[🏗️ Session principale<br/>system-design · même contexte]
   P2 --> ARCH[/📄 Contrats Pydantic + DAG<br/>docs/31-board.md/]
   ARCH --> GATE2[(🚦 Gate archi :<br/>impacts §9, migrations, secrets ?)]
   GATE2 -.->|risky| HUM[🚨 needs-approval]
-  GATE2 ==>|safe| PM[[📊 tech-manager<br/>opus · high<br/>skill sprint-planner]]
-  PM --> P3A[[🔧 backend-developer<br/>sonnet · high]]
-  PM --> P3B[[🗄️ spécialistes domaine<br/>db-migration / sync /<br/>ai-recsys / plex-generator<br/>sonnet · high]]
-  P3A & P3B -->|parallèle<br/>périmètres disjoints| CODE[/💻 Code commité<br/>develop/]
-  CODE --> P4[[🧪 qa-engineer<br/>sonnet · high<br/>pytest + tests HTTP]]
-  P4 --> P5A[[🔎 code-reviewer<br/>opus · high]]
-  P4 --> P5B[[🔒 security-reviewer<br/>opus · high<br/>si surface sensible]]
-  P4 --> P5C[[⚡ perf-benchmarker<br/>opus · high<br/>si chemin chaud]]
+  P2 -.->|si C2 = 2 ou C3 = 2| RVA[[🔎 cto ou tech-lead<br/>relecture archi · contexte neuf]]
+  RVA -.-> GATE2
+  GATE2 ==>|safe| PM[📊 Session principale<br/>skill sprint-planner]
+  PM --> P3A[[🔧 backend-developer]]
+  PM --> P3B[[🗄️ spécialistes domaine<br/>db-migration / sync /<br/>ai-recsys / plex-generator]]
+  P3A & P3B -->|l'un après l'autre<br/>rédacteur unique| CODE[/💻 Code commité<br/>develop/]
+  CODE --> P4[[🧪 qa-engineer<br/>pytest + tests HTTP]]
+  P4 --> P5A[[🔎 code-reviewer<br/>toujours]]
+  P4 --> DSEC{{🔒 Déclencheur sécurité ?<br/>auth · secrets · SSRF · /dav<br/>downloads · tv_auth · CORS · route /api}}
+  DSEC -->|oui · même message| P5B[[🔒 security-reviewer]]
+  P4 --> DPERF{{⚡ Déclencheur perf ?<br/>SQL/index · services d'agrégation<br/>workers · plex_generator · listes /api/media}}
+  DPERF -->|oui| P5C[[⚡ perf-benchmarker]]
   P5A & P5B & P5C --> GATE3[(🚦 Gate DoD :<br/>pytest -v + boot uvicorn<br/>+ /api/health 200<br/>+ migrations + ruff)]
-  GATE3 -.->|❌ cycle 1..2| ESC[[🔁 escalade orchestrée par cto/tm<br/>prompt+ · model override · autre agent]]
+  DSEC -.->|non · noté au rapport| GATE3
+  DPERF -.->|non · noté au rapport| GATE3
+  GATE3 -.->|❌ tentatives 2 et 3| ESC[[🔁 sous-agent neuf<br/>effort high → modèle +1]]
   ESC --> P3A
-  GATE3 -.->|❌ cycle 3| HUM
+  GATE3 -.->|❌ après tentative 3| HUM
   GATE3 ==>|✅| MERGE[[✔️ tech-manager<br/>gate de lot + integration-agent]]
-  MERGE --> SC[/sync-context si<br/>modules/§5/§9 touchés]
+  MERGE --> SC[/sync-context si<br/>modules/§5/§9 touchés/]
 ```
 
-**Escalade routage** (un cran à la fois, une ligne `ROUTAGE` par cran) :
-1. KO → même couple, prompt enrichi
-2. Encore KO → effort `high` (fiche jumelle `<agent>-high`)
-3. Encore KO → modèle +1 (`haiku` → `sonnet` → `opus`) ou spécialiste domaine
-4. `opus`·`high` KO → `BLOCKED`, `🚨 needs-approval` humain (`xhigh`/`max` = décision de Chakir seul)
+**Compteur unique — 3 tentatives max par tâche** (une ligne `ROUTAGE` par tentative ; un « cycle de correction » = une tentative) :
+1. Tentative 1 → couple noté par la grille
+2. 1er KO → **sous-agent neuf** + rapport de revue + effort `high` (fiche `<agent>-high`) ; si déjà `high` → modèle +1
+3. 2e KO → modèle +1 (`haiku` → `sonnet` → `opus`) ou spécialiste domaine, effort `high`
+4. KO suivant (ou 2e KO déjà en `opus`·`high`) → `BLOCKED`, `🚨 needs-approval` humain (`xhigh`/`max` = décision de Chakir seul)
 
 ---
 
@@ -185,7 +202,7 @@ flowchart TD
 ```mermaid
 flowchart TD
   T([🎯 /refacto « périmètre »]) --> SKILL[/📖 skill model-effort-routing<br/>lue par tech-lead/]
-  SKILL --> TL[[🏗️ tech-lead<br/>opus · high<br/>cartographie]]
+  SKILL --> TL[[🏗️ tech-lead<br/>couple = grille<br/>cartographie]]
   TL --> CART[/📄 Cartographie<br/>+ plan migration<br/>+ contrats stables + ADR/]
   CART --> RISK{Risky ?<br/>schéma DB / auth / worker partagé}
   RISK -->|oui| HUM[🚨 needs-approval humain]
@@ -194,21 +211,23 @@ flowchart TD
   WAVE --> V1[Vague 1<br/>changements isolés]
   WAVE --> V2[Vague 2<br/>dépendante V1]
   WAVE --> V3[Vague 3<br/>gros moteur : services IA,<br/>plex_generator, schéma DB<br/>= isolée obligatoire]
-  V1 --> DEV1[[🔧 backend-developer<br/>sonnet · high<br/>fichier par fichier]]
-  DEV1 --> QA1[[🧪 qa-engineer<br/>sonnet · high<br/>non-régression pytest]]
-  QA1 --> PB1[[⚡ perf-benchmarker<br/>opus · high<br/>si chemin chaud]]
-  PB1 --> REV1[[🔎 code-reviewer<br/>opus · high<br/>invariants §9 préservés ?]]
+  V1 --> DEV1[[🔧 backend-developer<br/>couple = grille<br/>fichier par fichier]]
+  DEV1 --> QA1[[🧪 qa-engineer<br/>couple = grille<br/>non-régression pytest]]
+  QA1 --> DP1{Chemin chaud touché ?<br/>SQL/index · agrégation · workers<br/>plex_generator · listes /api/media}
+  DP1 -->|oui| PB1[[⚡ perf-benchmarker<br/>couple = grille]]
+  DP1 -.->|non · noté au rapport| REV1
+  PB1 --> REV1[[🔎 code-reviewer<br/>couple = grille<br/>invariants §9 préservés ?]]
   REV1 --> G1[(🚦 Gate V1)]
-  G1 -.->|KO cycle 1..2| ESC1[[🔁 escalade routage]]
+  G1 -.->|KO · tentatives 2 et 3| ESC1[[🔁 sous-agent neuf<br/>effort high → modèle +1]]
   ESC1 --> DEV1
-  G1 -.->|KO cycle 3| BLK[🚨 BLOCKED]
+  G1 -.->|KO après tentative 3| BLK[🚨 BLOCKED]
   G1 ==>|OK| M1[[✔️ tech-manager<br/>gate de lot V1]]
   M1 --> V2
   V2 -->|même chaîne| M2[✔️ gate V2]
   M2 --> V3
   V3 -->|isolée + retest complet| M3[✔️ gate V3]
   M3 --> ADR[/📄 docs/architecture/adr/NNNN-refacto.md/]
-  ADR --> SC[/sync-context §9 + bandeau]
+  ADR --> SC[/sync-context §9 + bandeau/]
 ```
 
 **Escalade routage** : refacto = cartographie ET review typiquement `opus/high` (notées par la grille). Le dev peut rester `sonnet/high` sur les vagues isolées à impact borné. Si une vague touche invariants §9 (migrations, db_retry, master-worker, secrets) → le dev passe en `opus/high` aussi.
@@ -223,30 +242,62 @@ flowchart TD
 ```mermaid
 flowchart TD
   T([🎯 /incident « symptôme »]) --> MON[[📊 Monitor<br/>logs/plexhub.log request_id<br/>+ /metrics + repro curl]]
-  MON --> TRIAGE[[🏗️ tech-lead<br/>opus · high<br/>sévérité S0/S1/S2]]
+  MON --> TRIAGE[[🏗️ tech-lead<br/>couple = grille<br/>sévérité S1..S4]]
   TRIAGE --> SEV{Sévérité}
-  SEV -->|S0 prod down| HOT[🚨 hotfix depuis main<br/>needs-approval]
-  SEV -->|S1/S2| ROOT[[🔬 tech-lead<br/>opus · high<br/>skill systematic-debugging<br/>cause racine fichier:ligne]]
+  SEV -->|S1 · ou S2 qui se propage| CONF[🛑 Confinement AVANT la cause<br/>sauvegarde DB · version précédente<br/>worker fautif arrêté · accord de Chakir]
+  CONF -.->|prod cassée à chaud| HOT[🚨 hotfix depuis main<br/>needs-approval]
+  SEV -->|S2..S4| ROOT[[🔬 tech-lead<br/>couple = grille<br/>skill systematic-debugging<br/>cause racine fichier:ligne]]
+  CONF --> ROOT
   HOT --> ROOT
   ROOT --> HYP[/📄 Hypothèses<br/>+ preuves code/]
   HYP --> REPRO{Reproductible<br/>pytest ou curl ?}
   REPRO -.->|non| MORE[[🔍 more logs<br/>ou instrumentation temporaire]]
   MORE --> ROOT
-  REPRO -->|oui| GUARD[[🧪 qa-engineer<br/>sonnet · high<br/>test de garde ROUGE d'abord]]
-  GUARD --> FIX[[🔧 backend-developer<br/>ou spécialiste domaine<br/>sonnet · high<br/>correctif ciblé]]
+  REPRO -->|oui| GUARD[[🧪 qa-engineer<br/>couple = grille<br/>test de garde ROUGE d'abord]]
+  GUARD --> FIX[[🔧 backend-developer<br/>ou spécialiste domaine<br/>couple = grille<br/>correctif ciblé]]
   FIX --> VERIF[[🧪 qa-engineer<br/>garde VERTE + pytest -v<br/>+ smoke boot /api/health]]
-  VERIF --> REV[[🔎 code-reviewer<br/>opus · high]]
+  VERIF --> REV[[🔎 code-reviewer<br/>couple = grille]]
   REV --> GATE[(🚦 Gate incident :<br/>fix + garde + smoke ✓ ?)]
-  GATE -.->|KO cycle 1..2| ESC[[🔁 escalade orchestrée par tech-lead<br/>prompt+ · model override · autre agent]]
+  GATE -.->|KO · tentatives 2 et 3| ESC[[🔁 sous-agent neuf · orchestré par tech-lead<br/>effort high → modèle +1]]
   ESC --> FIX
-  GATE -.->|KO cycle 3| BLK[🚨 BLOCKED humain]
+  GATE -.->|KO après tentative 3| BLK[🚨 BLOCKED humain]
   GATE ==>|OK| MERGE[[✔️ tech-manager gate de lot]]
   MERGE --> POST[[📝 Postmortem<br/>docs/daily/DATE-incident.md]]
   POST --> P9[/§9 CLAUDE.md<br/>+1 piège gravé/]
-  P9 --> SC[/sync-context bandeau]
+  P9 --> SC[/sync-context bandeau/]
 ```
 
 **Escalade routage** : cause racine = `tech-lead` (typiquement `opus/high`, noté par la grille) (`xhigh`/`max` seulement sur décision de Chakir si mystère persistant — locks SQLite, races async). Correctif = `sonnet/high` typique. Test de garde = incontournable (« un test qui reproduit RED d'abord »).
+
+---
+
+## 8. `/release` — Publication d'une image Docker
+
+**Trigger** : « release », « publie », « tag », « image Docker », « livre version » (gate `/app-ship` puis `/release`)
+**Sortie** : merge `develop`→`main`, tag annoté `vX.Y.Z`, image GHCR `ghcr.io/…:X.Y.Z` + `:latest`, smoke `docker run`, notes `docs/60-releases.md`
+
+```mermaid
+flowchart TD
+  T([🎯 /release « X.Y.Z »]) --> PRE[[🔐 Préconditions<br/>board vide · 0 S1/S2 · pytest -v vert<br/>boot uvicorn + /api/health 200]]
+  PRE --> SYNC{{🔀 Synchro Git · bloquant<br/>arbre propre · develop = origin/develop<br/>main = origin/main · develop..main = 0}}
+  SYNC -.->|main a des commits absents de develop| BACK[🚨 STOP · proposer de ramener main dans develop<br/>merge main vers develop · accord de Chakir]
+  BACK -.->|après merge + tests verts| SYNC
+  SYNC -->|OK| VER[/📄 Version supérieure à la dernière publiée<br/>bump APP_VERSION commité + poussé sur develop/]
+  VER --> RC[[🐳 Smoke image candidate · OBLIGATOIRE<br/>docker build rc · copie de data · 2 Go<br/>healthy · /api/health 200 · 0 Traceback]]
+  RC -.->|FAIL| STOPRC[🚨 STOP · correctif sur develop<br/>pas de merge ni de tag]
+  RC -->|PASS| GAPP{{🚦 Risky · approbation de Chakir ?<br/>résultat du smoke joint}}
+  GAPP -->|OK| MERGE[["🔀 git checkout main<br/>git merge --no-ff develop"]]
+  MERGE --> CHK2{{main..develop = 0 ?}}
+  CHK2 -->|oui| TAG[[🏷️ tag annoté vX.Y.Z sur le merge<br/>push main + tag]]
+  TAG --> CI[[🏗️ docker.yml<br/>build + push GHCR]]
+  CI --> SMOKE[[✔️ image présente · docker run<br/>/api/health 200 · 2 Go RAM]]
+  SMOKE --> NOTES[/📝 docs/60-releases.md · rapport/]
+  SMOKE -.->|régression découverte après déploiement| RBK[[↩️ Rollback · accord de Chakir<br/>sauvegarde DB · version précédente<br/>puis correctif X.Y.Z+1]]
+```
+
+**Smoke de l'image candidate (bloquant, 2026-09-24)** : l'image est construite et démarrée sur une **copie** des données **avant** le merge et le tag — un tag `v*` publie sur GHCR. Tags d'image **sans** `v` (`X.Y.Z`). **Rollback** = sauvegarde de la base avant tout déploiement porteur d'une migration, retour à la version précédente, correctif `X.Y.Z+1`.
+
+**Pourquoi la synchro est bloquante** : si `main` porte des commits absents de `develop` (hotfix, commit direct), promouvoir `develop` vers `main` ne les ramène jamais dans `develop`, et les deux branches divergent à chaque release. On les rapatrie d'abord (`develop..main` = 0), puis on contrôle après le merge que tout `develop` est bien dans `main` (`main..develop` = 0). Tag immuable, jamais de force-push.
 
 ---
 
@@ -259,10 +310,11 @@ flowchart LR
   KW -->|audit diff| W2[/wf-audit-incremental/]
   KW -->|perf, latence| W3[/benchmark/]
   KW -->|doc périmée| W4[/sync-context/]
-  KW -->|nouvelle feature| W5[/feature/]
+  KW -->|nouvelle feature| W5[/feature · complète ou mineure/]
   KW -->|refacto, refonte| W6[/refacto/]
   KW -->|bug, 500| W7[/incident/]
-  W1 & W2 & W3 & W4 & W5 & W6 & W7 -.->|orchestrateur lit| DOCTRINE[[📖 skill<br/>model-effort-routing]]
+  KW -->|release, tag, image| W8[/release/]
+  W1 & W2 & W3 & W4 & W5 & W6 & W7 & W8 -.->|orchestrateur lit| DOCTRINE[[📖 skill<br/>model-effort-routing]]
   DOCTRINE --> EXEC[✔️ Exécution optimisée]
 ```
 

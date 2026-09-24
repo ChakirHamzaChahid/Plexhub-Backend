@@ -36,7 +36,8 @@ Publie la ref choisie en tête du rapport (« Audit incrémental : `<REF>..HEAD`
    | `app/services/download*`, `app/services/plex_*`, `app/workers/download_worker.py`, `app/api/*download*` | **Secrets** (URL Xtream / token Plex jamais persistés/loggés/renvoyés), confinement F-007 `resolve_confined`, `follow_redirects` anti-SSRF, worker master-only |
    | `requirements*.txt`, `pyproject.toml`, `Dockerfile`, `docker-compose.yml`, `.github/**` | **Bornes liées** fastapi<0.116 ⇆ instrumentator<8 (§10), CI pytest+cov+ruff, Python 3.12 image vs 3.13 CI |
    | `app/templates/**`, `app/api/admin*` | UI admin HTMX : Basic Auth au mount, pièges triggers htmx (§5.10), CSRF (dette CR-S07) |
-   | `.claude/**`, `docs/**`, `CLAUDE.md` | Cohérence agents/commands/workflows, fraîcheur bandeau |
+   | `.claude/hooks/**`, `.claude/settings*.json`, `.claude/tools/**` | **Garde-fous exécutables — audités comme du code** : un hook ou un outil de gate cassé désactive une protection sans bruit |
+   | `.claude/{agents,commands,skills}/**`, `docs/**`, `CLAUDE.md` | Cohérence agents/commands/workflows, fraîcheur bandeau |
 
 3. **Délègue à `full-auditor`** en **mode incrémental** (skills `production-code-audit` + `security-audit` + `application-performance-performance-optimization`) avec ce mandat :
    - « Audite UNIQUEMENT le diff `<REF>..HEAD`. Ne re-vérifie pas les zones non touchées. Pour chaque zone touchée : (a) régression vs invariants §9 ? (b) trous sécurité (auth/secrets/SSRF/confinement) ? (c) régression perf plausible (chemin chaud : listes unified, recherche, génération, sync) ? (d) dette technique/doc à jour ? »

@@ -1,6 +1,6 @@
 ---
 name: backend-developer-high
-description: Variante EFFORT HIGH de `backend-developer` (invoquer seulement si la grille model-effort-routing le décide) — IC principal du backend PlexHub. À utiliser quand un ticket demande du travail FastAPI — endpoints, services, workers, modèles, migrations, tests pytest. Implémente le contrat d'API que l'app Android PlexHubTV consomme. Tourne en parallèle des spécialistes domaine sur tickets indépendants.
+description: Variante EFFORT HIGH de `backend-developer` (invoquer seulement si la grille model-effort-routing le décide) — IC principal du backend PlexHub. À utiliser quand un ticket demande du travail FastAPI — endpoints, services, workers, modèles, migrations, tests pytest. Implémente le contrat d'API que l'app Android PlexHubTV consomme. Un seul agent dev écrit à la fois (rédacteur unique) : il ne tourne jamais en même temps qu'un spécialiste domaine.
 tools: Read, Write, Edit, Glob, Grep, Bash
 model: sonnet
 effort: high
@@ -42,7 +42,7 @@ Invoque `house-conventions` et charge `stack-defaults.md` + `python-conventions.
    - Tout nouveau comportement = un test ; tout bug corrigé = un test de garde.
 5. Vérifie le boot : `uvicorn app.main:app` démarre et `GET /api/health` répond `200`.
 6. Mets à jour le contrat d'API (`docs/40-api.md`) — l'app Android le lit. Le contrat OpenAPI auto (`/openapi.json`, `/docs`) reste cohérent.
-7. Commit **directement sur `develop`** (branche de travail par défaut — **jamais de branche par tâche**) en **Conventional Commits** (`feat(scope): …`, scope = module : `ai`, `sync`, `plex_generator`, `db`, `tv-auth`…). Commits petits, verts, réversibles ; périmètre de fichiers disjoint des autres agents parallèles.
+7. Commit **directement sur `develop`** (branche de travail par défaut — **jamais de branche par tâche**) en **Conventional Commits** (`feat(scope): …`, scope = module : `ai`, `sync`, `plex_generator`, `db`, `tv-auth`…). Commits petits, verts, réversibles ; aucun autre agent n'écrit pendant ton ticket (rédacteur unique).
 8. Note de statut d'un paragraphe dans `docs/daily/<date>.md` (tech-manager concatène pour éviter les write-races).
 
 # Coordination avec les spécialistes domaine

@@ -78,20 +78,22 @@ Sans cette ligne, la revue du lot peut refuser le routage. Elle sert aussi à re
 | Cause racine d'un « database is locked » intermittent | 2 2 2 2 2 | `opus` · `high` |
 | Recaler le bandeau de `CLAUDE.md` (`/sync-context`) | 0 0 0 0 0 | `haiku` · `medium` |
 
-## 4. Escalade sur échec (revue KO, gate rouge)
+## 4. Compteur unique sur échec (revue KO, gate rouge) — 3 tentatives max
 
-Distinguer l'échec de raisonnement (réponse superficielle) de l'échec de capacité (le modèle bute). Monter **d'un seul cran à la fois**, en traçant une nouvelle ligne `ROUTAGE`.
+Révisé le 2026-09-24. Il n'y a **qu'un compteur par tâche** : un « cycle de correction » de la revue et un « cran » d'escalade sont la même chose. Chaque tentative = une nouvelle ligne `ROUTAGE`.
 
-1. **1er échec** : même couple, **prompt enrichi** (rapport de revue joint, « considère 3 hypothèses », « raisonne étape par étape »).
-2. **2e échec** : **effort +1** (`medium` → fiche `-high`). Si déjà `high`, passer à l'étape 3.
-3. **3e échec** : **modèle +1** (`haiku` → `sonnet` → `opus`), en gardant `high`.
-4. **4e échec** (ou `opus` · `high` déjà atteint) : **`BLOCKED`** + remontée à Chakir, qui décide seul d'un éventuel `CLAUDE_CODE_EFFORT_LEVEL=xhigh` pour une session.
+1. **Tentative 1** : le couple noté par la grille.
+2. **Tentative 2** (1er KO) : **sous-agent neuf** — jamais la suite de la conversation qui a échoué — avec le rapport de revue joint et des pistes (« considère 3 hypothèses »), **et** effort +1 (`medium` → fiche `-high`). Si déjà `high`, ou si la tâche est routée `haiku` (l'effort y compte peu) : modèle +1 à la place.
+3. **Tentative 3** (2e KO) : **modèle +1** (`haiku` → `sonnet` → `opus`), en gardant `high` — ou spécialiste domaine si le problème sort du périmètre de l'agent. Si `opus` · `high` est déjà atteint, pas de tentative 3.
+4. **KO suivant** : **`BLOCKED`** + remontée à Chakir, qui décide seul d'un éventuel `CLAUDE_CODE_EFFORT_LEVEL=xhigh` pour une session.
+
+Pourquoi un contexte neuf et 3 tentatives : la doc Claude Code (*Best practices*) recommande, après deux corrections ratées, de repartir d'un contexte propre avec un meilleur prompt plutôt que d'insister dans un contexte encombré d'essais échoués.
 
 ## 5. Les orchestrateurs eux-mêmes
 
 Leur propre couple se décide avec la même grille, au moment où la session principale les lance :
 
-- `/feature` : `cpo`/`cto`/`tech-manager` — typiquement `opus` (jugement cross-module) ; `medium` seulement si la spec est déjà tranchée (C3 = 0) et hors zone C2 = 2, sinon `high`.
+- `/feature` : planification (PRD + archi + board) dans la **session principale** ; relecteur d'archi `cto`/`tech-lead` lancé seulement si C2 = 2 ou C3 = 2, typiquement `opus` · `high`.
 - `/refacto` et `/incident` : `tech-lead` · `high` dès que la cause ou le plan de migration n'est pas évident (C3 ≥ 1).
 - `/audit-full` : `full-auditor` · `opus` · `high` (jugement cross-module, vérification indirecte).
 - `/wf-audit-incremental` : `full-auditor` · `sonnet` ou `opus` selon les zones du diff (C2), `medium` si le delta est trivial.
@@ -112,7 +114,8 @@ Leur propre couple se décide avec la même grille, au moment où la session pri
 - ❌ Appeler un subagent sans ligne `ROUTAGE` ni `model:` explicite.
 - ❌ Choisir le couple par habitude de rôle (« un reviewer, c'est opus/high ») au lieu de noter la tâche.
 - ❌ Tout en `opus` · `high` « par sécurité » → tokens gaspillés, latence ×2-3.
-- ❌ Monter de deux crans d'un coup, ou monter le modèle avant d'avoir tenté le prompt enrichi puis l'effort.
+- ❌ Relancer l'agent qui a échoué dans la même conversation au lieu d'un sous-agent neuf, ou dépasser 3 tentatives sans passer par Chakir.
+- ❌ Lancer deux agents qui écrivent en même temps (voir `WORKFLOWS.md` § « Rédacteur unique »).
 - ❌ Éditer un fichier `<agent>-high.md` : il est régénéré, la modification serait perdue. Éditer la fiche de base puis relancer `gen-effort-twins.py`.
 - ❌ Utiliser `low`, `xhigh`, `max` ou `fable` sans décision explicite de Chakir.
 - ❌ Sauter la revue pour aller plus vite → dette qui revient en `/incident`.

@@ -18,8 +18,8 @@ Tu **planifies seulement** (pas de code). Sortie = un DAG de sous-issues sur `do
    - **Owner** par zone : `db-migration-specialist` (schéma/migrations), `sync-specialist` (Xtream/sync/enrichment), `ai-recsys-specialist` (embeddings/ranking/sqlite-vec), `plex-generator-specialist` (NFO/arbo), sinon `backend-developer`.
    - **Depends on** : arêtes explicites (ex. migration de schéma **avant** le service qui la consomme ; service **avant** son endpoint et ses tests).
    - **Safe-Risky** : marque `Risky·needs-approval` toute migration de schéma, durcissement CORS public, changement de contrat public, purge.
-   - Identifie ce qui est **parallèle** (périmètres disjoints) vs **série** (dépendances).
-3. **GATE** — présente le DAG (graphe de dépendances, parallèle vs série, classes Safe/Risky, owners) + un chemin critique estimé. **Attends le « go »** avant toute exécution. Ne lance aucun dev ici.
+   - Fixe l'**ordre d'exécution** (dépendances d'abord, puis P0, puis Safe avant Risky) : les tickets dev passent l'un après l'autre.
+3. **GATE** — présente le DAG (graphe de dépendances, ordre d'exécution, classes Safe/Risky, owners) + un chemin critique estimé. **Attends le « go »** avant toute exécution. Ne lance aucun dev ici.
 
 ## Garde-fous
 - **Planification ≠ exécution** : ce workflow ne modifie que `docs/31-board.md` (+ `docs/daily/<date>.md`). L'exécution passe par `/feature` (ou `/fix-cleanroom`).

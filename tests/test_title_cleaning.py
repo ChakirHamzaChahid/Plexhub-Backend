@@ -22,6 +22,71 @@ class TestCleanTitle:
     def test_table(self, raw, expected):
         assert clean_title(raw) == expected
 
+    @pytest.mark.parametrize("raw, expected_title", [
+        # A bare space was NOT accepted as a prefix separator, so 213 real
+        # catalogue titles reached TMDB as "FR <titre>" and never matched.
+        ("FR Les Châtiments", "Les Châtiments"),
+        ("FR Casque et talons hauts", "Casque et talons hauts"),
+        ("VOSTFR Parasite", "Parasite"),
+        ("VF Le Roi Lion", "Le Roi Lion"),
+        # `[` as separator: no closing bracket ever comes, so the leftover
+        # bracket pass could not help either.
+        ("FR[ Les Enfants perdus", "Les Enfants perdus"),
+        # Separator with no space after it.
+        ("FR|Les Visiteurs", "Les Visiteurs"),
+        # A quality tag in front hides the language prefix behind it, and
+        # quality tags are only stripped after the prefix pass.
+        ("4K FR Avatar", "Avatar"),
+        ("FR - Le Parrain", "Le Parrain"),
+        # FHD was listed in the older trailing-tag parser but NOT in the tag
+        # set `clean_title` uses, so these reached TMDB verbatim and always
+        # came back `no_candidates` (21 distinct catalogue titles).
+        ("FR The Captain FHD", "The Captain"),
+        ("FR The Bombardment FHD", "The Bombardment"),
+        ("Avatar FHD MULTI", "Avatar"),
+        ("FHD Le Parrain", "Le Parrain"),
+    ])
+    def test_strips_panel_language_prefixes(self, raw, expected_title):
+        assert clean_title(raw)[0] == expected_title
+
+    @pytest.mark.parametrize("raw", [
+        # Every one of these starts with 2-4 uppercase letters followed by a
+        # space. Stripping that blindly to fix "FR " would have destroyed
+        # them — LEGO(33), WWE(16), USS(4), OSS(3) rows in the real catalogue.
+        "LEGO Batman Le Film",
+        "USS Indianapolis",
+        "OSS 117 Rio ne répond plus",
+        "WWE Raw",
+        "THE Matrix",
+        "US Marshals",
+        "IT Chapter Two",
+        "UK 18",
+        "IFRI Story",
+        # Pre-existing bug fixed in passing: `:` is ordinary punctuation after
+        # an acronym, and accepting it as a prefix separator turned this into
+        # "Los Angeles".
+        "NCIS: Los Angeles",
+    ])
+    def test_never_eats_a_real_title_word(self, raw):
+        assert clean_title(raw)[0] == raw
+
+    @pytest.mark.parametrize("raw, expected", [
+        # The number IS the title. Reading it as a year left an EMPTY title,
+        # which fell back to the RAW string — prefix included, unmatchable.
+        ("FR| 1992", ("1992", None)),
+        ("1917", ("1917", None)),
+        ("2012", ("2012", None)),
+        ("FR| 1978 [VOSTFR]", ("1978", None)),
+        # A bare number too far in the future is not a release year.
+        ("Blade Runner 2049", ("Blade Runner 2049", None)),
+        # ...but a plausible one still is, and a parenthesised year is
+        # trusted as-is because the author marked it.
+        ("Le Film 2024", ("Le Film", 2024)),
+        ("Le Parrain (1972)", ("Le Parrain", 1972)),
+    ])
+    def test_a_number_that_is_the_title_is_not_a_year(self, raw, expected):
+        assert clean_title(raw) == expected
+
     def test_empty_falls_back_to_raw(self):
         # Nothing but tags/year -> keep raw rather than collapse to "Unknown".
         title, year = clean_title("(2020)")

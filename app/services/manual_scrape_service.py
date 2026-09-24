@@ -52,6 +52,7 @@ from app.services.tmdb_service import (
 from app.services.tmdb_service import count_requests as tmdb_count_requests
 from app.services.tmdb_service import title_similarity, year_score
 from app.utils.db_retry import write_with_retry
+from app.utils.string_normalizer import clean_title
 from app.utils.time import now_ms
 from app.utils.unification import calculate_history_group_key, calculate_unification_id
 
@@ -289,6 +290,24 @@ async def search_candidates(
     4. `combined_score = 0.6*text + 0.4*image`, sorted, at most one
        `recommended`.
     """
+    # `media.title` is written by the sync through `clean_title`, but a row
+    # synced BEFORE a cleaner fix keeps its polluted title forever: the
+    # provider payload is unchanged, so `content_hash` is unchanged, so the
+    # upsert never rewrites it. Re-cleaning the QUERY repairs every one of
+    # those rows on the spot — no re-sync, no backfill. Real catalogue:
+    # 213 titles start with a bare "FR " that TMDB can never match.
+    # A title the operator typed by hand is already clean, so this is a
+    # no-op there.
+    cleaned_title, cleaned_year = clean_title(query.title or "")
+    if cleaned_title and cleaned_title != query.title:
+        query = replace(
+            query,
+            title=cleaned_title,
+            # Only ADOPT a year the cleaner found; never drop one the caller
+            # supplied (the row's own `year` column is the better source).
+            year=query.year if query.year is not None else cleaned_year,
+        )
+
     kind = _tmdb_kind(query.media_type)
     language = query.language or settings.TMDB_LANGUAGE
     top_n = (

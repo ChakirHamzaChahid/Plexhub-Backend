@@ -123,6 +123,31 @@ class TMDBEnrichmentData:
     tmdb_votes: int | None = None
     cast_json: str | None = None      # JSON [{name, role, thumb, profile}]
     youtube_trailer: str | None = None  # bare YouTube video id, see _select_youtube_trailer
+    # Typical episode length in MILLISECONDS, from TMDB's `episode_run_time`
+    # (TV only; None for movies). Rides the existing detail call, 0 extra HTTP.
+    # Xtream panels publish garbage here — 2 s, 2 min — for a large slice of
+    # their catalogue, and that value is the ONLY one the backend had. This is
+    # the independent source that lets an implausible panel value be ignored.
+    episode_runtime_ms: int | None = None
+
+
+def _episode_runtime_ms(data: dict) -> int | None:
+    """TMDB `episode_run_time` (minutes) -> milliseconds.
+
+    The field is a LIST: shows with a mix of formats carry several values
+    (e.g. `[22, 44]` for a series that also aired double-length specials).
+    The smallest plausible value is taken, because this is used as a floor to
+    reject an implausible panel duration, not as an exact per-episode length —
+    overstating it would be worse than understating it.
+
+    Values under 1 minute are dropped: TMDB occasionally carries a `0`, and a
+    zero floor would reject nothing, silently defeating the whole point.
+    """
+    raw = data.get("episode_run_time")
+    if not isinstance(raw, list):
+        return None
+    minutes = [m for m in raw if isinstance(m, (int, float)) and m >= 1]
+    return int(min(minutes) * 60000) if minutes else None
 
 
 @dataclass
@@ -648,6 +673,7 @@ class TMDBService:
             tmdb_votes=tmdb_votes,
             cast_json=cast_json,
             youtube_trailer=youtube_trailer,
+            episode_runtime_ms=_episode_runtime_ms(data) if not is_movie else None,
         )
 
     @staticmethod

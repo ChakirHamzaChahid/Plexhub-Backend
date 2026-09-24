@@ -20,5 +20,5 @@ Délègue à l'agent **`perf-benchmarker`**. **Mesure serveur lancé** — pas d
 
 ## Garde-fous
 - **Lecture seule** : pas de modification de code ici (seulement mesure). Les correctifs vont dans `/fix-bench-perf`.
-- Mesures **reproductibles** : mêmes inputs, plusieurs runs, warm-up explicite (cold IA noté à part).
+- Mesures **reproductibles** : protocole de `agents/perf-benchmarker.md` § « Protocole de mesure » (conditions figées, warm-up jeté, ≥ 5 itérations, baseline du commit de référence dans la même session, seuil 10 % + étendue de la baseline ; cold IA noté à part).
 - Traçabilité : rapport chiffré dans `docs/daily/<date>.md` ; chiffres datés (HEAD + date).

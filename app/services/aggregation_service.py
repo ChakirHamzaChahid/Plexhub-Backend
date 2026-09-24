@@ -43,6 +43,44 @@ def best_row(rows: list[Media]) -> Media:
     return max(rows, key=lambda r: (key(r), r.server_id or "", r.rating_key or ""))
 
 
+#: Below this, a panel-published duration is not believable for a real
+#: episode or film — it is the "I don't know" value Xtream panels emit.
+#: Measured on the real catalogue: 2 s and 2 min are the two common ones.
+IMPLAUSIBLE_DURATION_MS = 5 * 60 * 1000
+
+
+def consolidated_duration(rows: list[Media], *, floor_ms: int | None = None) -> int | None:
+    """Best duration for a group, across every source that serves it.
+
+    A duration belongs to the CONTENT, not to the source streaming it, so it
+    must NOT ride on `best_row` — that election weighs enrichment, poster,
+    rating and title length, never duration, and its alphabetical tie-break
+    then picks a representative essentially at random. Real case: MAO S01E01
+    is served by three sources carrying 1 519 000 ms, 125 000 ms and 2 000 ms,
+    and the API was exposing **2 000**.
+
+    The longest value wins: a panel that does not know the duration publishes
+    0, a couple of seconds, or a truncated value — it practically never
+    publishes an inflated one, so the maximum is the best estimator.
+
+    `floor_ms` (TMDB's `episode_run_time` for the parent show) fills in ONLY
+    when no source reports any duration at all.
+
+    ⚠️ It deliberately does NOT override a short-but-reported duration, even
+    an absurd-looking one. That was this function's first design, and an
+    `ffprobe` on the real stream disproved its premise: for MAO S01E01 the
+    panel's 125 000 ms is EXACT — the file really is 2 min 05 (49.9 MB,
+    1920x1080, 2 993 frames). The provider is not publishing bad metadata,
+    it is serving a **truncated file**. Substituting TMDB's 24 minutes there
+    would advertise a runtime no available source can actually play, which is
+    worse than showing the unflattering truth.
+    """
+    values = [r.duration for r in rows if r.duration and r.duration > 0]
+    if values:
+        return max(values)
+    return floor_ms if floor_ms and floor_ms > 0 else None
+
+
 def canonical_title_year(row: Media) -> tuple[str, int | None]:
     """Clean display title + year for a group's representative row.
 

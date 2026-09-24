@@ -43,7 +43,7 @@
 
   <div class="flex flex-wrap gap-4 mt-2 text-xs text-slate-700">
     <span>{{ job.scanned }} analysé(s)</span>
-    <span>{{ job.paired }} apparié(s)</span>
+    <span>{{ job.paired }} apparié(s){% if job.omdbPaired %} (dont {{ job.omdbPaired }} via OMDb){% endif %}</span>
     <span>{{ job.autoAppliedA }} auto (A)</span>
     <span>{{ job.autoAppliedB }} auto (B)</span>
     <span>{{ job.queuedForReview }} à vérifier</span>

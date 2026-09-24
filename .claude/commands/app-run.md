@@ -29,10 +29,10 @@ C'est le driver autonome. Il enchaîne init/onboard → plan → build → stand
    - *Brownfield :* imprime la scorecard d'audit et le backlog groupé par sévérité et Safe/Risky, et demande *« Quels gaps corrige-t-on ? »* Les changements Risky ne partent que s'ils sont approuvés ici.
    Attends la réponse. Avec `--yolo`, saute le gate (greenfield : périmètre auto-approuvé ; brownfield : fixe tous les S1/S2 + Safe, diffère les Risky) et logge la décision.
 
-3. **Plan.** Lance `/app-plan` (`cto`/`tech-lead` + `tech-manager` construisent le DAG parallèle du board via `sprint-planner`). Vérifie que chaque feature P0 a ses tickets de tests/garde associés.
+3. **Plan.** Lance `/app-plan` (`cto`/`tech-lead` + `tech-manager` construisent le DAG (ordre d'exécution) du board via `sprint-planner`). Vérifie que chaque feature P0 a ses tickets de tests/garde associés.
 
 4. **Boucle de build.** Lance la boucle `/app-build` en autonomie, round après round :
-   - devs parallèles (`backend-developer` + spécialistes domaine selon Owner) → review streaming `code-reviewer` → gate de lot `tech-manager` (DoD : pytest + boot + `/api/health` + migrations + ruff) → `qa-engineer` → boucle bugs.
+   - devs l'un après l'autre (`backend-developer` + spécialistes domaine selon Owner, rédacteur unique) → review streaming `code-reviewer` → gate de lot `tech-manager` (DoD : pytest + boot + `/api/health` + migrations + ruff) → `qa-engineer` → boucle bugs.
    - Après chaque round, spawn `tech-manager` pour écrire `docs/daily/standup-<today>.md` et imprime un standup de 3 lignes : comptes par statut, ce qui est passé, blocages.
    - **N'escalade à l'utilisateur que** pour : un blocage insoluble par l'équipe, le cap 2 cycles atteint, ou un conflit de périmètre/architecture. Remonte verbatim avec une réponse proposée.
 

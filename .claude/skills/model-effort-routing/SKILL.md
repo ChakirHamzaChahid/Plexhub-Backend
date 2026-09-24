@@ -1,105 +1,121 @@
 ---
 name: model-effort-routing
-description: Doctrine PlexHub Backend consultée par les orchestrateurs (Manager principal, tech-lead, cto, tech-manager, full-auditor) AVANT toute invocation d'un subagent via Task. Donne la matrice « famille de tâche → couple modèle+effort de départ », les défauts par modèle et la politique d'escalade RÉELLE (changement d'agent OU override modèle par invocation — l'effort n'est PAS overridable par invocation dans le SDK Claude Code). Vérifié doc Anthropic 2026-07 : effort ∈ {low, medium, high, xhigh, max}, précédence env > settings > frontmatter agent > défaut modèle. Task tool expose param `model` override, PAS `effort`.
+description: Doctrine PlexHub Backend consultée par les orchestrateurs (Manager principal, tech-lead, cto, tech-manager, full-auditor) AVANT CHAQUE invocation d'un subagent via Agent/Task. Chaque tâche est notée sur une grille de 5 critères qui fixe son MODÈLE (haiku / sonnet / opus, passé en `model:` à l'appel) et son EFFORT (medium / high, choisi via la fiche `<agent>` ou son jumeau `<agent>-high`). Donne aussi l'escalade sur échec. Plage autorisée = haiku..opus × medium..high ; low, xhigh, max et fable sont hors routage.
 allowed-tools: Read
 effort: high
 ---
 
 # Doctrine de routage modèle × effort — PlexHub Backend
 
-> **Consultée par les orchestrateurs** (Manager principal, `tech-lead` pour /refacto, `cto`+`tech-manager` pour /feature, `full-auditor` pour les audits) AVANT toute invocation subagent. Cette skill est une **RÉFÉRENCE**, PAS un runtime — il n'y a pas d'agent routeur dédié (les orchestrateurs appliquent la matrice eux-mêmes).
+> **Décision de Chakir (2026-09-23)** : on ne fixe plus un couple modèle/effort par workflow ou par rôle. **Chaque tâche est évaluée** avant d'être confiée à un subagent, et reçoit le couple le plus bas qui la fera réussir. Objectif : ne pas brûler de tokens sur des tâches simples, sans sous-équiper les tâches risquées.
 
-## Ce qui est overridable à l'invocation, ce qui ne l'est pas
+## 1. Plage autorisée
 
-**Vérifié doc Anthropic 2026-07** :
-
-| Paramètre | Overridable par Task/Agent invocation ? | Comment ajuster ? |
+| Axe | Valeurs autorisées | Hors routage |
 |---|---|---|
-| **Modèle** (`haiku`/`sonnet`/`opus`/`fable`) | ✅ **Oui** — param `model:` du Task tool | Passe `model: "opus"` à l'invocation pour override le frontmatter |
-| **Effort** (`low`/`medium`/`high`/`xhigh`/`max`) | ❌ **Non** — pas de param à l'invocation | Statique via frontmatter agent, OU env var globale `CLAUDE_CODE_EFFORT_LEVEL`, OU variante d'agent dédiée |
+| **Modèle** | `haiku` < `sonnet` < `opus` | `fable` (retiré le 2026-09-23 : plus cher qu'Opus 5.5 sans gain mesuré) |
+| **Effort** | `medium` < `high` | `low` (trop de régressions cachées), `xhigh` et `max` (coût nettement supérieur pour un gain faible, d'après Anthropic) |
 
-**Précédence effective** : `CLAUDE_CODE_EFFORT_LEVEL` (env, session) > `effortLevel` (settings) > `effort:` (frontmatter agent) > défaut modèle.
+`xhigh`/`max` ne peuvent être posés **que par Chakir**, à la main, pour une session (`CLAUDE_CODE_EFFORT_LEVEL`). Aucun agent, aucune matrice, aucune escalade automatique ne les choisit.
 
-## Principe fondateur
+## 2. Mécanique : comment appliquer le couple choisi
 
-Deux axes indépendants :
+Vérifié dans la doc Claude Code (« sub-agents », 2026-09) : **le modèle se choisit à l'appel, l'effort non** (il est figé dans le frontmatter de l'agent).
 
-- **Modèle** = capacité brute (« quel niveau d'intelligence ? »)
-- **Effort** = énergie cognitive dépensée (« combien de raisonnement avant de répondre ? »)
+| Axe | Levier |
+|---|---|
+| **Modèle** | paramètre `model:` de l'outil Agent/Task (`"haiku"`, `"sonnet"`, `"opus"`) — **toujours le passer explicitement**, ne jamais compter sur le défaut de la fiche |
+| **Effort** | choix de la fiche : `<agent>` = `medium`, `<agent>-high` = `high` |
 
-**Règle d'or** : partir au plus bas couple viable, escalader ciblé si la revue échoue.
+Les jumeaux `<agent>-high.md` sont **générés** par `python .claude/tools/gen-effort-twins.py` depuis la fiche de base : on n'édite **que** la fiche de base, puis on relance le script (`--check` vérifie qu'aucun jumeau n'est absent, périmé ou orphelin).
 
-## Matrice de départ par famille de tâche
+⚠️ Opus 5.5 tourne par défaut en **`medium`** (doc Anthropic « Effort », vérifié 2026-09-23) ; les fiches de base le fixent explicitement pour que ce soit un choix et non un défaut subi.
 
-| Famille | Modèle départ | Effort figé dans frontmatter | Exemples PlexHub Backend |
+⚠️ Haiku : l'effort y a peu d'effet — pour une tâche routée `haiku`, utiliser la fiche de base.
+
+## 3. Grille d'évaluation (à remplir pour CHAQUE tâche)
+
+| Critère | 0 | 1 | 2 |
 |---|---|---|---|
-| Classification, extraction, lint/ruff fix, renommage | `haiku` | `low` | Renommer une constante, formater, corriger un import |
-| Recherche fichier, grep, lecture d'audit/board | `haiku` | `medium` | Trouver les refs à un symbole, lister les tests d'un module |
-| Endpoint CRUD simple, schéma Pydantic, template admin | `sonnet` | `medium` | Ajouter un champ camelCase, une colonne d'UI HTMX |
-| Logique métier moyenne, tests pytest, service isolé | `sonnet` | `high` | Nouveau service de lecture, garde §9, fixture async |
-| Architecture, refacto important, débogage difficile | `opus` | `high` | Découpe d'un god-file (`sync_worker`/`ai.py`), refonte agrégation |
-| Sécurité / migration de schéma / cross-stack | `opus` | `xhigh` | Migration N+1 + entités + tests + doc, durcissement auth/CORS, chiffrement Fernet |
-| Analyse ambiguë, stratégie, arbitrage transverse critique | `fable` | `xhigh` | Cause racine « database is locked » intermittent, audit clean-room 360° |
-| Vérification finale d'un lot risky | `opus` ou `fable` | `high`/`xhigh` | Review d'une refonte cross-module, gate sécurité pré-release |
+| **C1 Portée** | 1 fichier | plusieurs fichiers d'un même paquet (`api/`, `services/`, `workers/`…) | plusieurs paquets, ou backend + app Android |
+| **C2 Zone à risque** (pièges §9) | aucune | UI admin HTMX, schémas Pydantic, config/`.env` | migration SQLite, écritures concurrentes (`write_with_retry`), auth/SSRF/secrets, workers master/pipeline, écrivains d'identité (`match_locked`), `/dav`, downloads, release Docker |
+| **C3 Ambiguïté** | spec précise, solution connue | spec partielle, un choix de conception à faire | cause inconnue, diagnostic à mener, arbitrage |
+| **C4 Vérification** | un contrôle automatique tranche tout de suite (`pytest` ciblé, `ruff`) | tests partiels, à compléter | indirecte : vrai verrou SQLite, boot Docker, homelab/prod, navigateur (HTMX), revue, mesure perf |
+| **C5 Nature** | mécanique (renommer, formater, grep, doc factuelle) | implémentation | jugement (revue, architecture, diagnostic, audit) |
 
-⚠️ **Fable 5 réservé** aux tâches complexes ET risquées (`full-auditor`/`cleanroom-auditor`/`a0-cartographer`).
+### Règle de décision — modèle
 
-## Défauts modèles (rappel Anthropic 2026-07)
+1. **`opus`** si **au moins une** de ces conditions : C2 = 2 · C3 = 2 · (C5 = 2 **et** C1 = 2).
+2. Sinon **`haiku`** si **toutes** : C5 = 0 · C1 = 0 · C2 = 0 · C4 = 0.
+3. Sinon **`sonnet`**.
+
+### Règle de décision — effort
+
+- **`high`** si **au moins une** : C3 ≥ 1 · C4 = 2 · C2 = 2 · C1 = 2.
+- Sinon **`medium`**.
+
+### Trace obligatoire
+
+Avant chaque appel, l'orchestrateur écrit **une ligne de routage** dans son plan ou dans le board :
+
+```
+ROUTAGE <id tâche> : model=<haiku|sonnet|opus> effort=<medium|high> agent=<fiche> — C1=x C2=x C3=x C4=x C5=x (<raison en 5-10 mots>)
+```
+
+Sans cette ligne, la revue du lot peut refuser le routage. Elle sert aussi à recalibrer la grille après coup (tâche réussie du 1er coup en `high` alors que `medium` aurait suffi ⇒ la grille surestime).
+
+### Exemples PlexHub Backend
+
+| Tâche | C1 C2 C3 C4 C5 | Routage |
+|---|---|---|
+| Ajouter une clé dans `.env.example` + `config.py` | 1 1 0 0 0 | `sonnet` · `medium` (C2 = 1 exclut haiku) |
+| Corriger une erreur `ruff` dans un seul fichier | 0 0 0 0 0 | `haiku` · `medium` |
+| Nouveau service de lecture + tests `pytest`, spec claire | 1 0 0 0 1 | `sonnet` · `medium` |
+| Nouvelle colonne dans l'UI admin HTMX | 1 1 1 2 1 | `sonnet` · `high` (à vérifier en navigateur) |
+| Migration N+1 + entité + tests | 2 2 0 1 1 | `opus` · `high` |
+| Revue d'un diff qui touche `write_with_retry` | 1 2 1 2 2 | `opus` · `high` |
+| Revue d'un diff de template admin (2 fichiers) | 1 1 0 2 2 | `sonnet` · `high` |
+| Cause racine d'un « database is locked » intermittent | 2 2 2 2 2 | `opus` · `high` |
+| Recaler le bandeau de `CLAUDE.md` (`/sync-context`) | 0 0 0 0 0 | `haiku` · `medium` |
+
+## 4. Compteur unique sur échec (revue KO, gate rouge) — 3 tentatives max
+
+Révisé le 2026-09-24. Il n'y a **qu'un compteur par tâche** : un « cycle de correction » de la revue et un « cran » d'escalade sont la même chose. Chaque tentative = une nouvelle ligne `ROUTAGE`.
+
+1. **Tentative 1** : le couple noté par la grille.
+2. **Tentative 2** (1er KO) : **sous-agent neuf** — jamais la suite de la conversation qui a échoué — avec le rapport de revue joint et des pistes (« considère 3 hypothèses »), **et** effort +1 (`medium` → fiche `-high`). Si déjà `high`, ou si la tâche est routée `haiku` (l'effort y compte peu) : modèle +1 à la place.
+3. **Tentative 3** (2e KO) : **modèle +1** (`haiku` → `sonnet` → `opus`), en gardant `high` — ou spécialiste domaine si le problème sort du périmètre de l'agent. Si `opus` · `high` est déjà atteint, pas de tentative 3.
+4. **KO suivant** : **`BLOCKED`** + remontée à Chakir, qui décide seul d'un éventuel `CLAUDE_CODE_EFFORT_LEVEL=xhigh` pour une session.
+
+Pourquoi un contexte neuf et 3 tentatives : la doc Claude Code (*Best practices*) recommande, après deux corrections ratées, de repartir d'un contexte propre avec un meilleur prompt plutôt que d'insister dans un contexte encombré d'essais échoués.
+
+## 5. Les orchestrateurs eux-mêmes
+
+Leur propre couple se décide avec la même grille, au moment où la session principale les lance :
+
+- `/feature` : planification (PRD + archi + board) dans la **session principale** ; relecteur d'archi `cto`/`tech-lead` lancé seulement si C2 = 2 ou C3 = 2, typiquement `opus` · `high`.
+- `/refacto` et `/incident` : `tech-lead` · `high` dès que la cause ou le plan de migration n'est pas évident (C3 ≥ 1).
+- `/audit-full` : `full-auditor` · `opus` · `high` (jugement cross-module, vérification indirecte).
+- `/wf-audit-incremental` : `full-auditor` · `sonnet` ou `opus` selon les zones du diff (C2), `medium` si le delta est trivial.
+- `/benchmark` : `perf-benchmarker` · `opus` · `high` (mesure de latence réelle = C4 = 2).
+- `/sync-context` : session principale, travail le plus souvent `haiku`/`sonnet` · `medium`.
+- `/fix-cleanroom` : `tech-manager` note **chaque finding** avec la grille avant de le confier à `cleanroom-fixer` (ou à un spécialiste domaine).
+
+## 6. Défauts des modèles (rappel)
 
 | Modèle | Effort par défaut si non spécifié |
 |---|---|
-| Fable 5 | `high` |
+| Opus 5.5 | `medium` (doc Anthropic « Effort », vérifié 2026-09-23) |
 | Sonnet 5 | `high` |
-| Opus 4.8 | `high` |
-| Opus 4.7 | `xhigh` |
-| Opus 4.6 | `high` |
-| Sonnet 4.6 | `high` |
 | Haiku 4.5 | `medium` (implicite) |
 
-**Fallback intelligent** : `xhigh` demandé sur Opus 4.6 tourne comme `high` (Claude Code retombe au plus haut supporté).
+## 7. Anti-patterns
 
-## Politique d'escalade RÉELLE sur échec de revue
-
-Distinguer **échec de raisonnement** (réponse superficielle) et **échec de capacité** (le modèle « bute »).
-
-⚠️ **Contrainte SDK** : l'`effort` n'est PAS overridable par invocation Task. Donc pas de « même agent + effort supérieur » via Task. Les leviers réels :
-
-1. **1er échec** = ré-invoquer le **MÊME agent** avec un **prompt enrichi** (rapport de revue joint, hints « considère 3 hypothèses », « raisonne étape par étape »). Ça pousse le modèle à réfléchir plus SANS toucher l'effort config.
-2. **2e échec** = ré-invoquer avec **override modèle** via param `model:` du Task tool (`backend-developer` sonnet → passe `model: "opus"` à l'invocation, l'agent tourne alors en `opus` avec son effort frontmatter).
-3. **3e échec** = **changer d'agent** vers une variante plus musclée (ex. délégation à un spécialiste domaine — `db-migration-specialist`, `sync-specialist`, `ai-recsys-specialist`, `plex-generator-specialist` — OU à `tech-lead`/`full-auditor` opus/fable/xhigh).
-4. **4e échec** = **BLOCKED** + suggérer à l'humain de poser `CLAUDE_CODE_EFFORT_LEVEL=xhigh` (ou `max`) et de relancer la session pour un dernier essai global. Cap 2 relances puis remontée.
-
-Ne JAMAIS démarrer tout le monde en `opus + xhigh` par défaut → gaspillage massif de tokens.
-
-## Points de départ recommandés par workflow
-
-| Workflow | Orchestrateur (lit cette skill) | Exécution majoritaire | Vérification |
-|---|---|---|---|
-| `/feature` | `cpo`+`cto`+`tech-manager` opus/high | `backend-developer` sonnet/high, spécialistes domaine sonnet/high | `code-reviewer` opus/high, `security-reviewer` opus/xhigh si sensible |
-| `/refacto` | `tech-lead` opus/xhigh (cartographie) | `backend-developer` sonnet/high (override `model:"opus"` sur vague critique) | `perf-benchmarker` opus/high, `code-reviewer` opus/xhigh |
-| `/incident` | `tech-lead` opus/xhigh (cause racine) | `backend-developer`/spécialiste sonnet/high | `qa-engineer` sonnet/high + smoke boot `/api/health` |
-| `/audit-full` | `full-auditor` fable/xhigh (monolithique) | — | Cross-check `code-reviewer` opus/high |
-| `/wf-audit-incremental` | `full-auditor` opus/high (diff scope réduit) | — | (skip si delta trivial) |
-| `/benchmark` | `perf-benchmarker` opus/high (monolithique) | — | Cross-check `observability-analyst` sonnet/medium |
-| `/sync-context` | Manager principal sonnet/high (édition ciblée doc) | — | Auto-vérification (grep ancres) |
-| `/fix-cleanroom` | `tech-manager` opus/high (dispatch board) | `cleanroom-fixer` opus/high | `code-reviewer` opus/high |
-
-## Comment cette doctrine est appliquée en runtime
-
-**Il n'y a PAS d'agent routeur runtime.** À la place :
-
-1. Chaque **orchestrateur** de workflow doit **lire cette skill** avant d'invoquer un subagent (cf. `tech-lead`, `cto`, `tech-manager`, `full-auditor`).
-2. L'orchestrateur décide **quel agent invoquer** en s'appuyant sur la matrice ci-dessus.
-3. Si un override modèle est justifié pour cette invocation (ex. `backend-developer` normalement sonnet, mais pour la migration critique on passe `model: "opus"`), il le fait via le paramètre `model:` du Task tool.
-4. Sur KO de revue, il applique la politique d'escalade : prompt enrichi → override modèle → changement d'agent → BLOCKED.
-
-**Override global de session (levier ultime)** : `CLAUDE_CODE_EFFORT_LEVEL=xhigh` (ou `max`) posé en env var avant de lancer Claude Code force tous les agents de la session à ce niveau d'effort. Utile pour un `/audit-full` exhaustif ou un `/refacto` bloqué.
-
-## Anti-patterns
-
-- ❌ Tout en `opus + xhigh` par principe → tokens gaspillés, latence x3
-- ❌ Tout en `haiku + low` pour économiser → régressions cachées, escalades multiples
-- ❌ Tenter d'override l'`effort` par param Task (non supporté) — utiliser env var, variante d'agent, ou override modèle
-- ❌ Monter le modèle avant d'avoir tenté prompt enrichi (moins coûteux)
-- ❌ Ignorer la vérification (skip du reviewer) pour aller plus vite → dette qui explose en `/incident` plus tard
-- ❌ Utiliser Fable 5 pour une tâche non risquée → coût élevé sans bénéfice mesurable
+- ❌ Appeler un subagent sans ligne `ROUTAGE` ni `model:` explicite.
+- ❌ Choisir le couple par habitude de rôle (« un reviewer, c'est opus/high ») au lieu de noter la tâche.
+- ❌ Tout en `opus` · `high` « par sécurité » → tokens gaspillés, latence ×2-3.
+- ❌ Relancer l'agent qui a échoué dans la même conversation au lieu d'un sous-agent neuf, ou dépasser 3 tentatives sans passer par Chakir.
+- ❌ Lancer deux agents qui écrivent en même temps (voir `WORKFLOWS.md` § « Rédacteur unique »).
+- ❌ Éditer un fichier `<agent>-high.md` : il est régénéré, la modification serait perdue. Éditer la fiche de base puis relancer `gen-effort-twins.py`.
+- ❌ Utiliser `low`, `xhigh`, `max` ou `fable` sans décision explicite de Chakir.
+- ❌ Sauter la revue pour aller plus vite → dette qui revient en `/incident`.

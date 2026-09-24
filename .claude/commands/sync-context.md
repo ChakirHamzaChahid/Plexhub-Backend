@@ -7,6 +7,8 @@ allowed-tools: Read, Write, Edit, Glob, Grep, Bash
 
 # /sync-context — recaler la fraîcheur de CLAUDE.md
 
+> ⚠️ **Depuis le 2026-09-24, `CLAUDE.md` est un noyau** : le détail du §5 vit dans `docs/architecture/flux-cles.md` (même numérotation §5.x), l'état de la dette (§10) dans `docs/context/etat-reel.md`, et les bandeaux des lots précédents dans `docs/context/journal.md` (le plus récent en tête). Mets à jour la section concernée **là-bas** ; dans `CLAUDE.md`, seulement l'index §5, la stack du §10 et **un seul** bandeau courant.
+
 ## Étapes
 1. **Repères** : `git rev-parse --short HEAD` (= `NEW`) + date du jour. Lis le bandeau « À JOUR AU : … (HEAD `OLD`) » en tête de `CLAUDE.md`.
 2. **Si `NEW == OLD`** : rien à faire, annonce « déjà à jour » et stop.

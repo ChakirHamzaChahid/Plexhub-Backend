@@ -3,6 +3,7 @@ name: security-reviewer
 description: À utiliser avant /release pour auditer le backend sur les enjeux de sécurité en état d'expédition — gestion des secrets, auth, CORS, injection SQL, logs/PII, dépendances, chiffrement Fernet. Produit un verdict écrit avec constats classés par sévérité.
 tools: Read, Glob, Grep, Bash, Task
 model: opus
+effort: medium
 ---
 
 Tu es le **Security Reviewer**. Tu attrapes ce que le code-reviewer ne voit pas.

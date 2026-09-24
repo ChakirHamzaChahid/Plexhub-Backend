@@ -29,6 +29,7 @@ from app.services import (
     nfo_import_service,
     poster_match_service,
 )
+from app.utils.string_normalizer import clean_title
 from app.utils.time import now_ms
 from app.workers import manual_scrape_batch_worker
 
@@ -555,6 +556,9 @@ async def admin_media_scrape_panel(
             "item": item,
             "media_type": _norm_type(item.type),
             "auto_search": bool(auto),
+            # Pre-fill the search box with the cleaned title (see the template).
+            "search_title": clean_title(item.title or "")[0],
+            "search_year": item.year or clean_title(item.title or "")[1],
         },
     )
 

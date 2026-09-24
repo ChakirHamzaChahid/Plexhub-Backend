@@ -13,8 +13,8 @@ Cible : $ARGUMENTS
 ## Phases
 1. **Architecte** — `tech-lead` (skills `engineering:architecture` + `architecture-decision-records`) : analyse le code existant (réutilise `docs/architecture/ARCHITECTURE.md` ; ne relance `a0-cartographer` que si périmé), **cartographie les dépendances**, produit un **plan de migration par étapes** + **contrats** (signatures/ports/schémas Pydantic stables) + un ADR. Identifie les pièges §9 touchés (migrations idempotentes, cold-start IA, `db_retry`/WAL, `asyncio.to_thread` pour les appels bloquants, master-worker POSIX). **GATE** : valide le plan avant de toucher au code.
 2. **Migration** — `backend-developer` (ou le spécialiste domaine concerné : `db-migration-specialist`, `sync-specialist`, `ai-recsys-specialist`, `plex-generator-specialist`) applique **fichier par fichier / étape par étape**, en gardant le comportement (caractérisation par tests d'abord si zone non couverte). Périmètre strict, conventions §3.
-3. **Validation** — `qa-engineer` (tests de non-régression `pytest`) + `perf-benchmarker` (si chemin chaud : re-mesure latence endpoints serveur lancé, avant/après). Chaque étape doit rester verte (et `/api/health` 200) avant la suivante.
-4. **Boucle de correction** — `tech-manager` renvoie les échecs (tests/review/perf) à l'agent d'implémentation **jusqu'à état stable**. `code-reviewer` gate à chaque étape. Cap 2 cycles/étape.
+3. **Validation** — `qa-engineer` (tests de non-régression `pytest`) ; `perf-benchmarker` **uniquement si la vague touche un chemin chaud** (mêmes déclencheurs que `feature.md` § « Déclencheurs des revues spécialisées » : SQL/index, services d'agrégation, workers, `plex_generator`, listes `/api/media`) — re-mesure latence avant/après, serveur lancé. Sinon le rapport de vague écrit « perf : non requis — aucun déclencheur ». Chaque étape doit rester verte (et `/api/health` 200) avant la suivante.
+4. **Boucle de correction** — `tech-manager` renvoie les échecs (tests/review/perf) à l'agent d'implémentation **jusqu'à état stable**. `code-reviewer` gate à chaque étape. Cap 2 cycles/étape (= tentatives 2 et 3 du compteur unique, sous-agent neuf à chaque fois).
 
 ## Garde-fous (refonte = Risky par défaut → needs-approval)
 - **Gros moteur (services IA, `plex_generator`, schéma DB)** = **vague isolée**, retest complet avant merge.
@@ -25,4 +25,4 @@ Cible : $ARGUMENTS
 ## DoD (chaque étape)
 `pytest -v` vert · serveur boote · `GET /api/health` 200 · migrations idempotentes · `ruff check` (si câblé) · OpenAPI à jour si l'API change.
 
-> Raccourci : les étapes **indépendantes** peuvent s'exécuter via la brique `/app-build` (devs parallèles + review streaming) et se relire via `/app-review`. Routage (modèle, effort) des invocations = skill `model-effort-routing` (lue par `tech-lead` avant découpe).
+> Raccourci : les étapes **indépendantes** peuvent s'exécuter via la brique `/app-build` (devs l'un après l'autre + review streaming sur commit figé) et se relire via `/app-review`. Routage (modèle, effort) des invocations = skill `model-effort-routing` (lue par `tech-lead` avant découpe).

@@ -1,6 +1,6 @@
 ---
 name: sprint-planner
-description: À utiliser pour convertir le backlog en un sprint backend exécutable, avec assignation parallèle des tickets et suivi des dépendances. Utilisé surtout par le tech-manager. Déclenché sur « planifie le sprint », « que fait le pod ensuite », ou dans le cadre de /feature (phase build).
+description: À utiliser pour convertir le backlog en un sprint backend exécutable, avec un ordre d'exécution des tickets (rédacteur unique) et suivi des dépendances. Utilisé surtout par le tech-manager. Déclenché sur « planifie le sprint », « que fait le pod ensuite », ou dans le cadre de /feature (phase build).
 ---
 
 # Sprint planner
@@ -58,14 +58,12 @@ Convertit `docs/10-prd.md` + `docs/22-impl-spec-backend.md` en `docs/30-sprint-p
    - QA a exercé les critères d'acceptation
    - le rapport quotidien mentionne la clôture
 
-## Règles de parallélisme
+## Règles d'ordonnancement (rédacteur unique — 2026-09-24)
 
-- **En parallèle** quand les tickets A et B touchent des modules/fichiers différents.
-- **Sérialise** quand la sortie de A est l'entrée de B (migration de schéma, service partagé,
-  changement de contrat d'API).
-- **Ne spawn jamais plus d'agents en parallèle qu'il n'y a de tickets indépendants prêts.** Les
-  agents oisifs gaspillent des tokens ; les agents qui se chevauchent gaspillent le contexte des
-  autres en conflits de merge.
+- Les tickets s'**exécutent un par un** ; le plan fixe l'**ordre** : dépendances d'abord (migration
+  de schéma, service partagé, contrat d'API), puis P0, puis Safe avant Risky.
+- Une chaîne de tickets d'un même owner est confiée à **un seul** agent.
+- Le parallèle est réservé au travail en lecture (revues, exploration, audits), jamais à deux rédacteurs.
 
 ## P0 vs stretch
 
@@ -78,7 +76,7 @@ sur l'ambition : mieux vaut moins de tickets tous fermés (DoD complète) qu'un 
 ```
 SPRINT 1 LANCÉ
 But : <une phrase>
-Lancement parallèle :
+Ordre de lancement :
 - db-migration-specialist  ← PH-001 (M010)               [P0]
 - sync-specialist          ← PH-002, PH-005              [P0]
 - plex-generator-specialist← PH-003                      [P0]

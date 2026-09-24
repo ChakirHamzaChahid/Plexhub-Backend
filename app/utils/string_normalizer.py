@@ -1,3 +1,4 @@
+import datetime as _dt
 import re
 import unicodedata
 
@@ -66,7 +67,10 @@ def normalize_for_sorting(title: str) -> str:
 # Quality / language / release tags stripped ANYWHERE (case-insensitive, whole
 # word). Order matters in the regex: longer alternatives first (WEB-DL > WEB).
 _QUALITY_TAGS = (
-    "2160P", "1080P", "720P", "480P", "4K", "UHD", "HDLIGHT", "HDR", "HD", "SD",
+    # FHD sits before HD so the longer alternative wins. It was present in
+    # `_TRAIL_QUALITY_RE` (the older parser) but missing here, so `clean_title`
+    # shipped "The Captain FHD" to TMDB and got `no_candidates` every time.
+    "2160P", "1080P", "720P", "480P", "4K", "FHD", "UHD", "HDLIGHT", "HDR", "HD", "SD",
     "HQ", "LQ", "X264", "X265", "H264", "H265", "HEVC", "WEB-DL", "WEBRIP", "WEB",
     "BLURAY", "BRRIP", "BDRIP", "DVDRIP", "AC3", "DTS", "MULTI",
     "TRUEFRENCH", "SUBFRENCH", "VOSTFR", "VOST", "VFF", "VFQ", "VFI", "VFB",
@@ -82,16 +86,45 @@ _LANG_PREFIX_TOKENS = (
     "VOSTFR", "VOST", "MULTI", "TRUEFRENCH", "VFF", "VFQ", "VFI", "VFB", "VF",
     "VO", "FR", "FRA", "EN", "US", "UK", "NF", "SC", "AR", "PL", "DE", "ES", "IT",
 )
+# A separator makes the prefix unambiguous, so the WHOLE token list applies
+# and the trailing space is optional ("FR|Les Visiteurs" is as much a prefix
+# as "FR | Les Visiteurs"). `[` is included because panels emit "FR[ Titre";
+# it is consumed here rather than by `_ANY_BRACKET_RE`, which needs a closing
+# bracket that never comes.
 _LANG_PREFIX_RE = re.compile(
-    r"^\s*(?:" + "|".join(_LANG_PREFIX_TOKENS) + r")\s*[-|:]\s+",
+    r"^\s*(?:" + "|".join(_LANG_PREFIX_TOKENS) + r")\s*[-|:/\[]\s*",
     re.IGNORECASE,
+)
+
+# Tokens safe to strip when followed by nothing but a SPACE ("FR Les
+# Châtiments" — 213 such titles in the real catalogue). Deliberately a SUBSET
+# of `_LANG_PREFIX_TOKENS`: every excluded token starts a genuine title, and
+# without a separator there is nothing left to tell them apart —
+#   "US Marshals", "IT Chapter Two", "UK 18", "EN route", "SC Fantasy"
+# would all lose their first word. The survivors here are release/language
+# markers that never open a real title.
+_SPACE_PREFIX_TOKENS = (
+    "VOSTFR", "VOST", "TRUEFRENCH", "MULTI", "VFF", "VFQ", "VFI", "VFB",
+    "VF", "VO", "FR", "FRA",
+)
+_SPACE_PREFIX_RE = re.compile(
+    r"^\s*(?:" + "|".join(_SPACE_PREFIX_TOKENS) + r")\s+(?=\S)",
 )
 # Generic all-caps 2-4 letter code prefix ("DE - ", "ZX | ") — case-sensitive
 # so it never eats a real lowercase title word.
-_CAPS_PREFIX_RE = re.compile(r"^\s*[A-Z]{2,4}\s*[-|:]\s+")
+#
+# `:` is NOT a separator here: it is ordinary title punctuation after an
+# acronym, and accepting it turned "NCIS: Los Angeles" into "Los Angeles"
+# (4 such rows in the real catalogue). Language tokens keep `:` above, where
+# the closed token list makes it safe.
+_CAPS_PREFIX_RE = re.compile(r"^\s*[A-Z]{2,4}\s*[-|]\s+")
 _LEADING_PIPE_MARK_RE = re.compile(r"^\s*\|[^|]*\|\s*")
 _LEADING_BRACKET_MARK_RE = re.compile(r"^\s*\[[^\]]*\]\s*")
 _YEAR_TOKEN_RE = re.compile(r"(?<!\d)(19|20)\d{2}(?!\d)")
+# Upper bound for a BARE 4-digit token to be read as a release year. Computed
+# once at import (a long-lived process must not reject next year's titles, so
+# it carries a margin for announced-but-unreleased items).
+_MAX_PLAUSIBLE_YEAR = _dt.date.today().year + 2
 _PARENS_YEAR_RE = re.compile(r"[(\[]\s*((?:19|20)\d{2})\s*[)\]]")
 _ANY_BRACKET_RE = re.compile(r"[\(\[\{][^\)\]\}]*[\)\]\}]")
 _ORPHAN_EDGE_RE = re.compile(r"^[\s\-|:._]+|[\s\-|:._]+$")
@@ -110,14 +143,23 @@ def clean_title(raw: str) -> tuple[str, int | None]:
         return ("Unknown", None)
     title = raw
 
+    def _strip_prefixes(value: str) -> str:
+        """Leading markers + stacked language/country prefixes, to a fixed
+        point. Run TWICE: a quality tag in front ("4K FR Avatar") hides the
+        language prefix behind it, and quality tags are only removed at
+        step 4 — so a single pass left "FR Avatar"."""
+        prev = None
+        while prev != value:
+            prev = value
+            value = _LEADING_PIPE_MARK_RE.sub("", value)
+            value = _LEADING_BRACKET_MARK_RE.sub("", value)
+            value = _LANG_PREFIX_RE.sub("", value)
+            value = _SPACE_PREFIX_RE.sub("", value)
+            value = _CAPS_PREFIX_RE.sub("", value)
+        return value
+
     # 1) Leading markers + stacked language/country prefixes (loop until stable).
-    prev = None
-    while prev != title:
-        prev = title
-        title = _LEADING_PIPE_MARK_RE.sub("", title)
-        title = _LEADING_BRACKET_MARK_RE.sub("", title)
-        title = _LANG_PREFIX_RE.sub("", title)
-        title = _CAPS_PREFIX_RE.sub("", title)
+    title = _strip_prefixes(title)
 
     # 2) Scene separators: dotted/underscored names with no spaces → spaces.
     if " " not in title.strip() and ("." in title or "_" in title):
@@ -125,6 +167,7 @@ def clean_title(raw: str) -> tuple[str, int | None]:
 
     # 3) Year — prefer a parenthesized year, else the last bare plausible year.
     year: int | None = None
+    year_was_bare = False
     pm = list(_PARENS_YEAR_RE.finditer(title))
     if pm:
         year = int(pm[-1].group(1))
@@ -133,11 +176,21 @@ def clean_title(raw: str) -> tuple[str, int | None]:
         ym = list(_YEAR_TOKEN_RE.finditer(title))
         if ym:
             m = ym[-1]
-            year = int(m.group(0))
-            title = title[: m.start()] + " " + title[m.end():]
+            candidate = int(m.group(0))
+            # A BARE number is only a release year if it could be one. Without
+            # this, "Blade Runner 2049" lost its 2049 and was searched as
+            # "Blade Runner" filtered to year 2049 — no match, then the
+            # no-year retry happily returned the 1982 film instead. A
+            # parenthesized year above is trusted as-is: the author marked it.
+            if candidate <= _MAX_PLAUSIBLE_YEAR:
+                year_was_bare = True
+                year = candidate
+                title = title[: m.start()] + " " + title[m.end():]
 
-    # 4) Quality/release/language tags anywhere.
+    # 4) Quality/release/language tags anywhere, then re-strip prefixes the
+    #    removed tag was shielding ("4K FR Avatar" -> "FR Avatar" -> "Avatar").
     title = _QUALITY_RE.sub(" ", title)
+    title = _strip_prefixes(title.strip())
 
     # 5) Leftover brackets/braces/parens (non-year), in a loop.
     prev = None
@@ -151,6 +204,15 @@ def clean_title(raw: str) -> tuple[str, int | None]:
     title = re.sub(r"\s+", " ", title).strip()
 
     if not title:
+        # Removing a BARE number emptied the title, so that number WAS the
+        # title — "1917", "2012", "1984" and "1992" are all real films.
+        # Keeping it as a year searched TMDB for an empty title filtered to
+        # that year; a panel prefix made it worse ("FR| 1992" fell back to
+        # the RAW string, prefix included, which never matched anything).
+        # A PARENTHESISED year stays a year: the author marked it as one, so
+        # "(2020)" is a title-less row, not a film called 2020.
+        if year is not None and year_was_bare:
+            return (str(year), None)
         return (raw.strip() or "Unknown", year)
     return (title, year)
 

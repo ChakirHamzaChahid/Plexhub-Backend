@@ -73,13 +73,18 @@
             class="flex flex-wrap items-end gap-2">
         <div class="flex flex-col">
           <label class="text-xs text-slate-500" for="scrape-title">Titre</label>
-          <input id="scrape-title" name="title" type="text" value="{{ item.title or '' }}"
+          {# Pre-filled with the CLEANED title (`search_title`): a row synced
+             before a `clean_title` fix keeps its polluted title forever (the
+             provider payload is unchanged, so the upsert never rewrites it),
+             and the operator was retyping "FR Casque et talons hauts" by hand
+             on every one of them. The raw title stays visible in the row. #}
+          <input id="scrape-title" name="title" type="text" value="{{ search_title or item.title or '' }}"
                  class="border border-slate-300 rounded px-2 py-1 text-sm w-64">
         </div>
         <div class="flex flex-col">
           <label class="text-xs text-slate-500" for="scrape-year">Année</label>
           <input id="scrape-year" name="year" type="text" inputmode="numeric"
-                 value="{{ item.year or '' }}"
+                 value="{{ search_year or item.year or '' }}"
                  class="border border-slate-300 rounded px-2 py-1 text-sm w-20 font-mono">
         </div>
         <div class="flex flex-col">

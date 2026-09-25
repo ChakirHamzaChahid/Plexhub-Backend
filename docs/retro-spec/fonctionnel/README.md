@@ -18,7 +18,7 @@ Carte des capacités : [**00-carte.md**](00-carte.md) (produite le 2026-09-25 ; 
 | CAP-BE-12 Bandes-annonces (S) | [CAP-BE-12](CAP-BE-12-bandes-annonces.md) | FR-BE-421→469 (46 impl., 3 partiels, 0 mort, 0 absent) | rédigée 2026-09-25, pas de PRD (écarts face à CLAUDE.md §5.12, flux-cles §5.12 et .env.example) |
 | CAP-BE-13 Recommandations IA & recherche sémantique (M) | à faire | — | à rédiger |
 | CAP-BE-14 Génération LLM & assistant (M) | à faire | — | à rédiger |
-| CAP-BE-15 Traduction de sous-titres (S) | à faire | — | à rédiger |
+| CAP-BE-15 Traduction de sous-titres (S) | [CAP-BE-15](CAP-BE-15-traduction-sous-titres.md) | FR-BE-570→610 (37 impl., 2 partiels, 2 morts, 0 absent) | rédigée 2026-09-25, pas de PRD (écarts face à CLAUDE.md §9 piège 12, flux-cles §5.8 et commentaires du code) |
 | CAP-BE-16 Génération de bibliothèque Plex/Jellyfin (S) | à faire | — | à rédiger |
 | CAP-BE-17 Relais WebDAV (S) | à faire | — | à rédiger |
 | CAP-BE-18 Téléchargement physique Xtream (L) — **pilote** | [CAP-BE-18](CAP-BE-18-telechargement-physique-xtream.md) | FR-BE-001→036 (32 impl., 1 partiel, 2 morts, 1 absent) | rédigée 2026-09-25, écart PRD en fin de fiche |

@@ -10,6 +10,27 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/tools/cost-tracker.py hook",
+            "async": true,
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "deny": [
+      "Read(.env)",
+      "Edit(.env)"
+    ],
+    "ask": [
+      "Edit(/pyproject.toml)"
     ]
   }
 }

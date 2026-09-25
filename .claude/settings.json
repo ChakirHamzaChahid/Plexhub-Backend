@@ -43,6 +43,18 @@
           }
         ]
       }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/subagent-model-guard.js",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   },
   "permissions": {

@@ -59,7 +59,7 @@ Les jumeaux `<agent>-high.md` sont **générés** par `python .claude/tools/gen-
 
 Depuis Claude Code v2.1.198, `Explore` **hérite du modèle de la session principale** (donc Opus), et `Plan` aussi (doc « sub-agents », vérifié le 2026-09-25). Mesuré sur les transcripts des 14 jours précédents : 24 lancements d'`Explore` en Opus, 1 seul appel Haiku sur toute la période. D'où :
 
-- **Toujours passer `model:`** à l'appel (le paramètre d'appel prime sur tout le reste).
+- **Toujours passer `model:`** à l'appel (le paramètre d'appel prime sur tout le reste). **Exécutoire** : le hook `PreToolUse` `.claude/hooks/subagent-model-guard.js` refuse un appel à `Explore`/`Plan` sans `model:` (coupe-circuit `SUBAGENT_MODEL_GUARD=off`, à signaler à Chakir).
 - `Explore` en `quick` ou `medium` → **`haiku`** ; en `very thorough` sur plusieurs modules → **`sonnet`** (règle 2bis).
 - `Plan` → noté par la grille comme une tâche de jugement (C5 = 2), en pratique `sonnet`, `opus` seulement si C2 = 2 ou C3 = 2.
 - Effort : pas de fiche jumelle pour un agent intégré → écrire `effort=session` dans la ligne `ROUTAGE`.

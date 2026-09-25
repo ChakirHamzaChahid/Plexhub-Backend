@@ -4,6 +4,8 @@
 
 > 🎚️ **Les nœuds affichent « couple = grille » au lieu d'un couple fixe** (revue 2026-09-24). Depuis le 2026-09-23, le couple réel est décidé **tâche par tâche** par la grille de la skill `model-effort-routing` (plage `haiku`..`opus` × `medium`..`high`, ligne `ROUTAGE` tracée avant chaque appel ; effort `high` = fiche jumelle `<agent>-high`). `low`, `xhigh`, `max` et `fable` sont hors routage.
 
+> 🧰 **Garde-fous transverses (hors diagrammes, 2026-09-25)** : hook `Stop` `.claude/tools/cost-tracker.py` (mesure des tokens par workflow/agent/modèle), hooks `PreCompact`/`SessionStart` `.claude/tools/lot-state.py` (état de lot survivant à la compaction), règles `permissions` ask/deny (`.env` refusé, `pyproject.toml` sur confirmation). Détail dans `WORKFLOWS.md`.
+
 > ✍️ **Un seul rédacteur à la fois** : les devs s'enchaînent, seules les relectures et les audits partent en parallèle. **Échec = compteur unique** de 3 tentatives (sous-agent neuf + effort `high` → modèle +1 → `BLOCKED`).
 
 ## Légende commune
@@ -72,8 +74,11 @@ flowchart TD
   Z5 -.->|pas de revue de code<br/>cohérence seule| CROSS
   FA --> CROSS{Check<br/>CLAUDE.md<br/>à jour ?}
   CROSS -->|non| WARN[⚠️ Doc périmée<br/>→ /sync-context requis]
-  CROSS -->|oui| SC[[📊 Scorecard delta<br/>+ Top findings]]
-  WARN --> SC
+  CROSS -->|oui| COV{PRD ou board modifiés<br/>dans REF..HEAD ?}
+  WARN --> COV
+  COV -->|oui| FRC[[🧾 Couverture FR · spec-quality §4<br/>FR → code + test<br/>ticket done sans code = S2]]
+  COV -->|non| SC[[📊 Scorecard delta<br/>+ Top findings]]
+  FRC --> SC
   SC --> RPT[/📄 rapport léger inline/]
   RPT --> GATE[(🚦 Gate : findings > 0 ?)]
   GATE ==>|non| RELEASE([✔️ Prêt à shipper])
@@ -173,7 +178,7 @@ flowchart TD
   PM --> P3B[[🗄️ spécialistes domaine<br/>db-migration / sync /<br/>ai-recsys / plex-generator]]
   P3A & P3B -->|l'un après l'autre<br/>rédacteur unique| CODE[/💻 Code commité<br/>develop/]
   CODE --> P4[[🧪 qa-engineer<br/>pytest + tests HTTP]]
-  P4 --> P5A[[🔎 code-reviewer<br/>toujours]]
+  P4 --> P5A[[🔎 code-reviewer<br/>toujours · bloque si CRITICAL/HIGH]]
   P4 --> DSEC{{🔒 Déclencheur sécurité ?<br/>auth · secrets · SSRF · /dav<br/>downloads · tv_auth · CORS · route /api}}
   DSEC -->|oui · même message| P5B[[🔒 security-reviewer]]
   P4 --> DPERF{{⚡ Déclencheur perf ?<br/>SQL/index · services d'agrégation<br/>workers · plex_generator · listes /api/media}}

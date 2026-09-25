@@ -15,7 +15,7 @@ Carte des capacités : [**00-carte.md**](00-carte.md) (produite le 2026-09-25 ; 
 | CAP-BE-09 Catalogue VOD & séries (M) | à faire | — | à rédiger |
 | CAP-BE-10 Résolution d'URL de lecture (S) | [CAP-BE-10](CAP-BE-10-resolution-url-lecture.md) | FR-BE-393→420 (25 impl., 2 partiels, 1 mort, 0 absent) | rédigée 2026-09-25, pas de PRD (écarts face à CLAUDE.md §9 piège 17c, guide d'intégration et docs d'architecture) |
 | CAP-BE-11 TV en direct & EPG (M) | à faire | — | à rédiger |
-| CAP-BE-12 Bandes-annonces (S) | à faire | — | à rédiger |
+| CAP-BE-12 Bandes-annonces (S) | [CAP-BE-12](CAP-BE-12-bandes-annonces.md) | FR-BE-421→469 (46 impl., 3 partiels, 0 mort, 0 absent) | rédigée 2026-09-25, pas de PRD (écarts face à CLAUDE.md §5.12, flux-cles §5.12 et .env.example) |
 | CAP-BE-13 Recommandations IA & recherche sémantique (M) | à faire | — | à rédiger |
 | CAP-BE-14 Génération LLM & assistant (M) | à faire | — | à rédiger |
 | CAP-BE-15 Traduction de sous-titres (S) | à faire | — | à rédiger |

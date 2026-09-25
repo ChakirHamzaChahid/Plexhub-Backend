@@ -1,6 +1,30 @@
 # Rétro-spec fonctionnelle — index
 
-Carte des capacités : **00-carte.md** (à produire par `/retro-spec carte`). Une fiche par capacité : `CAP-BE-nn-<slug>.md`, modèle `.claude/templates/retro-spec-capacite.md`.
+Carte des capacités : [**00-carte.md**](00-carte.md) (produite le 2026-09-25 ; ordre de rédaction proposé en fin de carte). Une fiche par capacité : `CAP-BE-nn-<slug>.md`, modèle `.claude/templates/retro-spec-capacite.md`.
 
 | Capacité | Fiche | Exigences | Statut |
 |---|---|---|---|
+| CAP-BE-01 Santé & supervision (S) | à faire | — | à rédiger |
+| CAP-BE-02 Clés API & authentification (M) | à faire | — | à rédiger |
+| CAP-BE-03 Appairage TV (device-flow) (S) | à faire | — | à rédiger |
+| CAP-BE-04 Comptes Xtream & catégories (M) | à faire | — | à rédiger |
+| CAP-BE-05 Synchronisation Xtream & pipeline planifié (M) | à faire | — | à rédiger |
+| CAP-BE-06 Enrichissement métadonnées TMDB + OMDb (M) | à faire | — | à rédiger |
+| CAP-BE-07 Validation des flux (S) | à faire | — | à rédiger |
+| CAP-BE-08 Panne fournisseur prolongée (S) | à faire | — | à rédiger |
+| CAP-BE-09 Catalogue VOD & séries (M) | à faire | — | à rédiger |
+| CAP-BE-10 Résolution d'URL de lecture (S) | à faire | — | à rédiger |
+| CAP-BE-11 TV en direct & EPG (M) | à faire | — | à rédiger |
+| CAP-BE-12 Bandes-annonces (S) | à faire | — | à rédiger |
+| CAP-BE-13 Recommandations IA & recherche sémantique (M) | à faire | — | à rédiger |
+| CAP-BE-14 Génération LLM & assistant (M) | à faire | — | à rédiger |
+| CAP-BE-15 Traduction de sous-titres (S) | à faire | — | à rédiger |
+| CAP-BE-16 Génération de bibliothèque Plex/Jellyfin (S) | à faire | — | à rédiger |
+| CAP-BE-17 Relais WebDAV (S) | à faire | — | à rédiger |
+| CAP-BE-18 Téléchargement physique Xtream (L) — **pilote** | à faire | — | à rédiger |
+| CAP-BE-19 Téléchargement Plex (L) | à faire | — | à rédiger |
+| CAP-BE-20 Écran de téléchargement unifié (S) | à faire | — | à rédiger |
+| CAP-BE-21 Console admin du catalogue (M) | à faire | — | à rédiger |
+| CAP-BE-22 Scraper manuel & « À vérifier » (L) | à faire | — | à rédiger |
+| CAP-BE-23 Import de métadonnées NFO (S) | à faire | — | à rédiger |
+| CAP-BE-24 Sauvegarde & maintenance de la base (S) | à faire | — | à rédiger |

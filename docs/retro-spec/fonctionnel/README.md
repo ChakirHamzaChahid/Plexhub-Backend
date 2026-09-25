@@ -20,7 +20,7 @@ Carte des capacités : [**00-carte.md**](00-carte.md) (produite le 2026-09-25 ; 
 | CAP-BE-14 Génération LLM & assistant (M) | [CAP-BE-14](CAP-BE-14-generation-llm-assistant.md) | FR-BE-656→696 (36 impl., 4 partiels, 1 mort, 0 absent) | rédigée 2026-09-25, pas de PRD (écarts face à CLAUDE.md §2/§9 pièges 12-14 et flux-cles §5.7/§5.8) |
 | CAP-BE-15 Traduction de sous-titres (S) | [CAP-BE-15](CAP-BE-15-traduction-sous-titres.md) | FR-BE-570→610 (37 impl., 2 partiels, 2 morts, 0 absent) | rédigée 2026-09-25, pas de PRD (écarts face à CLAUDE.md §9 piège 12, flux-cles §5.8 et commentaires du code) |
 | CAP-BE-16 Génération de bibliothèque Plex/Jellyfin (S) | [CAP-BE-16](CAP-BE-16-generation-bibliotheque-plex-jellyfin.md) | FR-BE-697→752 (44 impl., 9 partiels, 2 morts, 1 absent) | rédigée 2026-09-26, pas de PRD (écarts face à CLAUDE.md §3, flux-cles §5.4, etat-reel et plan d'origine) |
-| CAP-BE-17 Relais WebDAV (S) | à faire | — | à rédiger |
+| CAP-BE-17 Relais WebDAV (S) | [CAP-BE-17](CAP-BE-17-relais-webdav.md) | FR-BE-753→803 (44 impl., 3 partiels, 0 mort, 4 absents) | rédigée 2026-09-26, pas de PRD (écarts face à CLAUDE.md §2/§3/§9 piège 18, flux-cles §5.11 et runbook `docs/30-ops-plex-webdav.md`) |
 | CAP-BE-18 Téléchargement physique Xtream (L) — **pilote** | [CAP-BE-18](CAP-BE-18-telechargement-physique-xtream.md) | FR-BE-001→036 (32 impl., 1 partiel, 2 morts, 1 absent) | rédigée 2026-09-25, écart PRD en fin de fiche |
 | CAP-BE-19 Téléchargement Plex (L) | à faire | — | à rédiger |
 | CAP-BE-20 Écran de téléchargement unifié (S) | à faire | — | à rédiger |

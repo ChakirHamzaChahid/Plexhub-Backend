@@ -2,7 +2,7 @@
 
 > Compagnon visuel de `.claude/WORKFLOWS.md`. Chaque workflow détaillé sous forme de flowchart Mermaid (rendu natif dans VS Code / Cursor / GitHub) avec agents, gates, livrables et boucles d'escalade. Backend **FastAPI / Python 3.13**, dév direct sur `develop`.
 
-> 🎚️ **Les nœuds affichent « couple = grille » au lieu d'un couple fixe** (revue 2026-09-24). Depuis le 2026-09-23, le couple réel est décidé **tâche par tâche** par la grille de la skill `model-effort-routing` (plage `haiku`..`opus` × `medium`..`high`, ligne `ROUTAGE` tracée avant chaque appel ; effort `high` = fiche jumelle `<agent>-high`). `low`, `xhigh`, `max` et `fable` sont hors routage.
+> 🎚️ **Les nœuds affichent « couple = grille » au lieu d'un couple fixe** (revue 2026-09-24). Depuis le 2026-09-23, le couple réel est décidé **tâche par tâche** par la grille de la skill `model-effort-routing` (plage `haiku`..`opus` × `medium`..`high`, ligne `ROUTAGE` tracée avant chaque appel ; effort `high` = fiche jumelle `<agent>-high`). `low`, `xhigh`, `max` et `fable` sont hors routage. Dans les notes « Escalade routage » ci-dessous, un **plancher** est le couple minimum que la grille donne pour ce cas (C2 = 2, C3 = 2 ou C4 = 2) — jamais un couple fixé par rôle.
 
 > 🧰 **Garde-fous transverses (hors diagrammes, 2026-09-25)** : hook `Stop` `.claude/tools/cost-tracker.py` (mesure des tokens par workflow/agent/modèle), hooks `PreCompact`/`SessionStart` `.claude/tools/lot-state.py` (état de lot survivant à la compaction), règles `permissions` ask/deny (`.env` refusé, `pyproject.toml` sur confirmation). Détail dans `WORKFLOWS.md`.
 
@@ -51,7 +51,7 @@ flowchart TD
   FIX -->|plus tard| END([✔️ Backlog priorisé])
 ```
 
-**Escalade routage** : `full-auditor` en `opus/high` par défaut. Si le rapport rate un axe → cross-check `code-reviewer opus/high`. Si findings vagues → 2ᵉ passe `full-auditor` avec prompt enrichi ; `xhigh`/`max` = décision humaine uniquement (`CLAUDE_CODE_EFFORT_LEVEL`).
+**Escalade routage** : couple de `full-auditor` noté par la grille — en pratique **plancher** `opus`·`high` (jugement cross-module, vérification indirecte : C5 = 2, C4 = 2). Si le rapport rate un axe → cross-check `code-reviewer` (couple = grille). Si findings vagues → 2ᵉ passe `full-auditor` avec prompt enrichi ; `xhigh`/`max` = décision humaine uniquement (`CLAUDE_CODE_EFFORT_LEVEL`).
 
 ---
 
@@ -86,7 +86,7 @@ flowchart TD
   GATE -.->|oui, P0| INCIDENT([/incident])
 ```
 
-**Escalade routage** : `full-auditor opus/high` par défaut (scope réduit vs `/audit-full`). Si le diff touche schéma/migrations, sécurité (auth/secrets/downloads) ou worker partagé → `opus/high`. Si mystère persistant → `/incident` (cause racine `tech-lead`).
+**Escalade routage** : couple de `full-auditor` noté par la grille selon les zones du diff (`sonnet`·`medium` si le delta est trivial ; scope réduit vs `/audit-full`). Si le diff touche schéma/migrations, sécurité (auth/secrets/downloads) ou worker partagé → **plancher** `opus`·`high` (C2 = 2). Si mystère persistant → `/incident` (cause racine `tech-lead`).
 
 ---
 
@@ -114,7 +114,7 @@ flowchart TD
   GATE -.->|non, tout vert| END([✔️ Baseline archivée])
 ```
 
-**Escalade routage** : `perf-benchmarker opus/high`. Si un goulot est ambigu (cause racine floue, ex. « pourquoi ce endpoint prend 4 s ? ») → escalade à `full-auditor opus/high` OU `/incident`.
+**Escalade routage** : couple de `perf-benchmarker` noté par la grille — **plancher** `opus`·`high` pour une mesure réelle (C4 = 2). Si un goulot est ambigu (cause racine floue, ex. « pourquoi ce endpoint prend 4 s ? ») → escalade à `full-auditor` (couple = grille) OU `/incident`.
 
 ---
 
@@ -128,7 +128,7 @@ flowchart TD
   T([🎯 /sync-context]) --> DIFF[[🔍 git log HEAD<br/>vs bandeau CLAUDE.md HEAD]]
   DIFF --> CHECK{Delta<br/>structurel ?}
   CHECK -.->|non, trivial| END([✔️ Rien à faire])
-  CHECK -->|oui| MGR[[✍️ Manager<br/>couple = grille<br/>édition ciblée]]
+  CHECK -->|oui| MGR[✍️ Session principale<br/>édition ciblée · couple = grille]
   MGR --> B[/Bandeau<br/>date + HEAD/]
   MGR --> S{Section<br/>impactée}
   S -->|modules| S2[/§2 modules/]
@@ -175,8 +175,9 @@ flowchart TD
   GATE2 -.->|risky| HUM[🚨 needs-approval]
   GATE2 ==>|safe| PM[📊 Session principale<br/>skill sprint-planner]
   PM --> P3A[[🔧 backend-developer]]
-  PM --> P3B[[🗄️ spécialistes domaine<br/>db-migration / sync /<br/>ai-recsys / plex-generator]]
-  P3A & P3B -->|l'un après l'autre<br/>rédacteur unique| CODE[/💻 Code commité<br/>develop/]
+  P3A -.->|puis, si la zone l'exige| P3B[[🗄️ spécialistes domaine<br/>db-migration / sync /<br/>ai-recsys / plex-generator]]
+  P3A -->|rédacteur unique| CODE[/💻 Code commité<br/>develop/]
+  P3B -.->|rédacteur unique| CODE
   CODE --> P4[[🧪 qa-engineer<br/>pytest + tests HTTP]]
   P4 --> P5A[[🔎 code-reviewer<br/>toujours · bloque si CRITICAL/HIGH]]
   P4 --> DSEC{{🔒 Déclencheur sécurité ?<br/>auth · secrets · SSRF · /dav<br/>downloads · tv_auth · CORS · route /api}}
@@ -233,11 +234,12 @@ flowchart TD
   V2 -->|même chaîne| M2[✔️ gate V2]
   M2 --> V3
   V3 -->|isolée + retest complet| M3[✔️ gate V3]
-  M3 --> ADR[/📄 docs/architecture/adr/NNNN-refacto.md/]
+  M3 --> GF[[🚦 gate final · integration-agent<br/>pytest -v · boot uvicorn · /api/health 200]]
+  GF --> ADR[/📄 docs/architecture/adr/NNNN-refacto.md/]
   ADR --> SC[/sync-context §9 + bandeau/]
 ```
 
-**Escalade routage** : refacto = cartographie ET review typiquement `opus/high` (notées par la grille). Le dev peut rester `sonnet/high` sur les vagues isolées à impact borné. Si une vague touche invariants §9 (migrations, db_retry, master-worker, secrets) → le dev passe en `opus/high` aussi.
+**Escalade routage** : cartographie et review notées par la grille ; **plancher** `opus`·`high` dès que la vague touche un invariant §9 (C2 = 2). Le dev peut rester `sonnet`·`high` sur les vagues isolées à impact borné. Si une vague touche invariants §9 (migrations, db_retry, master-worker, secrets) → **plancher** `opus`·`high` pour le dev aussi.
 
 ---
 
@@ -274,7 +276,7 @@ flowchart TD
   P9 --> SC[/sync-context bandeau/]
 ```
 
-**Escalade routage** : cause racine = `tech-lead` (typiquement `opus/high`, noté par la grille) (`xhigh`/`max` seulement sur décision de Chakir si mystère persistant — locks SQLite, races async). Correctif = `sonnet/high` typique. Test de garde = incontournable (« un test qui reproduit RED d'abord »).
+**Escalade routage** : cause racine = `tech-lead`, couple noté par la grille — **plancher** `opus`·`high` (cause inconnue : C3 = 2) (`xhigh`/`max` seulement sur décision de Chakir si mystère persistant — locks SQLite, races async). Correctif : couple noté par la grille (souvent `sonnet`·`high`). Test de garde = incontournable (« un test qui reproduit RED d'abord »).
 
 ---
 
@@ -330,4 +332,4 @@ flowchart LR
 - `.claude/WORKFLOWS.md` — routeur + garde-fous + politique de routage
 - `.claude/skills/model-effort-routing/SKILL.md` — matrice couples + escalade
 - `CLAUDE.md` §7 — roster agents · §9 — pièges · §11 — workflows
-- `.claude/commands/{feature,refacto,incident,audit-full,wf-audit-incremental,benchmark,sync-context}.md` — spécifications workflow par workflow
+- `.claude/commands/{feature,refacto,incident,audit-full,wf-audit-incremental,benchmark,sync-context,release}.md` — spécifications workflow par workflow (`release` = annexe, seule voie de publication)

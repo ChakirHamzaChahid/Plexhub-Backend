@@ -17,7 +17,7 @@ Carte des capacités : [**00-carte.md**](00-carte.md) (produite le 2026-09-25 ; 
 | CAP-BE-11 TV en direct & EPG (M) | [CAP-BE-11](CAP-BE-11-tv-en-direct-epg.md) | FR-BE-531→569 (30 impl., 3 partiels, 5 morts, 1 absent) | rédigée 2026-09-25, pas de PRD (écarts face à CLAUDE.md §2 et flux-cles §5.1) |
 | CAP-BE-12 Bandes-annonces (S) | [CAP-BE-12](CAP-BE-12-bandes-annonces.md) | FR-BE-421→469 (46 impl., 3 partiels, 0 mort, 0 absent) | rédigée 2026-09-25, pas de PRD (écarts face à CLAUDE.md §5.12, flux-cles §5.12 et .env.example) |
 | CAP-BE-13 Recommandations IA & recherche sémantique (M) | [CAP-BE-13](CAP-BE-13-recommandations-ia-recherche-semantique.md) | FR-BE-611→655 (38 impl., 7 partiels, 0 mort, 0 absent) | rédigée 2026-09-25, pas de PRD (écarts face à CLAUDE.md §9 pièges 4-5, flux-cles §5.5/§5.8 et commentaires du code) |
-| CAP-BE-14 Génération LLM & assistant (M) | à faire | — | à rédiger |
+| CAP-BE-14 Génération LLM & assistant (M) | [CAP-BE-14](CAP-BE-14-generation-llm-assistant.md) | FR-BE-656→696 (36 impl., 4 partiels, 1 mort, 0 absent) | rédigée 2026-09-25, pas de PRD (écarts face à CLAUDE.md §2/§9 pièges 12-14 et flux-cles §5.7/§5.8) |
 | CAP-BE-15 Traduction de sous-titres (S) | [CAP-BE-15](CAP-BE-15-traduction-sous-titres.md) | FR-BE-570→610 (37 impl., 2 partiels, 2 morts, 0 absent) | rédigée 2026-09-25, pas de PRD (écarts face à CLAUDE.md §9 piège 12, flux-cles §5.8 et commentaires du code) |
 | CAP-BE-16 Génération de bibliothèque Plex/Jellyfin (S) | à faire | — | à rédiger |
 | CAP-BE-17 Relais WebDAV (S) | à faire | — | à rédiger |

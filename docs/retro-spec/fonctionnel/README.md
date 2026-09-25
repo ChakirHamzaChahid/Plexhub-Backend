@@ -19,7 +19,7 @@ Carte des capacités : [**00-carte.md**](00-carte.md) (produite le 2026-09-25 ; 
 | CAP-BE-13 Recommandations IA & recherche sémantique (M) | [CAP-BE-13](CAP-BE-13-recommandations-ia-recherche-semantique.md) | FR-BE-611→655 (38 impl., 7 partiels, 0 mort, 0 absent) | rédigée 2026-09-25, pas de PRD (écarts face à CLAUDE.md §9 pièges 4-5, flux-cles §5.5/§5.8 et commentaires du code) |
 | CAP-BE-14 Génération LLM & assistant (M) | [CAP-BE-14](CAP-BE-14-generation-llm-assistant.md) | FR-BE-656→696 (36 impl., 4 partiels, 1 mort, 0 absent) | rédigée 2026-09-25, pas de PRD (écarts face à CLAUDE.md §2/§9 pièges 12-14 et flux-cles §5.7/§5.8) |
 | CAP-BE-15 Traduction de sous-titres (S) | [CAP-BE-15](CAP-BE-15-traduction-sous-titres.md) | FR-BE-570→610 (37 impl., 2 partiels, 2 morts, 0 absent) | rédigée 2026-09-25, pas de PRD (écarts face à CLAUDE.md §9 piège 12, flux-cles §5.8 et commentaires du code) |
-| CAP-BE-16 Génération de bibliothèque Plex/Jellyfin (S) | à faire | — | à rédiger |
+| CAP-BE-16 Génération de bibliothèque Plex/Jellyfin (S) | [CAP-BE-16](CAP-BE-16-generation-bibliotheque-plex-jellyfin.md) | FR-BE-697→752 (44 impl., 9 partiels, 2 morts, 1 absent) | rédigée 2026-09-26, pas de PRD (écarts face à CLAUDE.md §3, flux-cles §5.4, etat-reel et plan d'origine) |
 | CAP-BE-17 Relais WebDAV (S) | à faire | — | à rédiger |
 | CAP-BE-18 Téléchargement physique Xtream (L) — **pilote** | [CAP-BE-18](CAP-BE-18-telechargement-physique-xtream.md) | FR-BE-001→036 (32 impl., 1 partiel, 2 morts, 1 absent) | rédigée 2026-09-25, écart PRD en fin de fiche |
 | CAP-BE-19 Téléchargement Plex (L) | à faire | — | à rédiger |

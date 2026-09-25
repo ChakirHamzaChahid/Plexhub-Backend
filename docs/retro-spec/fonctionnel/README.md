@@ -6,7 +6,7 @@ Carte des capacités : [**00-carte.md**](00-carte.md) (produite le 2026-09-25 ; 
 |---|---|---|---|
 | CAP-BE-01 Santé & supervision (S) | [CAP-BE-01](CAP-BE-01-sante-supervision.md) | FR-BE-037→064 (25 impl., 3 partiels, 0 mort, 0 absent) | rédigée 2026-09-25, pas de PRD (écarts face à CLAUDE.md) |
 | CAP-BE-02 Clés API & authentification (M) | à faire | — | à rédiger |
-| CAP-BE-03 Appairage TV (device-flow) (S) | à faire | — | à rédiger |
+| CAP-BE-03 Appairage TV (device-flow) (S) | [CAP-BE-03](CAP-BE-03-appairage-tv.md) | FR-BE-065→100 (31 impl., 2 partiels, 1 mort, 2 absents) | rédigée 2026-09-25, pas de PRD (écarts face à CLAUDE.md, flux-cles §5.6 et guide TV) |
 | CAP-BE-04 Comptes Xtream & catégories (M) | à faire | — | à rédiger |
 | CAP-BE-05 Synchronisation Xtream & pipeline planifié (M) | à faire | — | à rédiger |
 | CAP-BE-06 Enrichissement métadonnées TMDB + OMDb (M) | à faire | — | à rédiger |

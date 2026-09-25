@@ -49,9 +49,15 @@ Publie la ref choisie en tête du rapport (« Audit incrémental : `<REF>..HEAD`
    - Le bandeau `À JOUR AU : … HEAD …` couvre-t-il `<REF>..HEAD` ? Sinon flag « CLAUDE.md périmé sur ce lot → lancer `/sync-context` ».
    - Chaque changement structurel (schéma/migrations / §5 flux / §9 pièges nouveaux) a-t-il été reflété dans CLAUDE.md ? Sinon liste les sections à MAJ.
 
-5. **Présente 3 blocs (dans l'ordre)** :
+4bis. **Couverture des exigences (FR)** — *adapté de github/spec-kit (MIT), passe « couverture » de `/analyze`*
+   - Déclenchée seulement si `git log --name-only <REF>..HEAD -- docs/31-board.md 'docs/10-prd-*.md'` n'est pas vide (un PRD créé/modifié ou des tickets passés à `done` dans la fenêtre). Sinon : « couverture FR : sans objet ».
+   - Le Manager applique la skill **`spec-quality` §4** : pour chaque PRD concerné, chaque `FR-###` (ou, pour un PRD antérieur au modèle, chaque critère d'acceptation) reçoit sa preuve **code `fichier:ligne` + test**. Plus de 20 exigences → délègue la recherche à un sous-agent `Explore` (lecture seule, couple noté par la grille).
+   - Statuts → sévérités du rapport : `absent` alors que le ticket est `done` = **S2** (la ligne board ment) · `code sans test` = **S3** · `différé` (non-goal écrit) et `couvert` = info.
+
+5. **Présente 3 blocs (4 si 4bis a tourné), dans l'ordre** :
    - **Scorecard delta** — 1 note globale (A/B/C/D) + une note par dimension impactée
    - **Top findings S1/S2** (max 10) avec `fichier:ligne` + effort estimé
+   - **Couverture FR** (si 4bis a tourné) — tableau `PRD | FR | code | test | statut`, lignes non `couvert` d'abord
    - **Actions recommandées** — `/incident` pour un S1 avéré · `/sync-context` si CLAUDE.md à recaler · `/audit-full` si delta > seuil · continuer sans action si tout est vert
 
 ## Anti-patterns

@@ -10,7 +10,7 @@ Carte des capacités : [**00-carte.md**](00-carte.md) (produite le 2026-09-25 ; 
 | CAP-BE-04 Comptes Xtream & catégories (M) | [CAP-BE-04](CAP-BE-04-comptes-xtream-categories.md) | FR-BE-139→188 (41 impl., 6 partiels, 1 mort, 2 absents) | rédigée 2026-09-25, pas de PRD (écarts face à CLAUDE.md §2, §3, §9) |
 | CAP-BE-05 Synchronisation Xtream & pipeline planifié (M) | [CAP-BE-05](CAP-BE-05-synchronisation-xtream-pipeline.md) | FR-BE-189→240 (43 impl., 6 partiels, 2 morts, 1 absent) | rédigée 2026-09-25, pas de PRD (écarts face à CLAUDE.md §2, §9 et flux-cles §5.1) |
 | CAP-BE-06 Enrichissement métadonnées TMDB + OMDb (M) | à faire | — | à rédiger |
-| CAP-BE-07 Validation des flux (S) | à faire | — | à rédiger |
+| CAP-BE-07 Validation des flux (S) | [CAP-BE-07](CAP-BE-07-validation-des-flux.md) | FR-BE-241→294 (49 impl., 3 partiels, 1 mort, 1 absent) | rédigée 2026-09-25, pas de PRD (écarts face à CLAUDE.md, flux-cles §5.3 et commentaires TV) |
 | CAP-BE-08 Panne fournisseur prolongée (S) | à faire | — | à rédiger |
 | CAP-BE-09 Catalogue VOD & séries (M) | à faire | — | à rédiger |
 | CAP-BE-10 Résolution d'URL de lecture (S) | à faire | — | à rédiger |

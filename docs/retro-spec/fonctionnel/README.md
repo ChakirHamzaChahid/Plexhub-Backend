@@ -21,7 +21,7 @@ Carte des capacités : [**00-carte.md**](00-carte.md) (produite le 2026-09-25 ; 
 | CAP-BE-15 Traduction de sous-titres (S) | à faire | — | à rédiger |
 | CAP-BE-16 Génération de bibliothèque Plex/Jellyfin (S) | à faire | — | à rédiger |
 | CAP-BE-17 Relais WebDAV (S) | à faire | — | à rédiger |
-| CAP-BE-18 Téléchargement physique Xtream (L) — **pilote** | à faire | — | à rédiger |
+| CAP-BE-18 Téléchargement physique Xtream (L) — **pilote** | [CAP-BE-18](CAP-BE-18-telechargement-physique-xtream.md) | FR-BE-001→036 (32 impl., 1 partiel, 2 morts, 1 absent) | rédigée 2026-09-25, écart PRD en fin de fiche |
 | CAP-BE-19 Téléchargement Plex (L) | à faire | — | à rédiger |
 | CAP-BE-20 Écran de téléchargement unifié (S) | à faire | — | à rédiger |
 | CAP-BE-21 Console admin du catalogue (M) | à faire | — | à rédiger |

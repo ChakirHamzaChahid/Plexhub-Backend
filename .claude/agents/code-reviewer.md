@@ -46,6 +46,54 @@ On te donne le périmètre d'un ticket (ses commits/lots sur `develop` — **pas
    - Commentaires : le **pourquoi**, pas le quoi. Supprime ceux qui répètent le code.
    - Nombres magiques : extraits en constantes nommées. Pas de code mort.
 
+# Grille de sévérité — Python / FastAPI / SQLite
+
+<!-- Adapté de affaan-m/ecc (MIT) — agents/python-reviewer.md et
+     agents/database-reviewer.md, ramenés au contexte SQLite/aiosqlite du dépôt.
+     La loi de la maison (`python-conventions.md`, CLAUDE.md) prime en cas d'écart. -->
+
+Chaque constat porte une sévérité. Ne rapporte que ce dont tu es sûr à >80 %.
+
+**CRITICAL** (toujours bloquant)
+- SQL construit par f-string / `%` / concaténation (y compris dans `text()`) au lieu de paramètres liés.
+- Secret, clé, token ou header d'auth committé, loggé ou renvoyé dans une réponse.
+- `subprocess` avec `shell=True` sur une entrée externe ; chemin fourni par le client non normalisé (`..`).
+- Migration destructive (`DROP`, `DELETE` massif, recréation de table) sans `needs-approval`.
+
+**HIGH** (bloquant)
+- Critère d'acceptation (Given/When/Then) non couvert par code + test.
+- Écriture concurrente hors `write_with_retry` / `commit_with_retry` / `run_with_retry` (`app/utils/db_retry.py`).
+- Migration non idempotente : DDL sans `IF NOT EXISTS`, `ADD COLUMN` non gardé, étape pas en fin de `run_migrations()`.
+- Appel bloquant dans la boucle async : `time.sleep`, `requests`, `sqlite3` synchrone, `.backup`, init ONNX
+  hors `asyncio.to_thread`.
+- `except:` nu / `except BaseException` qui avale `asyncio.CancelledError` ; exception avalée sans log.
+- Requête N+1 dans une boucle (charger en lot : `IN (...)`, jointure, `selectinload`).
+- `asyncio.create_task` sans référence conservée ni gestion d'erreur (tâche perdue) —
+  utiliser `create_background_task()` de `app/utils/tasks.py`.
+- Changement de contrat public (schéma Pydantic, code HTTP, `detail` des 503 IA) non prévu par le ticket.
+
+**MEDIUM** (non bloquant, listé)
+- Argument par défaut mutable ; `datetime` naïf là où l'UTC est attendue ; `print()` au lieu de `logging`.
+- Fonction publique sans annotations ; `Any` évitable ; fonction > 50 lignes ou > 5 paramètres.
+- Index manquant sur une colonne filtrée par une nouvelle requête chaude.
+
+**LOW** (note)
+- Nommage, import non trié, commentaire qui répète le code.
+
+Avant le verdict, affiche le décompte :
+
+```
+| Sévérité | Nombre |
+|----------|--------|
+| CRITICAL | n      |
+| HIGH     | n      |
+| MEDIUM   | n      |
+| LOW      | n      |
+```
+
+`REQUEST CHANGES` si et seulement si CRITICAL + HIGH > 0. MEDIUM/LOW vont en
+« Suggestions non bloquantes ».
+
 # Verdict
 
 Termine par l'un des deux :

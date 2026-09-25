@@ -96,9 +96,11 @@ Sans cette ligne, la revue du lot peut refuser le routage. Elle sert aussi à re
 Révisé le 2026-09-24. Il n'y a **qu'un compteur par tâche** : un « cycle de correction » de la revue et un « cran » d'escalade sont la même chose. Chaque tentative = une nouvelle ligne `ROUTAGE`.
 
 1. **Tentative 1** : le couple noté par la grille.
-2. **Tentative 2** (1er KO) : **sous-agent neuf** — jamais la suite de la conversation qui a échoué — avec le rapport de revue joint et des pistes (« considère 3 hypothèses »), **et** effort +1 (`medium` → fiche `-high`). Si déjà `high`, ou si la tâche est routée `haiku` (l'effort y compte peu) : modèle +1 à la place.
+2. **Tentative 2** (1er KO) : **sous-agent neuf** — jamais la suite de la conversation qui a échoué — avec le rapport de revue joint et des pistes (« considère 3 hypothèses »), **et** effort +1 (`medium` → fiche `-high`). Si déjà `high`, ou si la tâche est routée `haiku` (l'effort y compte peu) : modèle +1 à la place. Si la tâche part déjà en `opus` · `high` : sous-agent neuf avec **le même couple** et le rapport joint (c'est le contexte propre qui sert de levier) ; il n'y a pas de tentative 3, donc le 2ᵉ KO = `BLOCKED`.
 3. **Tentative 3** (2e KO) : **modèle +1** (`haiku` → `sonnet` → `opus`), en gardant `high` — ou spécialiste domaine si le problème sort du périmètre de l'agent. Si `opus` · `high` est déjà atteint, pas de tentative 3.
 4. **KO suivant** : **`BLOCKED`** + remontée à Chakir, qui décide seul d'un éventuel `CLAUDE_CODE_EFFORT_LEVEL=xhigh` pour une session.
+
+**Relance technique ≠ tentative (2026-09-25).** Une relance d'étape pour une cause d'infrastructure — daemon Gradle, ADB déconnecté, verrou de fichier, réseau, timeout CI — ainsi que la boucle interne d'un agent (compiler, corriger, relancer) restent **à l'intérieur** d'une tentative, **5 au maximum**, et ne consomment pas le compteur. Un échec de fond — test rouge reproductible, detekt/ruff, revue KO, gate rouge — consomme une tentative. Un test qui échoue puis passe sans changement de code est **instable** : il se signale (ticket), il ne justifie pas une 6ᵉ relance.
 
 Pourquoi un contexte neuf et 3 tentatives : la doc Claude Code (*Best practices*) recommande, après deux corrections ratées, de repartir d'un contexte propre avec un meilleur prompt plutôt que d'insister dans un contexte encombré d'essais échoués.
 

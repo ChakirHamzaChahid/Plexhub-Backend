@@ -1,5 +1,5 @@
 ---
-description: Démarre un NOUVEAU projet de service backend — intake des requirements, vision CEO, puis PRD + architecture en parallèle, bootstrap CLAUDE.md + git
+description: Démarre un NOUVEAU projet de service backend — intake des requirements, vision CEO, puis PRD + architecture (un rédacteur à la fois), bootstrap CLAUDE.md + git
 argument-hint: [idée en une ligne, optionnel]
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash, Task, Agent
 ---
@@ -18,9 +18,9 @@ Tu démarres un projet de service backend neuf. L'idée en une ligne de l'utilis
 
 2. **Spawn l'agent `ceo`** avec l'intake en entrée. Le CEO écrit `docs/00-vision.md`.
 
-3. **Spawn `cpo` et `cto` en parallèle** dans un seul message — les deux lisent `docs/00-vision.md` et produisent leurs docs respectifs (PRD/backlog et architecture/principes — stack par défaut = House KB `stack-defaults.md` : FastAPI async + SQLAlchemy[asyncio] + SQLite WAL + httpx + Pydantic v2 + pytest).
+3. **Spawn `cpo`, puis `cto`** (rédacteur unique, l'un après l'autre) — les deux lisent `docs/00-vision.md` et produisent leurs docs respectifs (PRD/backlog et architecture/principes — stack par défaut = House KB `stack-defaults.md` : FastAPI async + SQLAlchemy[asyncio] + SQLite WAL + httpx + Pydantic v2 + pytest).
 
-4. **Spawn `tech-lead` et `devops-engineer` en parallèle** dans un seul message :
+4. **Spawn `tech-lead`, puis `devops-engineer`** (rédacteur unique, l'un après l'autre) :
    - `tech-lead` lit architecture + PRD, écrit `docs/22-impl-spec-backend.md` (frontières de modules `api/`/`services/`/`workers/`/`db/`, contrats Pydantic, conventions d'erreurs).
    - `devops-engineer` lit l'architecture, écrit `docs/23-git-strategy.md`, un `.gitignore` Python, et le workflow CI (pytest + ruff + build image Docker) — seedé depuis le House KB `git-workflow.md`.
 

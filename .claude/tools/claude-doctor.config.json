@@ -1,0 +1,6 @@
+{
+  "_comment": "Lu par claude-doctor.py de PlexHubTV lancé avec CLAUDE_DOCTOR_ROOT=<ce dépôt>. Le code du Backend vit sous app/.",
+  "extra_path_roots": [
+    "app"
+  ]
+}

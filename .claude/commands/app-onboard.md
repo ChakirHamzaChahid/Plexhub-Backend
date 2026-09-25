@@ -18,7 +18,7 @@ Chemin du service cible (optionnel, défaut = répertoire courant) : $ARGUMENTS
 
 2. **Invoque `house-conventions`** pour cadrer la rétro-ingénierie contre les standards maison (packs `python-conventions`, `api-conventions`, `stack-defaults`, `git-workflow`, `observability`).
 
-3. **Spawn en parallèle** (un seul message), chacun lisant le code et écrivant un instantané *as-built* — décrire ce qui existe, marquer les suppositions `(inferred)`, ne rien changer au code :
+3. **Spawn l'un après l'autre** (rédacteur unique — chacun écrit son propre doc), chacun lisant le code et écrivant un instantané *as-built* — décrire ce qui existe, marquer les suppositions `(inferred)`, ne rien changer au code :
    - `cto` + `tech-lead` → `docs/20-architecture.md` (stack réelle depuis les fichiers de deps, layering, persistance/migrations, tâches de fond/scheduler, auth, CI, déploiement) et `docs/22-impl-spec-backend.md`.
    - `cpo` → `docs/10-prd.md` : inventaire des capacités dérivé des routers/endpoints et des workers. Ne demande à l'utilisateur que l'intention produit illisible dans le code.
    - `devops-engineer` → `docs/23-git-strategy.md` : modèle de branches / CI / packaging actuels vs cible House KB, en signalant les problèmes d'hygiène de secrets.

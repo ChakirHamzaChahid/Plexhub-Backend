@@ -4,7 +4,7 @@ Carte des capacités : [**00-carte.md**](00-carte.md) (produite le 2026-09-25 ; 
 
 | Capacité | Fiche | Exigences | Statut |
 |---|---|---|---|
-| CAP-BE-01 Santé & supervision (S) | à faire | — | à rédiger |
+| CAP-BE-01 Santé & supervision (S) | [CAP-BE-01](CAP-BE-01-sante-supervision.md) | FR-BE-037→064 (25 impl., 3 partiels, 0 mort, 0 absent) | rédigée 2026-09-25, pas de PRD (écarts face à CLAUDE.md) |
 | CAP-BE-02 Clés API & authentification (M) | à faire | — | à rédiger |
 | CAP-BE-03 Appairage TV (device-flow) (S) | à faire | — | à rédiger |
 | CAP-BE-04 Comptes Xtream & catégories (M) | à faire | — | à rédiger |

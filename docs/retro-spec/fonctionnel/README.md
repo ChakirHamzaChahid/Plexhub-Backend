@@ -24,7 +24,7 @@ Carte des capacités : [**00-carte.md**](00-carte.md) (produite le 2026-09-25 ; 
 | CAP-BE-18 Téléchargement physique Xtream (L) — **pilote** | [CAP-BE-18](CAP-BE-18-telechargement-physique-xtream.md) | FR-BE-001→036 (32 impl., 1 partiel, 2 morts, 1 absent) | rédigée 2026-09-25, écart PRD en fin de fiche |
 | CAP-BE-19 Téléchargement Plex (L) | à faire | — | à rédiger |
 | CAP-BE-20 Écran de téléchargement unifié (S) | à faire | — | à rédiger |
-| CAP-BE-21 Console admin du catalogue (M) | à faire | — | à rédiger |
+| CAP-BE-21 Console admin du catalogue (M) | [CAP-BE-21](CAP-BE-21-console-admin-catalogue.md) | FR-BE-880→920 (34 impl., 0 partiel, 6 morts, 1 absent) | rédigée 2026-09-26, pas de PRD (écarts face à CLAUDE.md §2/§9 piège 21 et aux commentaires du code) |
 | CAP-BE-22 Scraper manuel & « À vérifier » (L) | à faire | — | à rédiger |
 | CAP-BE-23 Import de métadonnées NFO (S) | [CAP-BE-23](CAP-BE-23-import-metadonnees-nfo.md) | FR-BE-804→854 (38 impl., 9 partiels, 4 morts, 0 absent) | rédigée 2026-09-26, pas de PRD (écarts face à CLAUDE.md §2/§3, ADR 0004/0005, gabarit `import_nfo.html` et plan de test) |
 | CAP-BE-24 Sauvegarde & maintenance de la base (S) | [CAP-BE-24](CAP-BE-24-sauvegarde-maintenance-base.md) | FR-BE-855→879 (16 impl., 2 partiels, 0 morts, 6 absents) | rédigée 2026-09-26, pas de PRD (écarts face aux docstrings, ARCHITECTURE.md et `etat-reel.md`) |

@@ -26,5 +26,5 @@ Carte des capacités : [**00-carte.md**](00-carte.md) (produite le 2026-09-25 ; 
 | CAP-BE-20 Écran de téléchargement unifié (S) | à faire | — | à rédiger |
 | CAP-BE-21 Console admin du catalogue (M) | à faire | — | à rédiger |
 | CAP-BE-22 Scraper manuel & « À vérifier » (L) | à faire | — | à rédiger |
-| CAP-BE-23 Import de métadonnées NFO (S) | à faire | — | à rédiger |
+| CAP-BE-23 Import de métadonnées NFO (S) | [CAP-BE-23](CAP-BE-23-import-metadonnees-nfo.md) | FR-BE-804→854 (38 impl., 9 partiels, 4 morts, 0 absent) | rédigée 2026-09-26, pas de PRD (écarts face à CLAUDE.md §2/§3, ADR 0004/0005, gabarit `import_nfo.html` et plan de test) |
 | CAP-BE-24 Sauvegarde & maintenance de la base (S) | à faire | — | à rédiger |

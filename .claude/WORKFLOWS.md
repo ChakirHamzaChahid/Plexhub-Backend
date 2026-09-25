@@ -68,6 +68,8 @@ Chaque workflow multi-agents DOIT décider un couple `(modèle, effort)` par sou
 
 **Doctrine complète** (matrice + escalade) = skill **`model-effort-routing`** (`.claude/skills/model-effort-routing/SKILL.md`), **consultée par les orchestrateurs** (`tech-lead` pour /refacto et /incident, `cto`+`tech-manager` pour /feature, `full-auditor` pour /audit-full et /wf-audit-incremental, Manager principal pour /sync-context).
 
+**Agents intégrés `Explore` / `Plan` (2026-09-25)** : depuis Claude Code v2.1.198 ils héritent du modèle de la session, donc Opus — mesuré : 24 `Explore` en Opus sur 14 jours, 1 seul appel Haiku. **`model:` toujours explicite** : `Explore` quick/medium = `haiku`, very thorough sur plusieurs modules = `sonnet` ; `Plan` noté par la grille. Détail : skill `model-effort-routing` § 3 (règle 2bis). `low` reste hors routage (sans effet sur Haiku), à réévaluer fin octobre avec `cost-tracker`.
+
 **Compteur unique — 3 tentatives maximum par tâche (revue 2026-09-24)**. « Cycle de correction » (revue) et « cran d'escalade » (routage) désignent la **même** chose : il n'y a qu'un compteur. Partir au plus bas couple viable :
 1. **Tentative 1** = le couple noté par la grille.
 2. **Tentative 2** (1er KO : revue KO ou gate rouge) = **sous-agent neuf** — jamais la suite de la conversation qui a échoué — avec le rapport de revue joint, **et** effort +1 (fiche `<agent>-high`). Si déjà `high` (ou routé `haiku`, où l'effort compte peu) → modèle +1 à la place.

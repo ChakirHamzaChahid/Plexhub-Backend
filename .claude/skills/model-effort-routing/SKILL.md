@@ -14,7 +14,7 @@ effort: high
 | Axe | Valeurs autorisées | Hors routage |
 |---|---|---|
 | **Modèle** | `haiku` < `sonnet` < `opus` | `fable` (retiré le 2026-09-23 : plus cher qu'Opus 5.5 sans gain mesuré) |
-| **Effort** | `medium` < `high` | `low` (trop de régressions cachées), `xhigh` et `max` (coût nettement supérieur pour un gain faible, d'après Anthropic) |
+| **Effort** | `medium` < `high` | `low` (trop de régressions cachées ; sans effet sur Haiku 4.5, absent de la liste des modèles qui gèrent l'effort — à réévaluer fin octobre 2026 avec les données de `.claude/tools/cost-tracker.py report`), `xhigh` et `max` (coût nettement supérieur pour un gain faible, d'après Anthropic) |
 
 `xhigh`/`max` ne peuvent être posés **que par Chakir**, à la main, pour une session (`CLAUDE_CODE_EFFORT_LEVEL`). Aucun agent, aucune matrice, aucune escalade automatique ne les choisit.
 
@@ -47,12 +47,23 @@ Les jumeaux `<agent>-high.md` sont **générés** par `python .claude/tools/gen-
 
 1. **`opus`** si **au moins une** de ces conditions : C2 = 2 · C3 = 2 · (C5 = 2 **et** C1 = 2).
 2. Sinon **`haiku`** si **toutes** : C5 = 0 · C1 = 0 · C2 = 0 · C4 = 0.
+   **2bis.** Sinon **`haiku`** aussi pour une tâche **mécanique en lecture seule** (C5 = 0, aucune écriture : inventaire, grep, comptage, localisation d'un appel), **quelle que soit C1** — c'est le cas typique d'`Explore`. **`sonnet`** si elle doit tenir un contexte très large (lecture exhaustive de plusieurs modules, synthèse demandée). Jamais `opus` : une recherche qui est en fait un diagnostic (C3 = 2) se confie à l'agent de diagnostic, pas à `Explore`.
 3. Sinon **`sonnet`**.
 
 ### Règle de décision — effort
 
 - **`high`** si **au moins une** : C3 ≥ 1 · C4 = 2 · C2 = 2 · C1 = 2.
 - Sinon **`medium`**.
+
+### Agents intégrés `Explore` et `Plan` (règle du 2026-09-25)
+
+Depuis Claude Code v2.1.198, `Explore` **hérite du modèle de la session principale** (donc Opus), et `Plan` aussi (doc « sub-agents », vérifié le 2026-09-25). Mesuré sur les transcripts des 14 jours précédents : 24 lancements d'`Explore` en Opus, 1 seul appel Haiku sur toute la période. D'où :
+
+- **Toujours passer `model:`** à l'appel (le paramètre d'appel prime sur tout le reste).
+- `Explore` en `quick` ou `medium` → **`haiku`** ; en `very thorough` sur plusieurs modules → **`sonnet`** (règle 2bis).
+- `Plan` → noté par la grille comme une tâche de jugement (C5 = 2), en pratique `sonnet`, `opus` seulement si C2 = 2 ou C3 = 2.
+- Effort : pas de fiche jumelle pour un agent intégré → écrire `effort=session` dans la ligne `ROUTAGE`.
+- ⚠️ **Résultat vide = à contre-vérifier.** Test du 2026-09-25 : `Explore` sur Haiku a répondu « 0 fichier » pour `SyncWriteGate` (filtre `type: kt` invalide pour ripgrep, erreur avalée) alors que `git grep` en trouve 25. Avant de conclure qu'un symbole n'existe pas, contre-vérifier par `git grep`.
 
 ### Trace obligatoire
 
@@ -77,6 +88,8 @@ Sans cette ligne, la revue du lot peut refuser le routage. Elle sert aussi à re
 | Revue d'un diff de template admin (2 fichiers) | 1 1 0 2 2 | `sonnet` · `high` |
 | Cause racine d'un « database is locked » intermittent | 2 2 2 2 2 | `opus` · `high` |
 | Recaler le bandeau de `CLAUDE.md` (`/sync-context`) | 0 0 0 0 0 | `haiku` · `medium` |
+| `Explore` quick : trouver tous les appels d'une fonction | 2 0 0 0 0 | `haiku` · session (règle 2bis) |
+| `Explore` very thorough : cartographier un flux sur 3 modules avec synthèse | 2 0 1 0 0 | `sonnet` · session (contexte large) |
 
 ## 4. Compteur unique sur échec (revue KO, gate rouge) — 3 tentatives max
 
@@ -93,7 +106,7 @@ Pourquoi un contexte neuf et 3 tentatives : la doc Claude Code (*Best practices*
 
 Leur propre couple se décide avec la même grille, au moment où la session principale les lance :
 
-- `/feature` : planification (PRD + archi + board) dans la **session principale** ; relecteur d'archi `cto`/`tech-lead` lancé seulement si C2 = 2 ou C3 = 2, typiquement `opus` · `high`.
+- `/feature` : planification (PRD + archi + board) et Clarifier dans la **session principale** ; Analyser (phase 2bis) = `tech-lead` neuf en lecture seule, `sonnet` · `medium` par défaut, `opus` · `high` si C2 = 2 ou C3 = 2 (il challenge alors aussi l'archi).
 - `/refacto` et `/incident` : `tech-lead` · `high` dès que la cause ou le plan de migration n'est pas évident (C3 ≥ 1).
 - `/audit-full` : `full-auditor` · `opus` · `high` (jugement cross-module, vérification indirecte).
 - `/wf-audit-incremental` : `full-auditor` · `sonnet` ou `opus` selon les zones du diff (C2), `medium` si le delta est trivial.
@@ -112,6 +125,7 @@ Leur propre couple se décide avec la même grille, au moment où la session pri
 ## 7. Anti-patterns
 
 - ❌ Appeler un subagent sans ligne `ROUTAGE` ni `model:` explicite.
+- ❌ Lancer `Explore` ou `Plan` sans `model:` : ils héritent du modèle de la session, donc Opus.
 - ❌ Choisir le couple par habitude de rôle (« un reviewer, c'est opus/high ») au lieu de noter la tâche.
 - ❌ Tout en `opus` · `high` « par sécurité » → tokens gaspillés, latence ×2-3.
 - ❌ Relancer l'agent qui a échoué dans la même conversation au lieu d'un sous-agent neuf, ou dépasser 3 tentatives sans passer par Chakir.

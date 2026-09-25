@@ -1,0 +1,7 @@
+{
+  "_comment": "Emplacements relatifs des dépôts frères pour les preuves préfixées (check.py).",
+  "self": "backend",
+  "repos": {
+    "tv": "../AndroidStudioProjects/PlexHubTV"
+  }
+}

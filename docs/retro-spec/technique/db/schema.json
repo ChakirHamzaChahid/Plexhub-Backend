@@ -1,0 +1,2834 @@
+{
+  "name": "schema.db",
+  "tables": [
+    {
+      "name": "ai_embeddings_chunks",
+      "type": "table",
+      "columns": [
+        {
+          "name": "chunk_id",
+          "type": "INTEGER",
+          "nullable": true
+        },
+        {
+          "name": "size",
+          "type": "INTEGER",
+          "nullable": false
+        },
+        {
+          "name": "validity",
+          "type": "BLOB",
+          "nullable": false
+        },
+        {
+          "name": "rowids",
+          "type": "BLOB",
+          "nullable": false
+        }
+      ],
+      "constraints": [
+        {
+          "name": "chunk_id",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (chunk_id)",
+          "table": "ai_embeddings_chunks",
+          "columns": [
+            "chunk_id"
+          ]
+        }
+      ],
+      "def": "CREATE TABLE \"ai_embeddings_chunks\"(chunk_id INTEGER PRIMARY KEY AUTOINCREMENT,size INTEGER NOT NULL,validity BLOB NOT NULL,rowids BLOB NOT NULL)"
+    },
+    {
+      "name": "ai_embeddings_info",
+      "type": "table",
+      "columns": [
+        {
+          "name": "key",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "value",
+          "type": "ANY",
+          "nullable": true
+        }
+      ],
+      "indexes": [
+        {
+          "name": "sqlite_autoindex_ai_embeddings_info_1",
+          "def": "PRIMARY KEY (key)",
+          "table": "ai_embeddings_info",
+          "columns": [
+            "key"
+          ]
+        }
+      ],
+      "constraints": [
+        {
+          "name": "key",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (key)",
+          "table": "ai_embeddings_info",
+          "columns": [
+            "key"
+          ]
+        },
+        {
+          "name": "sqlite_autoindex_ai_embeddings_info_1",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (key)",
+          "table": "ai_embeddings_info",
+          "columns": [
+            "key"
+          ]
+        }
+      ],
+      "def": "CREATE TABLE \"ai_embeddings_info\" (key text primary key, value any)"
+    },
+    {
+      "name": "ai_embeddings_rowids",
+      "type": "table",
+      "columns": [
+        {
+          "name": "rowid",
+          "type": "INTEGER",
+          "nullable": true
+        },
+        {
+          "name": "id",
+          "type": "",
+          "nullable": true
+        },
+        {
+          "name": "chunk_id",
+          "type": "INTEGER",
+          "nullable": true
+        },
+        {
+          "name": "chunk_offset",
+          "type": "INTEGER",
+          "nullable": true
+        }
+      ],
+      "constraints": [
+        {
+          "name": "rowid",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (rowid)",
+          "table": "ai_embeddings_rowids",
+          "columns": [
+            "rowid"
+          ]
+        }
+      ],
+      "def": "CREATE TABLE \"ai_embeddings_rowids\"(rowid INTEGER PRIMARY KEY AUTOINCREMENT,id,chunk_id INTEGER,chunk_offset INTEGER)"
+    },
+    {
+      "name": "ai_embeddings_vector_chunks00",
+      "type": "table",
+      "columns": [
+        {
+          "name": "rowid",
+          "type": "",
+          "nullable": true
+        },
+        {
+          "name": "vectors",
+          "type": "BLOB",
+          "nullable": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "sqlite_autoindex_ai_embeddings_vector_chunks00_1",
+          "def": "PRIMARY KEY (rowid)",
+          "table": "ai_embeddings_vector_chunks00",
+          "columns": [
+            "rowid"
+          ]
+        }
+      ],
+      "constraints": [
+        {
+          "name": "rowid",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (rowid)",
+          "table": "ai_embeddings_vector_chunks00",
+          "columns": [
+            "rowid"
+          ]
+        },
+        {
+          "name": "sqlite_autoindex_ai_embeddings_vector_chunks00_1",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (rowid)",
+          "table": "ai_embeddings_vector_chunks00",
+          "columns": [
+            "rowid"
+          ]
+        }
+      ],
+      "def": "CREATE TABLE \"ai_embeddings_vector_chunks00\"(rowid PRIMARY KEY,vectors BLOB NOT NULL)"
+    },
+    {
+      "name": "ai_media_blurb",
+      "type": "table",
+      "columns": [
+        {
+          "name": "tmdb_id",
+          "type": "INTEGER",
+          "nullable": false
+        },
+        {
+          "name": "media_type",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "lang",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "summary",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "tags",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "model",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "created_at",
+          "type": "BIGINT",
+          "nullable": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ix_media_blurb_tmdb",
+          "def": "CREATE INDEX ix_media_blurb_tmdb ON ai_media_blurb(tmdb_id)",
+          "table": "ai_media_blurb",
+          "columns": [
+            "tmdb_id"
+          ]
+        },
+        {
+          "name": "ix_media_blurb_lang",
+          "def": "CREATE INDEX ix_media_blurb_lang ON ai_media_blurb(lang)",
+          "table": "ai_media_blurb",
+          "columns": [
+            "lang"
+          ]
+        },
+        {
+          "name": "sqlite_autoindex_ai_media_blurb_1",
+          "def": "PRIMARY KEY (tmdb_id, media_type, lang)",
+          "table": "ai_media_blurb",
+          "columns": [
+            "tmdb_id",
+            "media_type",
+            "lang"
+          ]
+        }
+      ],
+      "constraints": [
+        {
+          "name": "tmdb_id",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (tmdb_id)",
+          "table": "ai_media_blurb",
+          "columns": [
+            "tmdb_id"
+          ]
+        },
+        {
+          "name": "media_type",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (media_type)",
+          "table": "ai_media_blurb",
+          "columns": [
+            "media_type"
+          ]
+        },
+        {
+          "name": "lang",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (lang)",
+          "table": "ai_media_blurb",
+          "columns": [
+            "lang"
+          ]
+        },
+        {
+          "name": "sqlite_autoindex_ai_media_blurb_1",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (tmdb_id, media_type, lang)",
+          "table": "ai_media_blurb",
+          "columns": [
+            "tmdb_id",
+            "media_type",
+            "lang"
+          ]
+        }
+      ],
+      "def": "CREATE TABLE ai_media_blurb (\n\ttmdb_id INTEGER NOT NULL, \n\tmedia_type TEXT NOT NULL, \n\tlang TEXT NOT NULL, \n\tsummary TEXT NOT NULL, \n\ttags TEXT NOT NULL, \n\tmodel TEXT NOT NULL, \n\tcreated_at BIGINT NOT NULL, \n\tPRIMARY KEY (tmdb_id, media_type, lang)\n)"
+    },
+    {
+      "name": "ai_subtitle_cache",
+      "type": "table",
+      "columns": [
+        {
+          "name": "cache_key",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "target_lang",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "model",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "source_format",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "cue_count",
+          "type": "INTEGER",
+          "nullable": false
+        },
+        {
+          "name": "translated_content",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "created_at",
+          "type": "BIGINT",
+          "nullable": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ix_subtitle_cache_lang",
+          "def": "CREATE INDEX ix_subtitle_cache_lang ON ai_subtitle_cache(target_lang)",
+          "table": "ai_subtitle_cache",
+          "columns": [
+            "target_lang"
+          ]
+        },
+        {
+          "name": "ix_subtitle_cache_created",
+          "def": "CREATE INDEX ix_subtitle_cache_created ON ai_subtitle_cache(created_at)",
+          "table": "ai_subtitle_cache",
+          "columns": [
+            "created_at"
+          ]
+        },
+        {
+          "name": "sqlite_autoindex_ai_subtitle_cache_1",
+          "def": "PRIMARY KEY (cache_key)",
+          "table": "ai_subtitle_cache",
+          "columns": [
+            "cache_key"
+          ]
+        }
+      ],
+      "constraints": [
+        {
+          "name": "cache_key",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (cache_key)",
+          "table": "ai_subtitle_cache",
+          "columns": [
+            "cache_key"
+          ]
+        },
+        {
+          "name": "sqlite_autoindex_ai_subtitle_cache_1",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (cache_key)",
+          "table": "ai_subtitle_cache",
+          "columns": [
+            "cache_key"
+          ]
+        }
+      ],
+      "def": "CREATE TABLE ai_subtitle_cache (\n\tcache_key TEXT NOT NULL, \n\ttarget_lang TEXT NOT NULL, \n\tmodel TEXT NOT NULL, \n\tsource_format TEXT NOT NULL, \n\tcue_count INTEGER NOT NULL, \n\ttranslated_content TEXT NOT NULL, \n\tcreated_at BIGINT NOT NULL, \n\tPRIMARY KEY (cache_key)\n)"
+    },
+    {
+      "name": "ai_tmdb_cache",
+      "type": "table",
+      "columns": [
+        {
+          "name": "tmdb_id",
+          "type": "INTEGER",
+          "nullable": true
+        },
+        {
+          "name": "imdb_id",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "media_type",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "title",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "overview",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "genres",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "fetched_at",
+          "type": "INTEGER",
+          "nullable": false
+        },
+        {
+          "name": "embedded_at",
+          "type": "INTEGER",
+          "nullable": true
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ix_ai_tmdb_cache_imdb_id",
+          "def": "CREATE INDEX ix_ai_tmdb_cache_imdb_id ON ai_tmdb_cache(imdb_id)",
+          "table": "ai_tmdb_cache",
+          "columns": [
+            "imdb_id"
+          ]
+        },
+        {
+          "name": "ix_ai_tmdb_cache_embedded_at",
+          "def": "CREATE INDEX ix_ai_tmdb_cache_embedded_at ON ai_tmdb_cache(embedded_at)",
+          "table": "ai_tmdb_cache",
+          "columns": [
+            "embedded_at"
+          ]
+        }
+      ],
+      "constraints": [
+        {
+          "name": "tmdb_id",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (tmdb_id)",
+          "table": "ai_tmdb_cache",
+          "columns": [
+            "tmdb_id"
+          ]
+        },
+        {
+          "name": "-",
+          "type": "CHECK",
+          "def": "CHECK(media_type IN ('movie','tv'))",
+          "table": "ai_tmdb_cache",
+          "columns": [
+            "media_type"
+          ]
+        }
+      ],
+      "def": "CREATE TABLE ai_tmdb_cache (\n            tmdb_id INTEGER PRIMARY KEY,\n            imdb_id TEXT,\n            media_type TEXT NOT NULL CHECK(media_type IN ('movie','tv')),\n            title TEXT,\n            overview TEXT,\n            genres TEXT,\n            fetched_at INTEGER NOT NULL,\n            embedded_at INTEGER\n        )"
+    },
+    {
+      "name": "api_keys",
+      "type": "table",
+      "columns": [
+        {
+          "name": "id",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "key_hash",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "key_prefix",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "label",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "created_at",
+          "type": "BIGINT",
+          "nullable": false
+        },
+        {
+          "name": "expires_at",
+          "type": "BIGINT",
+          "nullable": true
+        },
+        {
+          "name": "revoked_at",
+          "type": "BIGINT",
+          "nullable": true
+        },
+        {
+          "name": "last_used_at",
+          "type": "BIGINT",
+          "nullable": true
+        },
+        {
+          "name": "last_used_ip",
+          "type": "TEXT",
+          "nullable": true
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ix_api_keys_key_hash",
+          "def": "CREATE INDEX ix_api_keys_key_hash ON api_keys (key_hash)",
+          "table": "api_keys",
+          "columns": [
+            "key_hash"
+          ]
+        },
+        {
+          "name": "sqlite_autoindex_api_keys_2",
+          "def": "UNIQUE (key_hash)",
+          "table": "api_keys",
+          "columns": [
+            "key_hash"
+          ]
+        },
+        {
+          "name": "sqlite_autoindex_api_keys_1",
+          "def": "PRIMARY KEY (id)",
+          "table": "api_keys",
+          "columns": [
+            "id"
+          ]
+        }
+      ],
+      "constraints": [
+        {
+          "name": "id",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (id)",
+          "table": "api_keys",
+          "columns": [
+            "id"
+          ]
+        },
+        {
+          "name": "sqlite_autoindex_api_keys_2",
+          "type": "UNIQUE",
+          "def": "UNIQUE (key_hash)",
+          "table": "api_keys",
+          "columns": [
+            "key_hash"
+          ]
+        },
+        {
+          "name": "sqlite_autoindex_api_keys_1",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (id)",
+          "table": "api_keys",
+          "columns": [
+            "id"
+          ]
+        }
+      ],
+      "def": "CREATE TABLE api_keys (\n\tid TEXT NOT NULL, \n\tkey_hash TEXT NOT NULL, \n\tkey_prefix TEXT NOT NULL, \n\tlabel TEXT NOT NULL, \n\tcreated_at BIGINT NOT NULL, \n\texpires_at BIGINT, \n\trevoked_at BIGINT, \n\tlast_used_at BIGINT, \n\tlast_used_ip TEXT, \n\tPRIMARY KEY (id), \n\tUNIQUE (key_hash)\n)"
+    },
+    {
+      "name": "download_batch",
+      "type": "table",
+      "columns": [
+        {
+          "name": "id",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "media_type",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "unification_id",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "title",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "server_id",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "rating_key",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "scope",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "total_jobs",
+          "type": "INTEGER",
+          "nullable": false
+        },
+        {
+          "name": "created_at",
+          "type": "BIGINT",
+          "nullable": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "sqlite_autoindex_download_batch_1",
+          "def": "PRIMARY KEY (id)",
+          "table": "download_batch",
+          "columns": [
+            "id"
+          ]
+        }
+      ],
+      "constraints": [
+        {
+          "name": "id",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (id)",
+          "table": "download_batch",
+          "columns": [
+            "id"
+          ]
+        },
+        {
+          "name": "sqlite_autoindex_download_batch_1",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (id)",
+          "table": "download_batch",
+          "columns": [
+            "id"
+          ]
+        }
+      ],
+      "def": "CREATE TABLE download_batch (\n\tid TEXT NOT NULL, \n\tmedia_type TEXT NOT NULL, \n\tunification_id TEXT, \n\ttitle TEXT NOT NULL, \n\tserver_id TEXT NOT NULL, \n\trating_key TEXT NOT NULL, \n\tscope TEXT NOT NULL, \n\ttotal_jobs INTEGER NOT NULL, \n\tcreated_at BIGINT NOT NULL, \n\tPRIMARY KEY (id)\n)"
+    },
+    {
+      "name": "download_job",
+      "type": "table",
+      "columns": [
+        {
+          "name": "id",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "batch_id",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "server_id",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "rating_key",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "media_type",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "unification_id",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "title",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "season",
+          "type": "INTEGER",
+          "nullable": true
+        },
+        {
+          "name": "episode",
+          "type": "INTEGER",
+          "nullable": true
+        },
+        {
+          "name": "dest_path",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "state",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "bytes_total",
+          "type": "BIGINT",
+          "nullable": true
+        },
+        {
+          "name": "bytes_done",
+          "type": "BIGINT",
+          "nullable": false
+        },
+        {
+          "name": "error",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "attempts",
+          "type": "INTEGER",
+          "nullable": false
+        },
+        {
+          "name": "created_at",
+          "type": "BIGINT",
+          "nullable": false
+        },
+        {
+          "name": "updated_at",
+          "type": "BIGINT",
+          "nullable": false
+        },
+        {
+          "name": "started_at",
+          "type": "BIGINT",
+          "nullable": true
+        },
+        {
+          "name": "finished_at",
+          "type": "BIGINT",
+          "nullable": true
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ix_download_job_state",
+          "def": "CREATE INDEX ix_download_job_state ON download_job (state)",
+          "table": "download_job",
+          "columns": [
+            "state"
+          ]
+        },
+        {
+          "name": "ix_download_job_item",
+          "def": "CREATE INDEX ix_download_job_item ON download_job (server_id, rating_key)",
+          "table": "download_job",
+          "columns": [
+            "server_id",
+            "rating_key"
+          ]
+        },
+        {
+          "name": "ix_download_job_created",
+          "def": "CREATE INDEX ix_download_job_created ON download_job (created_at)",
+          "table": "download_job",
+          "columns": [
+            "created_at"
+          ]
+        },
+        {
+          "name": "ix_download_job_batch",
+          "def": "CREATE INDEX ix_download_job_batch ON download_job (batch_id)",
+          "table": "download_job",
+          "columns": [
+            "batch_id"
+          ]
+        },
+        {
+          "name": "sqlite_autoindex_download_job_1",
+          "def": "PRIMARY KEY (id)",
+          "table": "download_job",
+          "columns": [
+            "id"
+          ]
+        }
+      ],
+      "constraints": [
+        {
+          "name": "id",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (id)",
+          "table": "download_job",
+          "columns": [
+            "id"
+          ]
+        },
+        {
+          "name": "sqlite_autoindex_download_job_1",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (id)",
+          "table": "download_job",
+          "columns": [
+            "id"
+          ]
+        }
+      ],
+      "def": "CREATE TABLE download_job (\n\tid TEXT NOT NULL, \n\tbatch_id TEXT, \n\tserver_id TEXT NOT NULL, \n\trating_key TEXT NOT NULL, \n\tmedia_type TEXT NOT NULL, \n\tunification_id TEXT, \n\ttitle TEXT NOT NULL, \n\tseason INTEGER, \n\tepisode INTEGER, \n\tdest_path TEXT NOT NULL, \n\tstate TEXT NOT NULL, \n\tbytes_total BIGINT, \n\tbytes_done BIGINT NOT NULL, \n\terror TEXT, \n\tattempts INTEGER NOT NULL, \n\tcreated_at BIGINT NOT NULL, \n\tupdated_at BIGINT NOT NULL, \n\tstarted_at BIGINT, \n\tfinished_at BIGINT, \n\tPRIMARY KEY (id)\n)"
+    },
+    {
+      "name": "enrichment_queue",
+      "type": "table",
+      "columns": [
+        {
+          "name": "id",
+          "type": "INTEGER",
+          "nullable": false
+        },
+        {
+          "name": "rating_key",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "server_id",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "media_type",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "title",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "year",
+          "type": "INTEGER",
+          "nullable": true
+        },
+        {
+          "name": "status",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "attempts",
+          "type": "INTEGER",
+          "nullable": false
+        },
+        {
+          "name": "last_error",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "created_at",
+          "type": "BIGINT",
+          "nullable": false
+        },
+        {
+          "name": "processed_at",
+          "type": "BIGINT",
+          "nullable": true
+        },
+        {
+          "name": "existing_tmdb_id",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "existing_imdb_id",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "existing_summary",
+          "type": "TEXT",
+          "nullable": true
+        }
+      ],
+      "indexes": [
+        {
+          "name": "uix_enrichment_item",
+          "def": "CREATE UNIQUE INDEX uix_enrichment_item ON enrichment_queue (rating_key, server_id)",
+          "table": "enrichment_queue",
+          "columns": [
+            "rating_key",
+            "server_id"
+          ]
+        },
+        {
+          "name": "ix_enrichment_status",
+          "def": "CREATE INDEX ix_enrichment_status ON enrichment_queue (status)",
+          "table": "enrichment_queue",
+          "columns": [
+            "status"
+          ]
+        }
+      ],
+      "constraints": [
+        {
+          "name": "id",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (id)",
+          "table": "enrichment_queue",
+          "columns": [
+            "id"
+          ]
+        }
+      ],
+      "def": "CREATE TABLE enrichment_queue (\n\tid INTEGER NOT NULL, \n\trating_key TEXT NOT NULL, \n\tserver_id TEXT NOT NULL, \n\tmedia_type TEXT NOT NULL, \n\ttitle TEXT NOT NULL, \n\tyear INTEGER, \n\tstatus TEXT NOT NULL, \n\tattempts INTEGER NOT NULL, \n\tlast_error TEXT, \n\tcreated_at BIGINT NOT NULL, \n\tprocessed_at BIGINT, existing_tmdb_id TEXT, existing_imdb_id TEXT, existing_summary TEXT, \n\tPRIMARY KEY (id)\n)"
+    },
+    {
+      "name": "epg_entries",
+      "type": "table",
+      "columns": [
+        {
+          "name": "id",
+          "type": "INTEGER",
+          "nullable": false
+        },
+        {
+          "name": "server_id",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "epg_channel_id",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "stream_id",
+          "type": "INTEGER",
+          "nullable": true
+        },
+        {
+          "name": "title",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "description",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "start_time",
+          "type": "BIGINT",
+          "nullable": false
+        },
+        {
+          "name": "end_time",
+          "type": "BIGINT",
+          "nullable": false
+        },
+        {
+          "name": "lang",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "fetched_at",
+          "type": "BIGINT",
+          "nullable": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "uix_epg_dedup",
+          "def": "CREATE UNIQUE INDEX uix_epg_dedup ON epg_entries (server_id, stream_id, start_time)",
+          "table": "epg_entries",
+          "columns": [
+            "server_id",
+            "stream_id",
+            "start_time"
+          ]
+        },
+        {
+          "name": "ix_epg_time",
+          "def": "CREATE INDEX ix_epg_time ON epg_entries (start_time, end_time)",
+          "table": "epg_entries",
+          "columns": [
+            "start_time",
+            "end_time"
+          ]
+        },
+        {
+          "name": "ix_epg_stream_time",
+          "def": "CREATE INDEX ix_epg_stream_time ON epg_entries (stream_id, start_time, end_time)",
+          "table": "epg_entries",
+          "columns": [
+            "stream_id",
+            "start_time",
+            "end_time"
+          ]
+        },
+        {
+          "name": "ix_epg_stream",
+          "def": "CREATE INDEX ix_epg_stream ON epg_entries (stream_id)",
+          "table": "epg_entries",
+          "columns": [
+            "stream_id"
+          ]
+        },
+        {
+          "name": "ix_epg_server_channel",
+          "def": "CREATE INDEX ix_epg_server_channel ON epg_entries (server_id, epg_channel_id)",
+          "table": "epg_entries",
+          "columns": [
+            "server_id",
+            "epg_channel_id"
+          ]
+        },
+        {
+          "name": "ix_epg_server",
+          "def": "CREATE INDEX ix_epg_server ON epg_entries (server_id)",
+          "table": "epg_entries",
+          "columns": [
+            "server_id"
+          ]
+        },
+        {
+          "name": "ix_epg_channel",
+          "def": "CREATE INDEX ix_epg_channel ON epg_entries (epg_channel_id)",
+          "table": "epg_entries",
+          "columns": [
+            "epg_channel_id"
+          ]
+        }
+      ],
+      "constraints": [
+        {
+          "name": "id",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (id)",
+          "table": "epg_entries",
+          "columns": [
+            "id"
+          ]
+        }
+      ],
+      "def": "CREATE TABLE epg_entries (\n\tid INTEGER NOT NULL, \n\tserver_id TEXT NOT NULL, \n\tepg_channel_id TEXT NOT NULL, \n\tstream_id INTEGER, \n\ttitle TEXT NOT NULL, \n\tdescription TEXT, \n\tstart_time BIGINT NOT NULL, \n\tend_time BIGINT NOT NULL, \n\tlang TEXT, \n\tfetched_at BIGINT NOT NULL, \n\tPRIMARY KEY (id)\n)"
+    },
+    {
+      "name": "live_channels",
+      "type": "table",
+      "columns": [
+        {
+          "name": "stream_id",
+          "type": "INTEGER",
+          "nullable": false
+        },
+        {
+          "name": "server_id",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "name",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "name_sortable",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "stream_icon",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "epg_channel_id",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "category_id",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "container_extension",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "custom_sid",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "tv_archive",
+          "type": "BOOLEAN",
+          "nullable": false
+        },
+        {
+          "name": "tv_archive_duration",
+          "type": "INTEGER",
+          "nullable": false
+        },
+        {
+          "name": "is_adult",
+          "type": "BOOLEAN",
+          "nullable": false
+        },
+        {
+          "name": "is_active",
+          "type": "BOOLEAN",
+          "nullable": false
+        },
+        {
+          "name": "is_in_allowed_categories",
+          "type": "BOOLEAN",
+          "nullable": false
+        },
+        {
+          "name": "added_at",
+          "type": "BIGINT",
+          "nullable": false
+        },
+        {
+          "name": "updated_at",
+          "type": "BIGINT",
+          "nullable": false
+        },
+        {
+          "name": "dto_hash",
+          "type": "TEXT",
+          "nullable": true
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ix_live_channels_visible",
+          "def": "CREATE INDEX ix_live_channels_visible ON live_channels (is_in_allowed_categories)",
+          "table": "live_channels",
+          "columns": [
+            "is_in_allowed_categories"
+          ]
+        },
+        {
+          "name": "ix_live_channels_server_visible",
+          "def": "CREATE INDEX ix_live_channels_server_visible ON live_channels (server_id, is_in_allowed_categories)",
+          "table": "live_channels",
+          "columns": [
+            "server_id",
+            "is_in_allowed_categories"
+          ]
+        },
+        {
+          "name": "ix_live_channels_server_category",
+          "def": "CREATE INDEX ix_live_channels_server_category ON live_channels (server_id, category_id)",
+          "table": "live_channels",
+          "columns": [
+            "server_id",
+            "category_id"
+          ]
+        },
+        {
+          "name": "ix_live_channels_server",
+          "def": "CREATE INDEX ix_live_channels_server ON live_channels (server_id)",
+          "table": "live_channels",
+          "columns": [
+            "server_id"
+          ]
+        },
+        {
+          "name": "ix_live_channels_name",
+          "def": "CREATE INDEX ix_live_channels_name ON live_channels (name_sortable)",
+          "table": "live_channels",
+          "columns": [
+            "name_sortable"
+          ]
+        },
+        {
+          "name": "ix_live_channels_epg",
+          "def": "CREATE INDEX ix_live_channels_epg ON live_channels (epg_channel_id)",
+          "table": "live_channels",
+          "columns": [
+            "epg_channel_id"
+          ]
+        },
+        {
+          "name": "ix_live_channels_category",
+          "def": "CREATE INDEX ix_live_channels_category ON live_channels (category_id)",
+          "table": "live_channels",
+          "columns": [
+            "category_id"
+          ]
+        },
+        {
+          "name": "sqlite_autoindex_live_channels_1",
+          "def": "PRIMARY KEY (stream_id, server_id)",
+          "table": "live_channels",
+          "columns": [
+            "stream_id",
+            "server_id"
+          ]
+        }
+      ],
+      "constraints": [
+        {
+          "name": "stream_id",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (stream_id)",
+          "table": "live_channels",
+          "columns": [
+            "stream_id"
+          ]
+        },
+        {
+          "name": "server_id",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (server_id)",
+          "table": "live_channels",
+          "columns": [
+            "server_id"
+          ]
+        },
+        {
+          "name": "sqlite_autoindex_live_channels_1",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (stream_id, server_id)",
+          "table": "live_channels",
+          "columns": [
+            "stream_id",
+            "server_id"
+          ]
+        }
+      ],
+      "def": "CREATE TABLE live_channels (\n\tstream_id INTEGER NOT NULL, \n\tserver_id TEXT NOT NULL, \n\tname TEXT NOT NULL, \n\tname_sortable TEXT NOT NULL, \n\tstream_icon TEXT, \n\tepg_channel_id TEXT, \n\tcategory_id TEXT, \n\tcontainer_extension TEXT, \n\tcustom_sid TEXT, \n\ttv_archive BOOLEAN NOT NULL, \n\ttv_archive_duration INTEGER NOT NULL, \n\tis_adult BOOLEAN NOT NULL, \n\tis_active BOOLEAN NOT NULL, \n\tis_in_allowed_categories BOOLEAN NOT NULL, \n\tadded_at BIGINT NOT NULL, \n\tupdated_at BIGINT NOT NULL, \n\tdto_hash TEXT, \n\tPRIMARY KEY (stream_id, server_id)\n)"
+    },
+    {
+      "name": "media",
+      "type": "table",
+      "columns": [
+        {
+          "name": "rating_key",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "server_id",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "filter",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "sort_order",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "library_section_id",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "title",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "title_sortable",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "page_offset",
+          "type": "INTEGER",
+          "nullable": false
+        },
+        {
+          "name": "type",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "thumb_url",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "art_url",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "year",
+          "type": "INTEGER",
+          "nullable": true
+        },
+        {
+          "name": "duration",
+          "type": "INTEGER",
+          "nullable": true
+        },
+        {
+          "name": "summary",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "genres",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "content_rating",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "view_offset",
+          "type": "INTEGER",
+          "nullable": false
+        },
+        {
+          "name": "view_count",
+          "type": "INTEGER",
+          "nullable": false
+        },
+        {
+          "name": "last_viewed_at",
+          "type": "BIGINT",
+          "nullable": false
+        },
+        {
+          "name": "parent_title",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "parent_rating_key",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "parent_index",
+          "type": "INTEGER",
+          "nullable": true
+        },
+        {
+          "name": "grandparent_title",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "grandparent_rating_key",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "index",
+          "type": "INTEGER",
+          "nullable": true
+        },
+        {
+          "name": "parent_thumb",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "grandparent_thumb",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "media_parts",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "guid",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "imdb_id",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "tmdb_id",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "rating",
+          "type": "FLOAT",
+          "nullable": true
+        },
+        {
+          "name": "audience_rating",
+          "type": "FLOAT",
+          "nullable": true
+        },
+        {
+          "name": "unification_id",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "history_group_key",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "server_ids",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "rating_keys",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "added_at",
+          "type": "BIGINT",
+          "nullable": false
+        },
+        {
+          "name": "updated_at",
+          "type": "BIGINT",
+          "nullable": false
+        },
+        {
+          "name": "display_rating",
+          "type": "FLOAT",
+          "nullable": false
+        },
+        {
+          "name": "scraped_rating",
+          "type": "FLOAT",
+          "nullable": true
+        },
+        {
+          "name": "resolved_thumb_url",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "resolved_art_url",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "resolved_base_url",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "alternative_thumb_urls",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "stream_error_count",
+          "type": "INTEGER",
+          "nullable": false
+        },
+        {
+          "name": "last_stream_check",
+          "type": "BIGINT",
+          "nullable": true
+        },
+        {
+          "name": "is_broken",
+          "type": "BOOLEAN",
+          "nullable": false
+        },
+        {
+          "name": "tmdb_match_confidence",
+          "type": "FLOAT",
+          "nullable": true
+        },
+        {
+          "name": "content_hash",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "dto_hash",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "is_in_allowed_categories",
+          "type": "INTEGER",
+          "nullable": false,
+          "default": "1"
+        },
+        {
+          "name": "cast",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "is_adult",
+          "type": "INTEGER",
+          "nullable": false,
+          "default": "0"
+        },
+        {
+          "name": "original_title",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "tagline",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "premiered",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "status",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "studio",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "country",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "tvdb_id",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "wikidata_id",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "imdb_rating",
+          "type": "REAL",
+          "nullable": true
+        },
+        {
+          "name": "imdb_votes",
+          "type": "INTEGER",
+          "nullable": true
+        },
+        {
+          "name": "tmdb_rating",
+          "type": "REAL",
+          "nullable": true
+        },
+        {
+          "name": "tmdb_votes",
+          "type": "INTEGER",
+          "nullable": true
+        },
+        {
+          "name": "cast_json",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "file_size",
+          "type": "BIGINT",
+          "nullable": true
+        }
+      ],
+      "indexes": [
+        {
+          "name": "uix_media_pagination",
+          "def": "CREATE UNIQUE INDEX uix_media_pagination ON media (server_id, library_section_id, filter, sort_order, page_offset)",
+          "table": "media",
+          "columns": [
+            "server_id",
+            "library_section_id",
+            "filter",
+            "sort_order",
+            "page_offset"
+          ]
+        },
+        {
+          "name": "ix_media_updated",
+          "def": "CREATE INDEX ix_media_updated ON media (updated_at)",
+          "table": "media",
+          "columns": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "ix_media_unification",
+          "def": "CREATE INDEX ix_media_unification ON media (unification_id)",
+          "table": "media",
+          "columns": [
+            "unification_id"
+          ]
+        },
+        {
+          "name": "ix_media_type_rating",
+          "def": "CREATE INDEX ix_media_type_rating ON media (type, display_rating)",
+          "table": "media",
+          "columns": [
+            "type",
+            "display_rating"
+          ]
+        },
+        {
+          "name": "ix_media_type_added",
+          "def": "CREATE INDEX ix_media_type_added ON media (type, added_at)",
+          "table": "media",
+          "columns": [
+            "type",
+            "added_at"
+          ]
+        },
+        {
+          "name": "ix_media_tvdb",
+          "def": "CREATE INDEX ix_media_tvdb ON media(tvdb_id)",
+          "table": "media",
+          "columns": [
+            "tvdb_id"
+          ]
+        },
+        {
+          "name": "ix_media_tmdb",
+          "def": "CREATE INDEX ix_media_tmdb ON media (tmdb_id)",
+          "table": "media",
+          "columns": [
+            "tmdb_id"
+          ]
+        },
+        {
+          "name": "ix_media_title_sort",
+          "def": "CREATE INDEX ix_media_title_sort ON media (title_sortable)",
+          "table": "media",
+          "columns": [
+            "title_sortable"
+          ]
+        },
+        {
+          "name": "ix_media_stream_validation",
+          "def": "CREATE INDEX ix_media_stream_validation\n                ON media(server_id, type, is_in_allowed_categories, last_stream_check)\n            ",
+          "table": "media",
+          "columns": [
+            "server_id",
+            "type",
+            "is_in_allowed_categories",
+            "last_stream_check"
+          ]
+        },
+        {
+          "name": "ix_media_server_visible",
+          "def": "CREATE INDEX ix_media_server_visible ON media(server_id, is_in_allowed_categories)",
+          "table": "media",
+          "columns": [
+            "server_id",
+            "is_in_allowed_categories"
+          ]
+        },
+        {
+          "name": "ix_media_server_type",
+          "def": "CREATE INDEX ix_media_server_type ON media(server_id, type)",
+          "table": "media",
+          "columns": [
+            "server_id",
+            "type"
+          ]
+        },
+        {
+          "name": "ix_media_server_lib",
+          "def": "CREATE INDEX ix_media_server_lib ON media (server_id, library_section_id)",
+          "table": "media",
+          "columns": [
+            "server_id",
+            "library_section_id"
+          ]
+        },
+        {
+          "name": "ix_media_parent_visible",
+          "def": "CREATE INDEX ix_media_parent_visible ON media(parent_rating_key, is_in_allowed_categories)",
+          "table": "media",
+          "columns": [
+            "parent_rating_key",
+            "is_in_allowed_categories"
+          ]
+        },
+        {
+          "name": "ix_media_parent",
+          "def": "CREATE INDEX ix_media_parent ON media (parent_rating_key)",
+          "table": "media",
+          "columns": [
+            "parent_rating_key"
+          ]
+        },
+        {
+          "name": "ix_media_imdb",
+          "def": "CREATE INDEX ix_media_imdb ON media (imdb_id)",
+          "table": "media",
+          "columns": [
+            "imdb_id"
+          ]
+        },
+        {
+          "name": "ix_media_guid",
+          "def": "CREATE INDEX ix_media_guid ON media (guid)",
+          "table": "media",
+          "columns": [
+            "guid"
+          ]
+        },
+        {
+          "name": "ix_media_grandparent",
+          "def": "CREATE INDEX ix_media_grandparent ON media(grandparent_rating_key)",
+          "table": "media",
+          "columns": [
+            "grandparent_rating_key"
+          ]
+        },
+        {
+          "name": "ix_media_category_visible",
+          "def": "CREATE INDEX ix_media_category_visible\n                ON media(is_in_allowed_categories)\n            ",
+          "table": "media",
+          "columns": [
+            "is_in_allowed_categories"
+          ]
+        },
+        {
+          "name": "ix_media_broken",
+          "def": "CREATE INDEX ix_media_broken ON media (is_broken)",
+          "table": "media",
+          "columns": [
+            "is_broken"
+          ]
+        },
+        {
+          "name": "ix_media_adult",
+          "def": "CREATE INDEX ix_media_adult\n                ON media(is_adult)\n            ",
+          "table": "media",
+          "columns": [
+            "is_adult"
+          ]
+        },
+        {
+          "name": "sqlite_autoindex_media_1",
+          "def": "PRIMARY KEY (rating_key, server_id, filter, sort_order)",
+          "table": "media",
+          "columns": [
+            "rating_key",
+            "server_id",
+            "filter",
+            "sort_order"
+          ]
+        }
+      ],
+      "constraints": [
+        {
+          "name": "rating_key",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (rating_key)",
+          "table": "media",
+          "columns": [
+            "rating_key"
+          ]
+        },
+        {
+          "name": "server_id",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (server_id)",
+          "table": "media",
+          "columns": [
+            "server_id"
+          ]
+        },
+        {
+          "name": "filter",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (filter)",
+          "table": "media",
+          "columns": [
+            "filter"
+          ]
+        },
+        {
+          "name": "sort_order",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (sort_order)",
+          "table": "media",
+          "columns": [
+            "sort_order"
+          ]
+        },
+        {
+          "name": "sqlite_autoindex_media_1",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (rating_key, server_id, filter, sort_order)",
+          "table": "media",
+          "columns": [
+            "rating_key",
+            "server_id",
+            "filter",
+            "sort_order"
+          ]
+        }
+      ],
+      "def": "CREATE TABLE media (\n\trating_key TEXT NOT NULL, \n\tserver_id TEXT NOT NULL, \n\tfilter TEXT NOT NULL, \n\tsort_order TEXT NOT NULL, \n\tlibrary_section_id TEXT NOT NULL, \n\ttitle TEXT NOT NULL, \n\ttitle_sortable TEXT NOT NULL, \n\tpage_offset INTEGER NOT NULL, \n\ttype TEXT NOT NULL, \n\tthumb_url TEXT, \n\tart_url TEXT, \n\tyear INTEGER, \n\tduration INTEGER, \n\tsummary TEXT, \n\tgenres TEXT, \n\tcontent_rating TEXT, \n\tview_offset INTEGER NOT NULL, \n\tview_count INTEGER NOT NULL, \n\tlast_viewed_at BIGINT NOT NULL, \n\tparent_title TEXT, \n\tparent_rating_key TEXT, \n\tparent_index INTEGER, \n\tgrandparent_title TEXT, \n\tgrandparent_rating_key TEXT, \n\t\"index\" INTEGER, \n\tparent_thumb TEXT, \n\tgrandparent_thumb TEXT, \n\tmedia_parts TEXT NOT NULL, \n\tguid TEXT, \n\timdb_id TEXT, \n\ttmdb_id TEXT, \n\trating FLOAT, \n\taudience_rating FLOAT, \n\tunification_id TEXT NOT NULL, \n\thistory_group_key TEXT NOT NULL, \n\tserver_ids TEXT, \n\trating_keys TEXT, \n\tadded_at BIGINT NOT NULL, \n\tupdated_at BIGINT NOT NULL, \n\tdisplay_rating FLOAT NOT NULL, \n\tscraped_rating FLOAT, \n\tresolved_thumb_url TEXT, \n\tresolved_art_url TEXT, \n\tresolved_base_url TEXT, \n\talternative_thumb_urls TEXT, \n\tstream_error_count INTEGER NOT NULL, \n\tlast_stream_check BIGINT, \n\tis_broken BOOLEAN NOT NULL, \n\ttmdb_match_confidence FLOAT, content_hash TEXT, dto_hash TEXT, is_in_allowed_categories INTEGER NOT NULL DEFAULT 1, \"cast\" TEXT, is_adult INTEGER NOT NULL DEFAULT 0, original_title TEXT, tagline TEXT, premiered TEXT, status TEXT, studio TEXT, country TEXT, tvdb_id TEXT, wikidata_id TEXT, imdb_rating REAL, imdb_votes INTEGER, tmdb_rating REAL, tmdb_votes INTEGER, cast_json TEXT, file_size BIGINT, \n\tPRIMARY KEY (rating_key, server_id, filter, sort_order)\n)"
+    },
+    {
+      "name": "media_group",
+      "type": "table",
+      "columns": [
+        {
+          "name": "media_type",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "group_key",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "sort_added_at",
+          "type": "BIGINT",
+          "nullable": false
+        },
+        {
+          "name": "version_count",
+          "type": "INTEGER",
+          "nullable": false
+        },
+        {
+          "name": "built_at",
+          "type": "BIGINT",
+          "nullable": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ix_media_group_type_sort",
+          "def": "CREATE INDEX ix_media_group_type_sort ON media_group (media_type, sort_added_at)",
+          "table": "media_group",
+          "columns": [
+            "media_type",
+            "sort_added_at"
+          ]
+        },
+        {
+          "name": "sqlite_autoindex_media_group_1",
+          "def": "PRIMARY KEY (media_type, group_key)",
+          "table": "media_group",
+          "columns": [
+            "media_type",
+            "group_key"
+          ]
+        }
+      ],
+      "constraints": [
+        {
+          "name": "media_type",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (media_type)",
+          "table": "media_group",
+          "columns": [
+            "media_type"
+          ]
+        },
+        {
+          "name": "group_key",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (group_key)",
+          "table": "media_group",
+          "columns": [
+            "group_key"
+          ]
+        },
+        {
+          "name": "sqlite_autoindex_media_group_1",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (media_type, group_key)",
+          "table": "media_group",
+          "columns": [
+            "media_type",
+            "group_key"
+          ]
+        }
+      ],
+      "def": "CREATE TABLE media_group (\n\tmedia_type TEXT NOT NULL, \n\tgroup_key TEXT NOT NULL, \n\tsort_added_at BIGINT NOT NULL, \n\tversion_count INTEGER NOT NULL, \n\tbuilt_at BIGINT NOT NULL, \n\tPRIMARY KEY (media_type, group_key)\n)"
+    },
+    {
+      "name": "media_group_member",
+      "type": "table",
+      "columns": [
+        {
+          "name": "media_type",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "group_key",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "server_id",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "rating_key",
+          "type": "TEXT",
+          "nullable": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "sqlite_autoindex_media_group_member_1",
+          "def": "PRIMARY KEY (media_type, group_key, server_id, rating_key)",
+          "table": "media_group_member",
+          "columns": [
+            "media_type",
+            "group_key",
+            "server_id",
+            "rating_key"
+          ]
+        }
+      ],
+      "constraints": [
+        {
+          "name": "media_type",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (media_type)",
+          "table": "media_group_member",
+          "columns": [
+            "media_type"
+          ]
+        },
+        {
+          "name": "group_key",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (group_key)",
+          "table": "media_group_member",
+          "columns": [
+            "group_key"
+          ]
+        },
+        {
+          "name": "server_id",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (server_id)",
+          "table": "media_group_member",
+          "columns": [
+            "server_id"
+          ]
+        },
+        {
+          "name": "rating_key",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (rating_key)",
+          "table": "media_group_member",
+          "columns": [
+            "rating_key"
+          ]
+        },
+        {
+          "name": "sqlite_autoindex_media_group_member_1",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (media_type, group_key, server_id, rating_key)",
+          "table": "media_group_member",
+          "columns": [
+            "media_type",
+            "group_key",
+            "server_id",
+            "rating_key"
+          ]
+        }
+      ],
+      "def": "CREATE TABLE media_group_member (\n\tmedia_type TEXT NOT NULL, \n\tgroup_key TEXT NOT NULL, \n\tserver_id TEXT NOT NULL, \n\trating_key TEXT NOT NULL, \n\tPRIMARY KEY (media_type, group_key, server_id, rating_key)\n)"
+    },
+    {
+      "name": "omdb_scrape_cache",
+      "type": "table",
+      "columns": [
+        {
+          "name": "imdb_id",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "result",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "payload",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "fetched_at",
+          "type": "BIGINT",
+          "nullable": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ix_omdb_scrape_cache_fetched_at",
+          "def": "CREATE INDEX ix_omdb_scrape_cache_fetched_at ON omdb_scrape_cache (fetched_at)",
+          "table": "omdb_scrape_cache",
+          "columns": [
+            "fetched_at"
+          ]
+        },
+        {
+          "name": "sqlite_autoindex_omdb_scrape_cache_1",
+          "def": "PRIMARY KEY (imdb_id)",
+          "table": "omdb_scrape_cache",
+          "columns": [
+            "imdb_id"
+          ]
+        }
+      ],
+      "constraints": [
+        {
+          "name": "imdb_id",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (imdb_id)",
+          "table": "omdb_scrape_cache",
+          "columns": [
+            "imdb_id"
+          ]
+        },
+        {
+          "name": "sqlite_autoindex_omdb_scrape_cache_1",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (imdb_id)",
+          "table": "omdb_scrape_cache",
+          "columns": [
+            "imdb_id"
+          ]
+        }
+      ],
+      "def": "CREATE TABLE omdb_scrape_cache (\n\timdb_id TEXT NOT NULL, \n\tresult TEXT NOT NULL, \n\tpayload TEXT, \n\tfetched_at BIGINT NOT NULL, \n\tPRIMARY KEY (imdb_id)\n)"
+    },
+    {
+      "name": "plex_media_item",
+      "type": "table",
+      "columns": [
+        {
+          "name": "server_id",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "rating_key",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "type",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "title",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "year",
+          "type": "INTEGER",
+          "nullable": true
+        },
+        {
+          "name": "parent_rating_key",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "grandparent_rating_key",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "parent_index",
+          "type": "INTEGER",
+          "nullable": true
+        },
+        {
+          "name": "index",
+          "type": "INTEGER",
+          "nullable": true
+        },
+        {
+          "name": "imdb_id",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "tmdb_id",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "tvdb_id",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "unification_id",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "genres",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "thumb_url",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "added_at",
+          "type": "BIGINT",
+          "nullable": true
+        },
+        {
+          "name": "height",
+          "type": "INTEGER",
+          "nullable": true
+        },
+        {
+          "name": "width",
+          "type": "INTEGER",
+          "nullable": true
+        },
+        {
+          "name": "video_codec",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "audio_codec",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "container",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "bitrate",
+          "type": "INTEGER",
+          "nullable": true
+        },
+        {
+          "name": "part_key",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "part_size",
+          "type": "BIGINT",
+          "nullable": true
+        },
+        {
+          "name": "duration_ms",
+          "type": "BIGINT",
+          "nullable": true
+        },
+        {
+          "name": "synced_at",
+          "type": "BIGINT",
+          "nullable": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ix_plex_item_type_unif",
+          "def": "CREATE INDEX ix_plex_item_type_unif ON plex_media_item (type, unification_id)",
+          "table": "plex_media_item",
+          "columns": [
+            "type",
+            "unification_id"
+          ]
+        },
+        {
+          "name": "ix_plex_item_type_title",
+          "def": "CREATE INDEX ix_plex_item_type_title ON plex_media_item (type, title)",
+          "table": "plex_media_item",
+          "columns": [
+            "type",
+            "title"
+          ]
+        },
+        {
+          "name": "ix_plex_item_type_added",
+          "def": "CREATE INDEX ix_plex_item_type_added ON plex_media_item (type, added_at)",
+          "table": "plex_media_item",
+          "columns": [
+            "type",
+            "added_at"
+          ]
+        },
+        {
+          "name": "ix_plex_item_show",
+          "def": "CREATE INDEX ix_plex_item_show ON plex_media_item (server_id, grandparent_rating_key)",
+          "table": "plex_media_item",
+          "columns": [
+            "server_id",
+            "grandparent_rating_key"
+          ]
+        },
+        {
+          "name": "sqlite_autoindex_plex_media_item_1",
+          "def": "PRIMARY KEY (server_id, rating_key)",
+          "table": "plex_media_item",
+          "columns": [
+            "server_id",
+            "rating_key"
+          ]
+        }
+      ],
+      "constraints": [
+        {
+          "name": "server_id",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (server_id)",
+          "table": "plex_media_item",
+          "columns": [
+            "server_id"
+          ]
+        },
+        {
+          "name": "rating_key",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (rating_key)",
+          "table": "plex_media_item",
+          "columns": [
+            "rating_key"
+          ]
+        },
+        {
+          "name": "sqlite_autoindex_plex_media_item_1",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (server_id, rating_key)",
+          "table": "plex_media_item",
+          "columns": [
+            "server_id",
+            "rating_key"
+          ]
+        }
+      ],
+      "def": "CREATE TABLE plex_media_item (\n\tserver_id TEXT NOT NULL, \n\trating_key TEXT NOT NULL, \n\ttype TEXT NOT NULL, \n\ttitle TEXT NOT NULL, \n\tyear INTEGER, \n\tparent_rating_key TEXT, \n\tgrandparent_rating_key TEXT, \n\tparent_index INTEGER, \n\t\"index\" INTEGER, \n\timdb_id TEXT, \n\ttmdb_id TEXT, \n\ttvdb_id TEXT, \n\tunification_id TEXT, \n\tgenres TEXT, \n\tthumb_url TEXT, \n\tadded_at BIGINT, \n\theight INTEGER, \n\twidth INTEGER, \n\tvideo_codec TEXT, \n\taudio_codec TEXT, \n\tcontainer TEXT, \n\tbitrate INTEGER, \n\tpart_key TEXT, \n\tpart_size BIGINT, \n\tduration_ms BIGINT, \n\tsynced_at BIGINT NOT NULL, \n\tPRIMARY KEY (server_id, rating_key)\n)"
+    },
+    {
+      "name": "plex_server",
+      "type": "table",
+      "columns": [
+        {
+          "name": "client_identifier",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "name",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "owner_title",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "owned",
+          "type": "BOOLEAN",
+          "nullable": false
+        },
+        {
+          "name": "access_token",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "base_uri",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "is_reachable",
+          "type": "BOOLEAN",
+          "nullable": false
+        },
+        {
+          "name": "last_synced_at",
+          "type": "BIGINT",
+          "nullable": true
+        },
+        {
+          "name": "last_sync_error",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "created_at",
+          "type": "BIGINT",
+          "nullable": false
+        },
+        {
+          "name": "updated_at",
+          "type": "BIGINT",
+          "nullable": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "sqlite_autoindex_plex_server_1",
+          "def": "PRIMARY KEY (client_identifier)",
+          "table": "plex_server",
+          "columns": [
+            "client_identifier"
+          ]
+        }
+      ],
+      "constraints": [
+        {
+          "name": "client_identifier",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (client_identifier)",
+          "table": "plex_server",
+          "columns": [
+            "client_identifier"
+          ]
+        },
+        {
+          "name": "sqlite_autoindex_plex_server_1",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (client_identifier)",
+          "table": "plex_server",
+          "columns": [
+            "client_identifier"
+          ]
+        }
+      ],
+      "def": "CREATE TABLE plex_server (\n\tclient_identifier TEXT NOT NULL, \n\tname TEXT NOT NULL, \n\towner_title TEXT, \n\towned BOOLEAN NOT NULL, \n\taccess_token TEXT, \n\tbase_uri TEXT, \n\tis_reachable BOOLEAN NOT NULL, \n\tlast_synced_at BIGINT, \n\tlast_sync_error TEXT, \n\tcreated_at BIGINT NOT NULL, \n\tupdated_at BIGINT NOT NULL, \n\tPRIMARY KEY (client_identifier)\n)"
+    },
+    {
+      "name": "plex_sync_status",
+      "type": "table",
+      "columns": [
+        {
+          "name": "id",
+          "type": "INTEGER",
+          "nullable": false
+        },
+        {
+          "name": "state",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "started_at",
+          "type": "BIGINT",
+          "nullable": true
+        },
+        {
+          "name": "finished_at",
+          "type": "BIGINT",
+          "nullable": true
+        },
+        {
+          "name": "error",
+          "type": "TEXT",
+          "nullable": true
+        }
+      ],
+      "constraints": [
+        {
+          "name": "id",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (id)",
+          "table": "plex_sync_status",
+          "columns": [
+            "id"
+          ]
+        },
+        {
+          "name": "-",
+          "type": "CHECK",
+          "def": "CHECK (id = 1)",
+          "table": "plex_sync_status",
+          "columns": [
+            "id"
+          ]
+        }
+      ],
+      "def": "CREATE TABLE plex_sync_status (\n\tid INTEGER NOT NULL, \n\tstate TEXT NOT NULL, \n\tstarted_at BIGINT, \n\tfinished_at BIGINT, \n\terror TEXT, \n\tPRIMARY KEY (id), \n\tCONSTRAINT ck_plex_sync_status_singleton CHECK (id = 1)\n)"
+    },
+    {
+      "name": "tmdb_scrape_cache",
+      "type": "table",
+      "columns": [
+        {
+          "name": "cache_key",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "media_type",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "result",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "tmdb_id",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "imdb_id",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "confidence",
+          "type": "FLOAT",
+          "nullable": true
+        },
+        {
+          "name": "payload",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "fetched_at",
+          "type": "BIGINT",
+          "nullable": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ix_scrape_cache_fetched_at",
+          "def": "CREATE INDEX ix_scrape_cache_fetched_at ON tmdb_scrape_cache (fetched_at)",
+          "table": "tmdb_scrape_cache",
+          "columns": [
+            "fetched_at"
+          ]
+        },
+        {
+          "name": "sqlite_autoindex_tmdb_scrape_cache_1",
+          "def": "PRIMARY KEY (cache_key)",
+          "table": "tmdb_scrape_cache",
+          "columns": [
+            "cache_key"
+          ]
+        }
+      ],
+      "constraints": [
+        {
+          "name": "cache_key",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (cache_key)",
+          "table": "tmdb_scrape_cache",
+          "columns": [
+            "cache_key"
+          ]
+        },
+        {
+          "name": "sqlite_autoindex_tmdb_scrape_cache_1",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (cache_key)",
+          "table": "tmdb_scrape_cache",
+          "columns": [
+            "cache_key"
+          ]
+        }
+      ],
+      "def": "CREATE TABLE tmdb_scrape_cache (\n\tcache_key TEXT NOT NULL, \n\tmedia_type TEXT NOT NULL, \n\tresult TEXT NOT NULL, \n\ttmdb_id TEXT, \n\timdb_id TEXT, \n\tconfidence FLOAT, \n\tpayload TEXT, \n\tfetched_at BIGINT NOT NULL, \n\tPRIMARY KEY (cache_key)\n)"
+    },
+    {
+      "name": "tv_auth_sessions",
+      "type": "table",
+      "columns": [
+        {
+          "name": "id",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "device_code",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "user_code",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "status",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "payload_encrypted",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "payload_delivered",
+          "type": "BOOLEAN",
+          "nullable": false
+        },
+        {
+          "name": "device_name",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "created_at",
+          "type": "BIGINT",
+          "nullable": false
+        },
+        {
+          "name": "expires_at",
+          "type": "BIGINT",
+          "nullable": false
+        },
+        {
+          "name": "approved_at",
+          "type": "BIGINT",
+          "nullable": true
+        },
+        {
+          "name": "completed_at",
+          "type": "BIGINT",
+          "nullable": true
+        }
+      ],
+      "indexes": [
+        {
+          "name": "uix_tv_auth_user_code",
+          "def": "CREATE UNIQUE INDEX uix_tv_auth_user_code ON tv_auth_sessions (user_code)",
+          "table": "tv_auth_sessions",
+          "columns": [
+            "user_code"
+          ]
+        },
+        {
+          "name": "uix_tv_auth_device_code",
+          "def": "CREATE UNIQUE INDEX uix_tv_auth_device_code ON tv_auth_sessions (device_code)",
+          "table": "tv_auth_sessions",
+          "columns": [
+            "device_code"
+          ]
+        },
+        {
+          "name": "ix_tv_auth_status",
+          "def": "CREATE INDEX ix_tv_auth_status ON tv_auth_sessions (status)",
+          "table": "tv_auth_sessions",
+          "columns": [
+            "status"
+          ]
+        },
+        {
+          "name": "ix_tv_auth_expires",
+          "def": "CREATE INDEX ix_tv_auth_expires ON tv_auth_sessions (expires_at)",
+          "table": "tv_auth_sessions",
+          "columns": [
+            "expires_at"
+          ]
+        },
+        {
+          "name": "sqlite_autoindex_tv_auth_sessions_1",
+          "def": "PRIMARY KEY (id)",
+          "table": "tv_auth_sessions",
+          "columns": [
+            "id"
+          ]
+        }
+      ],
+      "constraints": [
+        {
+          "name": "id",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (id)",
+          "table": "tv_auth_sessions",
+          "columns": [
+            "id"
+          ]
+        },
+        {
+          "name": "sqlite_autoindex_tv_auth_sessions_1",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (id)",
+          "table": "tv_auth_sessions",
+          "columns": [
+            "id"
+          ]
+        }
+      ],
+      "def": "CREATE TABLE tv_auth_sessions (\n\tid TEXT NOT NULL, \n\tdevice_code TEXT NOT NULL, \n\tuser_code TEXT NOT NULL, \n\tstatus TEXT NOT NULL, \n\tpayload_encrypted TEXT, \n\tpayload_delivered BOOLEAN NOT NULL, \n\tdevice_name TEXT, \n\tcreated_at BIGINT NOT NULL, \n\texpires_at BIGINT NOT NULL, \n\tapproved_at BIGINT, \n\tcompleted_at BIGINT, \n\tPRIMARY KEY (id)\n)"
+    },
+    {
+      "name": "xtream_accounts",
+      "type": "table",
+      "columns": [
+        {
+          "name": "id",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "label",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "base_url",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "port",
+          "type": "INTEGER",
+          "nullable": false
+        },
+        {
+          "name": "username",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "password",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "status",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "expiration_date",
+          "type": "BIGINT",
+          "nullable": true
+        },
+        {
+          "name": "max_connections",
+          "type": "INTEGER",
+          "nullable": false
+        },
+        {
+          "name": "allowed_formats",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "server_url",
+          "type": "TEXT",
+          "nullable": true
+        },
+        {
+          "name": "https_port",
+          "type": "INTEGER",
+          "nullable": true
+        },
+        {
+          "name": "last_synced_at",
+          "type": "BIGINT",
+          "nullable": false
+        },
+        {
+          "name": "is_active",
+          "type": "BOOLEAN",
+          "nullable": false
+        },
+        {
+          "name": "created_at",
+          "type": "BIGINT",
+          "nullable": false
+        },
+        {
+          "name": "category_filter_mode",
+          "type": "TEXT",
+          "nullable": false,
+          "default": "'all'"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "sqlite_autoindex_xtream_accounts_1",
+          "def": "PRIMARY KEY (id)",
+          "table": "xtream_accounts",
+          "columns": [
+            "id"
+          ]
+        }
+      ],
+      "constraints": [
+        {
+          "name": "id",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (id)",
+          "table": "xtream_accounts",
+          "columns": [
+            "id"
+          ]
+        },
+        {
+          "name": "sqlite_autoindex_xtream_accounts_1",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (id)",
+          "table": "xtream_accounts",
+          "columns": [
+            "id"
+          ]
+        }
+      ],
+      "def": "CREATE TABLE xtream_accounts (\n\tid TEXT NOT NULL, \n\tlabel TEXT NOT NULL, \n\tbase_url TEXT NOT NULL, \n\tport INTEGER NOT NULL, \n\tusername TEXT NOT NULL, \n\tpassword TEXT NOT NULL, \n\tstatus TEXT NOT NULL, \n\texpiration_date BIGINT, \n\tmax_connections INTEGER NOT NULL, \n\tallowed_formats TEXT NOT NULL, \n\tserver_url TEXT, \n\thttps_port INTEGER, \n\tlast_synced_at BIGINT NOT NULL, \n\tis_active BOOLEAN NOT NULL, \n\tcreated_at BIGINT NOT NULL, category_filter_mode TEXT NOT NULL DEFAULT 'all', \n\tPRIMARY KEY (id)\n)"
+    },
+    {
+      "name": "xtream_categories",
+      "type": "table",
+      "columns": [
+        {
+          "name": "id",
+          "type": "INTEGER",
+          "nullable": false
+        },
+        {
+          "name": "account_id",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "category_id",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "category_type",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "category_name",
+          "type": "TEXT",
+          "nullable": false
+        },
+        {
+          "name": "is_allowed",
+          "type": "BOOLEAN",
+          "nullable": false
+        },
+        {
+          "name": "last_fetched_at",
+          "type": "BIGINT",
+          "nullable": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "uix_xtream_categories_item",
+          "def": "CREATE UNIQUE INDEX uix_xtream_categories_item ON xtream_categories (account_id, category_id, category_type)",
+          "table": "xtream_categories",
+          "columns": [
+            "account_id",
+            "category_id",
+            "category_type"
+          ]
+        },
+        {
+          "name": "ix_xtream_categories_type",
+          "def": "CREATE INDEX ix_xtream_categories_type ON xtream_categories (category_type)",
+          "table": "xtream_categories",
+          "columns": [
+            "category_type"
+          ]
+        },
+        {
+          "name": "ix_xtream_categories_account",
+          "def": "CREATE INDEX ix_xtream_categories_account ON xtream_categories (account_id)",
+          "table": "xtream_categories",
+          "columns": [
+            "account_id"
+          ]
+        }
+      ],
+      "constraints": [
+        {
+          "name": "id",
+          "type": "PRIMARY KEY",
+          "def": "PRIMARY KEY (id)",
+          "table": "xtream_categories",
+          "columns": [
+            "id"
+          ]
+        }
+      ],
+      "def": "CREATE TABLE xtream_categories (\n\tid INTEGER NOT NULL, \n\taccount_id TEXT NOT NULL, \n\tcategory_id TEXT NOT NULL, \n\tcategory_type TEXT NOT NULL, \n\tcategory_name TEXT NOT NULL, \n\tis_allowed BOOLEAN NOT NULL, \n\tlast_fetched_at BIGINT NOT NULL, \n\tPRIMARY KEY (id)\n)"
+    }
+  ],
+  "driver": {
+    "name": "sqlite",
+    "database_version": "3.53.4"
+  }
+}

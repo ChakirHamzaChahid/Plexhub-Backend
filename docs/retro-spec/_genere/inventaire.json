@@ -1,0 +1,1438 @@
+{
+ "endpoints": [
+  {
+   "method": "GET",
+   "path": "/api/accounts",
+   "fun": "list_accounts",
+   "module": "accounts",
+   "guard": "X-API-Key",
+   "ref": "app/api/accounts.py:23"
+  },
+  {
+   "method": "POST",
+   "path": "/api/accounts",
+   "fun": "create_account",
+   "module": "accounts",
+   "guard": "X-API-Key",
+   "ref": "app/api/accounts.py:29"
+  },
+  {
+   "method": "PUT",
+   "path": "/api/accounts/{account_id}",
+   "fun": "update_account",
+   "module": "accounts",
+   "guard": "X-API-Key",
+   "ref": "app/api/accounts.py:63"
+  },
+  {
+   "method": "DELETE",
+   "path": "/api/accounts/{account_id}",
+   "fun": "delete_account",
+   "module": "accounts",
+   "guard": "X-API-Key",
+   "ref": "app/api/accounts.py:88"
+  },
+  {
+   "method": "POST",
+   "path": "/api/accounts/{account_id}/test",
+   "fun": "test_account",
+   "module": "accounts",
+   "guard": "X-API-Key",
+   "ref": "app/api/accounts.py:109"
+  },
+  {
+   "method": "GET",
+   "path": "/admin",
+   "fun": "admin_index",
+   "module": "admin",
+   "guard": "Basic admin",
+   "ref": "app/api/admin.py:132"
+  },
+  {
+   "method": "GET",
+   "path": "/admin/",
+   "fun": "admin_index",
+   "module": "admin",
+   "guard": "Basic admin",
+   "ref": "app/api/admin.py:133"
+  },
+  {
+   "method": "GET",
+   "path": "/admin/catalogue",
+   "fun": "admin_catalogue_fragment",
+   "module": "admin",
+   "guard": "Basic admin",
+   "ref": "app/api/admin.py:158"
+  },
+  {
+   "method": "GET",
+   "path": "/admin/movies",
+   "fun": "admin_movies_fragment",
+   "module": "admin",
+   "guard": "Basic admin",
+   "ref": "app/api/admin.py:176"
+  },
+  {
+   "method": "GET",
+   "path": "/admin/stats",
+   "fun": "admin_stats_fragment",
+   "module": "admin",
+   "guard": "Basic admin",
+   "ref": "app/api/admin.py:205"
+  },
+  {
+   "method": "GET",
+   "path": "/admin/movies/stats",
+   "fun": "admin_stats_fragment",
+   "module": "admin",
+   "guard": "Basic admin",
+   "ref": "app/api/admin.py:206"
+  },
+  {
+   "method": "POST",
+   "path": "/admin/movies/{rating_key}/ids",
+   "fun": "admin_update_ids",
+   "module": "admin",
+   "guard": "Basic admin",
+   "ref": "app/api/admin.py:213"
+  },
+  {
+   "method": "POST",
+   "path": "/admin/movies/{rating_key}/rescrape",
+   "fun": "admin_rescrape",
+   "module": "admin",
+   "guard": "Basic admin",
+   "ref": "app/api/admin.py:261"
+  },
+  {
+   "method": "POST",
+   "path": "/admin/media/{server_id}/{rating_key}/apply",
+   "fun": "admin_media_apply",
+   "module": "admin",
+   "guard": "Basic admin",
+   "ref": "app/api/admin.py:299"
+  },
+  {
+   "method": "POST",
+   "path": "/admin/media/{server_id}/{rating_key}/unlock",
+   "fun": "admin_media_unlock",
+   "module": "admin",
+   "guard": "Basic admin",
+   "ref": "app/api/admin.py:421"
+  },
+  {
+   "method": "POST",
+   "path": "/admin/media/{server_id}/{rating_key}/clear",
+   "fun": "admin_media_clear",
+   "module": "admin",
+   "guard": "Basic admin",
+   "ref": "app/api/admin.py:440"
+  },
+  {
+   "method": "POST",
+   "path": "/admin/media/{server_id}/{rating_key}/rescrape",
+   "fun": "admin_media_rescrape",
+   "module": "admin",
+   "guard": "Basic admin",
+   "ref": "app/api/admin.py:462"
+  },
+  {
+   "method": "GET",
+   "path": "/admin/media/{server_id}/{rating_key}/poster",
+   "fun": "admin_media_poster",
+   "module": "admin",
+   "guard": "Basic admin",
+   "ref": "app/api/admin.py:492"
+  },
+  {
+   "method": "GET",
+   "path": "/admin/media/{server_id}/{rating_key}/scrape",
+   "fun": "admin_media_scrape_panel",
+   "module": "admin",
+   "guard": "Basic admin",
+   "ref": "app/api/admin.py:534"
+  },
+  {
+   "method": "GET",
+   "path": "/admin/media/{server_id}/{rating_key}/candidates",
+   "fun": "admin_media_candidates",
+   "module": "admin",
+   "guard": "Basic admin",
+   "ref": "app/api/admin.py:566"
+  },
+  {
+   "method": "POST",
+   "path": "/admin/media/{server_id}/{rating_key}/lookup",
+   "fun": "admin_media_lookup",
+   "module": "admin",
+   "guard": "Basic admin",
+   "ref": "app/api/admin.py:600"
+  },
+  {
+   "method": "GET",
+   "path": "/admin/review",
+   "fun": "admin_review_list",
+   "module": "admin",
+   "guard": "Basic admin",
+   "ref": "app/api/admin.py:657"
+  },
+  {
+   "method": "POST",
+   "path": "/admin/review/{server_id}/{rating_key}/apply",
+   "fun": "admin_review_apply",
+   "module": "admin",
+   "guard": "Basic admin",
+   "ref": "app/api/admin.py:672"
+  },
+  {
+   "method": "POST",
+   "path": "/admin/review/{server_id}/{rating_key}/dismiss",
+   "fun": "admin_review_dismiss",
+   "module": "admin",
+   "guard": "Basic admin",
+   "ref": "app/api/admin.py:730"
+  },
+  {
+   "method": "POST",
+   "path": "/admin/scrape-batch",
+   "fun": "admin_scrape_batch_start",
+   "module": "admin",
+   "guard": "Basic admin",
+   "ref": "app/api/admin.py:749"
+  },
+  {
+   "method": "GET",
+   "path": "/admin/scrape-batch/status",
+   "fun": "admin_scrape_batch_status",
+   "module": "admin",
+   "guard": "Basic admin",
+   "ref": "app/api/admin.py:776"
+  },
+  {
+   "method": "POST",
+   "path": "/admin/scrape-batch/{job_id}/cancel",
+   "fun": "admin_scrape_batch_cancel",
+   "module": "admin",
+   "guard": "Basic admin",
+   "ref": "app/api/admin.py:787"
+  },
+  {
+   "method": "GET",
+   "path": "/admin/import-nfo",
+   "fun": "admin_import_nfo_form",
+   "module": "admin",
+   "guard": "Basic admin",
+   "ref": "app/api/admin.py:798"
+  },
+  {
+   "method": "POST",
+   "path": "/admin/import-nfo",
+   "fun": "admin_import_nfo_run",
+   "module": "admin",
+   "guard": "Basic admin",
+   "ref": "app/api/admin.py:815"
+  },
+  {
+   "method": "GET",
+   "path": "/admin/keys",
+   "fun": "admin_keys",
+   "module": "admin",
+   "guard": "Basic admin",
+   "ref": "app/api/admin.py:902"
+  },
+  {
+   "method": "GET",
+   "path": "/admin/keys/table",
+   "fun": "admin_keys_table",
+   "module": "admin",
+   "guard": "Basic admin",
+   "ref": "app/api/admin.py:909"
+  },
+  {
+   "method": "POST",
+   "path": "/admin/keys",
+   "fun": "admin_keys_create",
+   "module": "admin",
+   "guard": "Basic admin",
+   "ref": "app/api/admin.py:916"
+  },
+  {
+   "method": "POST",
+   "path": "/admin/keys/{key_id}/revoke",
+   "fun": "admin_keys_revoke",
+   "module": "admin",
+   "guard": "Basic admin",
+   "ref": "app/api/admin.py:948"
+  },
+  {
+   "method": "GET",
+   "path": "/admin/downloads",
+   "fun": "admin_downloads_index",
+   "module": "admin_downloads",
+   "guard": "Basic admin",
+   "ref": "app/api/admin_downloads.py:156"
+  },
+  {
+   "method": "GET",
+   "path": "/admin/downloads/",
+   "fun": "admin_downloads_index",
+   "module": "admin_downloads",
+   "guard": "Basic admin",
+   "ref": "app/api/admin_downloads.py:157"
+  },
+  {
+   "method": "GET",
+   "path": "/admin/downloads/list",
+   "fun": "admin_downloads_list_fragment",
+   "module": "admin_downloads",
+   "guard": "Basic admin",
+   "ref": "app/api/admin_downloads.py:183"
+  },
+  {
+   "method": "GET",
+   "path": "/admin/downloads/{type}/{unification_id:path}/versions",
+   "fun": "admin_downloads_versions",
+   "module": "admin_downloads",
+   "guard": "Basic admin",
+   "ref": "app/api/admin_downloads.py:220"
+  },
+  {
+   "method": "GET",
+   "path": "/admin/downloads/{type}/{unification_id:path}/episodes",
+   "fun": "admin_downloads_episodes",
+   "module": "admin_downloads",
+   "guard": "Basic admin",
+   "ref": "app/api/admin_downloads.py:288"
+  },
+  {
+   "method": "POST",
+   "path": "/admin/downloads",
+   "fun": "admin_downloads_enqueue",
+   "module": "admin_downloads",
+   "guard": "Basic admin",
+   "ref": "app/api/admin_downloads.py:377"
+  },
+  {
+   "method": "POST",
+   "path": "/admin/downloads/",
+   "fun": "admin_downloads_enqueue",
+   "module": "admin_downloads",
+   "guard": "Basic admin",
+   "ref": "app/api/admin_downloads.py:378"
+  },
+  {
+   "method": "GET",
+   "path": "/admin/downloads/queue",
+   "fun": "admin_downloads_queue",
+   "module": "admin_downloads",
+   "guard": "Basic admin",
+   "ref": "app/api/admin_downloads.py:442"
+  },
+  {
+   "method": "POST",
+   "path": "/admin/downloads/{job_id}/cancel",
+   "fun": "admin_downloads_cancel",
+   "module": "admin_downloads",
+   "guard": "Basic admin",
+   "ref": "app/api/admin_downloads.py:449"
+  },
+  {
+   "method": "POST",
+   "path": "/admin/downloads/{job_id}/retry",
+   "fun": "admin_downloads_retry",
+   "module": "admin_downloads",
+   "guard": "Basic admin",
+   "ref": "app/api/admin_downloads.py:459"
+  },
+  {
+   "method": "POST",
+   "path": "/admin/downloads/clear-finished",
+   "fun": "admin_downloads_clear_finished",
+   "module": "admin_downloads",
+   "guard": "Basic admin",
+   "ref": "app/api/admin_downloads.py:469"
+  },
+  {
+   "method": "GET",
+   "path": "/admin/plex-downloads",
+   "fun": "admin_plex_downloads_index",
+   "module": "admin_plex_downloads",
+   "guard": "Basic admin",
+   "ref": "app/api/admin_plex_downloads.py:171"
+  },
+  {
+   "method": "GET",
+   "path": "/admin/plex-downloads/",
+   "fun": "admin_plex_downloads_index",
+   "module": "admin_plex_downloads",
+   "guard": "Basic admin",
+   "ref": "app/api/admin_plex_downloads.py:172"
+  },
+  {
+   "method": "GET",
+   "path": "/admin/plex-downloads/list",
+   "fun": "admin_plex_downloads_list_fragment",
+   "module": "admin_plex_downloads",
+   "guard": "Basic admin",
+   "ref": "app/api/admin_plex_downloads.py:204"
+  },
+  {
+   "method": "GET",
+   "path": "/admin/plex-downloads/{type}/{unification_id:path}/versions",
+   "fun": "admin_plex_downloads_versions",
+   "module": "admin_plex_downloads",
+   "guard": "Basic admin",
+   "ref": "app/api/admin_plex_downloads.py:234"
+  },
+  {
+   "method": "GET",
+   "path": "/admin/plex-downloads/{type}/{unification_id:path}/episodes",
+   "fun": "admin_plex_downloads_episodes",
+   "module": "admin_plex_downloads",
+   "guard": "Basic admin",
+   "ref": "app/api/admin_plex_downloads.py:278"
+  },
+  {
+   "method": "POST",
+   "path": "/admin/plex-downloads",
+   "fun": "admin_plex_downloads_enqueue",
+   "module": "admin_plex_downloads",
+   "guard": "Basic admin",
+   "ref": "app/api/admin_plex_downloads.py:360"
+  },
+  {
+   "method": "POST",
+   "path": "/admin/plex-downloads/",
+   "fun": "admin_plex_downloads_enqueue",
+   "module": "admin_plex_downloads",
+   "guard": "Basic admin",
+   "ref": "app/api/admin_plex_downloads.py:361"
+  },
+  {
+   "method": "POST",
+   "path": "/admin/plex-downloads/sync",
+   "fun": "admin_plex_downloads_sync",
+   "module": "admin_plex_downloads",
+   "guard": "Basic admin",
+   "ref": "app/api/admin_plex_downloads.py:422"
+  },
+  {
+   "method": "GET",
+   "path": "/admin/plex-downloads/sync/status",
+   "fun": "admin_plex_downloads_sync_status",
+   "module": "admin_plex_downloads",
+   "guard": "Basic admin",
+   "ref": "app/api/admin_plex_downloads.py:454"
+  },
+  {
+   "method": "GET",
+   "path": "/admin/unified-downloads",
+   "fun": "admin_unified_downloads_index",
+   "module": "admin_unified_downloads",
+   "guard": "Basic admin",
+   "ref": "app/api/admin_unified_downloads.py:97"
+  },
+  {
+   "method": "GET",
+   "path": "/admin/unified-downloads/",
+   "fun": "admin_unified_downloads_index",
+   "module": "admin_unified_downloads",
+   "guard": "Basic admin",
+   "ref": "app/api/admin_unified_downloads.py:98"
+  },
+  {
+   "method": "GET",
+   "path": "/admin/unified-downloads/list",
+   "fun": "admin_unified_downloads_list_fragment",
+   "module": "admin_unified_downloads",
+   "guard": "Basic admin",
+   "ref": "app/api/admin_unified_downloads.py:120"
+  },
+  {
+   "method": "POST",
+   "path": "/api/ai/rank",
+   "fun": "rank",
+   "module": "ai",
+   "guard": "X-API-Key",
+   "ref": "app/api/ai.py:320"
+  },
+  {
+   "method": "POST",
+   "path": "/api/ai/rank-multi",
+   "fun": "rank_multi",
+   "module": "ai",
+   "guard": "X-API-Key",
+   "ref": "app/api/ai.py:401"
+  },
+  {
+   "method": "POST",
+   "path": "/api/ai/search",
+   "fun": "search",
+   "module": "ai",
+   "guard": "X-API-Key",
+   "ref": "app/api/ai.py:499"
+  },
+  {
+   "method": "POST",
+   "path": "/api/ai/assistant",
+   "fun": "assistant",
+   "module": "ai",
+   "guard": "X-API-Key",
+   "ref": "app/api/ai.py:622"
+  },
+  {
+   "method": "POST",
+   "path": "/api/ai/embed/rebuild",
+   "fun": "embed_rebuild",
+   "module": "ai",
+   "guard": "X-API-Key",
+   "ref": "app/api/ai.py:713"
+  },
+  {
+   "method": "GET",
+   "path": "/api/ai/embed/jobs/{job_id}",
+   "fun": "embed_job_status",
+   "module": "ai",
+   "guard": "X-API-Key",
+   "ref": "app/api/ai.py:729"
+  },
+  {
+   "method": "GET",
+   "path": "/api/ai/embed/status",
+   "fun": "embed_status",
+   "module": "ai",
+   "guard": "X-API-Key",
+   "ref": "app/api/ai.py:745"
+  },
+  {
+   "method": "POST",
+   "path": "/api/ai/describe",
+   "fun": "describe",
+   "module": "ai",
+   "guard": "X-API-Key",
+   "ref": "app/api/ai.py:860"
+  },
+  {
+   "method": "POST",
+   "path": "/api/ai/chat",
+   "fun": "chat",
+   "module": "ai",
+   "guard": "X-API-Key",
+   "ref": "app/api/ai.py:883"
+  },
+  {
+   "method": "GET",
+   "path": "/api/ai/llm/status",
+   "fun": "llm_status",
+   "module": "ai",
+   "guard": "X-API-Key",
+   "ref": "app/api/ai.py:909"
+  },
+  {
+   "method": "POST",
+   "path": "/api/ai/subtitles/translate",
+   "fun": "translate_subtitle",
+   "module": "ai",
+   "guard": "X-API-Key",
+   "ref": "app/api/ai.py:948"
+  },
+  {
+   "method": "POST",
+   "path": "/api/ai/blurb",
+   "fun": "blurb_generate",
+   "module": "ai",
+   "guard": "X-API-Key",
+   "ref": "app/api/ai.py:1093"
+  },
+  {
+   "method": "GET",
+   "path": "/api/ai/blurb/{tmdb_id}",
+   "fun": "blurb_get",
+   "module": "ai",
+   "guard": "X-API-Key",
+   "ref": "app/api/ai.py:1216"
+  },
+  {
+   "method": "GET",
+   "path": "/api/admin/keys",
+   "fun": "list_api_keys",
+   "module": "api_keys",
+   "guard": "public ?",
+   "ref": "app/api/api_keys.py:68"
+  },
+  {
+   "method": "POST",
+   "path": "/api/admin/keys",
+   "fun": "create_api_key",
+   "module": "api_keys",
+   "guard": "public ?",
+   "ref": "app/api/api_keys.py:74"
+  },
+  {
+   "method": "POST",
+   "path": "/api/admin/keys/{key_id}/revoke",
+   "fun": "revoke_api_key",
+   "module": "api_keys",
+   "guard": "public ?",
+   "ref": "app/api/api_keys.py:91"
+  },
+  {
+   "method": "DELETE",
+   "path": "/api/admin/keys/{key_id}",
+   "fun": "delete_api_key",
+   "module": "api_keys",
+   "guard": "public ?",
+   "ref": "app/api/api_keys.py:100"
+  },
+  {
+   "method": "GET",
+   "path": "/api/accounts/{account_id}/categories",
+   "fun": "list_categories",
+   "module": "categories",
+   "guard": "X-API-Key",
+   "ref": "app/api/categories.py:27"
+  },
+  {
+   "method": "PUT",
+   "path": "/api/accounts/{account_id}/categories",
+   "fun": "update_categories",
+   "module": "categories",
+   "guard": "X-API-Key",
+   "ref": "app/api/categories.py:50"
+  },
+  {
+   "method": "POST",
+   "path": "/api/accounts/{account_id}/categories/refresh",
+   "fun": "refresh_categories",
+   "module": "categories",
+   "guard": "X-API-Key",
+   "ref": "app/api/categories.py:82"
+  },
+  {
+   "method": "GET",
+   "path": "/api/admin/downloads",
+   "fun": "list_downloads",
+   "module": "downloads",
+   "guard": "public ?",
+   "ref": "app/api/downloads.py:40"
+  },
+  {
+   "method": "GET",
+   "path": "/api/admin/downloads/{job_id}",
+   "fun": "get_download",
+   "module": "downloads",
+   "guard": "public ?",
+   "ref": "app/api/downloads.py:56"
+  },
+  {
+   "method": "POST",
+   "path": "/api/admin/enrichment/omdb-backfill",
+   "fun": "start_omdb_backfill",
+   "module": "enrichment",
+   "guard": "public ?",
+   "ref": "app/api/enrichment.py:69"
+  },
+  {
+   "method": "GET",
+   "path": "/api/admin/enrichment/jobs/{job_id}",
+   "fun": "get_omdb_backfill_job",
+   "module": "enrichment",
+   "guard": "public ?",
+   "ref": "app/api/enrichment.py:104"
+  },
+  {
+   "method": "GET",
+   "path": "/api/health",
+   "fun": "health_check",
+   "module": "health",
+   "guard": "public ?",
+   "ref": "app/api/health.py:14"
+  },
+  {
+   "method": "GET",
+   "path": "/api/live/channels",
+   "fun": "list_channels",
+   "module": "live",
+   "guard": "X-API-Key",
+   "ref": "app/api/live.py:28"
+  },
+  {
+   "method": "GET",
+   "path": "/api/live/channels/{stream_id}",
+   "fun": "get_channel",
+   "module": "live",
+   "guard": "X-API-Key",
+   "ref": "app/api/live.py:86"
+  },
+  {
+   "method": "GET",
+   "path": "/api/live/channels/{stream_id}/stream",
+   "fun": "get_channel_stream",
+   "module": "live",
+   "guard": "X-API-Key",
+   "ref": "app/api/live.py:105"
+  },
+  {
+   "method": "GET",
+   "path": "/api/live/channels/{stream_id}/epg",
+   "fun": "get_channel_epg",
+   "module": "live",
+   "guard": "X-API-Key",
+   "ref": "app/api/live.py:143"
+  },
+  {
+   "method": "GET",
+   "path": "/api/live/epg",
+   "fun": "get_epg_now",
+   "module": "live",
+   "guard": "X-API-Key",
+   "ref": "app/api/live.py:201"
+  },
+  {
+   "method": "GET",
+   "path": "/api/media/movies",
+   "fun": "list_movies",
+   "module": "media",
+   "guard": "X-API-Key",
+   "ref": "app/api/media.py:128"
+  },
+  {
+   "method": "GET",
+   "path": "/api/media/movies/stats",
+   "fun": "movies_stats",
+   "module": "media",
+   "guard": "X-API-Key",
+   "ref": "app/api/media.py:164"
+  },
+  {
+   "method": "GET",
+   "path": "/api/media/shows",
+   "fun": "list_shows",
+   "module": "media",
+   "guard": "X-API-Key",
+   "ref": "app/api/media.py:172"
+  },
+  {
+   "method": "GET",
+   "path": "/api/media/episodes",
+   "fun": "list_episodes",
+   "module": "media",
+   "guard": "X-API-Key",
+   "ref": "app/api/media.py:205"
+  },
+  {
+   "method": "GET",
+   "path": "/api/media/movies/unified",
+   "fun": "list_movies_unified",
+   "module": "media",
+   "guard": "X-API-Key",
+   "ref": "app/api/media.py:266"
+  },
+  {
+   "method": "GET",
+   "path": "/api/media/shows/unified",
+   "fun": "list_shows_unified",
+   "module": "media",
+   "guard": "X-API-Key",
+   "ref": "app/api/media.py:333"
+  },
+  {
+   "method": "GET",
+   "path": "/api/media/episodes/unified",
+   "fun": "list_episodes_unified",
+   "module": "media",
+   "guard": "X-API-Key",
+   "ref": "app/api/media.py:394"
+  },
+  {
+   "method": "GET",
+   "path": "/api/media/trailer/resolve",
+   "fun": "resolve_trailer",
+   "module": "media",
+   "guard": "X-API-Key",
+   "ref": "app/api/media.py:440"
+  },
+  {
+   "method": "GET",
+   "path": "/api/media/trailer/file/{cache_key}",
+   "fun": "get_trailer_file",
+   "module": "media",
+   "guard": "X-API-Key",
+   "ref": "app/api/media.py:475"
+  },
+  {
+   "method": "GET",
+   "path": "/api/media/{rating_key}",
+   "fun": "get_media",
+   "module": "media",
+   "guard": "X-API-Key",
+   "ref": "app/api/media.py:506"
+  },
+  {
+   "method": "PATCH",
+   "path": "/api/media/{rating_key}",
+   "fun": "update_media",
+   "module": "media",
+   "guard": "X-API-Key",
+   "ref": "app/api/media.py:518"
+  },
+  {
+   "method": "POST",
+   "path": "/api/media/{rating_key}/rescrape",
+   "fun": "rescrape_media",
+   "module": "media",
+   "guard": "X-API-Key",
+   "ref": "app/api/media.py:540"
+  },
+  {
+   "method": "POST",
+   "path": "/api/plex/generate",
+   "fun": "generate_plex_library",
+   "module": "plex",
+   "guard": "X-API-Key",
+   "ref": "app/api/plex.py:81"
+  },
+  {
+   "method": "GET",
+   "path": "/api/admin/plex-downloads/servers",
+   "fun": "list_plex_servers",
+   "module": "plex_downloads",
+   "guard": "public ?",
+   "ref": "app/api/plex_downloads.py:53"
+  },
+  {
+   "method": "GET",
+   "path": "/api/admin/plex-downloads/catalog",
+   "fun": "list_plex_catalog",
+   "module": "plex_downloads",
+   "guard": "public ?",
+   "ref": "app/api/plex_downloads.py:78"
+  },
+  {
+   "method": "GET",
+   "path": "/api/admin/plex-downloads/catalog/{type}/{unification_id:path}",
+   "fun": "get_plex_catalog_group",
+   "module": "plex_downloads",
+   "guard": "public ?",
+   "ref": "app/api/plex_downloads.py:113"
+  },
+  {
+   "method": "GET",
+   "path": "/api/stream/{rating_key}",
+   "fun": "get_stream",
+   "module": "stream",
+   "guard": "X-API-Key",
+   "ref": "app/api/stream.py:13"
+  },
+  {
+   "method": "POST",
+   "path": "/api/sync/xtream",
+   "fun": "trigger_sync",
+   "module": "sync",
+   "guard": "X-API-Key",
+   "ref": "app/api/sync.py:29"
+  },
+  {
+   "method": "POST",
+   "path": "/api/sync/xtream/all",
+   "fun": "trigger_sync_all",
+   "module": "sync",
+   "guard": "X-API-Key",
+   "ref": "app/api/sync.py:48"
+  },
+  {
+   "method": "DELETE",
+   "path": "/api/sync/cancel/{task_name}",
+   "fun": "cancel_sync",
+   "module": "sync",
+   "guard": "X-API-Key",
+   "ref": "app/api/sync.py:71"
+  },
+  {
+   "method": "POST",
+   "path": "/api/sync/enrichment",
+   "fun": "trigger_enrichment",
+   "module": "sync",
+   "guard": "X-API-Key",
+   "ref": "app/api/sync.py:83"
+  },
+  {
+   "method": "POST",
+   "path": "/api/sync/validate-streams",
+   "fun": "trigger_stream_validation",
+   "module": "sync",
+   "guard": "X-API-Key",
+   "ref": "app/api/sync.py:106"
+  },
+  {
+   "method": "POST",
+   "path": "/api/sync/full-pipeline",
+   "fun": "trigger_full_pipeline",
+   "module": "sync",
+   "guard": "X-API-Key",
+   "ref": "app/api/sync.py:129"
+  },
+  {
+   "method": "GET",
+   "path": "/api/sync/status/{job_id}",
+   "fun": "get_sync_status",
+   "module": "sync",
+   "guard": "X-API-Key",
+   "ref": "app/api/sync.py:181"
+  },
+  {
+   "method": "GET",
+   "path": "/api/sync/jobs",
+   "fun": "list_sync_jobs",
+   "module": "sync",
+   "guard": "X-API-Key",
+   "ref": "app/api/sync.py:209"
+  },
+  {
+   "method": "POST",
+   "path": "/api/tv-auth/start",
+   "fun": "start",
+   "module": "tv_auth",
+   "guard": "public ?",
+   "ref": "app/api/tv_auth.py:222"
+  },
+  {
+   "method": "POST",
+   "path": "/api/tv-auth/approve",
+   "fun": "approve",
+   "module": "tv_auth",
+   "guard": "public ?",
+   "ref": "app/api/tv_auth.py:382"
+  },
+  {
+   "method": "GET",
+   "path": "/api/tv-auth/status",
+   "fun": "get_status",
+   "module": "tv_auth",
+   "guard": "public ?",
+   "ref": "app/api/tv_auth.py:451"
+  },
+  {
+   "method": "POST",
+   "path": "/api/tv-auth/complete",
+   "fun": "complete",
+   "module": "tv_auth",
+   "guard": "public ?",
+   "ref": "app/api/tv_auth.py:557"
+  }
+ ],
+ "include_router": {
+  "health": {
+   "prefix": "/api",
+   "guard": "",
+   "ref": "app/main.py:635"
+  },
+  "accounts": {
+   "prefix": "/api",
+   "guard": "X-API-Key",
+   "ref": "app/main.py:638"
+  },
+  "categories": {
+   "prefix": "/api",
+   "guard": "X-API-Key",
+   "ref": "app/main.py:639"
+  },
+  "live": {
+   "prefix": "/api",
+   "guard": "X-API-Key",
+   "ref": "app/main.py:640"
+  },
+  "media": {
+   "prefix": "/api",
+   "guard": "X-API-Key",
+   "ref": "app/main.py:641"
+  },
+  "stream": {
+   "prefix": "/api",
+   "guard": "X-API-Key",
+   "ref": "app/main.py:642"
+  },
+  "sync": {
+   "prefix": "/api",
+   "guard": "X-API-Key",
+   "ref": "app/main.py:643"
+  },
+  "plex": {
+   "prefix": "/api",
+   "guard": "X-API-Key",
+   "ref": "app/main.py:644"
+  },
+  "tv_auth": {
+   "prefix": "/api",
+   "guard": "",
+   "ref": "app/main.py:647"
+  },
+  "admin": {
+   "prefix": "",
+   "guard": "Basic admin",
+   "ref": "app/main.py:653"
+  },
+  "admin_downloads": {
+   "prefix": "",
+   "guard": "Basic admin",
+   "ref": "app/main.py:658"
+  },
+  "admin_plex_downloads": {
+   "prefix": "",
+   "guard": "Basic admin",
+   "ref": "app/main.py:663"
+  },
+  "admin_unified_downloads": {
+   "prefix": "",
+   "guard": "Basic admin",
+   "ref": "app/main.py:668"
+  },
+  "ai": {
+   "prefix": "",
+   "guard": "",
+   "ref": "app/main.py:708"
+  },
+  "api_keys": {
+   "prefix": "",
+   "guard": "",
+   "ref": "app/main.py:709"
+  },
+  "downloads": {
+   "prefix": "",
+   "guard": "",
+   "ref": "app/main.py:710"
+  },
+  "plex_downloads": {
+   "prefix": "",
+   "guard": "",
+   "ref": "app/main.py:711"
+  },
+  "enrichment": {
+   "prefix": "",
+   "guard": "",
+   "ref": "app/main.py:712"
+  },
+  "dav": {
+   "prefix": "",
+   "guard": "",
+   "ref": "app/main.py:722"
+  }
+ },
+ "scheduled_jobs": [
+  {
+   "func": "scheduled_sync_enrich_generate",
+   "id": "sync_enrich_generate",
+   "trigger": "interval",
+   "ref": "app/main.py:357"
+  },
+  {
+   "func": "track_job",
+   "id": "",
+   "trigger": "",
+   "ref": "app/main.py:366"
+  },
+  {
+   "func": "track_job",
+   "id": "",
+   "trigger": "",
+   "ref": "app/main.py:375"
+  },
+  {
+   "func": "track_job",
+   "id": "",
+   "trigger": "",
+   "ref": "app/main.py:390"
+  },
+  {
+   "func": "track_job",
+   "id": "",
+   "trigger": "",
+   "ref": "app/main.py:410"
+  },
+  {
+   "func": "track_job",
+   "id": "",
+   "trigger": "",
+   "ref": "app/main.py:427"
+  },
+  {
+   "func": "track_job",
+   "id": "",
+   "trigger": "",
+   "ref": "app/main.py:459"
+  }
+ ],
+ "workers": [
+  "app/workers/download_worker.py",
+  "app/workers/embedding_worker.py",
+  "app/workers/enrichment_backfill_worker.py",
+  "app/workers/enrichment_worker.py",
+  "app/workers/health_check_worker.py",
+  "app/workers/manual_scrape_batch_worker.py",
+  "app/workers/sync_worker.py"
+ ],
+ "tables": [
+  {
+   "table": "xtream_categories",
+   "source": "migrations",
+   "ref": "app/db/migrations.py:92"
+  },
+  {
+   "table": "live_channels",
+   "source": "migrations",
+   "ref": "app/db/migrations.py:219"
+  },
+  {
+   "table": "epg_entries",
+   "source": "migrations",
+   "ref": "app/db/migrations.py:257"
+  },
+  {
+   "table": "ai_tmdb_cache",
+   "source": "migrations",
+   "ref": "app/db/migrations.py:326"
+  },
+  {
+   "table": "tv_auth_sessions",
+   "source": "migrations",
+   "ref": "app/db/migrations.py:358"
+  },
+  {
+   "table": "tmdb_scrape_cache",
+   "source": "migrations",
+   "ref": "app/db/migrations.py:413"
+  },
+  {
+   "table": "ai_subtitle_cache",
+   "source": "migrations",
+   "ref": "app/db/migrations.py:445"
+  },
+  {
+   "table": "ai_media_blurb",
+   "source": "migrations",
+   "ref": "app/db/migrations.py:479"
+  },
+  {
+   "table": "media_group",
+   "source": "migrations",
+   "ref": "app/db/migrations.py:746"
+  },
+  {
+   "table": "media_group_member",
+   "source": "migrations",
+   "ref": "app/db/migrations.py:756"
+  },
+  {
+   "table": "download_batch",
+   "source": "migrations",
+   "ref": "app/db/migrations.py:807"
+  },
+  {
+   "table": "download_job",
+   "source": "migrations",
+   "ref": "app/db/migrations.py:821"
+  },
+  {
+   "table": "plex_server",
+   "source": "migrations",
+   "ref": "app/db/migrations.py:888"
+  },
+  {
+   "table": "plex_media_item",
+   "source": "migrations",
+   "ref": "app/db/migrations.py:904"
+  },
+  {
+   "table": "plex_sync_status",
+   "source": "migrations",
+   "ref": "app/db/migrations.py:947"
+  },
+  {
+   "table": "omdb_scrape_cache",
+   "source": "migrations",
+   "ref": "app/db/migrations.py:1050"
+  },
+  {
+   "table": "scrape_review",
+   "source": "migrations",
+   "ref": "app/db/migrations.py:1293"
+  },
+  {
+   "table": "media",
+   "source": "ORM",
+   "ref": "app/models/database.py:15"
+  },
+  {
+   "table": "xtream_accounts",
+   "source": "ORM",
+   "ref": "app/models/database.py:146"
+  },
+  {
+   "table": "xtream_categories",
+   "source": "ORM",
+   "ref": "app/models/database.py:179"
+  },
+  {
+   "table": "live_channels",
+   "source": "ORM",
+   "ref": "app/models/database.py:197"
+  },
+  {
+   "table": "epg_entries",
+   "source": "ORM",
+   "ref": "app/models/database.py:242"
+  },
+  {
+   "table": "tv_auth_sessions",
+   "source": "ORM",
+   "ref": "app/models/database.py:279"
+  },
+  {
+   "table": "ai_subtitle_cache",
+   "source": "ORM",
+   "ref": "app/models/database.py:309"
+  },
+  {
+   "table": "ai_media_blurb",
+   "source": "ORM",
+   "ref": "app/models/database.py:329"
+  },
+  {
+   "table": "enrichment_queue",
+   "source": "ORM",
+   "ref": "app/models/database.py:341"
+  },
+  {
+   "table": "tmdb_scrape_cache",
+   "source": "ORM",
+   "ref": "app/models/database.py:373"
+  },
+  {
+   "table": "omdb_scrape_cache",
+   "source": "ORM",
+   "ref": "app/models/database.py:399"
+  },
+  {
+   "table": "api_keys",
+   "source": "ORM",
+   "ref": "app/models/database.py:427"
+  },
+  {
+   "table": "media_group",
+   "source": "ORM",
+   "ref": "app/models/database.py:463"
+  },
+  {
+   "table": "media_group_member",
+   "source": "ORM",
+   "ref": "app/models/database.py:492"
+  },
+  {
+   "table": "download_batch",
+   "source": "ORM",
+   "ref": "app/models/database.py:511"
+  },
+  {
+   "table": "download_job",
+   "source": "ORM",
+   "ref": "app/models/database.py:543"
+  },
+  {
+   "table": "plex_server",
+   "source": "ORM",
+   "ref": "app/models/database.py:596"
+  },
+  {
+   "table": "plex_media_item",
+   "source": "ORM",
+   "ref": "app/models/database.py:629"
+  },
+  {
+   "table": "plex_sync_status",
+   "source": "ORM",
+   "ref": "app/models/database.py:692"
+  },
+  {
+   "table": "scrape_review",
+   "source": "ORM",
+   "ref": "app/models/database.py:722"
+  }
+ ],
+ "config_fields": [
+  "TMDB_API_KEY",
+  "OMDB_API_KEY",
+  "OMDB_DAILY_LIMIT",
+  "AI_API_KEY",
+  "ADMIN_USERNAME",
+  "ADMIN_PASSWORD",
+  "METRICS_USERNAME",
+  "METRICS_PASSWORD",
+  "METRICS_PUBLIC",
+  "TV_AUTH_ENCRYPTION_KEY",
+  "TV_AUTH_TTL_SECONDS",
+  "TV_AUTH_START_RATE_LIMIT_MAX",
+  "TV_AUTH_START_RATE_LIMIT_WINDOW_SECONDS",
+  "TV_AUTH_PENDING_SESSIONS_CAP_PER_IP",
+  "TV_AUTH_PENDING_SESSIONS_CAP",
+  "XTREAM_ENCRYPTION_KEY",
+  "AI_EMBED_CACHE_DIR",
+  "AI_EMBED_MODEL",
+  "DATA_DIR",
+  "LOG_DIR",
+  "DB_PATH",
+  "SYNC_INTERVAL_HOURS",
+  "ENRICHMENT_DAILY_LIMIT",
+  "HEALTH_CHECK_BATCH_SIZE",
+  "STREAM_VALIDATION_ENABLED",
+  "STREAM_VALIDATION_CONCURRENCY",
+  "STREAM_VALIDATION_TIMEOUT",
+  "STREAM_BROKEN_THRESHOLD",
+  "STREAM_VALIDATION_RECHECK_HOURS",
+  "STREAM_FILTER_BROKEN",
+  "ACCOUNT_OUTAGE_STRIKES",
+  "ACCOUNT_OUTAGE_MASK_ENABLED",
+  "PLEX_LIBRARY_DIR",
+  "PLEX_FORCE_REFRESH_METADATA",
+  "BACKUP_ENABLED",
+  "BACKUP_DIR",
+  "BACKUP_RETENTION_DAYS",
+  "BACKUP_HOUR",
+  "CORS_ORIGINS",
+  "TMDB_LANGUAGE",
+  "OLLAMA_URL",
+  "OLLAMA_MODEL",
+  "SUBTITLE_CHUNK_CUES",
+  "SUBTITLE_CONCURRENCY",
+  "SUBTITLE_MAX_CUES",
+  "SUBTITLE_MAX_BYTES",
+  "SUBTITLE_PER_CHUNK_TIMEOUT",
+  "SUBTITLE_TOTAL_TIMEOUT",
+  "SUBTITLE_CACHE_RETENTION_DAYS",
+  "XTREAM_BASE_URL",
+  "XTREAM_PORT",
+  "XTREAM_USERNAME",
+  "XTREAM_PASSWORD",
+  "XTREAM_USER_AGENT",
+  "ADULT_CONTENT_RATING",
+  "ADULT_CATEGORY_KEYWORDS",
+  "ADULT_CATEGORY_IDS",
+  "DOWNLOAD_DIR",
+  "DOWNLOAD_CONCURRENCY",
+  "DOWNLOAD_CHUNK_BYTES",
+  "DOWNLOAD_MAX_RETRIES",
+  "DOWNLOAD_MIN_FREE_DISK_MB",
+  "DOWNLOAD_POLL_INTERVAL",
+  "DOWNLOAD_CONNECT_TIMEOUT",
+  "DOWNLOAD_READ_TIMEOUT",
+  "DOWNLOAD_MAX_REDIRECTS",
+  "UNIFIED_DOWNLOAD_MERGE_CAP",
+  "PLEX_ACCOUNT_TOKEN",
+  "PLEX_PROBE_TIMEOUT",
+  "PLEX_SYNC_INTERVAL_HOURS",
+  "PLEX_CLIENT_IDENTIFIER",
+  "TRAILER_CACHE_DIR",
+  "TRAILER_CACHE_MAX_MB",
+  "TRAILER_MIN_FREE_DISK_MB",
+  "DAV_ENABLED",
+  "DAV_USERNAME",
+  "DAV_PASSWORD",
+  "DAV_MOVIE_LIMIT",
+  "DAV_SERIES_LIMIT",
+  "DAV_ACCOUNT_IDS",
+  "DAV_INCLUDE_ADULT",
+  "DAV_SINGLE_VERSION",
+  "DAV_REQUIRE_KNOWN_SIZE",
+  "DAV_TREE_TTL_MINUTES",
+  "DAV_UPSTREAM_PER_ACCOUNT",
+  "DAV_QUEUE_TIMEOUT_SECONDS",
+  "DAV_RANGE_SHIM",
+  "DAV_CONNECT_TIMEOUT",
+  "DAV_READ_TIMEOUT",
+  "SCRAPE_REBUILD_DEBOUNCE_SECONDS",
+  "SCRAPE_INTERACTIVE_POSTER_CANDIDATES",
+  "SCRAPE_BATCH_POSTER_CANDIDATES",
+  "SCRAPE_BATCH_TMDB_LIMIT",
+  "SCRAPE_BATCH_MAX_ITEMS",
+  "SCRAPE_BATCH_CONCURRENCY",
+  "SCRAPE_BATCH_POSTER_ONLY_AUTO",
+  "POSTER_PHASH_IDENTICAL",
+  "POSTER_DHASH_IDENTICAL",
+  "POSTER_PHASH_CLOSE",
+  "POSTER_MAX_VARIANTS",
+  "POSTER_MAX_BYTES",
+  "POSTER_MAX_PIXELS",
+  "POSTER_FETCH_TIMEOUT",
+  "POSTER_CONCURRENCY",
+  "POSTER_HASH_CONCURRENCY",
+  "POSTER_PER_HOST_CONCURRENCY",
+  "POSTER_GENERIC_STDDEV",
+  "POSTER_GENERIC_MIN_REPEAT",
+  "SSRF_ALLOW_PRIVATE_HOSTS",
+  "SSRF_DNS_CACHE_SECONDS"
+ ],
+ "services": [
+  "account_outage_service",
+  "account_service",
+  "aggregation_service",
+  "api_key_service",
+  "category_service",
+  "download_nfo",
+  "download_service",
+  "embedding_service",
+  "job_registry",
+  "live_service",
+  "manual_scrape_service",
+  "media_identity_writer",
+  "media_service",
+  "nfo_import_service",
+  "ollama_service",
+  "omdb_scrape_cache_service",
+  "omdb_service",
+  "plex_api_service",
+  "plex_catalog_service",
+  "plex_download_service",
+  "plex_generation_service",
+  "plex_sync_service",
+  "poster_match_service",
+  "recommendation_service",
+  "scrape_cache_service",
+  "stream_service",
+  "subtitle_service",
+  "tmdb_service",
+  "trailer_service",
+  "unified_download_catalog_service",
+  "unified_group_service",
+  "xtream_credentials",
+  "xtream_service"
+ ],
+ "templates": [
+  ".claude/templates/prd-template.md",
+  "app/templates/admin/_downloads_episodes.html",
+  "app/templates/admin/_downloads_list.html",
+  "app/templates/admin/_downloads_queue.html",
+  "app/templates/admin/_downloads_versions.html",
+  "app/templates/admin/_key_created.html",
+  "app/templates/admin/_keys_table.html",
+  "app/templates/admin/_media_row.html",
+  "app/templates/admin/_media_table.html",
+  "app/templates/admin/_plex_downloads_episodes.html",
+  "app/templates/admin/_plex_downloads_list.html",
+  "app/templates/admin/_plex_downloads_versions.html",
+  "app/templates/admin/_plex_sync_status.html",
+  "app/templates/admin/_review_list.html",
+  "app/templates/admin/_review_row_result.html",
+  "app/templates/admin/_scrape_batch_status.html",
+  "app/templates/admin/_scrape_candidates.html",
+  "app/templates/admin/_scrape_panel.html",
+  "app/templates/admin/_stats.html",
+  "app/templates/admin/_unified_downloads_list.html",
+  "app/templates/admin/base.html",
+  "app/templates/admin/downloads.html",
+  "app/templates/admin/import_nfo.html",
+  "app/templates/admin/index.html",
+  "app/templates/admin/keys.html",
+  "app/templates/admin/plex_downloads.html",
+  "app/templates/admin/unified_downloads.html"
+ ],
+ "tests": 150
+}

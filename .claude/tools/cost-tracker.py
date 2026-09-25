@@ -179,7 +179,7 @@ def _store(row):
 
 def cmd_hook():
     try:
-        raw = sys.stdin.read()
+        raw = sys.stdin.buffer.read().decode("utf-8-sig", "replace")
         data = json.loads(raw) if raw.strip() else {}
         tp = data.get("transcript_path")
         if tp and os.path.isfile(tp):

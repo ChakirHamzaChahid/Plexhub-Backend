@@ -146,6 +146,7 @@ flowchart TD
 **Sortie** : commits sur `develop` + `docs/10-prd-<feature>.md` + tests + boot vert
 **🚀 Chemin mineur** : si l'éligibilité est remplie (C1≤1, C2≤1, C3=0, un ticket, ni migration ni route `/api/*` ni auth/secrets ni worker), tout se fait en **une session** sans PRD ni board.
 **🎯 Revues spécialisées** : `security-reviewer` et `perf-benchmarker` ne partent que si le diff coche un déclencheur (liste dans `commands/feature.md`).
+**🧭 Spec (chemin complet)** : **Clarifier** (≤ 5 questions à choix, tracées au PRD) puis, avant le gate archi, **Analyser** (sous-agent neuf en lecture seule, matrice FR → tickets, un CRITICAL bloque) — skill `spec-quality`.
 
 ```mermaid
 flowchart TD
@@ -158,14 +159,15 @@ flowchart TD
   TRI -->|non| SKILL[/📖 skill model-effort-routing<br/>ligne ROUTAGE avant chaque appel/]
   SKILL --> P1[📝 Session principale<br/>skill write-spec · PRD]
   P1 --> PRD[/📄 docs/10-prd-feature.md/]
-  PRD --> GATE1[(🚦 Gate produit :<br/>user stories + AC clairs ?)]
+  PRD --> CLR[🧭 Session principale · Clarifier<br/>≤ 5 questions à choix · tracées au PRD]
+  CLR --> GATE1[(🚦 Gate produit :<br/>user stories + AC clairs ?)]
   GATE1 -.->|❌| P1
   GATE1 ==>|✅| P2[🏗️ Session principale<br/>system-design · même contexte]
   P2 --> ARCH[/📄 Contrats Pydantic + DAG<br/>docs/31-board.md/]
-  ARCH --> GATE2[(🚦 Gate archi :<br/>impacts §9, migrations, secrets ?)]
+  ARCH --> ANA[[🔎 Analyser · tech-lead en lecture seule<br/>contexte neuf · 6 passes · matrice FR→tickets<br/>+ challenge archi si C2 = 2 ou C3 = 2]]
+  ANA -.->|CRITICAL| P2
+  ANA --> GATE2[(🚦 Gate archi :<br/>impacts §9, migrations, secrets ?)]
   GATE2 -.->|risky| HUM[🚨 needs-approval]
-  P2 -.->|si C2 = 2 ou C3 = 2| RVA[[🔎 cto ou tech-lead<br/>relecture archi · contexte neuf]]
-  RVA -.-> GATE2
   GATE2 ==>|safe| PM[📊 Session principale<br/>skill sprint-planner]
   PM --> P3A[[🔧 backend-developer]]
   PM --> P3B[[🗄️ spécialistes domaine<br/>db-migration / sync /<br/>ai-recsys / plex-generator]]

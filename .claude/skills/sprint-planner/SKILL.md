@@ -45,6 +45,8 @@ Convertit `docs/10-prd.md` + `docs/22-impl-spec-backend.md` en `docs/30-sprint-p
    - `Acceptance` est le Given/When/Then copié du PRD (ou un résumé une-ligne + pointeur si long).
    - `Notes` porte le compteur de cycles de review (`cycles=0`, `cycles=1`, `cycles=2 → blocked`) et le lien `BUG-NNN-fix`.
 
+   - **Traceability (spec-quality, 2026-09-25)** : every ticket names the stories and requirements it implements (`US1` · `FR-001, FR-004`) and the files or modules it touches. Tickets are grouped by story in priority order (P1 first) and each story ends with a **checkpoint** line: `✔ US1 — testable on its own: <how>`. No `[P]` parallel marker: execution is sequential (single writer). Adapted from github/spec-kit (MIT), templates/tasks-template.md.
+
    Status démarre à `todo`. Évolue via `in_progress → review → qa → done` (ou `blocked`).
 
 6. **Definition of Done** — liste-la en haut du board pour que tout le monde utilise la même :

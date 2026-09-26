@@ -23,8 +23,8 @@ import re
 import sys
 
 EVID = re.compile(r"`(?:(tv|backend):)?([\w./@-]+\.[\w]+):(\d+)(?:-(\d+))?`")
-FR_DEF = re.compile(r"^\s*[-*]\s+\*\*(FR-(?:TV|BE)-\d{3})\*\*", re.M)
-FR_ANY = re.compile(r"\bFR-(?:TV|BE)-\d{3}\b")
+FR_DEF = re.compile(r"^\s*[-*]\s+\*\*(FR-(?:TV|BE)-\d{3,})\*\*", re.M)
+FR_ANY = re.compile(r"\bFR-(?:TV|BE)-\d{3,}\b")
 SKIP = ("/_genere/", "/technique/db/")
 
 

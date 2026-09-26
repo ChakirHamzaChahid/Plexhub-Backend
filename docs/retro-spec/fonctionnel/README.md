@@ -22,7 +22,7 @@ Carte des capacités : [**00-carte.md**](00-carte.md) (produite le 2026-09-25 ; 
 | CAP-BE-16 Génération de bibliothèque Plex/Jellyfin (S) | [CAP-BE-16](CAP-BE-16-generation-bibliotheque-plex-jellyfin.md) | FR-BE-697→752 (44 impl., 9 partiels, 2 morts, 1 absent) | rédigée 2026-09-26, pas de PRD (écarts face à CLAUDE.md §3, flux-cles §5.4, etat-reel et plan d'origine) |
 | CAP-BE-17 Relais WebDAV (S) | [CAP-BE-17](CAP-BE-17-relais-webdav.md) | FR-BE-753→803 (44 impl., 3 partiels, 0 mort, 4 absents) | rédigée 2026-09-26, pas de PRD (écarts face à CLAUDE.md §2/§3/§9 piège 18, flux-cles §5.11 et runbook `docs/30-ops-plex-webdav.md`) |
 | CAP-BE-18 Téléchargement physique Xtream (L) — **pilote** | [CAP-BE-18](CAP-BE-18-telechargement-physique-xtream.md) | FR-BE-001→036 (32 impl., 1 partiel, 2 morts, 1 absent) | rédigée 2026-09-25, écart PRD en fin de fiche |
-| CAP-BE-19 Téléchargement Plex (L) | à faire | — | à rédiger |
+| CAP-BE-19 Téléchargement Plex (L) | [CAP-BE-19](CAP-BE-19-telechargement-plex.md) | FR-BE-988→1043 (53 impl., 0 partiel, 1 mort, 2 absents) | rédigée 2026-09-26, écart PRD `docs/10-prd-plex-download.md` en fin de fiche |
 | CAP-BE-20 Écran de téléchargement unifié (S) | à faire | — | à rédiger |
 | CAP-BE-21 Console admin du catalogue (M) | [CAP-BE-21](CAP-BE-21-console-admin-catalogue.md) | FR-BE-880→920 (34 impl., 0 partiel, 6 morts, 1 absent) | rédigée 2026-09-26, pas de PRD (écarts face à CLAUDE.md §2/§9 piège 21 et aux commentaires du code) |
 | CAP-BE-22 Scraper manuel & « À vérifier » (L) | [CAP-BE-22](CAP-BE-22-scraper-manuel-a-verifier.md) | FR-BE-921→987 (65 impl., 1 partiel, 1 mort, 0 absent) | rédigée 2026-09-26, pas de PRD (écarts face à l'ADR 0005, CLAUDE.md §2/§9 piège 21 et flux-cles §5.14) |

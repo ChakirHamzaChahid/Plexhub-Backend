@@ -6,7 +6,7 @@ Parcourt docs/retro-spec/**/*.md (hors _genere/ et technique/db/, générés) et
           n'existe plus ou qui pointe au-delà de la fin du fichier ;
   ERREUR  un identifiant d'exigence (FR-TV-###, FR-BE-###) défini deux fois ;
   AVERT.  une exigence définie sans aucune preuve ni statut « absent » ;
-  AVERT.  une exigence citée mais définie nulle part ;
+  AVERT.  une exigence citée mais définie nulle part (ni ici ni dans le dépôt frère) ;
   AVERT.  une preuve vers l'autre dépôt (préfixe `tv:` ou `backend:`) non
           vérifiable parce que l'autre dépôt n'est pas à l'emplacement attendu.
 
@@ -94,7 +94,14 @@ def main(argv):
             if not EVID.search(block) and not re.search(r"\babsent\b|non implément", block, re.I):
                 warns.append("%s  %s sans preuve `fichier:ligne` ni statut « absent »" % (where, fid))
         cited |= set(FR_ANY.findall(t))
-    for fid in sorted(cited - set(defined)):
+    # FR définies dans le dépôt frère (ex. FR-BE citées côté TV) : lues dans ses fiches, pas signalées.
+    foreign = set()
+    for rr in others.values():
+        if os.path.isdir(rr):
+            for d in glob.glob(os.path.join(rr, "docs", "retro-spec", "**", "*.md"), recursive=True):
+                if not any(s in d.replace("\\", "/") for s in SKIP):
+                    foreign |= set(FR_DEF.findall(open(d, encoding="utf-8", errors="replace").read()))
+    for fid in sorted(cited - set(defined) - foreign):
         warns.append("%s cité mais défini nulle part" % fid)
     for w in warns:
         print("AVERT.  " + w)

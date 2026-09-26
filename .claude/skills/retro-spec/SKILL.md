@@ -83,8 +83,10 @@ y renvoie, on ne les recopie pas.
 - Chaque parcours `.maestro/*.yaml` est relié aux FR qu'il couvre ; liste des
   FR `P1` sans parcours. L'exécution sur la Mi Box S se fait **sur accord** de
   Chakir (la box est une ressource partagée).
-- `/wf-audit-incremental` (§4bis) s'appuie sur ces FR ; `/sync-context` met à
-  jour la fiche d'une capacité touchée et relance `check.py`.
+- `python tools/retro-spec/impact.py <REF>` croise les preuves avec `git diff` : fiches et FR
+  touchées. `/sync-context` (étape 4bis) recale ces fiches puis relance `check.py` ;
+  `/wf-audit-incremental` (étape 4ter) re-vérifie les FR `implémenté` dont la preuve a bougé.
+- Traçabilité Maestro ↔ FR : dans le dépôt PlexHubTV (docs/retro-spec/tracabilite-maestro.md).
 
 ## Anti-patterns
 

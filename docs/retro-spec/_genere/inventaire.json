@@ -557,7 +557,7 @@
    "path": "/api/admin/keys",
    "fun": "list_api_keys",
    "module": "api_keys",
-   "guard": "public ?",
+   "guard": "clé maître",
    "ref": "app/api/api_keys.py:68"
   },
   {
@@ -565,7 +565,7 @@
    "path": "/api/admin/keys",
    "fun": "create_api_key",
    "module": "api_keys",
-   "guard": "public ?",
+   "guard": "clé maître",
    "ref": "app/api/api_keys.py:74"
   },
   {
@@ -573,7 +573,7 @@
    "path": "/api/admin/keys/{key_id}/revoke",
    "fun": "revoke_api_key",
    "module": "api_keys",
-   "guard": "public ?",
+   "guard": "clé maître",
    "ref": "app/api/api_keys.py:91"
   },
   {
@@ -581,7 +581,7 @@
    "path": "/api/admin/keys/{key_id}",
    "fun": "delete_api_key",
    "module": "api_keys",
-   "guard": "public ?",
+   "guard": "clé maître",
    "ref": "app/api/api_keys.py:100"
   },
   {
@@ -609,11 +609,27 @@
    "ref": "app/api/categories.py:82"
   },
   {
+   "method": "OPTIONS/PROPFIND/HEAD/GET",
+   "path": "/dav/{path:path}",
+   "fun": "dav_dispatch",
+   "module": "dav",
+   "guard": "Basic DAV",
+   "ref": "app/api/dav.py:319"
+  },
+  {
+   "method": "OPTIONS/PROPFIND/HEAD/GET",
+   "path": "/dav",
+   "fun": "dav_dispatch",
+   "module": "dav",
+   "guard": "Basic DAV",
+   "ref": "app/api/dav.py:320"
+  },
+  {
    "method": "GET",
    "path": "/api/admin/downloads",
    "fun": "list_downloads",
    "module": "downloads",
-   "guard": "public ?",
+   "guard": "clé maître",
    "ref": "app/api/downloads.py:40"
   },
   {
@@ -621,7 +637,7 @@
    "path": "/api/admin/downloads/{job_id}",
    "fun": "get_download",
    "module": "downloads",
-   "guard": "public ?",
+   "guard": "clé maître",
    "ref": "app/api/downloads.py:56"
   },
   {
@@ -629,7 +645,7 @@
    "path": "/api/admin/enrichment/omdb-backfill",
    "fun": "start_omdb_backfill",
    "module": "enrichment",
-   "guard": "public ?",
+   "guard": "clé maître",
    "ref": "app/api/enrichment.py:69"
   },
   {
@@ -637,7 +653,7 @@
    "path": "/api/admin/enrichment/jobs/{job_id}",
    "fun": "get_omdb_backfill_job",
    "module": "enrichment",
-   "guard": "public ?",
+   "guard": "clé maître",
    "ref": "app/api/enrichment.py:104"
   },
   {
@@ -645,7 +661,7 @@
    "path": "/api/health",
    "fun": "health_check",
    "module": "health",
-   "guard": "public ?",
+   "guard": "public",
    "ref": "app/api/health.py:14"
   },
   {
@@ -797,7 +813,7 @@
    "path": "/api/admin/plex-downloads/servers",
    "fun": "list_plex_servers",
    "module": "plex_downloads",
-   "guard": "public ?",
+   "guard": "clé maître",
    "ref": "app/api/plex_downloads.py:53"
   },
   {
@@ -805,7 +821,7 @@
    "path": "/api/admin/plex-downloads/catalog",
    "fun": "list_plex_catalog",
    "module": "plex_downloads",
-   "guard": "public ?",
+   "guard": "clé maître",
    "ref": "app/api/plex_downloads.py:78"
   },
   {
@@ -813,7 +829,7 @@
    "path": "/api/admin/plex-downloads/catalog/{type}/{unification_id:path}",
    "fun": "get_plex_catalog_group",
    "module": "plex_downloads",
-   "guard": "public ?",
+   "guard": "clé maître",
    "ref": "app/api/plex_downloads.py:113"
   },
   {
@@ -893,7 +909,7 @@
    "path": "/api/tv-auth/start",
    "fun": "start",
    "module": "tv_auth",
-   "guard": "public ?",
+   "guard": "public",
    "ref": "app/api/tv_auth.py:222"
   },
   {
@@ -901,7 +917,7 @@
    "path": "/api/tv-auth/approve",
    "fun": "approve",
    "module": "tv_auth",
-   "guard": "public ?",
+   "guard": "X-API-Key (appairage)",
    "ref": "app/api/tv_auth.py:382"
   },
   {
@@ -909,7 +925,7 @@
    "path": "/api/tv-auth/status",
    "fun": "get_status",
    "module": "tv_auth",
-   "guard": "public ?",
+   "guard": "public",
    "ref": "app/api/tv_auth.py:451"
   },
   {
@@ -917,104 +933,150 @@
    "path": "/api/tv-auth/complete",
    "fun": "complete",
    "module": "tv_auth",
-   "guard": "public ?",
+   "guard": "public",
    "ref": "app/api/tv_auth.py:557"
+  },
+  {
+   "method": "GET",
+   "path": "/docs",
+   "fun": "protected_swagger_ui",
+   "module": "main",
+   "guard": "Basic admin",
+   "ref": "app/main.py:679"
+  },
+  {
+   "method": "GET",
+   "path": "/openapi.json",
+   "fun": "protected_openapi",
+   "module": "main",
+   "guard": "Basic admin",
+   "ref": "app/main.py:684"
+  },
+  {
+   "method": "GET",
+   "path": "/metrics",
+   "fun": "setup_instrumentator",
+   "module": "main",
+   "guard": "Basic metrics",
+   "ref": "app/main.py:734"
   }
  ],
  "include_router": {
   "health": {
    "prefix": "/api",
-   "guard": "",
+   "guard": [],
    "ref": "app/main.py:635"
   },
   "accounts": {
    "prefix": "/api",
-   "guard": "X-API-Key",
+   "guard": [
+    "X-API-Key"
+   ],
    "ref": "app/main.py:638"
   },
   "categories": {
    "prefix": "/api",
-   "guard": "X-API-Key",
+   "guard": [
+    "X-API-Key"
+   ],
    "ref": "app/main.py:639"
   },
   "live": {
    "prefix": "/api",
-   "guard": "X-API-Key",
+   "guard": [
+    "X-API-Key"
+   ],
    "ref": "app/main.py:640"
   },
   "media": {
    "prefix": "/api",
-   "guard": "X-API-Key",
+   "guard": [
+    "X-API-Key"
+   ],
    "ref": "app/main.py:641"
   },
   "stream": {
    "prefix": "/api",
-   "guard": "X-API-Key",
+   "guard": [
+    "X-API-Key"
+   ],
    "ref": "app/main.py:642"
   },
   "sync": {
    "prefix": "/api",
-   "guard": "X-API-Key",
+   "guard": [
+    "X-API-Key"
+   ],
    "ref": "app/main.py:643"
   },
   "plex": {
    "prefix": "/api",
-   "guard": "X-API-Key",
+   "guard": [
+    "X-API-Key"
+   ],
    "ref": "app/main.py:644"
   },
   "tv_auth": {
    "prefix": "/api",
-   "guard": "",
+   "guard": [],
    "ref": "app/main.py:647"
   },
   "admin": {
    "prefix": "",
-   "guard": "Basic admin",
+   "guard": [
+    "Basic admin"
+   ],
    "ref": "app/main.py:653"
   },
   "admin_downloads": {
    "prefix": "",
-   "guard": "Basic admin",
+   "guard": [
+    "Basic admin"
+   ],
    "ref": "app/main.py:658"
   },
   "admin_plex_downloads": {
    "prefix": "",
-   "guard": "Basic admin",
+   "guard": [
+    "Basic admin"
+   ],
    "ref": "app/main.py:663"
   },
   "admin_unified_downloads": {
    "prefix": "",
-   "guard": "Basic admin",
+   "guard": [
+    "Basic admin"
+   ],
    "ref": "app/main.py:668"
   },
   "ai": {
    "prefix": "",
-   "guard": "",
+   "guard": [],
    "ref": "app/main.py:708"
   },
   "api_keys": {
    "prefix": "",
-   "guard": "",
+   "guard": [],
    "ref": "app/main.py:709"
   },
   "downloads": {
    "prefix": "",
-   "guard": "",
+   "guard": [],
    "ref": "app/main.py:710"
   },
   "plex_downloads": {
    "prefix": "",
-   "guard": "",
+   "guard": [],
    "ref": "app/main.py:711"
   },
   "enrichment": {
    "prefix": "",
-   "guard": "",
+   "guard": [],
    "ref": "app/main.py:712"
   },
   "dav": {
    "prefix": "",
-   "guard": "",
+   "guard": [],
    "ref": "app/main.py:722"
   }
  },
@@ -1407,6 +1469,7 @@
  ],
  "templates": [
   ".claude/templates/prd-template.md",
+  ".claude/templates/retro-spec-capacite.md",
   "app/templates/admin/_downloads_episodes.html",
   "app/templates/admin/_downloads_list.html",
   "app/templates/admin/_downloads_queue.html",

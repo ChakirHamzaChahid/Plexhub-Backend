@@ -55,6 +55,7 @@ def android(root, files):
     st = read(root, "settings.gradle.kts")
     inv["modules"] = re.findall(r'include\("(:[^"]+)"\)', st)
     screens, vms, daos, entities, workers, retro, navs, routes = [], [], [], [], [], [], [], []
+    okhttp = []
     for f in kt:
         t = read(root, f)
         if f.endswith("Screen.kt"):
@@ -74,6 +75,12 @@ def android(root, files):
         for m in re.finditer(r'@(GET|POST|PUT|DELETE|PATCH|HEAD)\("([^"]*)"\)\s*(?:@[\w.]+(?:\([^)]*\))?\s*)*(?:suspend\s+)?fun\s+(\w+)', t):
             retro.append({"method": m.group(1), "path": m.group(2), "fun": m.group(3),
                           "service": os.path.basename(f)[:-3], "ref": ref(f, t, m.start())})
+        for m in re.finditer(r'@(GET|POST|PUT|DELETE|PATCH|HEAD)(?![\w(])\s*(?:@[\w.]+(?:\([^)]*\))?\s*)*(?:suspend\s+)?fun\s+(\w+)\s*\(([\s\S]{0,400})', t):
+            if "@Url" in m.group(3):
+                retro.append({"method": m.group(1), "path": "(URL dynamique @Url)", "fun": m.group(2),
+                              "service": os.path.basename(f)[:-3], "ref": ref(f, t, m.start())})
+        for m in re.finditer(r"Request\.Builder\(\)", t):
+            okhttp.append({"file": f, "ref": ref(f, t, m.start())})
         for m in re.finditer(r"\.navigate\(\s*([^)\n]{1,80})", t):
             navs.append({"target": m.group(1).strip(), "ref": ref(f, t, m.start())})
         if f.endswith("/Screen.kt") and "sealed class Screen" in t:
@@ -89,6 +96,7 @@ def android(root, files):
     inv["entities"] = sorted(entities, key=lambda x: x["table"])
     inv["workers"] = sorted(workers, key=lambda x: x["name"])
     inv["retrofit"] = sorted(retro, key=lambda x: (x["service"], x["path"]))
+    inv["okhttp_direct"] = okhttp
     keys = collections.Counter()
     for f in files:
         if f.endswith("values/strings.xml"):
@@ -123,6 +131,8 @@ def android_md(inv):
     L += ["| %s | `%s` |" % (w["name"], w["ref"]) for w in inv["workers"]]
     L.append("\n## Endpoints appelés (Retrofit, %d)\n\n| Service | Méthode | Chemin | Fonction | Preuve |\n|---|---|---|---|---|" % len(inv["retrofit"]))
     L += ["| %s | %s | `%s` | %s | `%s` |" % (r["service"], r["method"], r["path"] or "/", r["fun"], r["ref"]) for r in inv["retrofit"]]
+    L.append("\n## Appels HTTP directs OkHttp (`Request.Builder`, %d) — URL construites à l'exécution\n\n| Preuve |\n|---|" % len(inv["okhttp_direct"]))
+    L += ["| `%s` |" % o["ref"] for o in inv["okhttp_direct"]]
     L.append("\n## Préfixes des clés de texte (`values/strings.xml`) — signal des domaines fonctionnels\n")
     L.append(" · ".join("`%s` %d" % kv for kv in inv["string_prefixes"]))
     L.append("\n\n## Parcours Maestro (%d)\n\n| Fichier | Description | Étapes |\n|---|---|---|" % len(inv["maestro_flows"]))
@@ -131,16 +141,60 @@ def android_md(inv):
 
 
 # --------------------------------------------------------------------- FastAPI
+GUARD_LABELS = collections.OrderedDict([
+    ("verify_backend_secret", "X-API-Key"),
+    ("verify_api_key", "X-API-Key"),
+    ("verify_pairing_api_key", "X-API-Key (appairage)"),
+    ("verify_master_key", "clé maître"),
+    ("verify_admin_basic_auth", "Basic admin"),
+    ("verify_dav_basic_auth", "Basic DAV"),
+    ("verify_metrics_basic_auth", "Basic metrics"),
+])
+
+
+def _guards_in(src, aliases=None):
+    '''Libellés des gardes d'accès cités dans un fragment de source (Depends(x) ou alias de liste).'''
+    out = []
+    for name, label in GUARD_LABELS.items():
+        if re.search(r"\b%s\b" % name, src) and label not in out:
+            out.append(label)
+    for var, labels in (aliases or {}).items():
+        if re.search(r"\b%s\b" % re.escape(var), src):
+            out += [l for l in labels if l not in out]
+    return out
+
+
+def _methods(node, t, consts):
+    for kw in node.keywords:
+        if kw.arg == "methods":
+            v = kw.value
+            if isinstance(v, ast.Name) and v.id in consts:
+                v = consts[v.id]
+            els = getattr(v, "elts", None)
+            if els:
+                return "/".join(getattr(e, "value", "?") for e in els)
+            return ast.get_source_segment(t, kw.value) or "?"
+    return "?"
+
+
 def fastapi(root, files):
     inv = collections.OrderedDict()
     main = read(root, "app/main.py")
+    aliases = {}
+    for m in re.finditer(r"^(\w+)\s*=\s*\[\s*Depends\(\s*(\w+)\s*\)\s*\]", main, re.M):
+        aliases[m.group(1)] = _guards_in(m.group(2))
     inc = {}
     for m in re.finditer(r"include_router\(\s*(\w+)\.router([^\n]*)", main):
         mod, rest = m.group(1), m.group(2)
         pre = re.search(r'prefix\s*=\s*"([^"]*)"', rest)
-        guard = "X-API-Key" if "_guard" in rest else ("Basic admin" if "admin_basic" in rest else "")
-        inc[mod] = {"prefix": pre.group(1) if pre else "", "guard": guard, "ref": ref("app/main.py", main, m.start())}
+        inc[mod] = {"prefix": pre.group(1) if pre else "", "guard": _guards_in(rest, aliases),
+                    "ref": ref("app/main.py", main, m.start())}
     eps = []
+
+    def add(method, path, fun, mod, guards, where):
+        eps.append({"method": method, "path": path, "fun": fun, "module": mod,
+                    "guard": " + ".join(guards) if guards else "public", "ref": where})
+
     for f in sorted(x for x in files if x.startswith("app/api/") and x.endswith(".py")):
         t = read(root, f)
         mod = os.path.basename(f)[:-3]
@@ -148,39 +202,65 @@ def fastapi(root, files):
             tree = ast.parse(t)
         except SyntaxError:
             continue
-        rprefix, rguard = "", ""
+        consts = {n.targets[0].id: n.value for n in tree.body
+                  if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)}
+        rprefix, rguard = "", []
         for node in ast.walk(tree):
             if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "APIRouter":
                 for kw in node.keywords:
                     if kw.arg == "prefix" and isinstance(kw.value, ast.Constant):
                         rprefix = kw.value.value
                     if kw.arg == "dependencies":
-                        src = ast.get_source_segment(t, kw.value) or ""
-                        rguard = "X-API-Key" if "verify_api_key" in src else ("Basic admin" if "admin_basic" in src else rguard)
-        for node in ast.walk(tree):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
+                        rguard = _guards_in(ast.get_source_segment(t, kw.value) or "")
+        base = inc.get(mod, {}).get("prefix", "") + rprefix
+        mguard = inc.get(mod, {}).get("guard", [])
+        funcs = {n.name: n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        for node in funcs.values():
             for dec in node.decorator_list:
                 if not (isinstance(dec, ast.Call) and isinstance(dec.func, ast.Attribute)
                         and getattr(dec.func.value, "id", "") == "router"
                         and dec.func.attr in ("get", "post", "put", "delete", "patch", "api_route")):
                     continue
                 path = dec.args[0].value if dec.args and isinstance(dec.args[0], ast.Constant) else "?"
-                method = dec.func.attr.upper()
-                if dec.func.attr == "api_route":
-                    for kw in dec.keywords:
-                        if kw.arg == "methods":
-                            method = "/".join(getattr(e, "value", "?") for e in getattr(kw.value, "elts", []))
+                method = _methods(dec, t, consts) if dec.func.attr == "api_route" else dec.func.attr.upper()
                 seg = (ast.get_source_segment(t, dec) or "") + " ".join(
                     ast.get_source_segment(t, d) or "" for d in node.args.defaults + node.args.kw_defaults if d is not None)
-                g = inc.get(mod, {}).get("guard") or rguard
-                if not g and "verify_api_key" in seg:
-                    g = "X-API-Key"
-                if not g and "verify_admin" in seg:
-                    g = "Basic admin"
-                eps.append({"method": method, "path": inc.get(mod, {}).get("prefix", "") + rprefix + path,
-                            "fun": node.name, "module": mod, "guard": g or "public ?",
-                            "ref": "%s:%d" % (f, dec.lineno)})
+                g = mguard + [x for x in rguard if x not in mguard]
+                g += [x for x in _guards_in(seg) if x not in g]
+                add(method, base + path, node.name, mod, g, "%s:%d" % (f, dec.lineno))
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "add_api_route"
+                    and getattr(node.func.value, "id", "") == "router" and node.args):
+                path = node.args[0].value if isinstance(node.args[0], ast.Constant) else "?"
+                fun = getattr(node.args[1], "id", "?") if len(node.args) > 1 else "?"
+                seg = ast.get_source_segment(t, node) or ""
+                fn = funcs.get(fun)
+                if fn is not None:
+                    seg += " ".join(ast.get_source_segment(t, d) or "" for d in fn.args.defaults + fn.args.kw_defaults if d is not None)
+                g = mguard + [x for x in rguard if x not in mguard]
+                g += [x for x in _guards_in(seg) if x not in g]
+                add(_methods(node, t, consts), base + path, fun, mod, g, "%s:%d" % (f, node.lineno))
+    # Routes déclarées directement sur `app` dans app/main.py (docs, openapi...)
+    try:
+        mtree = ast.parse(main)
+    except SyntaxError:
+        mtree = None
+    if mtree is not None:
+        for node in ast.walk(mtree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for dec in node.decorator_list:
+                if (isinstance(dec, ast.Call) and isinstance(dec.func, ast.Attribute)
+                        and getattr(dec.func.value, "id", "") == "app"
+                        and dec.func.attr in ("get", "post", "put", "delete", "patch", "api_route")):
+                    path = dec.args[0].value if dec.args and isinstance(dec.args[0], ast.Constant) else "?"
+                    add(dec.func.attr.upper(), path, node.name, "main",
+                        _guards_in(ast.get_source_segment(main, dec) or "", aliases), "app/main.py:%d" % dec.lineno)
+    # Endpoint /metrics exposé par l'instrumentateur Prometheus
+    m = re.search(r"setup_instrumentator\(([^\n]*)\)", main)
+    if m:
+        add("GET", "/metrics", "setup_instrumentator", "main", _guards_in(m.group(1), aliases),
+            ref("app/main.py", main, m.start()))
     inv["endpoints"] = eps
     inv["include_router"] = inc
     jobs = []

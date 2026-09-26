@@ -2,7 +2,7 @@
 
 > ⚙️ **Généré par `tools/retro-spec/inventaire.py` — ne pas éditer à la main.** Base factuelle de la rétro-spécification : chaque ligne porte sa preuve `fichier:ligne`. Régénérer : `python tools/retro-spec/inventaire.py`.
 
-## Endpoints (115)
+## Endpoints (120)
 
 | Méthode | Chemin | Garde | Fonction | Preuve |
 |---|---|---|---|---|
@@ -65,17 +65,17 @@
 | PUT | `/api/accounts/{account_id}/categories` | X-API-Key | update_categories | `app/api/categories.py:50` |
 | POST | `/api/accounts/{account_id}/categories/refresh` | X-API-Key | refresh_categories | `app/api/categories.py:82` |
 | POST | `/api/accounts/{account_id}/test` | X-API-Key | test_account | `app/api/accounts.py:109` |
-| GET | `/api/admin/downloads` | public ? | list_downloads | `app/api/downloads.py:40` |
-| GET | `/api/admin/downloads/{job_id}` | public ? | get_download | `app/api/downloads.py:56` |
-| GET | `/api/admin/enrichment/jobs/{job_id}` | public ? | get_omdb_backfill_job | `app/api/enrichment.py:104` |
-| POST | `/api/admin/enrichment/omdb-backfill` | public ? | start_omdb_backfill | `app/api/enrichment.py:69` |
-| GET | `/api/admin/keys` | public ? | list_api_keys | `app/api/api_keys.py:68` |
-| POST | `/api/admin/keys` | public ? | create_api_key | `app/api/api_keys.py:74` |
-| DELETE | `/api/admin/keys/{key_id}` | public ? | delete_api_key | `app/api/api_keys.py:100` |
-| POST | `/api/admin/keys/{key_id}/revoke` | public ? | revoke_api_key | `app/api/api_keys.py:91` |
-| GET | `/api/admin/plex-downloads/catalog` | public ? | list_plex_catalog | `app/api/plex_downloads.py:78` |
-| GET | `/api/admin/plex-downloads/catalog/{type}/{unification_id:path}` | public ? | get_plex_catalog_group | `app/api/plex_downloads.py:113` |
-| GET | `/api/admin/plex-downloads/servers` | public ? | list_plex_servers | `app/api/plex_downloads.py:53` |
+| GET | `/api/admin/downloads` | clé maître | list_downloads | `app/api/downloads.py:40` |
+| GET | `/api/admin/downloads/{job_id}` | clé maître | get_download | `app/api/downloads.py:56` |
+| GET | `/api/admin/enrichment/jobs/{job_id}` | clé maître | get_omdb_backfill_job | `app/api/enrichment.py:104` |
+| POST | `/api/admin/enrichment/omdb-backfill` | clé maître | start_omdb_backfill | `app/api/enrichment.py:69` |
+| GET | `/api/admin/keys` | clé maître | list_api_keys | `app/api/api_keys.py:68` |
+| POST | `/api/admin/keys` | clé maître | create_api_key | `app/api/api_keys.py:74` |
+| DELETE | `/api/admin/keys/{key_id}` | clé maître | delete_api_key | `app/api/api_keys.py:100` |
+| POST | `/api/admin/keys/{key_id}/revoke` | clé maître | revoke_api_key | `app/api/api_keys.py:91` |
+| GET | `/api/admin/plex-downloads/catalog` | clé maître | list_plex_catalog | `app/api/plex_downloads.py:78` |
+| GET | `/api/admin/plex-downloads/catalog/{type}/{unification_id:path}` | clé maître | get_plex_catalog_group | `app/api/plex_downloads.py:113` |
+| GET | `/api/admin/plex-downloads/servers` | clé maître | list_plex_servers | `app/api/plex_downloads.py:53` |
 | POST | `/api/ai/assistant` | X-API-Key | assistant | `app/api/ai.py:622` |
 | POST | `/api/ai/blurb` | X-API-Key | blurb_generate | `app/api/ai.py:1093` |
 | GET | `/api/ai/blurb/{tmdb_id}` | X-API-Key | blurb_get | `app/api/ai.py:1216` |
@@ -89,7 +89,7 @@
 | POST | `/api/ai/rank-multi` | X-API-Key | rank_multi | `app/api/ai.py:401` |
 | POST | `/api/ai/search` | X-API-Key | search | `app/api/ai.py:499` |
 | POST | `/api/ai/subtitles/translate` | X-API-Key | translate_subtitle | `app/api/ai.py:948` |
-| GET | `/api/health` | public ? | health_check | `app/api/health.py:14` |
+| GET | `/api/health` | public | health_check | `app/api/health.py:14` |
 | GET | `/api/live/channels` | X-API-Key | list_channels | `app/api/live.py:28` |
 | GET | `/api/live/channels/{stream_id}` | X-API-Key | get_channel | `app/api/live.py:86` |
 | GET | `/api/live/channels/{stream_id}/epg` | X-API-Key | get_channel_epg | `app/api/live.py:143` |
@@ -117,10 +117,15 @@
 | POST | `/api/sync/validate-streams` | X-API-Key | trigger_stream_validation | `app/api/sync.py:106` |
 | POST | `/api/sync/xtream` | X-API-Key | trigger_sync | `app/api/sync.py:29` |
 | POST | `/api/sync/xtream/all` | X-API-Key | trigger_sync_all | `app/api/sync.py:48` |
-| POST | `/api/tv-auth/approve` | public ? | approve | `app/api/tv_auth.py:382` |
-| POST | `/api/tv-auth/complete` | public ? | complete | `app/api/tv_auth.py:557` |
-| POST | `/api/tv-auth/start` | public ? | start | `app/api/tv_auth.py:222` |
-| GET | `/api/tv-auth/status` | public ? | get_status | `app/api/tv_auth.py:451` |
+| POST | `/api/tv-auth/approve` | X-API-Key (appairage) | approve | `app/api/tv_auth.py:382` |
+| POST | `/api/tv-auth/complete` | public | complete | `app/api/tv_auth.py:557` |
+| POST | `/api/tv-auth/start` | public | start | `app/api/tv_auth.py:222` |
+| GET | `/api/tv-auth/status` | public | get_status | `app/api/tv_auth.py:451` |
+| OPTIONS/PROPFIND/HEAD/GET | `/dav` | Basic DAV | dav_dispatch | `app/api/dav.py:320` |
+| OPTIONS/PROPFIND/HEAD/GET | `/dav/{path:path}` | Basic DAV | dav_dispatch | `app/api/dav.py:319` |
+| GET | `/docs` | Basic admin | protected_swagger_ui | `app/main.py:679` |
+| GET | `/metrics` | Basic metrics | setup_instrumentator | `app/main.py:734` |
+| GET | `/openapi.json` | Basic admin | protected_openapi | `app/main.py:684` |
 
 ## Tâches planifiées (APScheduler, 7)
 
@@ -189,9 +194,9 @@
 `TMDB_API_KEY` · `OMDB_API_KEY` · `OMDB_DAILY_LIMIT` · `AI_API_KEY` · `ADMIN_USERNAME` · `ADMIN_PASSWORD` · `METRICS_USERNAME` · `METRICS_PASSWORD` · `METRICS_PUBLIC` · `TV_AUTH_ENCRYPTION_KEY` · `TV_AUTH_TTL_SECONDS` · `TV_AUTH_START_RATE_LIMIT_MAX` · `TV_AUTH_START_RATE_LIMIT_WINDOW_SECONDS` · `TV_AUTH_PENDING_SESSIONS_CAP_PER_IP` · `TV_AUTH_PENDING_SESSIONS_CAP` · `XTREAM_ENCRYPTION_KEY` · `AI_EMBED_CACHE_DIR` · `AI_EMBED_MODEL` · `DATA_DIR` · `LOG_DIR` · `DB_PATH` · `SYNC_INTERVAL_HOURS` · `ENRICHMENT_DAILY_LIMIT` · `HEALTH_CHECK_BATCH_SIZE` · `STREAM_VALIDATION_ENABLED` · `STREAM_VALIDATION_CONCURRENCY` · `STREAM_VALIDATION_TIMEOUT` · `STREAM_BROKEN_THRESHOLD` · `STREAM_VALIDATION_RECHECK_HOURS` · `STREAM_FILTER_BROKEN` · `ACCOUNT_OUTAGE_STRIKES` · `ACCOUNT_OUTAGE_MASK_ENABLED` · `PLEX_LIBRARY_DIR` · `PLEX_FORCE_REFRESH_METADATA` · `BACKUP_ENABLED` · `BACKUP_DIR` · `BACKUP_RETENTION_DAYS` · `BACKUP_HOUR` · `CORS_ORIGINS` · `TMDB_LANGUAGE` · `OLLAMA_URL` · `OLLAMA_MODEL` · `SUBTITLE_CHUNK_CUES` · `SUBTITLE_CONCURRENCY` · `SUBTITLE_MAX_CUES` · `SUBTITLE_MAX_BYTES` · `SUBTITLE_PER_CHUNK_TIMEOUT` · `SUBTITLE_TOTAL_TIMEOUT` · `SUBTITLE_CACHE_RETENTION_DAYS` · `XTREAM_BASE_URL` · `XTREAM_PORT` · `XTREAM_USERNAME` · `XTREAM_PASSWORD` · `XTREAM_USER_AGENT` · `ADULT_CONTENT_RATING` · `ADULT_CATEGORY_KEYWORDS` · `ADULT_CATEGORY_IDS` · `DOWNLOAD_DIR` · `DOWNLOAD_CONCURRENCY` · `DOWNLOAD_CHUNK_BYTES` · `DOWNLOAD_MAX_RETRIES` · `DOWNLOAD_MIN_FREE_DISK_MB` · `DOWNLOAD_POLL_INTERVAL` · `DOWNLOAD_CONNECT_TIMEOUT` · `DOWNLOAD_READ_TIMEOUT` · `DOWNLOAD_MAX_REDIRECTS` · `UNIFIED_DOWNLOAD_MERGE_CAP` · `PLEX_ACCOUNT_TOKEN` · `PLEX_PROBE_TIMEOUT` · `PLEX_SYNC_INTERVAL_HOURS` · `PLEX_CLIENT_IDENTIFIER` · `TRAILER_CACHE_DIR` · `TRAILER_CACHE_MAX_MB` · `TRAILER_MIN_FREE_DISK_MB` · `DAV_ENABLED` · `DAV_USERNAME` · `DAV_PASSWORD` · `DAV_MOVIE_LIMIT` · `DAV_SERIES_LIMIT` · `DAV_ACCOUNT_IDS` · `DAV_INCLUDE_ADULT` · `DAV_SINGLE_VERSION` · `DAV_REQUIRE_KNOWN_SIZE` · `DAV_TREE_TTL_MINUTES` · `DAV_UPSTREAM_PER_ACCOUNT` · `DAV_QUEUE_TIMEOUT_SECONDS` · `DAV_RANGE_SHIM` · `DAV_CONNECT_TIMEOUT` · `DAV_READ_TIMEOUT` · `SCRAPE_REBUILD_DEBOUNCE_SECONDS` · `SCRAPE_INTERACTIVE_POSTER_CANDIDATES` · `SCRAPE_BATCH_POSTER_CANDIDATES` · `SCRAPE_BATCH_TMDB_LIMIT` · `SCRAPE_BATCH_MAX_ITEMS` · `SCRAPE_BATCH_CONCURRENCY` · `SCRAPE_BATCH_POSTER_ONLY_AUTO` · `POSTER_PHASH_IDENTICAL` · `POSTER_DHASH_IDENTICAL` · `POSTER_PHASH_CLOSE` · `POSTER_MAX_VARIANTS` · `POSTER_MAX_BYTES` · `POSTER_MAX_PIXELS` · `POSTER_FETCH_TIMEOUT` · `POSTER_CONCURRENCY` · `POSTER_HASH_CONCURRENCY` · `POSTER_PER_HOST_CONCURRENCY` · `POSTER_GENERIC_STDDEV` · `POSTER_GENERIC_MIN_REPEAT` · `SSRF_ALLOW_PRIVATE_HOSTS` · `SSRF_DNS_CACHE_SECONDS`
 
 
-## Templates admin (27)
+## Templates admin (28)
 
-`.claude/templates/prd-template.md` · `app/templates/admin/_downloads_episodes.html` · `app/templates/admin/_downloads_list.html` · `app/templates/admin/_downloads_queue.html` · `app/templates/admin/_downloads_versions.html` · `app/templates/admin/_key_created.html` · `app/templates/admin/_keys_table.html` · `app/templates/admin/_media_row.html` · `app/templates/admin/_media_table.html` · `app/templates/admin/_plex_downloads_episodes.html` · `app/templates/admin/_plex_downloads_list.html` · `app/templates/admin/_plex_downloads_versions.html` · `app/templates/admin/_plex_sync_status.html` · `app/templates/admin/_review_list.html` · `app/templates/admin/_review_row_result.html` · `app/templates/admin/_scrape_batch_status.html` · `app/templates/admin/_scrape_candidates.html` · `app/templates/admin/_scrape_panel.html` · `app/templates/admin/_stats.html` · `app/templates/admin/_unified_downloads_list.html` · `app/templates/admin/base.html` · `app/templates/admin/downloads.html` · `app/templates/admin/import_nfo.html` · `app/templates/admin/index.html` · `app/templates/admin/keys.html` · `app/templates/admin/plex_downloads.html` · `app/templates/admin/unified_downloads.html`
+`.claude/templates/prd-template.md` · `.claude/templates/retro-spec-capacite.md` · `app/templates/admin/_downloads_episodes.html` · `app/templates/admin/_downloads_list.html` · `app/templates/admin/_downloads_queue.html` · `app/templates/admin/_downloads_versions.html` · `app/templates/admin/_key_created.html` · `app/templates/admin/_keys_table.html` · `app/templates/admin/_media_row.html` · `app/templates/admin/_media_table.html` · `app/templates/admin/_plex_downloads_episodes.html` · `app/templates/admin/_plex_downloads_list.html` · `app/templates/admin/_plex_downloads_versions.html` · `app/templates/admin/_plex_sync_status.html` · `app/templates/admin/_review_list.html` · `app/templates/admin/_review_row_result.html` · `app/templates/admin/_scrape_batch_status.html` · `app/templates/admin/_scrape_candidates.html` · `app/templates/admin/_scrape_panel.html` · `app/templates/admin/_stats.html` · `app/templates/admin/_unified_downloads_list.html` · `app/templates/admin/base.html` · `app/templates/admin/downloads.html` · `app/templates/admin/import_nfo.html` · `app/templates/admin/index.html` · `app/templates/admin/keys.html` · `app/templates/admin/plex_downloads.html` · `app/templates/admin/unified_downloads.html`
 
 
 Fichiers de test : 150.

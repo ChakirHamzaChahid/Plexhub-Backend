@@ -276,13 +276,23 @@ class TestRawCopyFallbackAtomic:
         assert saved.read_bytes() == env["db"].read_bytes()
         assert not [p for p in env["data"].iterdir() if p.name.endswith(".tmp")]
 
-    def test_restore_logs_integrity_duration(self, env, caplog):
+    def test_restore_logs_integrity_duration(self, env):
         import logging
 
-        with caplog.at_level(logging.INFO, logger="plexhub.scripts.restore"):
+        records: list[logging.LogRecord] = []
+
+        class _H(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        log = logging.getLogger("plexhub.scripts.restore")
+        h, old = _H(level=logging.INFO), log.level
+        log.setLevel(logging.INFO)
+        log.addHandler(h)
+        try:
             restore_db.restore(env["good"], env["db"], apply=True)
-        durations = [
-            r for r in caplog.records
-            if r.name == "plexhub.scripts.restore" and "integrity_check duration" in r.getMessage()
-        ]
+        finally:
+            log.removeHandler(h)
+            log.setLevel(old)
+        durations = [r for r in records if "integrity_check duration" in r.getMessage()]
         assert len(durations) == 2  # source + verified copy

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -435,6 +436,34 @@ class TestBackupUnderRealWalWriter:
 # ---------------------------------------------------------------------------
 
 
+class _Records:
+    """Direct handler on the named logger (caplog is blind once app.main sets
+    propagate=False on the "plexhub" logger — same trap as tests/test_dav_relay.py)."""
+
+    def __init__(self, name: str, level: int):
+        self._logger = logging.getLogger(name)
+        self._level = level
+        self.records: list[logging.LogRecord] = []
+
+    def __enter__(self):
+        outer = self
+
+        class _H(logging.Handler):
+            def emit(self, record):
+                outer.records.append(record)
+
+        self._h = _H(level=self._level)
+        self._old = self._logger.level
+        self._logger.setLevel(self._level)
+        self._logger.addHandler(self._h)
+        return self
+
+    def __exit__(self, *exc):
+        self._logger.removeHandler(self._h)
+        self._logger.setLevel(self._old)
+        return False
+
+
 def _age(path: Path, seconds: float) -> None:
     ts = time.time() - seconds
     os.utime(path, (ts, ts))
@@ -500,7 +529,7 @@ class TestSweepSidecarsAndRestoreTmp:
 
 
 class TestPruneToleratesUnlinkError:
-    def test_permission_error_on_one_file_does_not_abort(self, tmp_path, monkeypatch, caplog):
+    def test_permission_error_on_one_file_does_not_abort(self, tmp_path, monkeypatch):
         def _mk(age_days: int, micro: int) -> Path:
             ts = datetime.now(timezone.utc) - timedelta(days=age_days)
             p = tmp_path / f"plexhub-{ts.strftime('%Y%m%d-%H%M%S')}-{micro:06d}.db"
@@ -517,11 +546,11 @@ class TestPruneToleratesUnlinkError:
             return real_unlink(self, *a, **kw)
 
         monkeypatch.setattr(Path, "unlink", _unlink)
-        with caplog.at_level(logging.WARNING, logger="plexhub.scripts.backup"):
+        with _Records("plexhub.scripts.backup", logging.WARNING) as cap:
             deleted = backup_db.prune_old_backups(tmp_path, retention_days=7)
         assert deleted == [fine]
         assert stuck.exists()
-        assert any("Could not prune" in r.getMessage() for r in caplog.records)
+        assert any("Could not prune" in r.getMessage() for r in cap.records)
 
     def test_run_backup_succeeds_despite_prune_failure(self, tmp_path, monkeypatch):
         live = tmp_path / "live.db"
@@ -548,21 +577,18 @@ class TestPruneToleratesUnlinkError:
 
 
 class TestIntegrityDurationLogged:
-    def test_duration_in_seconds_is_logged(self, tmp_path, caplog):
+    def test_duration_in_seconds_is_logged(self, tmp_path):
         db = tmp_path / "ok.db"
         _make_db(db)
-        with caplog.at_level(logging.INFO, logger="plexhub.scripts.backup"):
+        with _Records("plexhub.scripts.backup", logging.INFO) as cap:
             backup_db.check_integrity(db)
-        msgs = [r.getMessage() for r in caplog.records if "integrity_check duration" in r.getMessage()]
+        msgs = [r.getMessage() for r in cap.records if "integrity_check duration" in r.getMessage()]
         assert len(msgs) == 1
-        assert msgs[0].split(": ")[1].split("s ")[0].replace(".", "").isdigit()
+        assert re.search(r"duration: \d+\.\d{2}s \(ok\.db\)", msgs[0])
 
-    def test_custom_logger_receives_duration(self, tmp_path, caplog):
+    def test_custom_logger_receives_duration(self, tmp_path):
         db = tmp_path / "ok.db"
         _make_db(db)
-        with caplog.at_level(logging.INFO, logger="plexhub.scripts.restore"):
+        with _Records("plexhub.scripts.restore", logging.INFO) as cap:
             backup_db.check_integrity(db, logging.getLogger("plexhub.scripts.restore"))
-        assert any(
-            r.name == "plexhub.scripts.restore" and "integrity_check duration" in r.getMessage()
-            for r in caplog.records
-        )
+        assert any("integrity_check duration" in r.getMessage() for r in cap.records)

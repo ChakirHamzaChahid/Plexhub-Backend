@@ -92,7 +92,13 @@ async def ingest_short_epg(
     try:
         epg_data = await xtream_service.get_short_epg(account, stream_id=stream_id)
     except Exception as e:
-        logger.warning(f"Failed to fetch EPG for stream {stream_id}: {e}")
+        # Never interpolate `e`: an httpx HTTPStatusError message embeds the full
+        # request URL, i.e. the Xtream username and password.
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        logger.warning(
+            "Failed to fetch EPG for stream %s: %s%s", stream_id, type(e).__name__,
+            f" (HTTP {status})" if status else "",
+        )
         return []
 
     listings = epg_data.get("epg_listings") or []

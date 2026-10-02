@@ -69,8 +69,16 @@ _MAX_TITLE_CHARS = 500
 _MAX_DESCRIPTION_CHARS = 4000
 # XMLTV declares its DTD with a bare ``<!DOCTYPE tv SYSTEM "xmltv.dtd">`` (no
 # internal subset). A document that DECLARES ENTITIES is never a legitimate
-# XMLTV and is the vector for entity-expansion attacks: refuse it outright.
-_DOCTYPE_SCAN_BYTES = 64 * 1024
+# XMLTV and is the vector for entity-expansion attacks: refuse it outright. The
+# WHOLE file is scanned (a DOCTYPE's internal subset can follow any amount of
+# comment padding), block by block, with an overlap so a pattern straddling two
+# blocks is still seen.
+_SCAN_BLOCK_BYTES = 1024 * 1024
+_SCAN_OVERLAP_BYTES = 16
+# Upper bound on rows per write transaction: a multi-row INSERT binds 9 values
+# per row and SQLite's variable limit is 32 766 (999 on old builds), so ~3 600
+# rows is the cliff where EVERY batch would fail. 2 000 keeps a wide margin.
+_MAX_BATCH_SIZE = 2000
 # Ended programmes are deleted per CONTIGUOUS RANGE of this many stream_ids per
 # transaction (see _prune_ended: locality, not row count, is what bounds the WAL).
 _PRUNE_STREAMS_PER_TXN = 250
@@ -207,10 +215,34 @@ class _ParseStats:
 
 
 def _assert_no_entity_declarations(path: str) -> None:
+    """Refuse an XMLTV that declares XML entities (or that we cannot scan).
+
+    * UTF-16 / UTF-32 documents are refused outright (BOM, or the ``\x00<`` /
+      ``<\x00`` starts of a BOM-less one): ``<!ENTITY`` would not appear as
+      ASCII bytes and the scan below would be blind. Real XMLTV is UTF-8 /
+      ISO-8859-x.
+    * The scan covers the ENTIRE file in ``_SCAN_BLOCK_BYTES`` blocks overlapped
+      by ``_SCAN_OVERLAP_BYTES`` so a ``<!ENTITY`` split across two blocks is
+      found.
+
+    This is a first line of defence, not the only one: expat's own
+    entity-amplification limit (libexpat >= 2.4.0) still applies to anything
+    that slips through.
+    """
     with open(path, "rb") as fh:
-        head = fh.read(_DOCTYPE_SCAN_BYTES)
-    if b"<!ENTITY" in head:
-        raise EpgSyncError("XMLTV declares XML entities; refusing to parse")
+        head = fh.read(4)
+        if head[:2] in (b"\xff\xfe", b"\xfe\xff", b"\x00<", b"<\x00") or head[:2] == b"\x00\x00":
+            raise EpgSyncError("XMLTV is UTF-16/UTF-32 encoded; refusing to parse")
+        fh.seek(0)
+        tail = b""
+        while True:
+            chunk = fh.read(_SCAN_BLOCK_BYTES)
+            if not chunk:
+                return
+            buf = tail + chunk
+            if b"<!ENTITY" in buf:
+                raise EpgSyncError("XMLTV declares XML entities; refusing to parse")
+            tail = buf[-_SCAN_OVERLAP_BYTES:]
 
 
 def _text(elem: ET.Element | None, limit: int) -> str | None:
@@ -501,7 +533,8 @@ async def _sync_account(
         batches = iter_programme_batches(
             tmp_path, channel_map,
             server_id=server_id, win_start_ms=win_start, win_end_ms=win_end,
-            fetched_at=now, batch_size=max(1, settings.EPG_SYNC_BATCH_SIZE),
+            fetched_at=now,
+            batch_size=min(max(1, settings.EPG_SYNC_BATCH_SIZE), _MAX_BATCH_SIZE),
             max_rows=max(1, settings.EPG_SYNC_MAX_PROGRAMMES), stats=stats,
         )
         try:

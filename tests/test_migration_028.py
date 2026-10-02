@@ -206,3 +206,34 @@ async def test_run_migrations_full_chain_repairs_a_legacy_db_and_is_replayable(t
         assert info["uix_epg_dedup"][0] is True
     finally:
         await engine.dispose()
+
+
+async def test_failure_after_a_successful_delete_rolls_the_delete_back(legacy_engine):
+    """The DELETE itself succeeds, then CREATE UNIQUE INDEX fails: the whole
+    transaction must be undone -- the duplicates are still there (nothing was
+    half-migrated) and the error is raised."""
+    from sqlalchemy import event
+
+    async with legacy_engine.begin() as conn:
+        before = (await conn.execute(text("SELECT COUNT(*) FROM epg_entries"))).scalar()
+    assert before == 9  # 3 + 1 + 1 + 2 + 2 NULL-stream rows from the fixture
+
+    deleted: list[bool] = []
+
+    @event.listens_for(legacy_engine.sync_engine, "before_cursor_execute")
+    def _fail_on_create_index(conn, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().upper().startswith("DELETE FROM EPG_ENTRIES"):
+            deleted.append(True)
+        if statement.lstrip().upper().startswith("CREATE UNIQUE INDEX"):
+            raise RuntimeError("simulated failure of CREATE UNIQUE INDEX")
+
+    with pytest.raises(Exception, match="simulated failure"):
+        await _migration_028_epg_dedup_unique_index(legacy_engine)
+    assert deleted, "the DELETE must have been executed before the failure"
+
+    event.remove(legacy_engine.sync_engine, "before_cursor_execute", _fail_on_create_index)
+    async with legacy_engine.begin() as conn:
+        after = (await conn.execute(text("SELECT COUNT(*) FROM epg_entries"))).scalar()
+        info = await _index_info(conn)
+    assert after == before, "the successful DELETE must have been rolled back"
+    assert "uix_epg_dedup" not in info

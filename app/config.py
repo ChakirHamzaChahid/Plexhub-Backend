@@ -185,7 +185,9 @@ class Settings:
     EPG_SYNC_MAX_BYTES: int = _safe_int("EPG_SYNC_MAX_BYTES", 256 * 1024 * 1024)
     EPG_SYNC_MAX_PROGRAMMES: int = _safe_int("EPG_SYNC_MAX_PROGRAMMES", 500_000)
     # Rows per write transaction: small on purpose, so the single SQLite writer
-    # is never held for long while the pipeline / the API also write.
+    # is never held for long while the pipeline / the API also write. Capped at
+    # 2000 in the service (9 bound values per row; ~3 600 rows would exceed
+    # SQLite's 32 766-variable limit and fail every batch).
     EPG_SYNC_BATCH_SIZE: int = _safe_int("EPG_SYNC_BATCH_SIZE", 500)
     # Pause between two batches (ms). 0 = just yield to the event loop. The XML
     # parsing thread shares the GIL with the loop (measured: API reads 2-4x

@@ -655,3 +655,134 @@ async def test_batch_pause_setting_is_applied_between_batches(db_factory, monkey
     assert report.accounts[0].inserted == 5
     # 5 rows / 2 per batch = 3 batches -> 3 inter-batch pauses of 7 ms
     assert pauses.count(0.007) == 3
+
+
+# ─── XML entity guard (whole file, UTF-16/32, block boundary) ───────────────
+
+
+def _doctype_with_entity_after(padding_bytes: int) -> str:
+    return (
+        '<?xml version="1.0"?>\n<!DOCTYPE tv [\n<!-- ' + "x" * padding_bytes + ' -->\n'
+        '<!ENTITY a "HELLO">\n]>\n'
+        f'<tv>{prog("ch1", xt(NOW_MS + MIN), xt(NOW_MS + 2 * MIN), "&a;")}</tv>'
+    )
+
+
+async def test_entity_declared_after_more_than_64kib_of_padding_is_refused(db_factory, monkeypatch):
+    """The first version only scanned the first 64 KiB: a DOCTYPE whose internal
+    subset follows a long comment slipped through and the entity was resolved."""
+    await seed(db_factory, account("a"), channel(10, "xtream_a", "ch1"))
+    fake_download(monkeypatch, {"a": _doctype_with_entity_after(200 * 1024)})
+    acc = (await run_epg_sync(db_factory)).accounts[0]
+    assert acc.status == "failed" and "entities" in acc.error
+    assert await rows(db_factory) == []
+
+
+async def test_utf16_document_is_refused_with_an_explicit_error(db_factory, monkeypatch):
+    await seed(db_factory, account("a"), channel(10, "xtream_a", "ch1"))
+    doc = _doctype_with_entity_after(10)
+    for encoding in ("utf-16", "utf-16-le", "utf-16-be", "utf-32", "utf-32-be"):
+        calls: list = []
+
+        async def _fake(acc, dest, *, max_bytes, total_timeout, _enc=encoding, **_):
+            data = doc.encode(_enc)
+            with open(dest, "wb") as fh:
+                fh.write(data)
+            calls.append(dest)
+            return len(data)
+
+        monkeypatch.setattr(xtream_service, "download_xmltv", _fake)
+        acc = (await run_epg_sync(db_factory)).accounts[0]
+        assert acc.status == "failed", encoding
+        assert "UTF-16/UTF-32" in acc.error, (encoding, acc.error)
+    assert await rows(db_factory) == []
+
+
+def _write(tmp_path, data: bytes) -> str:
+    p = tmp_path / "doc.xml"
+    p.write_bytes(data)
+    return str(p)
+
+
+def test_entity_pattern_straddling_two_scan_blocks_is_still_found(tmp_path, monkeypatch):
+    monkeypatch.setattr(svc, "_SCAN_BLOCK_BYTES", 100)
+    for split in range(1, len(b"<!ENTITY")):  # every possible cut inside the pattern
+        data = b"a" * (100 - split) + b"<!ENTITY a 'x'>" + b"b" * 50
+        with pytest.raises(svc.EpgSyncError, match="entities"):
+            svc._assert_no_entity_declarations(_write(tmp_path, data))
+
+
+def test_clean_document_larger_than_a_block_passes_the_scan(tmp_path, monkeypatch):
+    monkeypatch.setattr(svc, "_SCAN_BLOCK_BYTES", 100)
+    svc._assert_no_entity_declarations(_write(tmp_path, b"<tv>" + b"<!ENT ITY>" * 200 + b"</tv>"))
+
+
+# ─── EPG_SYNC_BATCH_SIZE is bounded ─────────────────────────────────────────
+
+
+async def test_batch_size_is_clamped_below_the_sqlite_variable_limit(db_factory, monkeypatch):
+    monkeypatch.setattr(settings, "EPG_SYNC_BATCH_SIZE", 1_000_000)
+    # 4 variants of one channel x 700 programmes = 2800 rows (inside the 13 h window)
+    await seed(db_factory, account("a"), *[channel(10 + k, "xtream_a", "ch1") for k in range(4)])
+    n = 2800
+    fake_download(monkeypatch, {"a": xmltv(*[
+        prog("ch1", xt(NOW_MS + i * MIN), xt(NOW_MS + (i + 1) * MIN), f"P{i}") for i in range(n // 4)
+    ])})
+    sizes: list[int] = []
+    real = svc._write_batch
+
+    async def _spy(batch, *a, **k):
+        sizes.append(len(batch))
+        return await real(batch, *a, **k)
+
+    monkeypatch.setattr(svc, "_write_batch", _spy)
+    acc = (await run_epg_sync(db_factory)).accounts[0]
+
+    assert acc.status == "ok" and acc.inserted == n, acc.error
+    assert max(sizes) <= svc._MAX_BATCH_SIZE == 2000
+    assert sizes == [2000, 800]
+
+
+# ─── download wall-clock timeout (asyncio.timeout -> TimeoutError) ──────────
+
+
+async def test_download_timeout_fails_the_account_without_retry_or_leak(db_factory, monkeypatch):
+    import asyncio
+    import os
+
+    from app.services.xtream_service import XtreamService
+
+    await seed(db_factory, account("a"), account("b"),
+               channel(10, "xtream_a", "ch1"), channel(10, "xtream_b", "ch1"))
+    monkeypatch.setattr(settings, "EPG_SYNC_DOWNLOAD_TIMEOUT_SECONDS", 1)
+    attempts: list[str] = []
+    dests: list[str] = []
+
+    async def _hang(client, url, params, dest, max_bytes):
+        attempts.append(url)  # the credentialed URL: must never surface
+        dests.append(str(dest))
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(XtreamService, "_stream_to_file", staticmethod(_hang))
+    good = xmltv(prog("ch1", xt(NOW_MS + MIN), xt(NOW_MS + 2 * MIN), "ok"))
+    real_download = XtreamService.download_xmltv
+
+    async def _route(acc, dest, **kw):
+        if acc.id == "b":  # the second account does not time out
+            data = good.encode()
+            with open(dest, "wb") as fh:
+                fh.write(data)
+            return len(data)
+        return await real_download(xtream_service, acc, dest, **kw)
+
+    monkeypatch.setattr(xtream_service, "download_xmltv", _route)
+    with Records("plexhub") as logs:
+        report = await run_epg_sync(db_factory)
+
+    by_id = {a.account_id: a for a in report.accounts}
+    assert by_id["a"].status == "failed" and by_id["a"].error == "TimeoutError"
+    assert by_id["b"].status == "ok" and by_id["b"].inserted == 1
+    assert len(attempts) == 1, "a wall-clock timeout is terminal: no retry"
+    assert not os.path.exists(dests[0]), "temp file must be removed"
+    assert "EPG sync failed for account a" in logs.text
+    assert SECRET not in logs.text and SECRET not in repr(report)

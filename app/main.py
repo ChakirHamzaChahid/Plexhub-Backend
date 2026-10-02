@@ -4,6 +4,7 @@ from logging.handlers import RotatingFileHandler as _RotatingFileHandler
 import os
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -36,6 +37,9 @@ from app.utils.request_context import RequestIdLogFilter, RequestIdMiddleware
 from app.utils.job_health import mark_job_success, set_master, track_job
 
 APP_VERSION = "1.10.9"
+
+# First run of the opt-in `epg_sync` job, counted from boot (see lifespan).
+_EPG_SYNC_FIRST_RUN_DELAY = timedelta(minutes=5)
 
 logger = logging.getLogger("plexhub")
 
@@ -449,6 +453,12 @@ async def lifespan(app: FastAPI):
                     max_instances=1,
                     coalesce=True,
                     misfire_grace_time=3600,
+                    # A bare `interval` trigger first fires one full interval
+                    # after boot: a container restarted more often than every
+                    # EPG_SYNC_INTERVAL_HOURS would never sync. First run 5 min
+                    # after boot instead (the live_channels it maps onto come
+                    # from the boot-time sync).
+                    next_run_time=datetime.now(timezone.utc) + _EPG_SYNC_FIRST_RUN_DELAY,
                 )
 
             # Plex catalogue sync cron (feature "Télécharger Plex", ticket C7)

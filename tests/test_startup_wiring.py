@@ -354,6 +354,13 @@ class TestEpgSyncJobWiring:
             trigger, kwargs = scheduler.job_args["epg_sync"]
             assert trigger == "interval" and kwargs["hours"] == 4
             assert kwargs["max_instances"] == 1 and kwargs["coalesce"] is True
+            assert kwargs["misfire_grace_time"] == 3600
+            # First run 5 min after boot, not one full interval later (a
+            # container restarted more often than every 4 h would never sync).
+            from datetime import datetime, timedelta, timezone
+
+            delay = kwargs["next_run_time"] - datetime.now(timezone.utc)
+            assert timedelta(minutes=4, seconds=30) < delay <= timedelta(minutes=5)
             assert "epg_cleanup" in scheduler.jobs
 
     async def test_never_registered_on_a_slave_even_when_enabled(self, monkeypatch, tmp_path, request):

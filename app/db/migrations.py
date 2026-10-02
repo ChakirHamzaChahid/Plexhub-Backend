@@ -1349,15 +1349,13 @@ async def _migration_028_epg_dedup_unique_index(engine: AsyncEngine) -> None:
     the whole bulk sync into runtime errors, so the failure is logged at ERROR
     and re-raised rather than leaving the schema half-migrated in silence.
     """
-    logger.info("Migration 028: De-duplicating epg_entries and creating uix_epg_dedup")
-
     try:
         async with engine.begin() as conn:
             table = (await conn.execute(text(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='epg_entries'"
             ))).fetchone()
             if table is None:
-                logger.info("Migration 028: epg_entries absent, nothing to do")
+                logger.debug("Migration 028: epg_entries absent, nothing to do")
                 return
 
             indexes = (await conn.execute(text(
@@ -1368,6 +1366,9 @@ async def _migration_028_epg_dedup_unique_index(engine: AsyncEngine) -> None:
             if existing is not None and existing[2]:
                 logger.debug("Migration 028: uix_epg_dedup already UNIQUE, skipping")
                 return
+            # Only now is there real work to do: stay silent (debug above) on
+            # every boot after the first.
+            logger.info("Migration 028: de-duplicating epg_entries and creating uix_epg_dedup")
             if existing is not None:
                 await conn.execute(text("DROP INDEX uix_epg_dedup"))
 

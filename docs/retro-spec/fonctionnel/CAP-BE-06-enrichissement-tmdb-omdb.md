@@ -1,6 +1,6 @@
 # CAP-BE-06 — Enrichissement métadonnées TMDB + OMDb
 
-**Reconstituée le** : 2026-09-25 · **HEAD** : `313778e` · **Sources** : code, tests, `CLAUDE.md` (§2, §9 pièges 21 et 22), `docs/architecture/flux-cles.md` (§5.2 et pipeline planifié), ADR `docs/architecture/adr/0003-dual-provider-enrichment-and-blended-display-rating.md`, plan `docs/plans/2026-07-20-omdb-rating-enrichment-design.md`, `.env.example`, app TV (lecture seule, preuves `tv:`). Aucun PRD `docs/10-prd-*.md` ne couvre cette capacité (les deux PRD traitent des téléchargements) : pas de tableau d'écart fiche ↔ PRD ; les écarts sont face à `CLAUDE.md`, `flux-cles.md`, l'ADR 0003 et `.env.example`.
+**Reconstituée le** : 2026-09-25 · recalée le 2026-10-02 (Lot 10) · **HEAD** : `aa3270f` · **Sources** : code, tests, `CLAUDE.md` (§2, §9 pièges 21 et 22), `docs/architecture/flux-cles.md` (§5.2 et pipeline planifié), ADR `docs/architecture/adr/0003-dual-provider-enrichment-and-blended-display-rating.md`, plan `docs/plans/2026-07-20-omdb-rating-enrichment-design.md`, `.env.example`, app TV (lecture seule, preuves `tv:`). Aucun PRD `docs/10-prd-*.md` ne couvre cette capacité (les deux PRD traitent des téléchargements) : pas de tableau d'écart fiche ↔ PRD ; les écarts sont face à `CLAUDE.md`, `flux-cles.md`, l'ADR 0003 et `.env.example`.
 **Périmètre** : `app/workers/enrichment_worker.py` (file et résolution), `app/workers/enrichment_backfill_worker.py` (rattrapage OMDb) ; services `tmdb_service`, `omdb_service`, `scrape_cache_service`, `omdb_scrape_cache_service`, `media_identity_writer` (mode `fill`), `app/utils/rating_blend.py` ; alimentation de la file par `sync_worker.enqueue_for_enrichment` ; endpoints `POST /api/sync/enrichment`, `POST /api/admin/enrichment/omdb-backfill`, `GET /api/admin/enrichment/jobs/{job_id}`, `PATCH /api/media/{rating_key}`, `POST /api/media/{rating_key}/rescrape` ; étape du job planifié `sync_enrich_generate`. Hors périmètre, cités seulement comme interface : scraper manuel et lot de scraping (`CAP-BE-22`), import NFO (`CAP-BE-23`), recommandations IA (`CAP-BE-13`). Renvoi : `docs/retro-spec/_genere/inventaire.md`.
 
 ## Résumé
@@ -10,7 +10,7 @@
 ## User stories observées
 
 - **US-BE-06.1** (P1) — En tant que planificateur, j'identifie et j'enrichis automatiquement chaque film ou série synchronisé, afin que le catalogue servi à la TV porte ids, résumé, affiches et notes.
-  - Parcours : sync → `enqueue_for_enrichment` (`app/workers/sync_worker.py:801`) → `enrichment_worker.run()` (`app/main.py:342`) → `UPDATE media` · Maestro : sans objet
+  - Parcours : sync → `enqueue_for_enrichment` (`app/workers/sync_worker.py:793`) → `enrichment_worker.run()` (`app/main.py:346`) → `UPDATE media` · Maestro : sans objet
 - **US-BE-06.2** (P1) — En tant que spectateur TV (indirect), je vois une note qui combine IMDb et TMDB quand les deux existent.
   - Parcours : `_attach_omdb` → `build_rating_values` → `display_rating` ; la TV recalcule le même mélange (`tv:data/src/main/java/com/chakir/plexhubtv/data/mapper/BackendMediaMapper.kt:82`) · Maestro : aucun
 - **US-BE-06.3** (P2) — En tant qu'opérateur, je relance l'enrichissement sans attendre la prochaine passe planifiée.
@@ -26,12 +26,12 @@
 
 ### Alimentation de la file (`enrichment_queue`)
 
-- **FR-BE-337** — À la synchronisation, toute ligne `movie` ou `show` à laquelle il manque `tmdb_id` ou `imdb_id` est insérée dans `enrichment_queue` (statut `pending`, `attempts` 0) avec titre, année, ids déjà connus et résumé Xtream (`existing_summary`), par paquets de 200. Les épisodes et les chaînes n'y entrent jamais. — *implémenté* — preuve `app/workers/sync_worker.py:801-824` · test : aucun sur `enqueue_for_enrichment`
-- **FR-BE-338** — Un nouveau passage sur la même `(rating_key, server_id)` ne met à jour que `existing_tmdb_id`, `existing_imdb_id` et `existing_summary` : `status` et `attempts` ne sont pas remis à zéro, donc une entrée `done` ou définitivement `skipped` n'est jamais retentée par une simple synchronisation, même si son titre change. — *implémenté* (comportement constaté) — preuve `app/workers/sync_worker.py:826-837` · test : aucun
-- **FR-BE-339** — Les entrées de file dont la ligne `Media` a disparu pour ce compte sont supprimées à chaque synchronisation. — *implémenté* — preuve `app/workers/sync_worker.py:935-954` · test `tests/test_enrichment_scraping.py:584` (au niveau de la requête de sélection)
-- **FR-BE-340** — `POST /api/media/{rating_key}/rescrape?server_id=` remet l'entrée à `pending` (ou la crée) et répond 202 `{"status":"queued"}` ; 404 si la ligne `Media` n'existe pas. — *implémenté* — preuve `app/api/media.py:540-554`, `app/services/media_service.py:735-787` · test `tests/test_manual_scrape_lock.py:527`
-- **FR-BE-341** — Le rescrape d'une ligne verrouillée (`match_locked`) est refusé en 409, sans rien écrire. — *implémenté* — preuve `app/services/media_service.py:752-753`, `app/api/media.py:550-553` · test `tests/test_manual_scrape_lock.py:558`
-- **FR-BE-342** — `PATCH /api/media/{rating_key}?server_id=` ne retient que `imdb_id` et `tmdb_id` du corps, recalcule `unification_id`/`history_group_key` et pose le verrou manuel ; 404 si la ligne est inconnue. Détail du verrou : `CAP-BE-22`. — *implémenté* — preuve `app/api/media.py:518-537`, `app/services/media_service.py:651-733` · test : aucun au niveau HTTP dans ce périmètre
+- **FR-BE-337** — À la synchronisation, toute ligne `movie` ou `show` à laquelle il manque `tmdb_id` ou `imdb_id` est insérée dans `enrichment_queue` (statut `pending`, `attempts` 0) avec titre, année, ids déjà connus et résumé Xtream (`existing_summary`), par paquets de 200. Les épisodes et les chaînes n'y entrent jamais. — *implémenté* — preuve `app/workers/sync_worker.py:793-816` · test : aucun sur `enqueue_for_enrichment`
+- **FR-BE-338** — Un nouveau passage sur la même `(rating_key, server_id)` ne met à jour que `existing_tmdb_id`, `existing_imdb_id` et `existing_summary` : `status` et `attempts` ne sont pas remis à zéro, donc une entrée `done` ou définitivement `skipped` n'est jamais retentée par une simple synchronisation, même si son titre change. — *implémenté* (comportement constaté) — preuve `app/workers/sync_worker.py:818-829` · test : aucun
+- **FR-BE-339** — Les entrées de file dont la ligne `Media` a disparu pour ce compte sont supprimées à chaque synchronisation. — *implémenté* — preuve `app/workers/sync_worker.py:927-946` · test `tests/test_enrichment_scraping.py:584` (au niveau de la requête de sélection)
+- **FR-BE-340** — `POST /api/media/{rating_key}/rescrape?server_id=` remet l'entrée à `pending` (ou la crée) et répond 202 `{"status":"queued"}` ; 404 si la ligne `Media` n'existe pas. — *implémenté* — preuve `app/api/media.py:540-554`, `app/services/media_service.py:725-777` · test `tests/test_manual_scrape_lock.py:527`
+- **FR-BE-341** — Le rescrape d'une ligne verrouillée (`match_locked`) est refusé en 409, sans rien écrire. — *implémenté* — preuve `app/services/media_service.py:742-743`, `app/api/media.py:550-553` · test `tests/test_manual_scrape_lock.py:558`
+- **FR-BE-342** — `PATCH /api/media/{rating_key}?server_id=` ne retient que `imdb_id` et `tmdb_id` du corps, recalcule `unification_id`/`history_group_key` et pose le verrou manuel ; 404 si la ligne est inconnue. Détail du verrou : `CAP-BE-22`. — *implémenté* — preuve `app/api/media.py:518-537`, `app/services/media_service.py:641-723` · test : aucun au niveau HTTP dans ce périmètre
 
 ### Sélection à l'exécution
 
@@ -44,7 +44,7 @@
 
 ### Résolution TMDB
 
-- **FR-BE-349** — Quatre cas selon les ids déjà connus : les deux → jamais en file ; `tmdb_id` seul → lecture directe des détails TMDB (confiance 1.0) ; `imdb_id` seul → aucune recherche TMDB, seules les notes OMDb sont cherchées ; aucun → cache puis recherche. — *implémenté* — preuve `app/workers/enrichment_worker.py:164-204`, `app/workers/sync_worker.py:810-811` · test : aucun par cas
+- **FR-BE-349** — Quatre cas selon les ids déjà connus : les deux → jamais en file ; `tmdb_id` seul → lecture directe des détails TMDB (confiance 1.0) ; `imdb_id` seul → aucune recherche TMDB, seules les notes OMDb sont cherchées ; aucun → cache puis recherche. — *implémenté* — preuve `app/workers/enrichment_worker.py:164-204`, `app/workers/sync_worker.py:802-803` · test : aucun par cas
 - **FR-BE-350** — Cache persistant `tmdb_scrape_cache`, clé `type|titre normalisé|année`, valable 30 jours pour une correspondance et 3 jours pour un échec ; il évite de rappeler TMDB pour le même titre d'un compte à l'autre et après redémarrage. Les écritures sont dédupliquées par clé dans un lot. — *implémenté* — preuve `app/services/scrape_cache_service.py:25-26`, `app/workers/enrichment_worker.py:189-193`, `app/workers/enrichment_worker.py:489-494` · test `tests/test_enrichment_scraping.py:33`
 - **FR-BE-351** — Sur un défaut de cache, la chaîne de recherche est : titre + année → sans année → `en-US` → `/search/multi` ; elle s'arrête à la première correspondance automatique, sinon garde la meilleure note. — *implémenté* — preuve `app/workers/enrichment_worker.py:132-161` · test : aucun sur l'ordre
 - **FR-BE-352** — Note de correspondance = 0,7 × similarité de titre + 0,3 × score d'année (rapidfuzz sur titre localisé et titre original). — *implémenté* — preuve `app/services/tmdb_service.py:49-50`, `app/services/tmdb_service.py:690-743` · test `tests/test_tmdb_score_verdict_split.py:55`
@@ -52,7 +52,7 @@
 - **FR-BE-354** — Un résultat TMDB au `tmdb_id` non positif ou à l'`imdb_id` hors forme `tt\d+` est déclassé en `ambiguous` : rien n'est écrit. — *implémenté* — preuve `app/workers/enrichment_worker.py:343-355`, `app/workers/enrichment_worker.py:463-472` · test `tests/test_enrichment_guard.py:97`
 - **FR-BE-355** — Un 404 TMDB (id périmé fourni par le fournisseur) donne `not_found` avec un log `INFO` sans trace ; toute autre erreur donne `skipped` avec un log `WARNING`. Les deux restent retentables. — *implémenté* — preuve `app/workers/enrichment_worker.py:309-322`, `app/workers/enrichment_worker.py:552-553` · test : aucun
 - **FR-BE-356** — Une correspondance TMDB sans `imdb_id` est écrite (`tmdb_id` seul) et l'entrée passe à `done` : l'enrichissement automatique ne cherche pas l'`imdb_id` manquant chez OMDb. Ce repli (v1.10.7) n'existe que dans le lot de scraping de `CAP-BE-22`. — *partiel* (manque : repli OMDb de l'`imdb_id` dans le pipeline automatique) — preuve `app/workers/enrichment_worker.py:269-281`, `app/workers/enrichment_worker.py:511-520`
-- **FR-BE-357** — Les titres sont nettoyés à la synchronisation, avant d'entrer en file (préfixes pays, balises de qualité dont `FHD` depuis la v1.10.7). — *implémenté* — preuve `app/utils/string_normalizer.py:69-73`, `app/workers/sync_worker.py:112` · test : aucun dans ce périmètre
+- **FR-BE-357** — Les titres sont nettoyés à la synchronisation, avant d'entrer en file (préfixes pays, balises de qualité dont `FHD` depuis la v1.10.7). — *implémenté* — preuve `app/utils/string_normalizer.py:69-73`, `app/workers/sync_worker.py:104` · test : aucun dans ce périmètre
 
 ### OMDb : un seul appel, trois usages
 
@@ -77,16 +77,16 @@
 
 ### Budget et fiabilité réseau
 
-- **FR-BE-373** — Le budget TMDB compte les requêtes HTTP réelles, nouvelles tentatives comprises ; une phase s'arrête entre deux lots quand `ENRICHMENT_DAILY_LIMIT` (50 000 par défaut) est atteint, et les entrées non traitées restent en file. — *implémenté* — preuve `app/services/tmdb_service.py:326-334`, `app/workers/enrichment_worker.py:642-644`, `app/config.py:111` · test : aucun sur l'arrêt
+- **FR-BE-373** — Le budget TMDB compte les requêtes HTTP réelles, nouvelles tentatives comprises ; une phase s'arrête entre deux lots quand `ENRICHMENT_DAILY_LIMIT` (50 000 par défaut) est atteint, et les entrées non traitées restent en file. — *implémenté* — preuve `app/services/tmdb_service.py:326-334`, `app/workers/enrichment_worker.py:642-644`, `app/config.py:121` · test : aucun sur l'arrêt
 - **FR-BE-374** — Les deux budgets (`ENRICHMENT_DAILY_LIMIT`, `OMDB_DAILY_LIMIT` 95 000 par défaut) sont des compteurs du processus remis à zéro au début de chaque `run()` : ce ne sont pas des quotas sur 24 heures. — *partiel* (manque : quota quotidien persistant ; résidu CR-F03 assumé dans le code) — preuve `app/services/tmdb_service.py:295-304`, `app/workers/enrichment_worker.py:609-612`, `app/config.py:38` · test : aucun
 - **FR-BE-375** — TMDB et OMDb : jusqu'à 3 nouvelles tentatives (1 s, 2 s, 4 s), en-tête `Retry-After` suivi sur un 429, nouvelle tentative sur 502/503/504, les autres 4xx remontés tout de suite. — *implémenté* — preuve `app/services/tmdb_service.py:317-366`, `app/services/omdb_service.py:237-290` · test : aucun dans ce périmètre
-- **FR-BE-376** — Sans `TMDB_API_KEY`, aucune requête TMDB n'est faite (entrées `skipped`) ; le démarrage le signale en `WARNING`. — *implémenté* — preuve `app/services/tmdb_service.py:285-287`, `app/workers/enrichment_worker.py:185-186`, `app/config.py:417-420` · test : aucun
+- **FR-BE-376** — Sans `TMDB_API_KEY`, aucune requête TMDB n'est faite (entrées `skipped`) ; le démarrage le signale en `WARNING`. — *implémenté* — preuve `app/services/tmdb_service.py:285-287`, `app/workers/enrichment_worker.py:185-186`, `app/config.py:461-464` · test : aucun
 - **FR-BE-377** — La clé TMDB ne doit pas paraître dans les journaux. Or une erreur HTTP TMDB autre que 404 est journalisée avec le texte de l'exception et sa trace, qui contiennent l'URL de la requête, clé comprise (la clé est un paramètre de requête ajouté par le client). — *partiel* (manque : journaliser le type et le statut seulement, comme `omdb_service`) — preuve `app/services/tmdb_service.py:272`, `app/workers/enrichment_worker.py:318`, `app/workers/enrichment_worker.py:321` · test : aucun
 - **FR-BE-378** — La passe tient une seule session du **pool de l'API** (`async_session_factory`) de bout en bout, et ses commits de lot ne retentent pas (lecture-modification-écriture sur objets attachés, choix documenté). — *partiel* (manque : pool dédié aux workers, comme le prévoit `worker_engine`) — preuve `app/workers/enrichment_worker.py:12`, `app/workers/enrichment_worker.py:619`, `app/workers/enrichment_worker.py:656-672` · test : aucun
 
 ### Déclenchement
 
-- **FR-BE-379** — Le job planifié `sync_enrich_generate` (maître seulement, toutes les `SYNC_INTERVAL_HOURS`, une instance à la fois, rattrapage fusionné) enchaîne synchronisation → enrichissement → validation → génération → instantané ; un premier passage est lancé au démarrage du maître. Chacun saute son tour si `_PIPELINE_LOCK` est déjà tenu. — *implémenté* — preuve `app/main.py:330-365`, `app/main.py:523-532` · test : aucun dans ce périmètre (détail : `CAP-BE-05`)
+- **FR-BE-379** — Le job planifié `sync_enrich_generate` (maître seulement, toutes les `SYNC_INTERVAL_HOURS`, une instance à la fois, rattrapage fusionné) enchaîne synchronisation → enrichissement → validation → génération → instantané ; un premier passage est lancé au démarrage du maître. Chacun saute son tour si `_PIPELINE_LOCK` est déjà tenu. — *implémenté* — preuve `app/main.py:334-369`, `app/main.py:550-559` · test : aucun dans ce périmètre (détail : `CAP-BE-05`)
 - **FR-BE-380** — `POST /api/sync/enrichment` (clé `X-API-Key`) lance `run()` en tâche de fond et répond 202 + `jobId`, suivi par le registre de jobs en mémoire. — *implémenté* — preuve `app/api/sync.py:83-103` · test : aucun dans ce périmètre
 - **FR-BE-381** — Le déclenchement manuel ne prend pas `_PIPELINE_LOCK` et ne vérifie pas qu'une passe tourne déjà : deux `run()` peuvent se chevaucher, et chacun remet à zéro les compteurs partagés de budget. — *partiel* (manque : exclusion mutuelle avec le pipeline) — preuve `app/api/sync.py:87-103`, `app/workers/enrichment_worker.py:609-612` · test : aucun
 - **FR-BE-382** — En cas d'échec, le job manuel garde `str(exc)` dans son état, renvoyé par l'API de suivi. — *implémenté* (comportement constaté) — preuve `app/api/sync.py:98-100` · test : aucun
@@ -109,7 +109,7 @@
 
 ## Règles métier
 
-- **RG-BE-06.1** — Une ligne entre en file si elle est `movie` ou `show` et qu'il lui manque `tmdb_id` ou `imdb_id`. — preuve `app/workers/sync_worker.py:806-811`
+- **RG-BE-06.1** — Une ligne entre en file si elle est `movie` ou `show` et qu'il lui manque `tmdb_id` ou `imdb_id`. — preuve `app/workers/sync_worker.py:798-803`
 - **RG-BE-06.2** — Une ligne verrouillée n'est jamais modifiée par l'enrichissement automatique, ni à la sélection ni à l'écriture. — preuve `app/workers/enrichment_worker.py:59-77`, `app/workers/enrichment_worker.py:585`
 - **RG-BE-06.3** — Correspondance TMDB automatique : note ≥ 0,85, titre ≥ 0,90, écart ≥ 0,05 (ou départage par le résumé). — preuve `app/services/tmdb_service.py:51-57`
 - **RG-BE-06.4** — Identité tirée d'un titre OMDb : année exacte, similarité ≥ 0,90, type concordant ; seuil plus haut que celui du contrôle de contradiction, car OMDb renvoie souvent le titre anglais. — preuve `app/workers/enrichment_worker.py:90-97`, `app/workers/enrichment_worker.py:253`
@@ -118,7 +118,7 @@
 - **RG-BE-06.7** — OMDb ne dégrade jamais un résultat TMDB : toute défaillance est en échec ouvert. — preuve `app/workers/enrichment_worker.py:324-331`
 - **RG-BE-06.8** — Le budget compte les requêtes HTTP réelles, par passe. — preuve `app/services/tmdb_service.py:326-334`, `app/services/tmdb_service.py:295-304`
 - **RG-BE-06.9** — Une durée rapportée par une source n'est jamais remplacée au niveau épisode ; la durée TMDB ne remplit que la ligne série absente ou sous 5 minutes. — preuve `app/services/media_identity_writer.py:97-101`, `app/services/aggregation_service.py:78-81`
-- **RG-BE-06.10** — Une entrée est retentée au plus 3 fois ; une entrée `done` ne revient que par un rescrape. — preuve `app/workers/enrichment_worker.py:29`, `app/workers/sync_worker.py:829-836`
+- **RG-BE-06.10** — Une entrée est retentée au plus 3 fois ; une entrée `done` ne revient que par un rescrape. — preuve `app/workers/enrichment_worker.py:29`, `app/workers/sync_worker.py:821-828`
 
 ## États, erreurs et cas limites
 
@@ -157,7 +157,7 @@
 | Le déclenchement manuel ne partage pas le verrou du pipeline (FR-BE-381) | code manquant | prendre `_PIPELINE_LOCK` ou refuser en 409 |
 | Les noms `ENRICHMENT_DAILY_LIMIT` / `OMDB_DAILY_LIMIT` et `CLAUDE.md` §2 (« borné ENRICHMENT_DAILY_LIMIT ») suggèrent un quota quotidien ; ce sont des budgets par passe, et le pipeline tourne toutes les 6 heures par défaut (FR-BE-374) | spec ↔ code (nommage) | documenter « par passe » ou persister un compteur |
 | `.env.example` et le log de démarrage présentent OMDb comme validateur de cohérence des ids (« imdb-id consistency validator will be disabled ») sans ses rôles de notes et de repli par titre | doc et message périmés | mettre à jour le commentaire et le message |
-| `flux-cles.md`, section pipeline planifié, cite des lignes de `main.py` qui ne correspondent plus (main.py:248-273, main.py:311-321) ; les fonctions sont à `app/main.py:330` et `app/main.py:523` | doc ↔ code (lignes périmées) | corriger à la prochaine `/sync-context` |
+| `flux-cles.md`, section pipeline planifié, cite des lignes de `main.py` qui ne correspondent plus (main.py:248-273, main.py:311-321) ; les fonctions sont à `app/main.py:334` et `app/main.py:550` | doc ↔ code (lignes périmées) | corriger à la prochaine `/sync-context` |
 | `CLAUDE.md` §2 affiche encore `APP_VERSION = "1.10.0"` dans la puce `main.py`, alors que le code porte 1.10.9 (§4 le dit) | doc ↔ doc | corriger à la prochaine `/sync-context` |
 | Tests manquants : `enqueue_for_enrichment` (cas d'ids partiels, statut non remis à zéro), borne des 3 tentatives, ordre de la chaîne de recherche, arrêt sur budget, contenu des logs (clés TMDB et OMDb), chevauchement manuel/planifié, `youtube_trailer` écrit par l'enrichissement, cas `imdb_id` seul sans réponse OMDb | test manquant | lot de tests dédié |
 

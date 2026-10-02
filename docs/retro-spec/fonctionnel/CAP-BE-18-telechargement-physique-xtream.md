@@ -1,6 +1,6 @@
 # CAP-BE-18 — Téléchargement physique Xtream
 
-**Reconstituée le** : 2026-09-25 · **HEAD** : `0ff5777` · **Sources** : inventaire, code, tests, PRD `docs/10-prd-media-download.md` (pilote)
+**Reconstituée le** : 2026-09-25 · recalée le 2026-10-02 (Lot 10) · **HEAD** : `aa3270f` · **Sources** : inventaire, code, tests, PRD `docs/10-prd-media-download.md` (pilote)
 **Périmètre** : UI HTMX `/admin/downloads*` (11 routes) + miroir JSON `/api/admin/downloads*` (2 routes), `download_service`, `download_nfo`, `download_worker` (maître seul), tables `download_job`/`download_batch` (migration 018) — voir `docs/retro-spec/_genere/inventaire.md`.
 
 ## Résumé
@@ -23,49 +23,49 @@ L'opérateur choisit, dans l'onglet admin « Télécharger », un film ou une s�
 ## Exigences fonctionnelles
 
 - **FR-BE-001** — Le système affiche le catalogue unifié films/séries (page + fragment filtrable par type et recherche) en réutilisant `media_service.get_unified_list`. — *implémenté* — preuve `app/api/admin_downloads.py:156-204` · test `tests/test_admin_downloads.py`
-- **FR-BE-002** — Toutes les routes `/admin/downloads*` exigent la Basic Auth admin, posée au montage du routeur. — *implémenté* — preuve `app/main.py:658` · test `tests/test_download_security.py:240-254`
+- **FR-BE-002** — Toutes les routes `/admin/downloads*` exigent la Basic Auth admin, posée au montage du routeur. — *implémenté* — preuve `app/main.py:685` · test `tests/test_download_security.py:240-254`
 - **FR-BE-003** — Le système liste les versions d'un titre (`server_id`, `rating_key`, libellé, `is_broken`) et, pour un film, la taille estimée par source. — *implémenté* — preuve `app/api/admin_downloads.py:220-285` · test `tests/test_admin_downloads.py:145-206`
 - **FR-BE-004** — Un `unification_id` inconnu ou un `type` hors `movie|show` donne 404. — *implémenté* — preuve `app/api/admin_downloads.py:232-237` · test `tests/test_admin_downloads.py:206-227`
-- **FR-BE-005** — Pour une série, le système propose un sélecteur par saison avec sources multi-comptes et taille agrégée. — *implémenté* — preuve `app/services/download_service.py:746-805`, `app/api/admin_downloads.py:260-271` · test `tests/test_admin_downloads.py:228-266`
-- **FR-BE-006** — Pour une saison donnée, le système propose un sélecteur par épisode avec la taille de chaque épisode. — *implémenté* — preuve `app/api/admin_downloads.py:288-317`, `app/services/download_service.py:808-843` · test `tests/test_admin_downloads.py:307-334`
-- **FR-BE-007** — La mise en file accepte quatre portées : film (1 job), série entière `series_all` (1 job par épisode + 1 lot), saisons choisies avec une source par saison (`seasons`), épisodes choisis avec une source par épisode (`episodes`) ; une même action peut couvrir plusieurs comptes. — *implémenté* — preuve `app/api/admin_downloads.py:402-439`, `app/services/download_service.py:846-1272` · test `tests/test_admin_downloads.py:355-580`
-- **FR-BE-008** — L'ancienne portée `series_seasons` (cases à cocher, une seule source) reste dans `enqueue_selection` mais le routeur la refuse : aucun chemin UI ni API ne l'atteint. — *mort* — preuve `app/api/admin_downloads.py:392-405`, `app/services/download_service.py:937-941`
-- **FR-BE-009** — La destination est toujours calculée côté serveur ; le formulaire n'accepte aucun chemin (`type`, `unification_id`, `scope`, `source`, `season_pick`, `episode_pick` seulement). — *implémenté* — preuve `app/services/download_service.py:222-260`, `app/api/admin_downloads.py:377-390` · test `tests/test_download_security.py:277-292`
-- **FR-BE-010** — Si `DOWNLOAD_DIR` est vide, la mise en file renvoie une erreur explicite sans créer de job, et le worker ne démarre pas. — *implémenté* — preuve `app/services/download_service.py:873-874`, `app/workers/download_worker.py:200-202`, `app/main.py:480-483` · test `tests/test_download_service.py:162-176`
-- **FR-BE-011** — Le chemin final est prouvé confiné sous `DOWNLOAD_DIR` par résolution `realpath` au moment de l'écriture, y compris contre un lien symbolique interne pointant à l'extérieur. — *implémenté* — preuve `app/services/download_service.py:288-300` · test `tests/test_download_confinement.py:208-219`
+- **FR-BE-005** — Pour une série, le système propose un sélecteur par saison avec sources multi-comptes et taille agrégée. — *implémenté* — preuve `app/services/download_service.py:727-786`, `app/api/admin_downloads.py:260-271` · test `tests/test_admin_downloads.py:228-266`
+- **FR-BE-006** — Pour une saison donnée, le système propose un sélecteur par épisode avec la taille de chaque épisode. — *implémenté* — preuve `app/api/admin_downloads.py:288-317`, `app/services/download_service.py:789-824` · test `tests/test_admin_downloads.py:307-334`
+- **FR-BE-007** — La mise en file accepte quatre portées : film (1 job), série entière `series_all` (1 job par épisode + 1 lot), saisons choisies avec une source par saison (`seasons`), épisodes choisis avec une source par épisode (`episodes`) ; une même action peut couvrir plusieurs comptes. — *implémenté* — preuve `app/api/admin_downloads.py:400-437`, `app/services/download_service.py:827-1233` · test `tests/test_admin_downloads.py:355-580`
+- **FR-BE-008** — L'ancienne portée `series_seasons` (cases à cocher, une seule source) restait dans `enqueue_selection` alors que le routeur la refusait : aucun chemin UI ni API ne l'atteignait. — *retiré* (Lot 10 : la portée, son paramètre `seasons`, sa branche et le schéma `DownloadEnqueueRequest` sont supprimés ; l'interface propose `seasons`, avec une source par saison) — preuve de l'absence `app/services/download_service.py:827-838` (signature sans `seasons`), `app/api/admin_downloads.py:392-397` (docstring : portée retirée) · test : aucun (le routeur refuse déjà toute portée hors `movie`/`series_all`/`seasons`/`episodes`, `app/api/admin_downloads.py:400-402`)
+- **FR-BE-009** — La destination est toujours calculée côté serveur ; le formulaire n'accepte aucun chemin (`type`, `unification_id`, `scope`, `source`, `season_pick`, `episode_pick` seulement). — *implémenté* — preuve `app/services/download_service.py:222-259`, `app/api/admin_downloads.py:377-390` · test `tests/test_download_security.py:277-292`
+- **FR-BE-010** — Si `DOWNLOAD_DIR` est vide, la mise en file renvoie une erreur explicite sans créer de job, et le worker ne démarre pas. — *implémenté* — preuve `app/services/download_service.py:851-852`, `app/workers/download_worker.py:200-202`, `app/main.py:507-510` · test `tests/test_download_service.py:162-176`
+- **FR-BE-011** — Le chemin final est prouvé confiné sous `DOWNLOAD_DIR` par résolution `realpath` au moment de l'écriture, y compris contre un lien symbolique interne pointant à l'extérieur. — *implémenté* — preuve `app/services/download_service.py:287-299` · test `tests/test_download_confinement.py:208-219`
 - **FR-BE-012** — Chaque segment de chemin est assaini : séparateurs et `..` neutralisés, caractères interdits NTFS remappés, caractères de contrôle retirés, longueur bornée, noms réservés Windows suffixés. — *implémenté* — preuve `app/services/download_service.py:152-219` · test `tests/test_download_confinement.py:62-118`
 - **FR-BE-013** — L'URL Xtream n'est jamais persistée, loggée ni renvoyée : aucune colonne URL, re-dérivation au worker par `build_stream_url`. — *implémenté* — preuve `app/workers/download_worker.py:600`, `app/models/database.py:543-575` · test `tests/test_download_security.py:162`
-- **FR-BE-014** — Le transfert ne suit pas les redirections automatiquement : chaque saut (borné par `DOWNLOAD_MAX_REDIRECTS`) n'est suivi que si l'hôte résout vers une IP publique, sans jamais écrire l'URL dans le message d'erreur. — *implémenté* — preuve `app/services/download_service.py:346-380`, `app/services/download_service.py:453-473` · test `tests/test_download_security.py:328-353`
-- **FR-BE-015** — Le transfert écrit dans `<dest>.part` puis promeut par `os.replace` ; sur annulation ou échec, le `.part` est conservé et jamais promu. — *implémenté* — preuve `app/services/download_service.py:477`, `app/services/download_service.py:561` · test `tests/test_download_transfer.py:33-56`
-- **FR-BE-016** — La reprise envoie `Range: bytes=<n>-` depuis le `.part` ; un 206 au `Content-Range` incohérent ou un 200 redémarrent de zéro ; un 416 promeut le `.part`. — *implémenté* — preuve `app/services/download_service.py:475-532` · test `tests/test_download_transfer.py:93-218`
-- **FR-BE-017** — Si le fichier final existe et qu'aucun `.part` n'est présent, le job se termine sans re-télécharger. — *implémenté* — preuve `app/services/download_service.py:434-438` · test `tests/test_download_transfer.py:219-237`
-- **FR-BE-018** — Les réponses amont sont classées : 403/404 et contenu d'erreur (HTML/JSON) = échec définitif ; 5xx/429 = échec transitoire relancé. — *implémenté* — preuve `app/services/download_service.py:497-508` · test `tests/test_download_transfer.py:238-268`
-- **FR-BE-019** — Un job `queued`/`running` peut être annulé ; l'écriture est conditionnelle à l'état et le transfert en cours la découvre par une vérification coopérative (~1/s). — *implémenté* — preuve `app/services/download_service.py:1299-1321`, `app/workers/download_worker.py:400-412` · test `tests/test_download_service.py:431-458`
-- **FR-BE-020** — Un job `failed`/`canceled` peut être relancé : retour à `queued`, compteur d'essais et erreur remis à zéro, `.part` conservé pour la reprise. — *implémenté* — preuve `app/services/download_service.py:1324-1346` · test `tests/test_download_service.py:465-497`
-- **FR-BE-021** — « Vider les terminés » supprime les jobs `completed`/`failed`/`canceled` sans toucher aux jobs actifs. — *implémenté* — preuve `app/services/download_service.py:1349-1363`, `app/api/admin_downloads.py:469-476` · test `tests/test_download_service.py:504-527`
+- **FR-BE-014** — Le transfert ne suit pas les redirections automatiquement : chaque saut (borné par `DOWNLOAD_MAX_REDIRECTS`) n'est suivi que si l'hôte résout vers une IP publique, sans jamais écrire l'URL dans le message d'erreur. — *implémenté* — preuve `app/services/download_service.py:345-379`, `app/services/download_service.py:452-472` · test `tests/test_download_security.py:328-353`
+- **FR-BE-015** — Le transfert écrit dans `<dest>.part` puis promeut par `os.replace` ; sur annulation ou échec, le `.part` est conservé et jamais promu. — *implémenté* — preuve `app/services/download_service.py:476`, `app/services/download_service.py:560` · test `tests/test_download_transfer.py:33-56`
+- **FR-BE-016** — La reprise envoie `Range: bytes=<n>-` depuis le `.part` ; un 206 au `Content-Range` incohérent ou un 200 redémarrent de zéro ; un 416 promeut le `.part`. — *implémenté* — preuve `app/services/download_service.py:474-531` · test `tests/test_download_transfer.py:93-218`
+- **FR-BE-017** — Si le fichier final existe et qu'aucun `.part` n'est présent, le job se termine sans re-télécharger. — *implémenté* — preuve `app/services/download_service.py:433-437` · test `tests/test_download_transfer.py:219-237`
+- **FR-BE-018** — Les réponses amont sont classées : 403/404 et contenu d'erreur (HTML/JSON) = échec définitif ; 5xx/429 = échec transitoire relancé. — *implémenté* — preuve `app/services/download_service.py:496-507` · test `tests/test_download_transfer.py:238-268`
+- **FR-BE-019** — Un job `queued`/`running` peut être annulé ; l'écriture est conditionnelle à l'état et le transfert en cours la découvre par une vérification coopérative (~1/s). — *implémenté* — preuve `app/services/download_service.py:1260-1282`, `app/workers/download_worker.py:400-412` · test `tests/test_download_service.py:431-458`
+- **FR-BE-020** — Un job `failed`/`canceled` peut être relancé : retour à `queued`, compteur d'essais et erreur remis à zéro, `.part` conservé pour la reprise. — *implémenté* — preuve `app/services/download_service.py:1285-1307` · test `tests/test_download_service.py:465-497`
+- **FR-BE-021** — « Vider les terminés » supprime les jobs `completed`/`failed`/`canceled` sans toucher aux jobs actifs. — *implémenté* — preuve `app/services/download_service.py:1310-1324`, `app/api/admin_downloads.py:467-474` · test `tests/test_download_service.py:504-527`
 - **FR-BE-022** — Les échecs transitoires sont relancés jusqu'à `DOWNLOAD_MAX_RETRIES` avec attente exponentielle plafonnée à 30 s ; le créneau de concurrence est rendu avant l'attente et le job reste visible `queued`. — *implémenté* — preuve `app/workers/download_worker.py:479-563` · test `tests/test_download_worker.py:247-344`
 - **FR-BE-023** — Au démarrage du maître, les jobs restés `running` (process mort) repassent `queued` avant le drain. — *implémenté* (sans test dédié) — preuve `app/workers/download_worker.py:125-140`, `app/workers/download_worker.py:204`
-- **FR-BE-024** — Le worker ne tourne que dans le process maître, lancé en tâche de fond sans bloquer le démarrage. — *implémenté* — preuve `app/main.py:471-497` · test `tests/test_download_worker.py` (drain isolé, pas le câblage `lifespan`)
-- **FR-BE-025** — Avant chaque transfert, le job échoue définitivement (sans consommer de relance) si l'espace libre sous `DOWNLOAD_DIR` est sous `DOWNLOAD_MIN_FREE_DISK_MB` (0 = désactivé). — *implémenté* — preuve `app/services/download_service.py:263-285`, `app/workers/download_worker.py:642-648` · test `tests/test_download_service.py:296-334`
+- **FR-BE-024** — Le worker ne tourne que dans le process maître, lancé en tâche de fond sans bloquer le démarrage. — *implémenté* — preuve `app/main.py:498-524` · test `tests/test_download_worker.py` (drain isolé, pas le câblage `lifespan`)
+- **FR-BE-025** — Avant chaque transfert, le job échoue définitivement (sans consommer de relance) si l'espace libre sous `DOWNLOAD_DIR` est sous `DOWNLOAD_MIN_FREE_DISK_MB` (0 = désactivé). — *implémenté* — preuve `app/services/download_service.py:262-284`, `app/workers/download_worker.py:642-648` · test `tests/test_download_service.py:296-334`
 - **FR-BE-026** — La concurrence est bornée par `DOWNLOAD_CONCURRENCY` (sémaphore). — *implémenté* — preuve `app/workers/download_worker.py:214-215` · test `tests/test_download_worker.py:272-315`
-- **FR-BE-027** — Une mise en file qui retrouve un job non terminal pour le même `(server_id, rating_key)` le réutilise ; un job `completed` peut être remis en file. — *implémenté* — preuve `app/services/download_service.py:600-616` · test `tests/test_download_service.py:106-143`
-- **FR-BE-028** — Un compte introuvable ou inactif bloque la mise en file (erreur, aucun job) ; s'il devient inactif avant exécution, le job passe `failed`. — *implémenté* — preuve `app/services/download_service.py:886-890`, `app/workers/download_worker.py:596-599` · test `tests/test_download_service.py:186`
+- **FR-BE-027** — Une mise en file qui retrouve un job non terminal pour le même `(server_id, rating_key)` le réutilise ; un job `completed` peut être remis en file. — *implémenté* — preuve `app/services/download_service.py:599-615` · test `tests/test_download_service.py:106-143`
+- **FR-BE-028** — Un compte introuvable ou inactif bloque la mise en file (erreur, aucun job) ; s'il devient inactif avant exécution, le job passe `failed`. — *implémenté* — preuve `app/services/download_service.py:864-868`, `app/workers/download_worker.py:596-599` · test `tests/test_download_service.py:186`
 - **FR-BE-029** — Après un téléchargement réussi, un `.nfo` (Jellyfin/Kodi) est écrit à côté de la vidéo, en best-effort ; aucune image n'est posée sur disque (le poster n'est qu'une URL dans le NFO). — *partiel* (manque : fichier poster annoncé par F-203) — preuve `app/services/download_nfo.py:50-90`, `app/workers/download_worker.py:323-359` · test `tests/test_download_nfo.py:32-120`
 - **FR-BE-030** — Un miroir JSON en lecture seule (`GET /api/admin/downloads`, `GET /api/admin/downloads/{job_id}`) est gardé par la clé maître seule. — *implémenté* — preuve `app/api/downloads.py:33-61` · test `tests/test_download_security.py:278-325`
-- **FR-BE-031** — Ni le fragment HTMX de la file ni le JSON n'exposent d'URL ou d'identifiant. — *implémenté* — preuve `app/api/admin_downloads.py:80-112`, `app/models/schemas.py:563-607` · test `tests/test_download_security.py:186-224`
+- **FR-BE-031** — Ni le fragment HTMX de la file ni le JSON n'exposent d'URL ou d'identifiant. — *implémenté* — preuve `app/api/admin_downloads.py:80-112`, `app/models/schemas.py:562-606` · test `tests/test_download_security.py:186-224`
 - **FR-BE-032** — La progression (`bytes_done`/`bytes_total`) est persistée au plus ~1 fois/s sans jamais toucher à l'état (une annulation concurrente n'est pas écrasée). — *implémenté* — preuve `app/workers/download_worker.py:380-397` · test : aucun dédié (le throttle voisin d'annulation est testé en `tests/test_download_worker.py:200-246`)
-- **FR-BE-033** — Les tables `download_job`/`download_batch` sont créées de façon additive et idempotente (migration 018), `batch_id` sans clé étrangère dure. — *implémenté* — preuve `app/db/migrations.py:807-858`, `app/models/database.py:511-575`
-- **FR-BE-034** — Trois métriques Prometheus : jauge `plexhub_download_jobs{state}` recalculée périodiquement, compteur `plexhub_download_bytes_total`, compteur `plexhub_download_failures_total{reason}` à valeurs fermées. — *implémenté* (noms différents du PRD) — preuve `app/utils/metrics.py:174-226`, `app/services/download_service.py:93-147` · test `tests/test_download_metrics.py`
-- **FR-BE-035** — Le préfixe `[XXX] ` du dossier d'un film adulte existe dans `compute_dest_path`, mais aucun appelant ne passe `is_adult=True` (choix documenté « non appliqué au MVP »). — *mort* — preuve `app/services/download_service.py:230`, `app/services/download_service.py:240-244`
-- **FR-BE-036** — API JSON de mutation (mise en file, annulation, relance par `X-API-Key`) annoncée par le PRD (F-201) : seul un schéma `DownloadEnqueueRequest` existe, aucune route ne l'utilise. — *absent* (annoncé dans `docs/10-prd-media-download.md`, introuvable dans le code) — schéma orphelin `app/models/schemas.py:616`
+- **FR-BE-033** — Les tables `download_job`/`download_batch` sont créées de façon additive et idempotente (migration 018), `batch_id` sans clé étrangère dure. — *implémenté* — preuve `app/db/migrations.py:808-859`, `app/models/database.py:511-575`
+- **FR-BE-034** — Trois métriques Prometheus : jauge `plexhub_download_jobs{state}` recalculée périodiquement, compteur `plexhub_download_bytes_total`, compteur `plexhub_download_failures_total{reason}` à valeurs fermées. — *implémenté* (noms différents du PRD) — preuve `app/utils/metrics.py:175-227`, `app/services/download_service.py:93-147` · test `tests/test_download_metrics.py`
+- **FR-BE-035** — Le préfixe `[XXX] ` du dossier d'un film adulte existait dans `compute_dest_path` mais aucun appelant ne passait `is_adult=True` (choix documenté « non appliqué au MVP »). — *retiré* (Lot 10 : le paramètre `is_adult` et l'import de `apply_adult_prefix` sont supprimés de `compute_dest_path` ; le titre n'est jamais préfixé dans les chemins de téléchargement) — preuve de l'absence `app/services/download_service.py:222-259`, docstring `app/services/download_service.py:239-240` · test : aucun
+- **FR-BE-036** — API JSON de mutation (mise en file, annulation, relance par `X-API-Key`) annoncée par le PRD (F-201). — *absent* (annoncé dans `docs/10-prd-media-download.md`, introuvable dans le code ; le schéma orphelin `DownloadEnqueueRequest`, sans route, a été retiré au Lot 10) — preuve de l'absence : plus aucune occurrence de `DownloadEnqueueRequest` dans `app/`, `app/models/schemas.py:612-620`
 
 ## Règles métier
 
-- **RG-BE-18.1** — Un film n'a jamais de lot (`batch_id` nul) ; toute mise en file de série crée exactement un `DownloadBatch`. — preuve `app/services/download_service.py:910-935`, `app/services/download_service.py:976-987`
-- **RG-BE-18.2** — Le `total_jobs` d'un lot ne compte que les jobs neufs rattachés à ce lot ; un job dédupliqué garde son lot d'origine. — preuve `app/services/download_service.py:1030-1032`
-- **RG-BE-18.3** — Une saison ou un numéro d'épisode absent vaut `0` pour le nommage et le tri. — preuve `app/services/download_service.py:253-256`
+- **RG-BE-18.1** — Un film n'a jamais de lot (`batch_id` nul) ; toute mise en file de série crée exactement un `DownloadBatch`. — preuve `app/services/download_service.py:888-913`, `app/services/download_service.py:937-948`
+- **RG-BE-18.2** — Le `total_jobs` d'un lot ne compte que les jobs neufs rattachés à ce lot ; un job dédupliqué garde son lot d'origine. — preuve `app/services/download_service.py:991-993`
+- **RG-BE-18.3** — Une saison ou un numéro d'épisode absent vaut `0` pour le nommage et le tri. — preuve `app/services/download_service.py:252-255`
 - **RG-BE-18.4** — Toute écriture terminale du worker est conditionnée à `state='running'` : une annulation concurrente l'emporte toujours. — preuve `app/workers/download_worker.py:427-463`
-- **RG-BE-18.5** — L'assainissement à la mise en file n'est qu'une défense en profondeur ; seule `resolve_confined` au worker prouve le confinement. — preuve `app/services/download_service.py:238-241`
+- **RG-BE-18.5** — L'assainissement à la mise en file n'est qu'une défense en profondeur ; seule `resolve_confined` au worker prouve le confinement. — preuve `app/services/download_service.py:237-239`
 - **RG-BE-18.6** — Le repli 403 vers une URL de lecture directe n'existe que pour les jobs Plex ; un job Xtream n'a jamais d'URL de repli. — preuve `app/workers/download_worker.py:581-594`
 - **RG-BE-18.7** — Une version marquée cassée (`is_broken`) reste téléchargeable : aucun garde ne la bloque. — preuve `app/api/admin_downloads.py:248`
 
@@ -73,21 +73,21 @@ L'opérateur choisit, dans l'onglet admin « Télécharger », un film ou une s�
 
 | Situation | Comportement observé | Preuve |
 |---|---|---|
-| `DOWNLOAD_DIR` vide (mise en file) | Erreur « DOWNLOAD_DIR n'est pas défini », aucun job | `app/services/download_service.py:873-874` |
-| `DOWNLOAD_DIR` vide (démarrage) | Worker non lancé, simple log | `app/main.py:480-483` |
+| `DOWNLOAD_DIR` vide (mise en file) | Erreur « DOWNLOAD_DIR n'est pas défini », aucun job | `app/services/download_service.py:851-852` |
+| `DOWNLOAD_DIR` vide (démarrage) | Worker non lancé, simple log | `app/main.py:507-510` |
 | Compte introuvable/inactif | Mise en file refusée ; au worker, job `failed` | `app/workers/download_worker.py:596-599` |
 | Chemin résolu hors `DOWNLOAD_DIR` | Job `failed` « chemin de destination invalide », métrique `confinement` | `app/workers/download_worker.py:605-616` |
-| Disque presque plein | Job `failed` sans relance, métrique `disk_full` | `app/services/download_service.py:282-285` |
-| 403/404 amont | Échec définitif `failed` | `app/services/download_service.py:497-498` |
+| Disque presque plein | Job `failed` sans relance, métrique `disk_full` | `app/services/download_service.py:281-284` |
+| 403/404 amont | Échec définitif `failed` | `app/services/download_service.py:496-497` |
 | 5xx/429 amont | Relance avec attente, puis `failed` si budget épuisé | `app/workers/download_worker.py:479-563` |
-| Redirection vers IP privée / métadonnées cloud | Rejetée avant tout fetch, échec définitif | `app/services/download_service.py:346-380` |
-| Reprise avec `Content-Range` incohérent | Redémarrage à zéro (pas de trou ni doublon) | `app/services/download_service.py:510-526` |
-| Fichier final déjà présent | `completed` sans transfert | `app/services/download_service.py:434-438` |
-| Annulation pendant le transfert | `.part` gardé, jamais promu, état `canceled` | `app/services/download_service.py:566-567` |
+| Redirection vers IP privée / métadonnées cloud | Rejetée avant tout fetch, échec définitif | `app/services/download_service.py:345-379` |
+| Reprise avec `Content-Range` incohérent | Redémarrage à zéro (pas de trou ni doublon) | `app/services/download_service.py:509-525` |
+| Fichier final déjà présent | `completed` sans transfert | `app/services/download_service.py:433-437` |
+| Annulation pendant le transfert | `.part` gardé, jamais promu, état `canceled` | `app/services/download_service.py:565-566` |
 | Redémarrage avec job `running` | Remis `queued` au boot du maître | `app/workers/download_worker.py:125-140` |
-| Sélection saisons/épisodes vide | Erreur, aucun job | `app/services/download_service.py:1173-1174` |
-| Un épisode choisi est inconnu | Ignoré ; erreur seulement si tous les choix échouent | `app/services/download_service.py:1247-1258` |
-| Compte en panne fournisseur (§5.13) | Aucun traitement dédié trouvé : seul `is_active` est testé | `app/services/download_service.py:619-629` |
+| Sélection saisons/épisodes vide | Erreur, aucun job | `app/services/download_service.py:1134-1135` |
+| Un épisode choisi est inconnu | Ignoré ; erreur seulement si tous les choix échouent | `app/services/download_service.py:1208-1219` |
+| Compte en panne fournisseur (§5.13) | Aucun traitement dédié trouvé : seul `is_active` est testé | `app/services/download_service.py:618-628` |
 
 ## Dépendances
 
@@ -99,9 +99,9 @@ L'opérateur choisit, dans l'onglet admin « Télécharger », un film ou une s�
 
 | Écart | Nature | Suite proposée |
 |---|---|---|
-| Portée `series_seasons` inatteignable (FR-BE-008) | code mort | retirer, ou la documenter comme réservée — à trancher par Chakir |
+| Portée `series_seasons` inatteignable (FR-BE-008) | code mort (résolu au Lot 10 : retirée) | aucune |
 | Préfixe `[XXX]` jamais appliqué (FR-BE-035) | code mort (P2 assumé) | câbler F-202 ou retirer le paramètre |
-| `DownloadEnqueueRequest` sans route (FR-BE-036) | code mort / spec ↔ code | idem F-201 |
+| `DownloadEnqueueRequest` sans route (FR-BE-036) | code mort (schéma retiré au Lot 10) / spec ↔ code (API JSON toujours absente) | idem F-201 |
 | `reap_orphans` sans test dédié (FR-BE-023) | test manquant | test sous vrai verrou WAL (§9 piège 8) |
 | Câblage `lifespan` maître-seul non testé (FR-BE-024) | test manquant | test d'intégration du démarrage |
 | Migration 018 sans test dédié (FR-BE-033) | test manquant | test de rejouabilité |

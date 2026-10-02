@@ -1,6 +1,6 @@
 # CAP-BE-20 — Écran de téléchargement unifié
 
-**Reconstituée le** : 2026-09-26 · **HEAD** : `a222a60` · **Sources** : inventaire, code, tests, `docs/architecture/flux-cles.md` §5.10, board `docs/31-board.md` (UDL-01, UDL-02), PRD `docs/10-prd-media-download.md` et `docs/10-prd-plex-download.md` (ne couvrent pas cet écran), dépôt PlexHubTV (recherche négative)
+**Reconstituée le** : 2026-09-26 · recalée le 2026-10-02 (Lot 10) · **HEAD** : `aa3270f` · **Sources** : inventaire, code, tests, `docs/architecture/flux-cles.md` §5.10, board `docs/31-board.md` (UDL-01, UDL-02), PRD `docs/10-prd-media-download.md` et `docs/10-prd-plex-download.md` (ne couvrent pas cet écran), dépôt PlexHubTV (recherche négative)
 **Périmètre** : UI HTMX `/admin/unified-downloads` (3 décorateurs, 2 fonctions, `app/api/admin_unified_downloads.py`) ; service `unified_download_catalog_service` ; templates `unified_downloads.html` et `_unified_downloads_list.html` ; réutilise sans les modifier la file et les sélecteurs de version de CAP-BE-18 (Xtream) et CAP-BE-19 (Plex). Aucune route `/api/*`, aucune table propre — voir `docs/retro-spec/_genere/inventaire.md`.
 
 ## Résumé
@@ -28,7 +28,7 @@ Troisième onglet de l'admin, « Téléchargements » : l'opérateur parcourt en
 
 - **FR-BE-1044** — `GET /admin/unified-downloads` (avec ou sans barre finale) rend la page complète : filtres, catalogue et file. — *implémenté* — preuve `app/api/admin_unified_downloads.py:97-117` · test `tests/test_admin_unified_downloads.py:91`
 - **FR-BE-1045** — `GET /admin/unified-downloads/list` rend le seul fragment de catalogue, sans la file. — *implémenté* — preuve `app/api/admin_unified_downloads.py:120-140` · test `tests/test_admin_unified_downloads.py:98`
-- **FR-BE-1046** — L'accès est protégé par la Basic Auth posée au montage : 401 avec `WWW-Authenticate: Basic` sans identifiants, 503 si `ADMIN_PASSWORD` est vide. — *implémenté* — preuve `app/main.py:668`, `app/api/deps.py:113-145` · test `tests/test_admin_unified_downloads.py:75` et `:81` (401 seulement ; mauvais mot de passe et 503 non testés sur cet onglet)
+- **FR-BE-1046** — L'accès est protégé par la Basic Auth posée au montage : 401 avec `WWW-Authenticate: Basic` sans identifiants, 503 si `ADMIN_PASSWORD` est vide. — *implémenté* — preuve `app/main.py:695`, `app/api/deps.py:113-145` · test `tests/test_admin_unified_downloads.py:75` et `:81` (401 seulement ; mauvais mot de passe et 503 non testés sur cet onglet)
 - **FR-BE-1064** — Un lien « Téléchargements » figure dans la navigation de l'admin. — *implémenté* — preuve `app/templates/admin/base.html:123` · test : aucun
 
 **Fusion des catalogues**
@@ -44,7 +44,7 @@ Troisième onglet de l'admin, « Téléchargements » : l'opérateur parcourt en
 - **FR-BE-1051** — La recherche par sous-chaîne de titre s'applique aux deux catalogues. — *implémenté* — preuve `app/services/unified_download_catalog_service.py:109-114`, `app/services/plex_catalog_service.py:203-206` · test : aucun
 - **FR-BE-1052** — Le filtre `genre` (sous-chaîne) s'applique aux deux catalogues ; un genre Plex NULL (données d'avant la migration 021) ne correspond jamais. — *implémenté* — preuve `app/services/plex_catalog_service.py:207-210` · test `tests/test_admin_unified_downloads.py:142`, `tests/test_unified_download_catalog.py:126`
 - **FR-BE-1053** — La pagination est en mémoire après fusion : `page` ≥ 1 (défaut 1), `page_size` de 6 à 200 (défaut 24), boutons Précédent et Suivant ; un changement de filtre repart de la page 1 (champ caché `page=1`). — *implémenté* — preuve `app/api/admin_unified_downloads.py:72`, `app/api/admin_unified_downloads.py:104-105`, `app/services/unified_download_catalog_service.py:150`, `app/templates/admin/_unified_downloads_list.html:69-87`, `app/templates/admin/unified_downloads.html:46-47` · test : aucun
-- **FR-BE-1054** — Chaque source est lue sur `UNIFIED_DOWNLOAD_MERGE_CAP` groupes au plus (défaut 5000) ; au-delà, `truncated` déclenche un bandeau ambre et un « + » sur le total. — *implémenté* — preuve `app/config.py:224`, `app/services/unified_download_catalog_service.py:43`, `app/services/unified_download_catalog_service.py:98`, `app/services/unified_download_catalog_service.py:149`, `app/templates/admin/_unified_downloads_list.html:3-7`, `app/templates/admin/_unified_downloads_list.html:70` · test `tests/test_unified_download_catalog.py:148` (service seulement ; le bandeau HTML n'est pas testé)
+- **FR-BE-1054** — Chaque source est lue sur `UNIFIED_DOWNLOAD_MERGE_CAP` groupes au plus (défaut 5000) ; au-delà, `truncated` déclenche un bandeau ambre et un « + » sur le total. — *implémenté* — preuve `app/config.py:268`, `app/services/unified_download_catalog_service.py:43`, `app/services/unified_download_catalog_service.py:98`, `app/services/unified_download_catalog_service.py:149`, `app/templates/admin/_unified_downloads_list.html:3-7`, `app/templates/admin/_unified_downloads_list.html:70` · test `tests/test_unified_download_catalog.py:148` (service seulement ; le bandeau HTML n'est pas testé)
 - **FR-BE-1056** — Le total du catalogue est rendu via `catalogue_total`, distinct du `total` de la file, pour que le contexte de la file ne l'écrase pas au premier rendu pleine page (UDL-01). — *implémenté* — preuve `app/api/admin_unified_downloads.py:80-91`, `app/api/admin_unified_downloads.py:116`, `app/templates/admin/_unified_downloads_list.html:1`, `app/templates/admin/_unified_downloads_list.html:70` · test : aucun
 
 **Sélection et mise en file (déléguées)**
@@ -55,8 +55,8 @@ Troisième onglet de l'admin, « Téléchargements » : l'opérateur parcourt en
 
 **File partagée**
 
-- **FR-BE-1060** — La file commune est affichée sous `#downloads-queue` et rafraîchie toutes les 2 s via `/admin/downloads/queue` (200 jobs au plus, du plus récent au plus ancien). — *implémenté* — preuve `app/templates/admin/unified_downloads.html:60`, `app/api/admin_downloads.py:442-446`, `app/services/download_service.py:1277-1292` · test `tests/test_download_security.py:250` (401 de `/queue` ; le rendu sur l'écran unifié n'est pas testé)
-- **FR-BE-1061** — Depuis l'écran, l'opérateur peut annuler un job `queued` ou `running`, relancer un job `failed` ou `canceled`, et purger en bloc l'historique terminé ; il n'existe pas de suppression unitaire. — *implémenté* (via les routes `/admin/downloads/*`) — preuve `app/templates/admin/_downloads_queue.html:6-10`, `app/templates/admin/_downloads_queue.html:63-70`, `app/api/admin_downloads.py:449-476`, `app/services/download_service.py:1299-1363` · test `tests/test_download_service.py:432`, `:440`, `:476` (service seulement ; aucun test HTTP)
+- **FR-BE-1060** — La file commune est affichée sous `#downloads-queue` et rafraîchie toutes les 2 s via `/admin/downloads/queue` (200 jobs au plus, du plus récent au plus ancien). — *implémenté* — preuve `app/templates/admin/unified_downloads.html:60`, `app/api/admin_downloads.py:440-444`, `app/services/download_service.py:1238-1253` · test `tests/test_download_security.py:250` (401 de `/queue` ; le rendu sur l'écran unifié n'est pas testé)
+- **FR-BE-1061** — Depuis l'écran, l'opérateur peut annuler un job `queued` ou `running`, relancer un job `failed` ou `canceled`, et purger en bloc l'historique terminé ; il n'existe pas de suppression unitaire. — *implémenté* (via les routes `/admin/downloads/*`) — preuve `app/templates/admin/_downloads_queue.html:6-10`, `app/templates/admin/_downloads_queue.html:63-70`, `app/api/admin_downloads.py:447-474`, `app/services/download_service.py:1260-1324` · test `tests/test_download_service.py:432`, `:440`, `:476` (service seulement ; aucun test HTTP)
 
 **Sécurité**
 
@@ -72,7 +72,7 @@ Troisième onglet de l'admin, « Téléchargements » : l'opérateur parcourt en
 - **RG-BE-20.4** — `source_count` est le nombre de versions cumulées des deux origines, pas le nombre d'origines ; `origins` est trié alphabétiquement. — preuve `app/services/unified_download_catalog_service.py:128`, `app/services/unified_download_catalog_service.py:140`, `app/services/unified_download_catalog_service.py:144-145`
 - **RG-BE-20.5** — `total` est le nombre de groupes fusionnés dans la fenêtre lue, pas le total réel de la base ; `truncated` vaut vrai dès qu'une source dépasse `cap`. — preuve `app/services/unified_download_catalog_service.py:148-149`
 - **RG-BE-20.6** — Les chargeurs de version se déclenchent sur l'événement `toggle` du `<details>`, jamais sur un auto-déclencheur dans du contenu échangé ; le déclencheur des filtres est `change, keyup delay:300ms, submit`, sans `from:` contenant un espace ni `changed` sur un `<form>` (pièges htmx, UDL-02). — preuve `app/templates/admin/_unified_downloads_list.html:12-20`, `app/templates/admin/_unified_downloads_list.html:41`, `app/templates/admin/_unified_downloads_list.html:52`, `app/templates/admin/unified_downloads.html:22`
-- **RG-BE-20.7** — Le catalogue Xtream lu par cet écran passe par `media_service.get_unified_list`, donc hérite du masquage des comptes en panne (CAP-BE-08). — preuve `app/services/media_service.py:324-328`
+- **RG-BE-20.7** — Le catalogue Xtream lu par cet écran passe par `media_service.get_unified_list`, donc hérite du masquage des comptes en panne (CAP-BE-08). — preuve `app/services/media_service.py:316-320`
 
 ## États, erreurs et cas limites
 
@@ -83,8 +83,8 @@ Troisième onglet de l'admin, « Téléchargements » : l'opérateur parcourt en
 | `page` < 1, `page_size` < 6 ou > 200 | 422 FastAPI ; `base.html` fait échanger les 422 dans la cible, donc du JSON pourrait s'afficher dans la liste (l'UI ne peut pas produire ces valeurs) | `app/api/admin_unified_downloads.py:104-105`, `app/templates/admin/base.html:106-107` |
 | `page` au-delà de la dernière page | Liste vide, libellé « page N / M » non borné | `app/services/unified_download_catalog_service.py:150`, `app/templates/admin/_unified_downloads_list.html:1,70` |
 | Fenêtre dépassée sur une source | Bandeau ambre et « + » sur le total | `app/templates/admin/_unified_downloads_list.html:3-7,70` |
-| Job inexistant (annuler, relancer) | Le service renvoie `None`, la file est réaffichée sans erreur | `app/services/download_service.py:1304-1306`, `app/services/download_service.py:1329-1331`, `app/api/admin_downloads.py:449-466` |
-| Job déjà terminal ou déjà en file | Sans effet (mise à jour conditionnelle) | `app/services/download_service.py:1311`, `app/services/download_service.py:1336` |
+| Job inexistant (annuler, relancer) | Le service renvoie `None`, la file est réaffichée sans erreur | `app/services/download_service.py:1265-1267`, `app/services/download_service.py:1290-1292`, `app/api/admin_downloads.py:447-464` |
+| Job déjà terminal ou déjà en file | Sans effet (mise à jour conditionnelle) | `app/services/download_service.py:1272`, `app/services/download_service.py:1297` |
 | Job Plex dont la source a disparu du catalogue | Marqué `failed` : « source Plex introuvable ou non synchronisée » | `app/workers/download_worker.py:586-589` |
 | POST de la file avec `Sec-Fetch-Site: cross-site` | 403 par le middleware CSRF | `app/api/csrf.py:98-113` |
 | Sans identifiants admin | 401 avec `WWW-Authenticate: Basic` ; 503 si `ADMIN_PASSWORD` vide | `app/api/deps.py:123-134` |
@@ -92,7 +92,7 @@ Troisième onglet de l'admin, « Téléchargements » : l'opérateur parcourt en
 ## Dépendances
 
 - Autres capacités : `CAP-BE-18` (file `download_job`, worker, `_queue_context`, `/admin/downloads/*`, `media_service.get_unified_list`), `CAP-BE-19` (`plex_catalog_service.list_unified`, `/admin/plex-downloads/…/versions`, `plex_download_service`), `CAP-BE-02` (Basic Auth admin, CSRF), `CAP-BE-08` (masquage de panne, RG-BE-20.7).
-- Autre dépôt : aucun appelant. Recherche négative dans `tv:` : zéro occurrence de `unified-downloads`, `plex-downloads` ni `admin/downloads` dans le code ; seule mention, `tv:docs/retro-spec/fonctionnel/CAP-TV-14-telechargements-hors-ligne.md:160`, un texte de fiche (aucune dépendance fonctionnelle de la TV avec le module de téléchargement).
+- Autre dépôt : aucun appelant. Recherche négative dans `tv:` : zéro occurrence de `unified-downloads`, `plex-downloads` ni `admin/downloads` dans le code ; seule mention, `tv:docs/retro-spec/fonctionnel/CAP-TV-14-telechargements-hors-ligne.md:162`, un texte de fiche (aucune dépendance fonctionnelle de la TV avec le module de téléchargement).
 - Données : lit `media`, `plex_media_item` (colonne `genres`, migration 021) et `download_job` ; n'écrit rien lui-même. Config : `UNIFIED_DOWNLOAD_MERGE_CAP`, `ADMIN_USERNAME`, `ADMIN_PASSWORD`, `DOWNLOAD_DIR` (voir `docs/retro-spec/technique/db/`).
 
 ## Écarts relevés

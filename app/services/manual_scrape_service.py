@@ -183,7 +183,6 @@ class CataloguePage:
     items: list[Media]
     total: int
     offset: int
-    review_keys: set[tuple[str, str]] = field(default_factory=set)
 
 
 @dataclass(frozen=True)
@@ -1143,23 +1142,10 @@ async def list_catalogue(
         .offset(offset)
     )).scalars().all()
 
-    # Which of THIS page's items sit in the review queue — one extra query
-    # scoped to the page's keys (never a join against `media`, ADR 0005 F1).
     items = list(rows)
-    review_keys: set[tuple[str, str]] = set()
-    if items:
-        keys = {(it.server_id, it.rating_key) for it in items}
-        pending = (await db.execute(
-            select(ScrapeReview.server_id, ScrapeReview.rating_key).where(
-                ScrapeReview.status == "pending",
-                ScrapeReview.server_id.in_({k[0] for k in keys}),
-                ScrapeReview.rating_key.in_({k[1] for k in keys}),
-            )
-        )).all()
-        review_keys = {(r.server_id, r.rating_key) for r in pending} & keys
 
     return CataloguePage(
-        items=items, total=total, offset=offset, review_keys=review_keys,
+        items=items, total=total, offset=offset,
     )
 
 

@@ -552,7 +552,7 @@ async def test_show_import_unmatched_when_nfo_missing(tmp_path, db_session):
 
 def _nfo(media_type: str = "show", **ids):
     return nfo_import_service.NfoEntry(
-        path=Path("x"), folder_name="x", media_type=media_type, **ids
+        path=Path("x"), media_type=media_type, **ids
     )
 
 

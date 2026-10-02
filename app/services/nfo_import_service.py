@@ -140,7 +140,6 @@ async def _commit_with_lock_retry(db: AsyncSession) -> None:
 @dataclass
 class NfoEntry:
     path: Path
-    folder_name: str
     media_type: str  # "movie" or "show"
     # IDs
     imdb_id: Optional[str] = None
@@ -190,8 +189,6 @@ class ImportReport:
     parse_errors: list[str] = field(default_factory=list)
     dry_run: bool = False
     overwrite: bool = False
-    # Kept for template compatibility; deterministic matching never produces ambiguous hits.
-    ambiguous: list[str] = field(default_factory=list)
 
 
 def _first_text(root: ET.Element, *tags: str) -> Optional[str]:
@@ -418,7 +415,6 @@ def parse_nfo_file(path: Path, media_type: str) -> Optional[NfoEntry]:
 
     return NfoEntry(
         path=path,
-        folder_name=path.parent.name,
         media_type=media_type,
         imdb_id=imdb,
         tmdb_id=tmdb,
@@ -857,15 +853,14 @@ async def import_nfo(
     kinds: tuple[str, ...] = ("movies", "shows"),
     overwrite: bool = False,
     dry_run: bool = False,
-    account_ids: Optional[tuple[str, ...]] = None,
 ) -> list[ImportReport]:
     """Run a deterministic NFO import for every active Xtream account.
 
     Returns one ImportReport per (account, kind).
     """
     logger.info(
-        "NFO import start: root=%s kinds=%s overwrite=%s dry_run=%s account_filter=%s",
-        root, kinds, overwrite, dry_run, account_ids,
+        "NFO import start: root=%s kinds=%s overwrite=%s dry_run=%s",
+        root, kinds, overwrite, dry_run,
     )
 
     if not dry_run:
@@ -882,9 +877,6 @@ async def import_nfo(
         select(XtreamAccount).where(XtreamAccount.is_active == True),  # noqa: E712
     )
     accounts: list[XtreamAccount] = list(accounts_q.scalars().all())
-    if account_ids is not None:
-        wanted = set(account_ids)
-        accounts = [a for a in accounts if a.id in wanted]
     logger.info("NFO import: %d active account(s)", len(accounts))
 
     reports: list[ImportReport] = []

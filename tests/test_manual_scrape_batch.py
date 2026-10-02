@@ -715,11 +715,9 @@ async def test_catalogue_stats_and_filter_see_pending_reviews(db_factory):
     async with db_factory() as s:
         stats = await mss.catalogue_stats(s)
         page = await mss.list_catalogue(s, media_type="movie", id_filter="review")
-        all_page = await mss.list_catalogue(s, media_type="movie", id_filter="all")
 
     assert stats["movie"].review_pending == 1
     assert [i.rating_key for i in page.items] == ["vod_1.mp4"]
-    assert all_page.review_keys == {("xtream_a", "vod_1.mp4")}
 
 
 async def test_deleting_an_account_purges_its_reviews(db_session, db_factory):

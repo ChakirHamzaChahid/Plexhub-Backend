@@ -21,7 +21,7 @@ Cas d'usage typique : un ami possède un serveur Plex avec des films que l'opér
 - **Frustrations** : la disponibilité d'un serveur partagé n'est pas garantie dans le temps (le partage peut être révoqué, le serveur éteint) ; deux copies du même film sur deux serveurs différents ne doivent pas apparaître comme deux titres distincts ; le token plex.tv est un secret qui ne doit jamais transiter côté client.
 
 ### 2.2 Worker de téléchargement (réutilisé, pas de nouveau consommateur système)
-- Le worker de drainage de la feature « Télécharger » Xtream (`app/workers/download_worker.py`) traite **indifféremment** les jobs Xtream et Plex — le discriminant est le préfixe de `download_job.server_id` (`xtream_` vs `plex_`) ; l'URL de download est re-dérivée par source au moment du run (`stream_service.build_stream_url` pour Xtream, `plex_download_service.resolve_job_url` pour Plex).
+- Le worker de drainage de la feature « Télécharger » Xtream (`app/workers/download_worker.py`) traite **indifféremment** les jobs Xtream et Plex — le discriminant est le préfixe de `download_job.server_id` (`xtream_` vs `plex_`) ; l'URL de download est re-dérivée par source au moment du run (`stream_service.build_stream_url` pour Xtream, `plex_download_service.resolve_job_urls` pour Plex).
 
 ### 2.3 Sync worker catalogue Plex (nouveau, interne)
 - **Qui / contexte d'appel** : déclenché manuellement par l'opérateur (bouton « Sync » de l'onglet) ou, optionnellement, par un cron interval configurable (`PLEX_SYNC_INTERVAL_HOURS`, défaut `0` = désactivé). **Master-only** (même élection `fcntl.flock` que le reste du pipeline).
@@ -56,7 +56,7 @@ Cas d'usage typique : un ami possède un serveur Plex avec des films que l'opér
 | PC-003 | Sync catalogue mark-and-sweep | `plex_sync_service.run_full_sync` : discover→probe→catalogue-sync→dédup | P0 | **Livré** (C2/C3) |
 | PC-004 | Dédup lecture (`unification_id`) | `plex_catalog_service.list_unified`/`get_group` : `GROUP BY unification_id`, priorité imdb>tmdb>plexsrc | P0 | **Livré** (C4) |
 | PC-005 | Enqueue réutilisant la file existante | `plex_download_service.enqueue_plex_selection` écrit dans `download_job` (discriminant `server_id` préfixe `plex_`) | P0 | **Livré** (C5) |
-| PC-006 | Worker branché sans duplication | `download_worker` route sur `is_plex_server_id` pour re-dériver l'URL via `plex_download_service.resolve_job_url` | P0 | **Livré** (C5) |
+| PC-006 | Worker branché sans duplication | `download_worker` route sur `is_plex_server_id` pour re-dériver l'URL via `plex_download_service.resolve_job_urls` | P0 | **Livré** (C5) |
 | PC-007 | UI admin `/admin/plex-downloads` | Onglet HTMX miroir, 5 templates, réutilise le panneau file existant | P0 | **Livré** (C6) |
 | PC-101 | Miroir JSON lecture | `GET /api/admin/plex-downloads/{servers,catalog,catalog/{type}/{id}}`, `verify_master_key` | P1 | **Livré** (C7, ce PRD) |
 | PC-102 | Cron sync optionnel | `PLEX_SYNC_INTERVAL_HOURS>0` + `PLEX_ACCOUNT_TOKEN` non vide → job APScheduler master-only | P1 | **Livré** (C7, ce PRD) |
@@ -150,7 +150,7 @@ Schémas Pydantic v2 (camelCase, `to_camel`, `populate_by_name`) déjà posés c
 ## 9. Sécurité
 
 - **`PlexServer.access_token` et `base_uri`** : le token est un secret **par serveur** (plex.tv en émet un distinct par ressource), chiffré **Fernet au repos** exactement comme `XtreamAccount.password` (`EncryptedString`) — jamais exposé en API/HTML/log. `base_uri` (l'URI de connexion gagnante du probe) ne porte volontairement pas le token et reste affichable pour diagnostic.
-- **URL de téléchargement re-dérivée au worker** : comme pour Xtream, aucune URL complète (qui embarquerait le token en query) n'est jamais persistée en DB — `plex_download_service.resolve_job_url` la reconstruit au moment du transfert à partir de `plex_server.access_token`/`base_uri` + `download_job.rating_key`.
+- **URL de téléchargement re-dérivée au worker** : comme pour Xtream, aucune URL complète (qui embarquerait le token en query) n'est jamais persistée en DB — `plex_download_service.resolve_job_urls` la reconstruit au moment du transfert à partir de `plex_server.access_token`/`base_uri` + `download_job.rating_key`.
 - **Confinement d'écriture réutilisé (F-007)** : la destination est calculée serveur-side sous le **même** `DOWNLOAD_DIR`, via le **même** `download_service.resolve_confined` (realpath) — aucun chemin client accepté, aucune nouvelle surface de risque.
 - **`GET /api/admin/plex-downloads/*` = secret maître uniquement** (`verify_master_key`), jamais une clé par-utilisateur — même garde que `GET /api/admin/downloads`.
 - **`thumb_url`** stocké en base est un chemin **relatif** au PMS (sans token intégré) — jamais résolu en URL absolue côté serveur pour cette feature (pas de proxy image au MVP, cf. §6/PC-203).

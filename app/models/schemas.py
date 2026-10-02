@@ -343,7 +343,6 @@ class SyncRequest(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
     account_id: str
-    force: bool = False
 
 
 class SyncStatusResponse(BaseModel):

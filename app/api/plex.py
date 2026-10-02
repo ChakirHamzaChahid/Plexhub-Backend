@@ -15,7 +15,6 @@ router = APIRouter(prefix="/plex", tags=["plex"])
 class GenerateRequest(BaseModel):
     model_config = {"alias_generator": to_camel, "populate_by_name": True}
     account_id: Optional[str] = None
-    all_accounts: bool = False
     output_dir: Optional[str] = None
     strm_only: bool = False
     dry_run: bool = False
@@ -95,7 +94,7 @@ async def generate_plex_library(req: GenerateRequest):
 
     # Unified library: one flat, deduped tree. `accountId` (optional) restricts
     # the aggregation to a single account; otherwise all active accounts are
-    # merged. `allAccounts` is kept for backward compatibility (now the default).
+    # merged.
     account_ids = [req.account_id] if req.account_id else None
 
     report = await _run_plex_generation(

@@ -364,9 +364,11 @@ sequenceDiagram
     TV->>S: POST /api/tv-auth/start
     S->>DB: crée session (deviceCode, userCode, status=pending, expiry)
     S-->>TV: 201 {deviceCode, userCode}
-    Note over TV: affiche userCode à l'écran
+    Note over TV: affiche userCode + QR (verificationUri?userCode=…)
 
-    APP->>S: POST /api/tv-auth/approve {userCode, payload} (X-API-Key)
+    APP->>S: GET /api/tv-auth/approve?userCode=… (page HTML publique, CSP à nonce, limiteur par IP)
+    S-->>APP: 200 text/html (aucune donnée de session, aucun accès base)
+    APP->>S: POST /api/tv-auth/approve {userCode, payload} (X-API-Key, fetch relatif depuis la page)
     S->>S: verify_pairing_api_key + _expire_if_needed
     S->>CR: chiffre le payload (config serveur/credentials)
     S->>DB: attache payload chiffré, status=approved
@@ -397,5 +399,5 @@ sequenceDiagram
 
 - **Écritures DB** : SQLite WAL + `commit_with_retry`/`run_with_retry` (retry « database is locked »).
 - **Appels bloquants** (`sqlite3.backup`, inférence ONNX) → `asyncio.to_thread` ; images Plex → `ThreadPoolExecutor`.
-- **Auth** : seuls le router `/api/ai` et `POST /api/tv-auth/approve` exigent `X-API-Key`. Les routers catalogue (`accounts`/`media`/`live`/`stream`/`sync`/`plex`/`categories`/`admin`) ne sont **pas** authentifiés (dette ouverte, cf. §10).
+- **Auth** : toute l'API `/api/*` exige `X-API-Key` (fail-closed, audit de routes au boot par **(méthode, chemin)**) sauf l'allow-list publique de 5 entrées : `GET /api/health`, `POST /api/tv-auth/start`, `GET /api/tv-auth/status`, `POST /api/tv-auth/complete` et la page `GET /api/tv-auth/approve` (le `POST /api/tv-auth/approve` du même chemin reste gardé). Détail : CLAUDE.md §3 / §9.
 - **Observabilité** : métriques `plexhub_*` sur `/metrics`, `request_id` injecté par middleware.

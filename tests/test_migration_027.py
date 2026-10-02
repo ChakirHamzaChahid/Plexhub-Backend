@@ -103,7 +103,7 @@ async def test_migration_027_pk_is_one_review_per_item(legacy_engine):
 
 
 async def test_run_migrations_full_chain_on_fresh_db(tmp_path):
-    """CR-C05: create_all THEN the whole 001->027 chain must not raise, twice."""
+    """CR-C05: create_all THEN the whole 001->028 chain must not raise, twice."""
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'chain.db'}", future=True)
     register_sqlite_vec_listener(engine)
     try:

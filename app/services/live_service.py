@@ -5,9 +5,16 @@ runs the DB-cache read itself (a plain parameterized SELECT, not business
 logic), and delegates the provider fetch + parse + persist to this module
 when the cache is empty.
 
-The caller owns the transaction boundary: ``ingest_short_epg`` stages new
-rows via ``db.add`` but does not commit — the router still calls
+The caller owns the transaction boundary: ``ingest_short_epg`` executes its
+upsert on the caller's session but does not commit — the router still calls
 ``commit_with_retry`` itself (CR-C04), unchanged.
+
+Lot 10 sub-lot D (FR-BE-554): the write is an UPSERT on the dedup key
+``(server_id, stream_id, start_time)`` (``uix_epg_dedup``, guaranteed by
+migration 028), no longer a bare ``db.add``. Two concurrent cache misses for the
+same channel therefore converge on one row per programme instead of raising
+``IntegrityError`` or duplicating. The same key is shared with the bulk sync in
+``epg_sync_service``, so the two ingestion paths never duplicate each other.
 """
 from __future__ import annotations
 
@@ -15,6 +22,7 @@ import base64
 import logging
 
 from sqlalchemy import select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.database import EpgEntry, XtreamAccount
@@ -56,7 +64,7 @@ async def ingest_short_epg(
     stream_id: int,
     fetched_at: int,
 ) -> list[EpgEntry]:
-    """Fetch the short EPG for a channel from Xtream and stage new EpgEntry rows.
+    """Fetch the short EPG for a channel from Xtream and upsert its EpgEntry rows.
 
     ``fetched_at`` is passed in (not computed here) so it matches the exact
     timestamp the router used for its DB-cache freshness check — same value,
@@ -88,7 +96,10 @@ async def ingest_short_epg(
         return []
 
     listings = epg_data.get("epg_listings") or []
-    new_entries: list[EpgEntry] = []
+    # One row per start_time: a payload that repeats a start_time keeps the
+    # last occurrence (the upsert would converge on it anyway; collapsing here
+    # keeps the multi-row INSERT free of self-conflicts).
+    rows_by_start: dict[int, dict] = {}
 
     for listing in listings:
         if not isinstance(listing, dict):
@@ -117,18 +128,33 @@ async def ingest_short_epg(
         description = listing.get("description") or ""
         description = _try_base64_decode(description)
 
-        entry = EpgEntry(
-            server_id=server_id,
-            epg_channel_id=listing.get("epg_id") or "",
-            stream_id=stream_id,
-            title=title,
-            description=description or None,
-            start_time=start_ms,
-            end_time=end_ms,
-            lang=listing.get("lang"),
-            fetched_at=fetched_at,
-        )
-        db.add(entry)
-        new_entries.append(entry)
+        rows_by_start[start_ms] = {
+            "server_id": server_id,
+            "epg_channel_id": listing.get("epg_id") or "",
+            "stream_id": stream_id,
+            "title": title,
+            "description": description or None,
+            "start_time": start_ms,
+            "end_time": end_ms,
+            "lang": listing.get("lang"),
+            "fetched_at": fetched_at,
+        }
 
-    return new_entries
+    if not rows_by_start:
+        return []
+
+    stmt = sqlite_insert(EpgEntry).values(list(rows_by_start.values()))
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["server_id", "stream_id", "start_time"],
+        set_={
+            col: stmt.excluded[col]
+            for col in (
+                "epg_channel_id", "title", "description", "end_time", "lang",
+                "fetched_at",
+            )
+        },
+    ).returning(EpgEntry)
+    # populate_existing: if a conflicting row is already in this session's
+    # identity map, RETURNING must refresh it rather than hand back stale values.
+    result = await db.execute(stmt, execution_options={"populate_existing": True})
+    return sorted(result.scalars().all(), key=lambda e: e.start_time)

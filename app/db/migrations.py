@@ -60,6 +60,7 @@ async def run_migrations(engine: AsyncEngine) -> None:
     await _migration_025_add_account_outage_tracking(engine)
     await _migration_026_add_media_match_lock(engine)
     await _migration_027_create_scrape_review(engine)
+    await _migration_028_epg_dedup_unique_index(engine)
 
     logger.info("All migrations completed successfully")
 
@@ -1310,3 +1311,88 @@ async def _migration_027_create_scrape_review(engine: AsyncEngine) -> None:
             "CREATE INDEX IF NOT EXISTS ix_scrape_review_status_type "
             "ON scrape_review(status, media_type)"
         ))
+
+
+async def _migration_028_epg_dedup_unique_index(engine: AsyncEngine) -> None:
+    """Make the `epg_entries` dedup contract real: one row per
+    `(server_id, stream_id, start_time)` (FR-BE-554, Lot 10 sub-lot D).
+
+    The ORM model has always declared `uix_epg_dedup`, but migration 006
+    created the table with only four plain indexes, and `Base.metadata
+    .create_all` never adds an index to a table that already exists. On a
+    production database created before the model declared it, the unique index
+    therefore does NOT exist, and the on-demand short-EPG path
+    (`live_service.ingest_short_epg`, formerly a bare `db.add`) could insert the
+    same programme twice on two concurrent cache misses. Both the new upsert
+    (`INSERT ... ON CONFLICT(server_id, stream_id, start_time)`) and the bulk
+    EPG sync (`epg_sync_service`) REQUIRE the unique index: SQLite rejects an
+    `ON CONFLICT` target that matches no unique constraint.
+
+    Steps, in ONE transaction (all-or-nothing):
+      1. De-duplicate: keep exactly one row per triplet, the one with the
+         highest `id` (the most recently inserted; short-EPG ingestion only
+         ever appends, so the highest id is the freshest fetch).
+      2. `CREATE UNIQUE INDEX IF NOT EXISTS uix_epg_dedup`.
+
+    Rows with `stream_id IS NULL` are left untouched: SQLite treats NULLs as
+    distinct inside a UNIQUE index, so they can never violate it, and nothing
+    in the app writes a NULL `stream_id` anyway.
+
+    Idempotent and cheap on every boot after the first: if a UNIQUE
+    `uix_epg_dedup` already exists (fresh DB from `create_all`, or a previous
+    run), the de-dup is skipped entirely -- the index itself guarantees there
+    is nothing to remove. A same-named NON-unique index (never produced by this
+    code, but cheap to handle) is dropped and rebuilt as UNIQUE.
+
+    Unlike the additive `ADD COLUMN` migrations, a failure here is NOT
+    swallowed: a missing unique index would turn every short-EPG cache miss and
+    the whole bulk sync into runtime errors, so the failure is logged at ERROR
+    and re-raised rather than leaving the schema half-migrated in silence.
+    """
+    logger.info("Migration 028: De-duplicating epg_entries and creating uix_epg_dedup")
+
+    try:
+        async with engine.begin() as conn:
+            table = (await conn.execute(text(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='epg_entries'"
+            ))).fetchone()
+            if table is None:
+                logger.info("Migration 028: epg_entries absent, nothing to do")
+                return
+
+            indexes = (await conn.execute(text(
+                'PRAGMA index_list("epg_entries")'
+            ))).fetchall()
+            # PRAGMA index_list columns: seq, name, unique, origin, partial.
+            existing = next((r for r in indexes if r[1] == "uix_epg_dedup"), None)
+            if existing is not None and existing[2]:
+                logger.debug("Migration 028: uix_epg_dedup already UNIQUE, skipping")
+                return
+            if existing is not None:
+                await conn.execute(text("DROP INDEX uix_epg_dedup"))
+
+            removed = (await conn.execute(text("""
+                DELETE FROM epg_entries
+                WHERE stream_id IS NOT NULL
+                  AND id NOT IN (
+                      SELECT MAX(id) FROM epg_entries
+                      WHERE stream_id IS NOT NULL
+                      GROUP BY server_id, stream_id, start_time
+                  )
+            """))).rowcount
+            await conn.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uix_epg_dedup "
+                "ON epg_entries(server_id, stream_id, start_time)"
+            ))
+            logger.info(
+                "Migration 028: uix_epg_dedup created (%s duplicate row(s) removed)",
+                removed,
+            )
+    except Exception:
+        logger.error(
+            "Migration 028 FAILED: epg_entries is not de-duplicated and "
+            "uix_epg_dedup is missing -- EPG upserts will not work until this "
+            "migration succeeds",
+            exc_info=True,
+        )
+        raise

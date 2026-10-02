@@ -114,18 +114,6 @@ def series_episode_path(
     return f"Series/{safe_title}/{season_str}/{ep_str}.strm"
 
 
-def series_episode_nfo_path(
-    series_title: str, season: int, episode: int,
-    year: int | None = None,
-    suffix: str | None = None, fallback_id: str | None = None,
-) -> str:
-    """Relative path for an episode .nfo file."""
-    safe_title = series_folder(series_title, year, suffix, fallback_id)
-    season_str = f"Season {season:02d}"
-    ep_str = f"{safe_title} S{season:02d}E{episode:02d}"
-    return f"Series/{safe_title}/{season_str}/{ep_str}.nfo"
-
-
 def series_nfo_path(
     series_title: str,
     year: int | None = None,

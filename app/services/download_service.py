@@ -36,7 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.models.database import DownloadBatch, DownloadJob, Media, XtreamAccount
-from app.models.schemas import DownloadJobResponse, apply_adult_prefix
+from app.models.schemas import DownloadJobResponse
 from app.services.aggregation_service import canonical_title_year
 from app.services.media_service import media_service
 from app.services.stream_service import parse_rating_key
@@ -227,21 +227,20 @@ def compute_dest_path(
     season: Optional[int],
     episode: Optional[int],
     ext: str,
-    is_adult: bool = False,
 ) -> str:
     """Relative destination path under `DOWNLOAD_DIR` (NEVER absolute, NEVER
     derived from client input).
 
-    Movies:  ``Movies/<[XXX] ?><Title (Year)>/<[XXX] ?><Title (Year)>.<ext>``
+    Movies:  ``Movies/<Title (Year)>/<Title (Year)>.<ext>``
     Episode: ``Series/<Show Title>/Season NN/<Show Title> - SxxEyy.<ext>``
 
     Every segment goes through `_sanitize_segment` (defense); `resolve_confined`
     proves confinement at write time (F-007) — the two are complementary, not
-    redundant. `is_adult` is wired but deliberately UNUSED by callers at the
-    MVP (spec §12 — "non appliqué au MVP"); kept available for the P2 prefix.
+    redundant. The adult `[XXX]` prefix is not applied to download paths
+    (spec §12 — "non appliqué au MVP").
     """
     safe_ext = _sanitize_segment((ext or _DEFAULT_EXT).lstrip("."), fallback=_DEFAULT_EXT)
-    display_title = apply_adult_prefix(title or "Unknown", is_adult)
+    display_title = title or "Unknown"
 
     if media_type == "movie":
         display = f"{display_title} ({year})" if year else display_title
@@ -629,24 +628,6 @@ async def _resolve_active_account(db: AsyncSession, server_id: str) -> Optional[
     return result.scalars().first()
 
 
-async def list_series_seasons(
-    db: AsyncSession, server_id: str, rating_key: str
-) -> list[int]:
-    """Distinct season numbers (``parent_index``) of a series' episodes for a
-    given source, ascending. Powers the per-season download picker. A NULL
-    season is normalized to 0 (mirrors ``compute_dest_path``)."""
-    rows = (await db.execute(
-        select(Media.parent_index)
-        .where(
-            Media.type == "episode",
-            Media.server_id == server_id,
-            Media.grandparent_rating_key == rating_key,
-        )
-        .distinct()
-    )).scalars().all()
-    return sorted({(s if s is not None else 0) for s in rows})
-
-
 # --- Granular reads: per-season / per-episode sources + size (X2) -----------
 
 @dataclass
@@ -850,17 +831,14 @@ async def enqueue_selection(
     unification_id: str,
     server_id: Optional[str] = None,
     rating_key: Optional[str] = None,
-    scope: str,                # 'movie' | 'series_all' | 'series_seasons' | 'seasons' | 'episodes'
-    seasons: Optional[list[int]] = None,  # required (non-empty) for series_seasons
+    scope: str,                # 'movie' | 'series_all' | 'seasons' | 'episodes'
     season_picks: Optional[list[tuple[int, str, str]]] = None,  # (season, server_id, series_rating_key) — scope='seasons'
     episode_picks: Optional[list[tuple[str, str]]] = None,      # (server_id, episode_rating_key) — scope='episodes'
 ) -> EnqueueResult:
     """Resolve an operator selection into 1..N persisted `DownloadJob` rows.
 
     Movie -> exactly one job (`batch_id=None`). Series -> one `DownloadBatch` +
-    one job per episode of the chosen source: `scope=series_all` takes every
-    episode, `scope=series_seasons` takes only episodes whose season
-    (`parent_index`) is in `seasons`. `scope=seasons`/`scope=episodes` (X2 —
+    one job per episode of the chosen source (`scope=series_all`). `scope=seasons`/`scope=episodes` (X2 —
     granular per-season/per-episode picker, one physical source PER UNIT,
     mirroring `plex_download_service.enqueue_plex_selection`'s shape) resolve
     `season_picks`/`episode_picks` instead of a single `server_id`/
@@ -934,18 +912,7 @@ async def enqueue_selection(
         logger.info("Download enqueued: movie job=%s title=%r", job.id, job.title)
         return EnqueueResult(jobs=[job], batch_id=None, error=None)
 
-    if scope in ("series_all", "series_seasons"):
-        # Normalize the season selection up front; series_seasons REQUIRES a
-        # non-empty set, series_all ignores it (takes every season).
-        season_set: Optional[set[int]] = None
-        if scope == "series_seasons":
-            season_set = {int(s) for s in seasons} if seasons else set()
-            if not season_set:
-                return EnqueueResult(
-                    jobs=[], batch_id=None,
-                    error="aucune saison sélectionnée",
-                )
-
+    if scope == "series_all":
         show_row = (await db.execute(
             select(Media)
             .where(Media.server_id == server_id, Media.rating_key == rating_key)
@@ -959,18 +926,12 @@ async def enqueue_selection(
             Media.server_id == server_id,
             Media.grandparent_rating_key == rating_key,
         ]
-        if season_set is not None:
-            episode_filters.append(Media.parent_index.in_(season_set))
 
         episodes = list((await db.execute(
             select(Media).where(*episode_filters)
         )).scalars().all())
         if not episodes:
-            msg = (
-                "aucun épisode pour les saisons sélectionnées"
-                if season_set is not None else "aucun épisode disponible"
-            )
-            return EnqueueResult(jobs=[], batch_id=None, error=msg)
+            return EnqueueResult(jobs=[], batch_id=None, error="aucun épisode disponible")
 
         show_title, show_year = canonical_title_year(show_row)
         batch = DownloadBatch(
@@ -1050,7 +1011,7 @@ async def enqueue_selection(
 # `_enqueue_seasons`/`_enqueue_episodes`/`_persist_batch_and_jobs` 1:1 (same
 # shape: resolve picks -> one `DownloadBatch` + N deduped `DownloadJob`s),
 # adapted to the `media` table. Deliberately NOT wired into the
-# `series_all`/`series_seasons` block above — that already-tested code path
+# `series_all` block above — that already-tested code path
 # is left byte-for-byte unchanged; these are new, additive scopes only.
 
 
@@ -1131,7 +1092,7 @@ async def _persist_episode_batch(
 
     # total_jobs counts only jobs actually linked to THIS batch — a reused
     # (deduped) job may still point at an earlier batch_id (mirrors the
-    # series_all/series_seasons block above).
+    # series_all block above).
     batch.total_jobs = new_job_count
 
     async def _commit() -> None:

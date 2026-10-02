@@ -194,7 +194,7 @@ class TestLocalStorage:
     def test_write_and_read_strm(self, tmp_path):
         storage = LocalStorage(tmp_path)
         storage.write_strm("Films/Test/Test.strm", "http://example.com/stream")
-        content = storage.read_strm("Films/Test/Test.strm")
+        content = (tmp_path / "Films" / "Test" / "Test.strm").read_text(encoding="utf-8").strip()
         assert content == "http://example.com/stream"
 
     def test_write_file(self, tmp_path):
@@ -263,10 +263,6 @@ class TestLocalStorage:
         assert not (tmp_path / "Films" / "Test").exists()
         # Films/ itself is now empty and should be cleaned
         assert not (tmp_path / "Films").exists()
-
-    def test_read_nonexistent_strm(self, tmp_path):
-        storage = LocalStorage(tmp_path)
-        assert storage.read_strm("nope.strm") is None
 
 
 # ─── Generator Tests (with MockSource) ──────────────────────────

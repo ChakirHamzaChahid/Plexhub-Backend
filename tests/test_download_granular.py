@@ -3,8 +3,8 @@ helpers) — ticket X2, `docs/31-board.md`.
 
 Additive to `app.services.download_service`:
   - `enqueue_selection(scope='seasons'|'episodes', season_picks=..., episode_picks=...)`
-    — a NEW granular picker alongside the existing `movie`/`series_all`/
-    `series_seasons` scopes (those are exercised, unchanged, in
+    — a NEW granular picker alongside the existing `movie`/`series_all`
+    scopes (those are exercised, unchanged, in
     `tests/test_download_service.py` — this file never touches them).
   - `list_series_seasons_with_sources` / `list_series_episodes_with_sources`
     — read-only per-source size/estimate breakdown.

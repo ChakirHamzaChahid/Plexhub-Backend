@@ -25,7 +25,7 @@ from app.plex_generator.mapping import MappingStore
 from app.plex_generator.naming import movie_folder, series_folder
 from app.utils.server_id import build_server_id
 from app.utils.string_normalizer import (
-    normalize_for_sorting, parse_title_and_year, parse_title_year_and_suffix,
+    normalize_for_sorting, parse_title_year_and_suffix,
 )
 from app.utils.time import now_ms
 

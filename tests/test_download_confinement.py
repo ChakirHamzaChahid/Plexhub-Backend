@@ -274,15 +274,6 @@ class TestNoClientSuppliedPathField:
     path/destination field from the client, on EITHER the JSON or the HTMX
     surface."""
 
-    def test_download_enqueue_request_schema_has_no_path_field(self):
-        from app.models.schemas import DownloadEnqueueRequest
-
-        fields = set(DownloadEnqueueRequest.model_fields.keys())
-        forbidden = {"path", "dest_path", "destPath", "output_dir", "outputDir", "dir"}
-        assert not (fields & forbidden), f"a path-like field leaked into the enqueue schema: {fields}"
-        # `seasons` (list[int], for scope=series_seasons) is a non-path selector.
-        assert fields == {"type", "unification_id", "server_id", "rating_key", "scope", "seasons"}
-
     def test_admin_downloads_enqueue_form_has_no_path_field(self):
         import inspect
 

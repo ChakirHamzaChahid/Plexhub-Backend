@@ -55,10 +55,6 @@ def set_pipeline_active(active: bool) -> None:
     _pipeline_active = active
 
 
-def is_pipeline_active() -> bool:
-    return _pipeline_active
-
-
 async def rebuild(db: AsyncSession, media_type: str) -> int:
     """Rebuild the snapshot for one media_type on the given session (no commit).
 

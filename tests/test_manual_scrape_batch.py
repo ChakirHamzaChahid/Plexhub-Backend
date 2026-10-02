@@ -794,7 +794,9 @@ async def test_upsert_review_reopens_a_resolved_row(db_factory):
         title="One", year=1999, reason="no_candidates", candidates=[],
         session_factory=db_factory,
     )
-    await mss.resolve_review("xtream_a", "vod_1.mp4", session_factory=db_factory)
+    await mss._set_review_status(
+        "xtream_a", "vod_1.mp4", "resolved", session_factory=db_factory,
+    )
 
     await mss.upsert_review(
         server_id="xtream_a", rating_key="vod_1.mp4", media_type="movie",

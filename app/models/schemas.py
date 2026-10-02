@@ -613,19 +613,6 @@ class DownloadJobListResponse(BaseModel):
     total: int
 
 
-class DownloadEnqueueRequest(BaseModel):
-    """JSON body for ``POST /api/admin/downloads`` (P2 — the primary HTMX admin
-    route ``POST /admin/downloads`` takes a Form instead, per spec §7.1)."""
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
-
-    type: str                                   # 'movie' | 'show'
-    unification_id: str
-    server_id: str
-    rating_key: str
-    scope: str                                  # 'movie' | 'series_all' | 'series_seasons'
-    seasons: Optional[list[int]] = None         # required (non-empty) for series_seasons
-
-
 # --- Plex catalogue Schemas (feature "Télécharger Plex", Tâche C4 —
 #     read-only shapes for the JSON mirror, Tâche C7; the reads themselves
 #     live in services.plex_catalog_service, which returns dataclasses —

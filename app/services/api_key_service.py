@@ -79,10 +79,6 @@ async def list_keys(db) -> list[ApiKey]:
     return list(result.scalars().all())
 
 
-async def get_key(db, key_id: str) -> ApiKey | None:
-    return await db.get(ApiKey, key_id)
-
-
 async def revoke_key(db, key_id: str) -> ApiKey | None:
     """Mark a key revoked (idempotent). Returns the row or None if unknown."""
     row = await db.get(ApiKey, key_id)

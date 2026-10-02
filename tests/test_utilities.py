@@ -131,32 +131,3 @@ class TestBackgroundTasks:
             assert len(_background_tasks) == 0
 
         asyncio.run(_test())
-
-
-# ─── Mapping Purge ──────────────────────────────────────────────
-
-
-class TestMappingPurge:
-    def test_purge_stale(self, tmp_path):
-        store = MappingStore(tmp_path)
-        store.load()
-        store.set("keep_1", "path1", "url1")
-        store.set("keep_2", "path2", "url2")
-        store.set("stale_1", "path3", "url3")
-        store.set("stale_2", "path4", "url4")
-
-        removed = store.purge_stale({"keep_1", "keep_2"})
-        assert removed == 2
-        assert store.get("keep_1") is not None
-        assert store.get("keep_2") is not None
-        assert store.get("stale_1") is None
-        assert store.get("stale_2") is None
-        assert len(store) == 2
-
-    def test_purge_nothing(self, tmp_path):
-        store = MappingStore(tmp_path)
-        store.load()
-        store.set("a", "p1", "u1")
-        removed = store.purge_stale({"a"})
-        assert removed == 0
-        assert len(store) == 1

@@ -26,8 +26,7 @@ two entry points:
     Downloads" disabled — the stream is still served). Both embed
     `X-Plex-Token` — a secret — and this function, like its Xtream
     counterpart, NEVER logs or persists any of them; only the caller's
-    `dest`/`job_id`/`title` may appear in log lines. (`resolve_job_url`,
-    singular, is a thin back-compat wrapper returning the first URL.)
+    `dest`/`job_id`/`title` may appear in log lines.
 
 Dispatch lives in `download_worker._run_job`::
 
@@ -161,7 +160,7 @@ async def _persist_batch_and_jobs(
 
     # total_jobs counts only jobs actually linked to THIS batch — a reused
     # (deduped) job may still point at an earlier batch_id (mirrors
-    # download_service.enqueue_selection's series_all/series_seasons).
+    # download_service.enqueue_selection's series_all).
     batch.total_jobs = new_job_count
 
     async def _commit() -> None:
@@ -464,16 +463,3 @@ async def resolve_job_urls(session_factory, job) -> list[str]:
         f"{base}{part_key}?download=1&X-Plex-Token={token}",
         f"{base}{part_key}?X-Plex-Token={token}",
     ]
-
-
-async def resolve_job_url(session_factory, job) -> Optional[str]:
-    """Back-compat single-URL resolver: the preferred (`?download=1`) URL, or
-    `None` if no candidate can be built.
-
-    `download_worker` uses `resolve_job_urls` instead, to also obtain the
-    direct-stream fallback; this thin wrapper is retained for any caller/test
-    that only needs the primary URL. Same secrets invariant as
-    `resolve_job_urls`.
-    """
-    urls = await resolve_job_urls(session_factory, job)
-    return urls[0] if urls else None

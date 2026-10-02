@@ -7,9 +7,13 @@ Flow (RFC 8628-like):
     1. POST /api/tv-auth/start    TV asks for a session. Gets a long secret
                                   `deviceCode` (poll credential) + a short
                                   `userCode` (displayed on screen + QR).
-    2. POST /api/tv-auth/approve  Mobile/web (authenticated via X-API-Key)
+    2. GET  /api/tv-auth/approve  PUBLIC HTML page (the QR code target): a
+                                  phone opens it, the user types the backend
+                                  key and picks the payload to hand over.
+       POST /api/tv-auth/approve  Mobile/web (authenticated via X-API-Key)
                                   validates the userCode and attaches the
-                                  config payload (encrypted at rest).
+                                  config payload (encrypted at rest). The
+                                  page above calls it with `fetch`.
     3. GET  /api/tv-auth/status   TV polls by deviceCode (backoff-friendly).
                                   The decrypted payload is delivered EXACTLY
                                   once, on the first poll after approval.
@@ -19,18 +23,28 @@ Flow (RFC 8628-like):
 Security model:
     - Sessions expire after settings.TV_AUTH_TTL_SECONDS (default 15 min).
     - deviceCode is a 32-byte urlsafe token — unguessable.
-    - approve requires the backend shared secret (X-API-Key, constant-time).
+    - POST approve requires an X-API-Key (constant-time): the backend shared
+      secret OR any active per-user key (same guard as the JSON API,
+      `verify_backend_secret`). The GET page is public by construction — no
+      session data, no DB lookup — rate-limited per IP and served with a strict
+      nonce-based CSP (see `approve_page`). The route audit
+      (`app/api/route_audit.py`) reasons on (METHOD, path) so the public GET
+      can never make the guarded POST public.
     - Payload is Fernet-encrypted at rest (app/utils/payload_crypto.py) and
       never re-delivered after the first read.
 """
 from __future__ import annotations
 
 import logging
+import re
 import secrets
 import time
 import uuid
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 from sqlalchemy import delete, func, select, update
@@ -54,9 +68,16 @@ logger = logging.getLogger("plexhub.tvauth")
 
 router = APIRouter(prefix="/tv-auth", tags=["tv-auth"])
 
+# Pairing page templates (Jinja2 autoescape ON — never use |safe / Markup there).
+_TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
+_templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+
 # Unambiguous alphabet for the human code (no 0/O, 1/I/L).
 _USER_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 _USER_CODE_LENGTH = 8
+# Format accepted for the `?userCode=` prefill of the pairing page (display
+# form with optional hyphen, case-insensitive input is upper-cased first).
+_USER_CODE_PAGE_RE = re.compile(rf"^[{_USER_CODE_ALPHABET}]{{4}}-?[{_USER_CODE_ALPHABET}]{{4}}$")
 _POLL_INTERVAL_SECONDS = 5  # suggested base interval for client backoff
 _CLEANUP_GRACE_MS = 60 * 60 * 1000  # purge sessions expired > 1h ago
 
@@ -376,6 +397,79 @@ async def start(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# GET /api/tv-auth/approve — PUBLIC pairing page (Lot 10 sous-lot B, FR-BE-075)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _prefill_user_code(raw: str | None) -> str:
+    """Return the display form 'ABCD-EFGH' of `raw`, or '' if it is not a valid code.
+
+    The page NEVER echoes the raw query value: it is only shown when it matches
+    the user-code format, and what is shown is rebuilt from the alphabet.
+    """
+    if not raw:
+        return ""
+    candidate = raw.strip().upper()
+    if not _USER_CODE_PAGE_RE.fullmatch(candidate):
+        return ""
+    return _format_user_code(_normalize_user_code(candidate))
+
+
+def _approve_page_headers(nonce: str) -> dict[str, str]:
+    """Security headers of the pairing page (no global middleware exists)."""
+    return {
+        "Content-Security-Policy": (
+            "default-src 'none'; "
+            f"script-src 'nonce-{nonce}'; "
+            f"style-src 'nonce-{nonce}'; "
+            "connect-src 'self'; "
+            "form-action 'none'; "
+            "base-uri 'none'; "
+            "frame-ancestors 'none'"
+        ),
+        "X-Frame-Options": "DENY",
+        "Cache-Control": "no-store",
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff",
+    }
+
+
+@router.get("/approve", response_class=HTMLResponse, include_in_schema=False)
+async def approve_page(request: Request) -> HTMLResponse:
+    """Public HTML page opened from the TV's QR code (`<verificationUri>?userCode=...`).
+
+    PUBLIC by construction: it renders a static template and does no DB lookup
+    and no crypto — it never depends on `get_db` nor on the Fernet key, and it
+    contains no session data. The secret that authorises an approval is typed
+    by the user and sent by the page's `fetch` as `X-API-Key` to the guarded
+    `POST /approve` below (same path, different method; the route audit reasons
+    on (METHOD, path)). Per-IP rate limit (TV_AUTH_APPROVE_PAGE_RATE_LIMIT_*),
+    429 + Retry-After when exceeded; strict nonce-based CSP.
+    """
+    client_key = rate_limit.resolve_client_ip(request) or "unknown"
+    try:
+        rate_limit.tv_auth_approve_page_limiter.hit(
+            client_key,
+            max_events=settings.TV_AUTH_APPROVE_PAGE_RATE_LIMIT_MAX,
+            window_seconds=settings.TV_AUTH_APPROVE_PAGE_RATE_LIMIT_WINDOW_SECONDS,
+        )
+    except rate_limit.RateLimitExceeded as exc:
+        raise _too_many_requests(
+            exc.retry_after_seconds, "Too many requests, slow down"
+        ) from None
+
+    nonce = secrets.token_urlsafe(16)
+    return _templates.TemplateResponse(
+        request,
+        "pairing/approve.html",
+        {
+            "nonce": nonce,
+            "user_code": _prefill_user_code(request.query_params.get("userCode")),
+        },
+        headers=_approve_page_headers(nonce),
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # POST /api/tv-auth/approve — mobile/web validates the user code
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -391,8 +485,10 @@ async def approve(
 ) -> ApproveResponse:
     """Attach the (encrypted) config payload to a pending session.
 
-    Authenticated: requires the backend shared secret in X-API-Key — only a
-    device that is already configured can hand its config to a TV.
+    Authenticated: requires an X-API-Key (backend shared secret or an active
+    per-user key) — only a device that is already configured can hand its
+    config to a TV. Known gap: no per-IP limiter on this POST (the code space
+    is 31^8 and a valid key is required) — tracked as a follow-up.
     """
     _require_crypto_configured()
 

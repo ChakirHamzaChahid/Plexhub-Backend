@@ -94,6 +94,16 @@ class Settings:
     # (not recommended).
     TV_AUTH_PENDING_SESSIONS_CAP: int = _safe_int("TV_AUTH_PENDING_SESSIONS_CAP", 500)
 
+    # Lot 10 sous-lot B — rate limit of the PUBLIC pairing page
+    # GET /api/tv-auth/approve (static HTML, no DB access): per-client-IP cap,
+    # max requests per rolling window. <=0 disables it.
+    TV_AUTH_APPROVE_PAGE_RATE_LIMIT_MAX: int = _safe_int(
+        "TV_AUTH_APPROVE_PAGE_RATE_LIMIT_MAX", 30
+    )
+    TV_AUTH_APPROVE_PAGE_RATE_LIMIT_WINDOW_SECONDS: int = _safe_int(
+        "TV_AUTH_APPROVE_PAGE_RATE_LIMIT_WINDOW_SECONDS", 60
+    )
+
     # Xtream credential encryption at rest (CR-S03) — see
     # app/utils/crypto_fields.py for full key-resolution semantics.
     # Optional explicit Fernet key (urlsafe base64, 32 bytes) used to encrypt

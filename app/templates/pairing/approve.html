@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+{#-
+  Public pairing-approval page (Lot 10 sous-lot B, FR-BE-075 / FR-TV-087/088).
+  Served by GET /api/tv-auth/approve. Self-contained on purpose: no CDN, no
+  external script/font/stylesheet, no inline event handler and no inline
+  style attribute (the CSP only allows the two nonce'd blocks below).
+  Rendered with Jinja2 autoescape ON; NEVER disable escaping for any value here.
+  The secret typed in this page is sent ONLY as an X-API-Key header by fetch()
+  and is never put in a URL, a cookie or any web storage.
+-#}
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex, nofollow">
+<title data-i18n="title">Appairer la TV</title>
+<style nonce="{{ nonce }}">
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; padding: 16px; font: 17px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+         background: #f4f5f7; color: #15171a; }
+  @media (prefers-color-scheme: dark) { body { background: #14161a; color: #eceef1; } }
+  main { max-width: 520px; margin: 0 auto; }
+  h1 { font-size: 1.5rem; margin: 8px 0 4px; }
+  p.lead { margin: 0 0 16px; opacity: .8; }
+  fieldset { border: 1px solid rgba(128,128,128,.4); border-radius: 12px; margin: 0 0 16px; padding: 12px 14px; }
+  legend { padding: 0 6px; font-weight: 600; }
+  label { display: block; margin: 12px 0 4px; font-weight: 600; }
+  .hint { display: block; font-weight: 400; font-size: .85rem; opacity: .75; margin-top: 2px; }
+  input[type=text], input[type=password], input[type=url] {
+    width: 100%; font-size: 1.1rem; padding: 14px 12px; border-radius: 10px;
+    border: 2px solid rgba(128,128,128,.5); background: transparent; color: inherit; }
+  input:focus { outline: 3px solid #3b82f6; outline-offset: 1px; }
+  #code { font-family: ui-monospace, Menlo, Consolas, monospace; letter-spacing: .12em; text-transform: uppercase; text-align: center; font-size: 1.4rem; }
+  .mode { display: flex; gap: 8px; margin: 4px 0 8px; }
+  .mode label { flex: 1; margin: 0; padding: 12px; border: 2px solid rgba(128,128,128,.5); border-radius: 10px; text-align: center; font-weight: 600; }
+  .mode input { margin-right: 6px; }
+  button { width: 100%; font-size: 1.15rem; font-weight: 700; padding: 16px; border: 0; border-radius: 12px;
+           background: #2563eb; color: #fff; cursor: pointer; }
+  button:disabled { opacity: .55; cursor: progress; }
+  #msg { margin-top: 16px; padding: 14px; border-radius: 10px; font-weight: 600; border: 2px solid transparent; }
+  #msg.ok { background: rgba(22,163,74,.15); border-color: #16a34a; }
+  #msg.err { background: rgba(220,38,38,.12); border-color: #dc2626; }
+  #msg.info { background: rgba(37,99,235,.12); border-color: #2563eb; }
+</style>
+</head>
+<body>
+<main>
+  <h1 data-i18n="title">Appairer la TV</h1>
+  <p class="lead" data-i18n="lead">Saisissez le code affiché sur la TV, puis la clé API de votre backend pour autoriser l'envoi de la configuration.</p>
+
+  <noscript><p class="lead">JavaScript est requis / JavaScript is required.</p></noscript>
+
+  <form id="f" autocomplete="off" novalidate>
+    <fieldset>
+      <legend data-i18n="legendCode">Code de la TV</legend>
+      <label for="code"><span data-i18n="labelCode">Code affiché sur la TV</span></label>
+      <input id="code" type="text" inputmode="text" autocapitalize="characters" autocorrect="off"
+             spellcheck="false" autocomplete="off" maxlength="9" placeholder="ABCD-EFGH" value="{{ user_code }}">
+    </fieldset>
+
+    <fieldset>
+      <legend data-i18n="legendAuth">Autorisation</legend>
+      <label for="authkey">
+        <span data-i18n="labelAuth">Clé API du backend (autorise l'approbation)</span>
+        <span class="hint" data-i18n="hintAuth">Envoyée uniquement en en-tête X-API-Key ; jamais mémorisée.</span>
+      </label>
+      <input id="authkey" type="password" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+    </fieldset>
+
+    <fieldset>
+      <legend data-i18n="legendPayload">Configuration à transmettre à la TV</legend>
+      <div class="mode" role="radiogroup">
+        <label><input type="radio" name="mode" value="plex" checked><span data-i18n="modePlex">Jeton Plex</span></label>
+        <label><input type="radio" name="mode" value="backend"><span data-i18n="modeBackend">Backend</span></label>
+      </div>
+
+      <div id="secPlex">
+        <label for="plexToken">
+          <span data-i18n="labelPlex">Jeton Plex (plexToken)</span>
+        </label>
+        <input id="plexToken" type="password" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+      </div>
+
+      <div id="secBackend" hidden>
+        <label for="backendUrl">
+          <span data-i18n="labelBackendUrl">URL du backend (backendUrl)</span>
+          <span class="hint" data-i18n="hintBackendUrl">Adresse que la TV utilisera pour joindre le backend.</span>
+        </label>
+        <input id="backendUrl" type="url" inputmode="url" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+        <label for="tvApiKey">
+          <span data-i18n="labelTvKey">Clé API que la TV utilisera (apiKey)</span>
+          <span class="hint" data-i18n="hintTvKey">Distincte de la clé d'autorisation ci-dessus : c'est celle que la TV enregistrera pour appeler le backend.</span>
+        </label>
+        <input id="tvApiKey" type="password" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+      </div>
+    </fieldset>
+
+    <button id="go" type="submit" data-i18n="submit">Appairer</button>
+  </form>
+
+  <div id="msg" role="status" aria-live="polite" hidden></div>
+</main>
+
+<script nonce="{{ nonce }}">
+(function () {
+  "use strict";
+  var I18N = {
+    fr: {
+      title: "Appairer la TV",
+      lead: "Saisissez le code affiché sur la TV, puis la clé API de votre backend pour autoriser l'envoi de la configuration.",
+      legendCode: "Code de la TV", labelCode: "Code affiché sur la TV",
+      legendAuth: "Autorisation",
+      labelAuth: "Clé API du backend (autorise l'approbation)",
+      hintAuth: "Envoyée uniquement en en-tête X-API-Key ; jamais mémorisée.",
+      legendPayload: "Configuration à transmettre à la TV",
+      modePlex: "Jeton Plex", modeBackend: "Backend",
+      labelPlex: "Jeton Plex (plexToken)",
+      labelBackendUrl: "URL du backend (backendUrl)",
+      hintBackendUrl: "Adresse que la TV utilisera pour joindre le backend.",
+      labelTvKey: "Clé API que la TV utilisera (apiKey)",
+      hintTvKey: "Distincte de la clé d'autorisation ci-dessus : c'est celle que la TV enregistrera pour appeler le backend.",
+      submit: "Appairer",
+      sending: "Envoi en cours…",
+      m200: "TV appairée. La configuration a été transmise ; la TV va la récupérer dans quelques secondes.",
+      m401: "Clé API du backend refusée. Vérifiez la clé d'autorisation.",
+      m404: "Code inconnu. Vérifiez le code affiché sur la TV.",
+      m409: "Ce code a déjà été utilisé. Demandez un nouveau code à la TV.",
+      m410: "Ce code a expiré. Redémarrez l'appairage sur la TV.",
+      m422: "Requête invalide : vérifiez le code et la configuration à transmettre.",
+      m429: "Trop de tentatives. Réessayez dans un instant.",
+      m429s: "Trop de tentatives. Réessayez dans {s} s.",
+      m503: "L'appairage n'est pas disponible sur ce serveur pour le moment.",
+      mnet: "Impossible de joindre le serveur. Vérifiez votre connexion.",
+      mother: "Échec inattendu (code {c}).",
+      needCode: "Saisissez le code affiché sur la TV (8 caractères).",
+      needKey: "Saisissez la clé API du backend.",
+      needPlex: "Saisissez le jeton Plex.",
+      needBackend: "Saisissez l'URL du backend et la clé API que la TV utilisera."
+    },
+    en: {
+      title: "Pair your TV",
+      lead: "Enter the code shown on the TV, then your backend API key to authorize sending the configuration.",
+      legendCode: "TV code", labelCode: "Code shown on the TV",
+      legendAuth: "Authorization",
+      labelAuth: "Backend API key (authorizes the approval)",
+      hintAuth: "Sent only in the X-API-Key header; never stored.",
+      legendPayload: "Configuration to send to the TV",
+      modePlex: "Plex token", modeBackend: "Backend",
+      labelPlex: "Plex token (plexToken)",
+      labelBackendUrl: "Backend URL (backendUrl)",
+      hintBackendUrl: "Address the TV will use to reach the backend.",
+      labelTvKey: "API key the TV will use (apiKey)",
+      hintTvKey: "Different from the authorization key above: this is the key the TV will store to call the backend.",
+      submit: "Pair",
+      sending: "Sending…",
+      m200: "TV paired. The configuration was sent; the TV will pick it up in a few seconds.",
+      m401: "Backend API key rejected. Check the authorization key.",
+      m404: "Unknown code. Check the code shown on the TV.",
+      m409: "This code was already used. Ask the TV for a new code.",
+      m410: "This code has expired. Restart pairing on the TV.",
+      m422: "Invalid request: check the code and the configuration to send.",
+      m429: "Too many attempts. Try again in a moment.",
+      m429s: "Too many attempts. Try again in {s} s.",
+      m503: "Pairing is not available on this server right now.",
+      mnet: "Cannot reach the server. Check your connection.",
+      mother: "Unexpected failure (code {c}).",
+      needCode: "Enter the code shown on the TV (8 characters).",
+      needKey: "Enter the backend API key.",
+      needPlex: "Enter the Plex token.",
+      needBackend: "Enter the backend URL and the API key the TV will use."
+    }
+  };
+  var first = String((navigator.languages && navigator.languages[0]) || navigator.language || "fr").toLowerCase();
+  var lang = first.indexOf("en") === 0 ? "en" : "fr";
+  var T = I18N[lang];
+  function $(id) { return document.getElementById(id); }
+
+  document.documentElement.lang = lang;
+  Array.prototype.forEach.call(document.querySelectorAll("[data-i18n]"), function (el) {
+    var k = el.getAttribute("data-i18n");
+    if (T[k]) { el.textContent = T[k]; }
+  });
+
+  var form = $("f"), code = $("code"), authkey = $("authkey"), msg = $("msg"), go = $("go");
+  var secPlex = $("secPlex"), secBackend = $("secBackend");
+  $("backendUrl").value = window.location.origin;
+
+  function show(kind, text) {
+    msg.className = kind;
+    msg.textContent = text;
+    msg.hidden = false;
+  }
+  function mode() { return document.querySelector("input[name=mode]:checked").value; }
+  Array.prototype.forEach.call(document.querySelectorAll("input[name=mode]"), function (r) {
+    r.addEventListener("change", function () {
+      secPlex.hidden = mode() !== "plex";
+      secBackend.hidden = mode() !== "backend";
+    });
+  });
+
+  function normCode(v) {
+    var raw = String(v).toUpperCase().replace(/[^A-Z0-9]/g, "");
+    return raw.length === 8 ? raw.slice(0, 4) + "-" + raw.slice(4) : "";
+  }
+
+  function messageFor(res) {
+    var s = res.status;
+    if (s === 429) {
+      var ra = parseInt(res.headers.get("Retry-After"), 10);
+      return ra > 0 ? T.m429s.replace("{s}", String(ra)) : T.m429;
+    }
+    var known = { 401: 1, 404: 1, 409: 1, 410: 1, 422: 1, 503: 1 };
+    return known[s] ? T["m" + s] : T.mother.replace("{c}", String(s));
+  }
+
+  form.addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var userCode = normCode(code.value);
+    var key = authkey.value.trim();
+    if (!userCode) { show("err", T.needCode); return; }
+    if (!key) { show("err", T.needKey); return; }
+    var payload = {};
+    if (mode() === "plex") {
+      var tok = $("plexToken").value.trim();
+      if (!tok) { show("err", T.needPlex); return; }
+      payload.plexToken = tok;
+    } else {
+      var url = $("backendUrl").value.trim(), tvKey = $("tvApiKey").value.trim();
+      if (!url || !tvKey) { show("err", T.needBackend); return; }
+      payload.backendUrl = url;
+      payload.apiKey = tvKey;
+    }
+    go.disabled = true;
+    show("info", T.sending);
+    // Relative URL on purpose: same origin as this page, correct behind any
+    // tunnel / reverse proxy. The key travels ONLY in this header.
+    fetch("approve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-API-Key": key },
+      body: JSON.stringify({ userCode: userCode, payload: payload }),
+      credentials: "omit",
+      cache: "no-store",
+      referrerPolicy: "no-referrer"
+    }).then(function (res) {
+      if (res.ok) {
+        authkey.value = ""; $("plexToken").value = ""; $("tvApiKey").value = "";
+        show("ok", T.m200);
+      } else {
+        show("err", messageFor(res));
+        go.disabled = false;
+      }
+    }).catch(function () {
+      show("err", T.mnet);
+      go.disabled = false;
+    });
+  });
+})();
+</script>
+</body>
+</html>

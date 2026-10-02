@@ -2,17 +2,17 @@
 
 **Corrigé le 2026-09-26 d'après le volet TV** (`..\AndroidStudioProjects\PlexHubTV\docs\retro-spec\technique\contrat-api.md`, §4 et §8, preuves re-vérifiées dans le code TV) : **24 routes réellement appelées, pas 29** — `POST /api/accounts`, `DELETE /api/accounts/{id}`, `POST /api/accounts/{id}/test`, `POST /api/sync/xtream` et `PUT /api/accounts/{id}/categories` sont implémentés dans le dépôt TV mais n'ont **aucun déclencheur** ; les références /v1/... périmées sont dans les DTO IA, pas dans l'interface ; aucun poster n'est servi sous `/api` (question 1 tranchée).
 
-**Reconstitué le** : 2026-09-26 · **HEAD** : `9e9464b` (branche `develop`, backend v1.10.9) · **Méthode** : `/retro-spec technique contrat-api` — 5 lecteurs en lecture seule (routes JSON, routes transverses/auth, IA + miroirs admin + DAV, UI admin, appelants TV), rédaction et vérification des preuves par la session principale.
-**Sources** : le code (`app/api/*.py`, `app/api/deps.py`, `app/main.py`, `app/models/schemas.py`), l'inventaire généré [`../_genere/inventaire.md`](../_genere/inventaire.md) (120 lignes d'endpoints), les fiches [`../fonctionnel/`](../fonctionnel/00-carte.md) ; côté TV (lecture seule, preuves `tv:`) les interfaces Retrofit de PlexHubTV et leurs appelants.
+**Reconstitué le** : 2026-09-26 · recalé le 2026-10-02 (Lot 10 : page d'approbation `GET /api/tv-auth/approve`, champs de requête et routes admin retirés) · **HEAD** : `aa3270f` (branche `develop`, backend v1.10.9) · **Méthode** : `/retro-spec technique contrat-api` — 5 lecteurs en lecture seule (routes JSON, routes transverses/auth, IA + miroirs admin + DAV, UI admin, appelants TV), rédaction et vérification des preuves par la session principale.
+**Sources** : le code (`app/api/*.py`, `app/api/deps.py`, `app/main.py`, `app/models/schemas.py`), l'inventaire généré [`../_genere/inventaire.md`](../_genere/inventaire.md) (119 lignes d'endpoints, régénéré au Lot 10), les fiches [`../fonctionnel/`](../fonctionnel/00-carte.md) ; côté TV (lecture seule, preuves `tv:`) les interfaces Retrofit de PlexHubTV et leurs appelants.
 **Règle** : ce volet ne redéfinit aucune exigence. Chaque endpoint renvoie aux FR-BE des fiches de capacité ; le comportement détaillé (règles métier, tests) est dans la fiche. Aucun secret, aucune valeur de configuration, aucune URL privée.
 
 ## 0. Vue d'ensemble
 
 | Surface | Lignes d'inventaire | Garde | Clients |
 |---|---|---|---|
-| API JSON `/api/*` (hors `/api/admin/*`) | 53 | `X-API-Key` (4 routes publiques) | app TV (24 routes appelées, 8 déclarées sans déclencheur), opérateur |
+| API JSON `/api/*` (hors `/api/admin/*`) | 54 | `X-API-Key` (5 couples (méthode, chemin) publics, dont la page d'approbation) | app TV (24 routes appelées, 8 déclarées sans déclencheur), opérateur |
 | Miroirs JSON `/api/admin/*` | 11 | clé maître seule | opérateur, scripts |
-| UI admin `/admin*` (HTML/HTMX) | 51 (dont 6 doublons avec `/` final) | Basic Auth admin + CSRF | navigateur de l'opérateur |
+| UI admin `/admin*` (HTML/HTMX) | 49 (dont 6 doublons avec `/` final) | Basic Auth admin + CSRF | navigateur de l'opérateur |
 | `/dav`, `/dav/{path}` | 2 | Basic Auth DAV dédiée | rclone → Plex/Jellyfin |
 | `/docs`, `/openapi.json`, `/metrics` | 3 | Basic Auth admin / Basic Auth métriques | opérateur, Prometheus |
 
@@ -28,7 +28,7 @@ flowchart LR
     PR[Prometheus]
     B -->|X-API-Key| API[/api/health · accounts · media · stream · live · sync/]
     A -->|X-API-Key| AI[/api/ai/*/]
-    P -->|public| TA[/api/tv-auth start · status · complete/]
+    P -->|public| TA[/api/tv-auth start · status · complete · GET approve page/]
     OP -->|clé maître| ADM[/api/admin/*/]
     OP -->|Basic admin + CSRF| UI[/admin*/]
     OP -->|X-API-Key| API
@@ -40,14 +40,14 @@ flowchart LR
 
 ### 1.1 Montage et gardes
 
-Trois conventions de montage coexistent (dette CR-A04, cf. [CAP-BE-02](../fonctionnel/CAP-BE-02-cles-api-authentification.md)) ; l'assertion de boot `assert_api_routes_authenticated` (`app/main.py:728`) refuse le démarrage si une route `/api/*` hors liste publique n'a aucune garde reconnue. Liste publique figée à 4 chemins : `app/api/route_audit.py:76-85`.
+Trois conventions de montage coexistent (dette CR-A04, cf. [CAP-BE-02](../fonctionnel/CAP-BE-02-cles-api-authentification.md)) ; l'assertion de boot `assert_api_routes_authenticated` (`app/main.py:755`) refuse le démarrage si une route `/api/*` hors liste publique n'a aucune garde reconnue. Liste publique figée à 5 couples (méthode, chemin) — `GET /api/health`, `POST /api/tv-auth/start`, `GET /api/tv-auth/status`, `POST /api/tv-auth/complete`, `GET /api/tv-auth/approve` (page d'approbation, Lot 10) : `app/api/route_audit.py:66-99`.
 
 | Convention | Routers | Preuve |
 |---|---|---|
-| A — garde au montage (`dependencies=_guard`) | `accounts`, `categories`, `live`, `media`, `stream`, `sync`, `plex` | `app/main.py:633-644` |
-| B — public au montage | `health` (public), `tv_auth` (seul `/approve` gardé à l'endpoint) | `app/main.py:635`, `app/main.py:647` |
-| C — préfixe et garde déclarés dans le module | `ai`, `api_keys`, `downloads`, `plex_downloads`, `enrichment`, `dav` | `app/main.py:708-722`, `app/api/ai.py:52`, `app/api/dav.py:79` |
-| Garde au montage, hors `/api` | `admin`, `admin_downloads`, `admin_plex_downloads`, `admin_unified_downloads` | `app/main.py:653-668` |
+| A — garde au montage (`dependencies=_guard`) | `accounts`, `categories`, `live`, `media`, `stream`, `sync`, `plex` | `app/main.py:660-671` |
+| B — public au montage | `health` (public), `tv_auth` (seul `POST /approve` gardé à l'endpoint ; `GET /approve` est la page publique) | `app/main.py:662`, `app/main.py:674` |
+| C — préfixe et garde déclarés dans le module | `ai`, `api_keys`, `downloads`, `plex_downloads`, `enrichment`, `dav` | `app/main.py:735-749`, `app/api/ai.py:52`, `app/api/dav.py:79` |
+| Garde au montage, hors `/api` | `admin`, `admin_downloads`, `admin_plex_downloads`, `admin_unified_downloads` | `app/main.py:680-695` |
 
 | Garde | Lit | Échec | Particularité | Preuve |
 |---|---|---|---|---|
@@ -80,12 +80,12 @@ flowchart TD
 
 - **Réponses JSON en camelCase** : les schémas Pydantic déclarent `alias_generator=to_camel` et FastAPI sérialise par alias par défaut ; `response_model_by_alias=True` est explicite dans `sync`, `tv_auth`, `ai` et sur `categories/refresh`, implicite ailleurs (même effet). Les listes de films/séries/épisodes passent par une sérialisation en une passe (`app/api/media.py:41-57`).
 - **Corps de requête** : camelCase **et** snake_case acceptés (`populate_by_name=True`) — `app/api/ai.py:63`, `app/api/api_keys.py:26`, `app/api/enrichment.py:39`, schémas `AccountCreate`/`MediaUpdate`/`SyncRequest` de `app/models/schemas.py`.
-- **Paramètres de requête (query) en snake_case** (`server_id`, `parent_rating_key`, `unification_id`, `category_id`, `rating_key`, `youtube_id`), sans alias — seules exceptions : `GET /api/tv-auth/status` accepte `deviceCode` **et** `device_code` (`app/api/tv_auth.py:456-461`), `GET /api/ai/blurb/{tmdb_id}` exige `mediaType` (alias). L'app TV envoie bien du snake_case en query et lit du camelCase.
+- **Paramètres de requête (query) en snake_case** (`server_id`, `parent_rating_key`, `unification_id`, `category_id`, `rating_key`, `youtube_id`), sans alias — seules exceptions : `GET /api/tv-auth/status` accepte `deviceCode` **et** `device_code` (`app/api/tv_auth.py:552-557`), `GET /api/ai/blurb/{tmdb_id}` exige `mediaType` (alias). L'app TV envoie bien du snake_case en query et lit du camelCase.
 - **Erreurs** : corps FastAPI `{"detail": "<message>"}` ; 422 de validation `{"detail": [ … ]}`. Aucun `exception_handler` global : toute exception non prévue donne un 500 non enveloppé.
 - **Identifiants** : un média est identifié par le couple `(rating_key, server_id)` ; `server_id` d'un compte Xtream = `xtream_<id>`. Un `parent_rating_key` de série n'est unique que par compte (d'où le 400 sur `episodes` sans `server_id`, [CAP-BE-09](../fonctionnel/CAP-BE-09-catalogue-vod-series.md) FR-BE-473).
 - **Pagination** : `limit`/`offset` + `total`/`hasMore` ; curseur keyset optionnel `cursor` → `nextCursor` sur `movies`/`shows`/`episodes` (FR-BE-477, FR-BE-478).
 - **Traitements longs** : 202 + `jobId` puis sondage (`/api/sync/*`, `/api/ai/embed/rebuild`, `/api/admin/enrichment/omdb-backfill`). Les jobs de synchro et d'enrichissement OMDb et de reconstruction d'embeddings vivent **en mémoire du processus** : un `jobId` émis avant un redémarrage donne 404.
-- **En-têtes** : `X-Request-ID` renvoyé sur toute réponse (écho ou généré) ; CORS méthodes `GET/POST/PUT/PATCH/DELETE/OPTIONS`, en-têtes `X-API-Key`/`Content-Type`/`Authorization` (`app/main.py:600-609`) ; `Content-Encoding: identity` sur les flux binaires (bande-annonce, relais DAV, proxy de poster) pour neutraliser GZip.
+- **En-têtes** : `X-Request-ID` renvoyé sur toute réponse (écho ou généré) ; CORS méthodes `GET/POST/PUT/PATCH/DELETE/OPTIONS`, en-têtes `X-API-Key`/`Content-Type`/`Authorization` (`app/main.py:627-636`) ; `Content-Encoding: identity` sur les flux binaires (bande-annonce, relais DAV, proxy de poster) pour neutraliser GZip.
 
 ### 1.3 Clients TV (mécanisme, jamais de valeur)
 
@@ -108,10 +108,11 @@ Colonnes : **Garde** (§1.1) · **Paramètres** (Q = query, P = path, B = body) 
 
 | Méthode | Chemin | Garde | Paramètres | Réponse | Erreurs | Preuve | FR | Appelant TV |
 |---|---|---|---|---|---|---|---|---|
-| POST | `/api/tv-auth/start` | public, limité en débit | B `StartRequest{deviceName?}` (≤ 120) | 201 `StartResponse` (`deviceCode`, `userCode`, `verificationUri`, `expiresIn`, `interval`) | 503 appairage non configuré ; **429 + `Retry-After`** (deux fenêtres par IP, plafond global de sessions en attente) ; 503 code non allouable | `app/api/tv_auth.py:222` | FR-BE-065…074 | `tv:data/src/main/java/com/chakir/plexhubtv/data/repository/TvPairingRepositoryImpl.kt:52` |
-| GET | `/api/tv-auth/status` | public, **jamais limité** | Q `deviceCode` ou `device_code` (16-128) | `StatusResponse` (`status`, `expiresIn`, `payload` livré **une seule fois**) | 422 code absent ; 404 code inconnu ; expirée → **200** `status=expired` ; 503 charge indéchiffrable | `app/api/tv_auth.py:451` | FR-BE-082…086 | `tv:data/src/main/java/com/chakir/plexhubtv/data/repository/TvPairingRepositoryImpl.kt:69` (envoie `device_code`) |
-| POST | `/api/tv-auth/complete` | public | B `CompleteRequest{deviceCode}` | `CompleteResponse{status}` | 404 ; **410** expirée ; **409** déjà complétée ou pas encore approuvée | `app/api/tv_auth.py:557` | FR-BE-087…089 | `tv:data/src/main/java/com/chakir/plexhubtv/data/repository/TvPairingRepositoryImpl.kt:92` |
-| POST | `/api/tv-auth/approve` | `X-API-Key` (alias de `verify_backend_secret`) | B `ApproveRequest{userCode (4-16), payload: objet libre}` | `ApproveResponse` | 503 chiffrement non configuré ; 422 charge vide ; 404 ; 410 ; 409 | `app/api/tv_auth.py:382` | FR-BE-075…081 | aucun appelant (appelé par le mobile/web, hors dépôt TV — `tv:core/network/src/main/java/com/chakir/plexhubtv/core/network/tvauth/TvAuthApiService.kt:20`) |
+| POST | `/api/tv-auth/start` | public, limité en débit | B `StartRequest{deviceName?}` (≤ 120) | 201 `StartResponse` (`deviceCode`, `userCode`, `verificationUri`, `expiresIn`, `interval`) | 503 appairage non configuré ; **429 + `Retry-After`** (deux fenêtres par IP, plafond global de sessions en attente) ; 503 code non allouable | `app/api/tv_auth.py:243` | FR-BE-065…074 | `tv:data/src/main/java/com/chakir/plexhubtv/data/repository/TvPairingRepositoryImpl.kt:52` |
+| GET | `/api/tv-auth/status` | public, **jamais limité** | Q `deviceCode` ou `device_code` (16-128) | `StatusResponse` (`status`, `expiresIn`, `payload` livré **une seule fois**) | 422 code absent ; 404 code inconnu ; expirée → **200** `status=expired` ; 503 charge indéchiffrable | `app/api/tv_auth.py:547` | FR-BE-082…086 | `tv:data/src/main/java/com/chakir/plexhubtv/data/repository/TvPairingRepositoryImpl.kt:69` (envoie `device_code`) |
+| POST | `/api/tv-auth/complete` | public | B `CompleteRequest{deviceCode}` | `CompleteResponse{status}` | 404 ; **410** expirée ; **409** déjà complétée ou pas encore approuvée | `app/api/tv_auth.py:653` | FR-BE-087…089 | `tv:data/src/main/java/com/chakir/plexhubtv/data/repository/TvPairingRepositoryImpl.kt:92` |
+| GET | `/api/tv-auth/approve` | **public**, limité en débit par IP (30 / 60 s par défaut) | Q `userCode` facultatif (rempli seulement s'il respecte le format `ABCD-EFGH`) | page HTML `pairing/approve.html` (hors schéma OpenAPI) avec en-têtes `Content-Security-Policy` à nonce, `X-Frame-Options: DENY`, `Cache-Control: no-store`, `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff` | **429 + `Retry-After`** au-delà du limiteur ; aucune dépendance à la base ni à la clé de chiffrement | `app/api/tv_auth.py:436-469`, `app/api/tv_auth.py:417-433` | FR-BE-075 ; RG-BE-03.8…11 | aucun appelant : page ouverte depuis le QR affiché par la TV (`tv:app/src/main/java/com/chakir/plexhubtv/feature/pairing/PairingViewModel.kt:90`) |
+| POST | `/api/tv-auth/approve` | `X-API-Key` (alias de `verify_backend_secret`) | B `ApproveRequest{userCode (4-16), payload: objet libre}` | `ApproveResponse` | 503 chiffrement non configuré ; 422 charge vide ; 404 ; 410 ; 409 | `app/api/tv_auth.py:476` | FR-BE-075…081 | aucun appelant TV : appelé par `fetch` depuis la page `GET /api/tv-auth/approve` (clé saisie, envoyée en en-tête `X-API-Key` uniquement), ou par un mobile/web — `tv:core/network/src/main/java/com/chakir/plexhubtv/core/network/tvauth/TvAuthApiService.kt:20` ; **aucun limiteur de débit sur ce POST** |
 
 ### 2.3 Comptes Xtream et catégories — [CAP-BE-04](../fonctionnel/CAP-BE-04-comptes-xtream-categories.md)
 
@@ -130,8 +131,8 @@ Colonnes : **Garde** (§1.1) · **Paramètres** (Q = query, P = path, B = body) 
 
 | Méthode | Chemin | Garde | Paramètres | Réponse | Erreurs | Preuve | FR | Appelant TV |
 |---|---|---|---|---|---|---|---|---|
-| POST | `/api/sync/xtream` | X-API-Key | B `SyncRequest{accountId, force}` — **`force` jamais lu** | 202 `JobIdResponse{jobId}` | — | `app/api/sync.py:29` | FR-BE-189, FR-BE-192 | aucun déclencheur (dépôt seul `tv:data/src/main/java/com/chakir/plexhubtv/data/repository/BackendRepositoryImpl.kt:678`, `triggerAccountSync` sans appelant) |
-| POST | `/api/sync/xtream/all` | X-API-Key | — | 202 `JobIdResponse` | échec → job `failed` | `app/api/sync.py:48` | FR-BE-190 | `tv:data/src/main/java/com/chakir/plexhubtv/data/repository/BackendRepositoryImpl.kt:664`, déclenché par « Synchroniser tout » `tv:app/src/main/java/com/chakir/plexhubtv/feature/settings/SettingsViewModel.kt:1208` (`jobId` jamais relu) |
+| POST | `/api/sync/xtream` | X-API-Key | B `SyncRequest{accountId}` (le champ `force`, jamais lu, a été retiré au Lot 10 ; une clé inconnue est ignorée, sans 422) | 202 `JobIdResponse{jobId}` | — | `app/api/sync.py:29` | FR-BE-189, FR-BE-192 | aucun déclencheur (dépôt seul `tv:data/src/main/java/com/chakir/plexhubtv/data/repository/BackendRepositoryImpl.kt:678`, `triggerAccountSync` sans appelant) |
+| POST | `/api/sync/xtream/all` | X-API-Key | — | 202 `JobIdResponse` | échec → job `failed` | `app/api/sync.py:48` | FR-BE-190 | `tv:data/src/main/java/com/chakir/plexhubtv/data/repository/BackendRepositoryImpl.kt:664`, déclenché par « Synchroniser tout » `tv:app/src/main/java/com/chakir/plexhubtv/feature/settings/SettingsViewModel.kt:1206` (`jobId` jamais relu) |
 | GET | `/api/sync/status/{job_id}` | X-API-Key | P `job_id` | `SyncStatusResponse` (`status`, `phase`, dates, `error`) | 404 job inconnu (dont après redémarrage) | `app/api/sync.py:181` | FR-BE-195 | aucun appelant (déclaré `tv:core/network/src/main/java/com/chakir/plexhubtv/core/network/backend/BackendApiService.kt:70`, jamais invoqué ; le `jobId` reçu est ignoré) |
 | GET | `/api/sync/jobs` | X-API-Key | — | `SyncJobListResponse` (éléments plus pauvres que `status`) | — | `app/api/sync.py:209` | FR-BE-196, FR-BE-197, FR-BE-199 | aucun appelant |
 | DELETE | `/api/sync/cancel/{task_name}` | X-API-Key | P `task_name` | `MessageResponse` | 404 aucune tâche de ce nom | `app/api/sync.py:71` | FR-BE-191, FR-BE-203 | aucun appelant |
@@ -183,7 +184,7 @@ Ordre de déclaration contractuel : `trailer/*` et `episodes/unified` **avant** 
 
 | Méthode | Chemin | Garde | Paramètres | Réponse | Erreurs | Preuve | FR | Appelant TV |
 |---|---|---|---|---|---|---|---|---|
-| POST | `/api/plex/generate` | X-API-Key (toute clé utilisateur active) | B `GenerateRequest{accountId, allAccounts (jamais lu), outputDir, strmOnly, dryRun, forceRefreshMetadata}` | `GenerateResponse` — **synchrone**, pas de `jobId` | 400 `outputDir` absent / refusé / hors bibliothèque ; échec de génération → 500 | `app/api/plex.py:81` | FR-BE-697…701, FR-BE-703 | aucun appelant |
+| POST | `/api/plex/generate` | X-API-Key (toute clé utilisateur active) | B `GenerateRequest{accountId, outputDir, strmOnly, dryRun, forceRefreshMetadata}` (`allAccounts`, jamais lu, retiré au Lot 10) | `GenerateResponse` — **synchrone**, pas de `jobId` | 400 `outputDir` absent / refusé / hors bibliothèque ; échec de génération → 500 | `app/api/plex.py:80` | FR-BE-697…701, FR-BE-703 | aucun appelant |
 
 ### 2.10 IA — [CAP-BE-13](../fonctionnel/CAP-BE-13-recommandations-ia-recherche-semantique.md), [CAP-BE-14](../fonctionnel/CAP-BE-14-generation-llm-assistant.md), [CAP-BE-15](../fonctionnel/CAP-BE-15-traduction-sous-titres.md)
 
@@ -201,9 +202,9 @@ Garde de tout le router : `verify_api_key` (`app/api/ai.py:52-56`) → 503 sqlit
 | POST | `/api/ai/describe` | `DescribeRequest{title, overview?, genres[], year?, language fr\|en}` | `DescribeResponse` | 503 LLM | `app/api/ai.py:860` | FR-BE-659…661 | aucun appelant |
 | POST | `/api/ai/chat` | `ChatRequest{messages[], stream}` | non-stream `ChatResponse` ; stream `text/event-stream` terminé par `data: [DONE]` ou **`data: [ERROR]` sous un 200 déjà émis** | 503 LLM (non-stream seulement) | `app/api/ai.py:883` | FR-BE-656, FR-BE-662…664, FR-BE-666 | aucun appelant |
 | GET | `/api/ai/llm/status` | — | `LlmStatus` — toujours 200 (mais 503 de la garde si sqlite-vec absent) | — | `app/api/ai.py:909` | FR-BE-669, FR-BE-672 | aucun appelant |
-| POST | `/api/ai/subtitles/translate` | `SubtitleTranslateRequest{content, targetLang (fr), format?, sourceLang?, mediaId?, ratingKey?}` | `SubtitleTranslateResponse{translatedContent, format, cueCount, cached, model, durationSeconds}` | **422** format ; **413** taille / nombre de répliques ; 503 LLM ou délai | `app/api/ai.py:948` | FR-BE-570, FR-BE-572…574, FR-BE-593…595 | `tv:data/src/main/java/com/chakir/plexhubtv/data/repository/SubtitleTranslationRepositoryImpl.kt:77` |
-| POST | `/api/ai/blurb` | `BlurbRequest{tmdbId, mediaType, lang, title?, overview?, genres?, force}` | `BlurbResponse{summary, tags[], cached, model}` | 422 aucun texte source ; 503 LLM | `app/api/ai.py:1093` | FR-BE-681, FR-BE-682, FR-BE-684 | aucun appelant |
-| GET | `/api/ai/blurb/{tmdb_id}` | P `tmdb_id` ; Q `mediaType` (alias, requis), `lang` | `BlurbResponse` | 404 | `app/api/ai.py:1216` | FR-BE-689 | aucun appelant |
+| POST | `/api/ai/subtitles/translate` | `SubtitleTranslateRequest{content, targetLang (fr), format?, sourceLang?}` (`mediaId`/`ratingKey`, inertes, retirés au Lot 10) | `SubtitleTranslateResponse{translatedContent, format, cueCount, cached, model, durationSeconds}` | **422** format ; **413** taille / nombre de répliques ; 503 LLM ou délai | `app/api/ai.py:946` | FR-BE-570, FR-BE-572…574, FR-BE-593…595 | `tv:data/src/main/java/com/chakir/plexhubtv/data/repository/SubtitleTranslationRepositoryImpl.kt:77` |
+| POST | `/api/ai/blurb` | `BlurbRequest{tmdbId, mediaType, lang, title?, overview?, genres?, force}` | `BlurbResponse{summary, tags[], cached, model}` | 422 aucun texte source ; 503 LLM | `app/api/ai.py:1091` | FR-BE-681, FR-BE-682, FR-BE-684 | aucun appelant |
+| GET | `/api/ai/blurb/{tmdb_id}` | P `tmdb_id` ; Q `mediaType` (alias, requis), `lang` | `BlurbResponse` | 404 | `app/api/ai.py:1214` | FR-BE-689 | aucun appelant |
 
 ### 2.11 Miroirs JSON opérateur `/api/admin/*` — clé maître seule
 
@@ -232,9 +233,9 @@ Aucun appelant TV sur tout ce groupe (surface opérateur).
 | HEAD | idem | Basic DAV | servi depuis l'arbre en mémoire, zéro appel amont | 404 ; 405 sur répertoire | `app/api/dav.py:121-130` | FR-BE-759, FR-BE-769 | aucun appelant |
 | GET | idem | Basic DAV | relais d'octets, `Range` transmis (200/206/416 de l'amont), `Content-Encoding: identity` | 404 ; 405 répertoire ; **503 + `Retry-After`** file d'attente ; **504** délai amont ; **502** erreur amont | `app/api/dav.py:165-271` | FR-BE-770…777, FR-BE-780 | aucun appelant |
 | autres verbes | idem | — | 405 par le routage, sans exécuter la garde | — | `app/api/dav.py:319-320` | FR-BE-754 | — |
-| GET | `/metrics` | Basic métriques | format Prometheus | 401 ; 503 non configuré | `app/main.py:734` | [CAP-BE-01](../fonctionnel/CAP-BE-01-sante-supervision.md) | aucun appelant |
-| GET | `/docs` | Basic admin | Swagger UI | 401 ; 503 | `app/main.py:679` | CAP-BE-01 | aucun appelant |
-| GET | `/openapi.json` | Basic admin | schéma OpenAPI (hors `/dav`, `/docs`, `/metrics`) | 401 ; 503 | `app/main.py:684` | CAP-BE-01 | aucun appelant |
+| GET | `/metrics` | Basic métriques | format Prometheus | 401 ; 503 non configuré | `app/main.py:761` | [CAP-BE-01](../fonctionnel/CAP-BE-01-sante-supervision.md) | aucun appelant |
+| GET | `/docs` | Basic admin | Swagger UI | 401 ; 503 | `app/main.py:706` | CAP-BE-01 | aucun appelant |
+| GET | `/openapi.json` | Basic admin | schéma OpenAPI (hors `/dav`, `/docs`, `/metrics`) | 401 ; 503 | `app/main.py:711` | CAP-BE-01 | aucun appelant |
 
 ## 4. UI admin `/admin*` (HTML/HTMX)
 
@@ -242,37 +243,36 @@ Garde : Basic Auth admin au montage + CSRF `Sec-Fetch-Site` (`app/api/csrf.py:98
 
 | Méthode | Chemin | Réponse / erreurs notables | Preuve | FR / CAP |
 |---|---|---|---|---|
-| GET | `/admin`, `/admin/` | page `index.html` (onglets catalogue / à vérifier) | `app/api/admin.py:132-133` | FR-BE-887 — [CAP-BE-21](../fonctionnel/CAP-BE-21-console-admin-catalogue.md) |
-| GET | `/admin/catalogue` | fragment `_media_table.html` (filtre `ids`) | `app/api/admin.py:158` | FR-BE-894 |
-| GET | `/admin/movies` | même fragment, contrat hérité (`missing_imdb`/`missing_tmdb`) — **mort** côté gabarits | `app/api/admin.py:176` | FR-BE-918 |
-| GET | `/admin/stats`, `/admin/movies/stats` | fragment `_stats.html` ; la 2ᵉ forme est **morte** | `app/api/admin.py:205-206` | FR-BE-903, FR-BE-919 |
-| POST | `/admin/movies/{rating_key}/ids` | ligne `_media_row.html` ; `server_id` en **champ de formulaire** (pas dans l'URL) ; 404, 422 | `app/api/admin.py:213` | FR-BE-906…909 |
-| POST | `/admin/movies/{rating_key}/rescrape` | ligne ; 404 | `app/api/admin.py:261` | FR-BE-957 |
-| GET | `/admin/media/{server_id}/{rating_key}/scrape` | tiroir modal `_scrape_panel.html` ; 404 | `app/api/admin.py:534` | FR-BE-924 — [CAP-BE-22](../fonctionnel/CAP-BE-22-scraper-manuel-a-verifier.md) |
-| GET | `/admin/media/{server_id}/{rating_key}/candidates` | `_scrape_candidates.html` ; 404 | `app/api/admin.py:566` | FR-BE-925 |
-| POST | `/admin/media/{server_id}/{rating_key}/lookup` | `_scrape_candidates.html` ; 404, 422 | `app/api/admin.py:600` | FR-BE-926, FR-BE-933 |
-| POST | `/admin/media/{server_id}/{rating_key}/apply` | ligne + `HX-Trigger` fermeture du tiroir ; 404, 422, **409** (conflit, base verrouillée, `skipped_locked`) | `app/api/admin.py:299` | FR-BE-945…951 |
-| POST | `/admin/media/{server_id}/{rating_key}/unlock` | ligne ; 404 | `app/api/admin.py:421` | FR-BE-955 |
-| POST | `/admin/media/{server_id}/{rating_key}/clear` | ligne ; 404 | `app/api/admin.py:440` | FR-BE-956 |
-| POST | `/admin/media/{server_id}/{rating_key}/rescrape` | ligne ; 404 | `app/api/admin.py:462` | FR-BE-957 |
-| GET | `/admin/media/{server_id}/{rating_key}/poster` | image proxifiée (URL lue en base, jamais du client), `nosniff`, SVG refusé ; 404 | `app/api/admin.py:492` | FR-BE-921…923 |
-| GET | `/admin/review` | `_review_list.html` | `app/api/admin.py:657` | FR-BE-969 |
-| POST | `/admin/review/{server_id}/{rating_key}/apply` | 200 vide + `HX-Trigger` ; 404, **422** (dont `skipped_locked`), 409 conflit | `app/api/admin.py:672` | FR-BE-971 |
-| POST | `/admin/review/{server_id}/{rating_key}/dismiss` | 200 vide ; 404 | `app/api/admin.py:730` | FR-BE-972 |
-| POST | `/admin/scrape-batch` | 202 `_scrape_batch_status.html` ; **409** lot en cours | `app/api/admin.py:749` | FR-BE-975 |
-| GET | `/admin/scrape-batch/status` | statut du lot | `app/api/admin.py:776` | FR-BE-976 |
-| POST | `/admin/scrape-batch/{job_id}/cancel` | statut ; 404 | `app/api/admin.py:787` | FR-BE-977 |
-| GET | `/admin/import-nfo` | `import_nfo.html` | `app/api/admin.py:798` | FR-BE-804 — [CAP-BE-23](../fonctionnel/CAP-BE-23-import-metadonnees-nfo.md) |
-| POST | `/admin/import-nfo` | **200 toujours** (erreurs en bandeau) ; `HX-Trigger` sans auditeur | `app/api/admin.py:815` | FR-BE-806…808, FR-BE-815 |
-| GET | `/admin/keys`, `/admin/keys/table` | page / tableau des clés | `app/api/admin.py:902`, `app/api/admin.py:909` | FR-BE-120 — CAP-BE-02 |
-| POST | `/admin/keys` | clé en clair une fois ; 422 libellé vide | `app/api/admin.py:916` | FR-BE-120, FR-BE-121 |
-| POST | `/admin/keys/{key_id}/revoke` | tableau ; id inconnu ignoré | `app/api/admin.py:948` | FR-BE-122 |
+| GET | `/admin`, `/admin/` | page `index.html` (onglets catalogue / à vérifier) | `app/api/admin.py:125-126` | FR-BE-887 — [CAP-BE-21](../fonctionnel/CAP-BE-21-console-admin-catalogue.md) |
+| GET | `/admin/catalogue` | fragment `_media_table.html` (filtre `ids`) | `app/api/admin.py:149` | FR-BE-894 |
+| GET | `/admin/stats` | fragment `_stats.html` (les alias `GET /admin/movies` et `GET /admin/movies/stats`, morts côté gabarits, ont été retirés au Lot 10) | `app/api/admin.py:167-171` | FR-BE-903, FR-BE-918, FR-BE-919 |
+| POST | `/admin/movies/{rating_key}/ids` | ligne `_media_row.html` ; `server_id` en **champ de formulaire** (pas dans l'URL) ; 404, 422 | `app/api/admin.py:174` | FR-BE-906…909 |
+| POST | `/admin/movies/{rating_key}/rescrape` | ligne ; 404 | `app/api/admin.py:222` | FR-BE-957 |
+| GET | `/admin/media/{server_id}/{rating_key}/scrape` | tiroir modal `_scrape_panel.html` ; 404 | `app/api/admin.py:495` | FR-BE-924 — [CAP-BE-22](../fonctionnel/CAP-BE-22-scraper-manuel-a-verifier.md) |
+| GET | `/admin/media/{server_id}/{rating_key}/candidates` | `_scrape_candidates.html` ; 404 | `app/api/admin.py:527` | FR-BE-925 |
+| POST | `/admin/media/{server_id}/{rating_key}/lookup` | `_scrape_candidates.html` ; 404, 422 | `app/api/admin.py:561` | FR-BE-926, FR-BE-933 |
+| POST | `/admin/media/{server_id}/{rating_key}/apply` | ligne + `HX-Trigger` fermeture du tiroir ; 404, 422, **409** (conflit, base verrouillée, `skipped_locked`) | `app/api/admin.py:260` | FR-BE-945…951 |
+| POST | `/admin/media/{server_id}/{rating_key}/unlock` | ligne ; 404 | `app/api/admin.py:382` | FR-BE-955 |
+| POST | `/admin/media/{server_id}/{rating_key}/clear` | ligne ; 404 | `app/api/admin.py:401` | FR-BE-956 |
+| POST | `/admin/media/{server_id}/{rating_key}/rescrape` | ligne ; 404 | `app/api/admin.py:423` | FR-BE-957 |
+| GET | `/admin/media/{server_id}/{rating_key}/poster` | image proxifiée (URL lue en base, jamais du client), `nosniff`, SVG refusé ; 404 | `app/api/admin.py:453` | FR-BE-921…923 |
+| GET | `/admin/review` | `_review_list.html` | `app/api/admin.py:618` | FR-BE-969 |
+| POST | `/admin/review/{server_id}/{rating_key}/apply` | 200 vide + `HX-Trigger` ; 404, **422** (dont `skipped_locked`), 409 conflit | `app/api/admin.py:633` | FR-BE-971 |
+| POST | `/admin/review/{server_id}/{rating_key}/dismiss` | 200 vide ; 404 | `app/api/admin.py:691` | FR-BE-972 |
+| POST | `/admin/scrape-batch` | 202 `_scrape_batch_status.html` ; **409** lot en cours | `app/api/admin.py:710` | FR-BE-975 |
+| GET | `/admin/scrape-batch/status` | statut du lot | `app/api/admin.py:737` | FR-BE-976 |
+| POST | `/admin/scrape-batch/{job_id}/cancel` | statut ; 404 | `app/api/admin.py:748` | FR-BE-977 |
+| GET | `/admin/import-nfo` | `import_nfo.html` | `app/api/admin.py:759` | FR-BE-804 — [CAP-BE-23](../fonctionnel/CAP-BE-23-import-metadonnees-nfo.md) |
+| POST | `/admin/import-nfo` | **200 toujours** (erreurs en bandeau) ; l'en-tête `HX-Trigger` sans auditeur a été retiré au Lot 10 (FR-BE-815 *retiré*) | `app/api/admin.py:776` | FR-BE-806…808, FR-BE-815 |
+| GET | `/admin/keys`, `/admin/keys/table` | page / tableau des clés | `app/api/admin.py:862`, `app/api/admin.py:869` | FR-BE-120 — CAP-BE-02 |
+| POST | `/admin/keys` | clé en clair une fois ; 422 libellé vide | `app/api/admin.py:876` | FR-BE-120, FR-BE-121 |
+| POST | `/admin/keys/{key_id}/revoke` | tableau ; id inconnu ignoré | `app/api/admin.py:908` | FR-BE-122 |
 | GET | `/admin/downloads`, `/`, `/list` | page / liste du catalogue Xtream téléchargeable | `app/api/admin_downloads.py:156-157`, `app/api/admin_downloads.py:183` | FR-BE-001, FR-BE-002 — [CAP-BE-18](../fonctionnel/CAP-BE-18-telechargement-physique-xtream.md) |
 | GET | `/admin/downloads/{type}/{unification_id:path}/versions` | versions ; 404 type / id | `app/api/admin_downloads.py:220` | FR-BE-003…005 |
 | GET | `/admin/downloads/{type}/{unification_id:path}/episodes` | épisodes d'une saison (Q `season` requis) ; 404 | `app/api/admin_downloads.py:288` | FR-BE-006 |
 | POST | `/admin/downloads`, `/admin/downloads/` | file `_downloads_queue.html`, **200 toujours** (erreur en ligne) | `app/api/admin_downloads.py:377-378` | FR-BE-007, FR-BE-009 |
-| GET | `/admin/downloads/queue` | file | `app/api/admin_downloads.py:442` | FR-BE-019 |
-| POST | `/admin/downloads/{job_id}/cancel`, `/retry`, `/admin/downloads/clear-finished` | file ; id inconnu sans erreur | `app/api/admin_downloads.py:449`, `app/api/admin_downloads.py:459`, `app/api/admin_downloads.py:469` | FR-BE-019…021 |
+| GET | `/admin/downloads/queue` | file | `app/api/admin_downloads.py:440` | FR-BE-019 |
+| POST | `/admin/downloads/{job_id}/cancel`, `/retry`, `/admin/downloads/clear-finished` | file ; id inconnu sans erreur | `app/api/admin_downloads.py:447`, `app/api/admin_downloads.py:457`, `app/api/admin_downloads.py:467` | FR-BE-019…021 |
 | GET | `/admin/plex-downloads`, `/`, `/list` | page / liste Plex | `app/api/admin_plex_downloads.py:171-172`, `app/api/admin_plex_downloads.py:204` | FR-BE-1004…1007 — [CAP-BE-19](../fonctionnel/CAP-BE-19-telechargement-plex.md) |
 | GET | `/admin/plex-downloads/{type}/{unification_id:path}/versions`, `/episodes` | 404 type / id | `app/api/admin_plex_downloads.py:234`, `app/api/admin_plex_downloads.py:278` | FR-BE-1012…1014 |
 | POST | `/admin/plex-downloads`, `/admin/plex-downloads/` | file, **200 toujours** | `app/api/admin_plex_downloads.py:360-361` | FR-BE-1017…1023 |
@@ -332,9 +332,9 @@ La précédente version comptait 29 appelés : elle prenait l'appel Retrofit dan
 | # | Écart / risque | Preuve | Gravité | Piste |
 |---|---|---|---|---|
 | 1 | **`/api/ai/*` répond 503 avant 401** : sans clé, un appelant reçoit « AI vector storage unavailable » si sqlite-vec manque ; les endpoints LLM purs (`describe`, `chat`, `llm/status`, `subtitles`) sont bloqués par une dépendance qu'ils n'utilisent pas. Côté TV, le chemin IA mappe 503 en « service désactivé » : une panne sqlite-vec y ressemble à une IA coupée volontairement (la traduction de sous-titres, elle, ne le mappe pas : repli silencieux sur l'original, cf. question 11). | `app/api/deps.py:81-90`, `tv:data/src/main/java/com/chakir/plexhubtv/data/repository/AiResultMappers.kt:33-48` | moyenne | garde sqlite-vec au niveau des seuls endpoints vectoriels (FR-BE-658) |
-| 2 | **Aucun exception handler global** : toute exception non prévue (santé avec base indisponible, génération, catégories) donne un 500 non enveloppé ; l'app TV le traite comme ServerError avec retry. | `app/api/health.py:14`, `app/api/plex.py:81` | moyenne | enveloppe d'erreur homogène + test |
-| 3 | **Codes incohérents pour un même concept** : id inconnu → 200 vide (`movies/unified`, `shows/unified`) mais 404 (`episodes/unified`) ; `server_id` invalide → 200 vide (`live/channels`, `live/epg`) mais 400 (`live/.../stream`, `.../epg`, `/api/stream`) ; compte inconnu → 200 (`GET categories`) mais 404 ailleurs ; session expirée → 200 (`status`) mais 410 (`complete`, `approve`) ; `skipped_locked` → 409 (scraper) mais 422 (« À vérifier ») ; `type` invalide → repli silencieux (`plex-downloads/catalog`) mais 404 (détail). | `app/api/media.py:394`, `app/api/live.py:201`, `app/api/categories.py:27`, `app/api/tv_auth.py:479-480`, `app/api/plex_downloads.py:78` | moyenne | table de codes par concept, puis alignement |
-| 4 | **Champs acceptés mais jamais lus** : `SyncRequest.force` (porté par le DTO TV, mais `POST /api/sync/xtream` n'a aucun déclencheur côté TV), `GenerateRequest.allAccounts` ; **champ annoncé jamais rempli** : `StreamResponse.expiresAt`. Le schéma OpenAPI promet plus que le code. | `app/api/sync.py:29`, `app/api/plex.py:81`, `app/api/stream.py:13` | faible | retirer ou implémenter |
+| 2 | **Aucun exception handler global** : toute exception non prévue (santé avec base indisponible, génération, catégories) donne un 500 non enveloppé ; l'app TV le traite comme ServerError avec retry. | `app/api/health.py:14`, `app/api/plex.py:80` | moyenne | enveloppe d'erreur homogène + test |
+| 3 | **Codes incohérents pour un même concept** : id inconnu → 200 vide (`movies/unified`, `shows/unified`) mais 404 (`episodes/unified`) ; `server_id` invalide → 200 vide (`live/channels`, `live/epg`) mais 400 (`live/.../stream`, `.../epg`, `/api/stream`) ; compte inconnu → 200 (`GET categories`) mais 404 ailleurs ; session expirée → 200 (`status`) mais 410 (`complete`, `approve`) ; `skipped_locked` → 409 (scraper) mais 422 (« À vérifier ») ; `type` invalide → repli silencieux (`plex-downloads/catalog`) mais 404 (détail). | `app/api/media.py:394`, `app/api/live.py:201`, `app/api/categories.py:27`, `app/api/tv_auth.py:575-576`, `app/api/plex_downloads.py:78` | moyenne | table de codes par concept, puis alignement |
+| 4 | **Champs acceptés mais jamais lus** : `SyncRequest.force`, `GenerateRequest.allAccounts` et `SubtitleTranslateRequest.mediaId`/`ratingKey` ont été **retirés au Lot 10** (`tests/test_legacy_request_fields.py` : un ancien client qui les envoie ne reçoit pas de 422) ; reste **champ annoncé jamais rempli** : `StreamResponse.expiresAt`. | `app/api/sync.py:29`, `app/api/plex.py:80`, `app/api/stream.py:13` | faible | retirer ou implémenter `expiresAt` |
 | 5 | **Réponses sans `response_model`** : `PUT categories` (dict `{message}`), `POST media/{rk}/rescrape` (dict `{status}`), `trailer/file` (binaire) ; body `CategoryUpdateRequest.categories` en `list[dict]` non typé (élément incomplet ignoré en silence). | `app/api/categories.py:50`, `app/api/media.py:540`, `app/api/media.py:475` | faible | schémas explicites |
 | 6 | **Jobs en mémoire** (synchro, embeddings, backfill OMDb) : `jobId` perdu au redémarrage → 404 ; invisible d'un autre processus. Le backfill OMDb ne partage pas le verrou du pipeline planifié. | `app/api/sync.py:181`, `app/api/ai.py:729`, `app/api/enrichment.py:104` | faible (mono-processus) | documenté ; persister si multi-workers |
 | 7 | **Surface morte côté TV : 8 routes** — 3 déclarées seules (`PUT /api/accounts/{id}`, `GET /api/sync/status/{id}`, `GET /api/live/channels/{id}`) et 5 implémentées dans un dépôt sans déclencheur (création, suppression et test de compte, synchro d'un seul compte, mise à jour des catégories — cette dernière court-circuitée par un enregistrement local) ; la lecture de statut IA n'a aucun appelant. Le `jobId` de synchro est ignoré : l'app ne peut pas savoir qu'une synchro a échoué côté serveur. | `tv:core/network/src/main/java/com/chakir/plexhubtv/core/network/backend/BackendApiService.kt:70`, `tv:data/src/main/java/com/chakir/plexhubtv/data/repository/HybridCategoryRepository.kt:57-72`, `tv:data/src/main/java/com/chakir/plexhubtv/data/repository/AiRecommendationRepositoryImpl.kt:161` | faible | décider : brancher ou retirer |
@@ -342,15 +342,16 @@ La précédente version comptait 29 appelés : elle prenait l'appel Retrofit dan
 | 9 | **Timeout TV vs démarrage à froid IA** : le client « ai » lit 15 s alors que le premier `/rank` charge le modèle d'embeddings (~30 s, CLAUDE.md §9 piège 1) ; l'hydratation TMDB plafonnée ajoute du temps. | `tv:core/network/src/main/java/com/chakir/plexhubtv/core/network/ai/AiNetworkModule.kt:54-55`, `app/api/ai.py:320` | moyenne | préchauffage au boot ou timeout client plus long |
 | 10 | **Retry TV sur 5xx/429 appliqué aux écritures non idempotentes** : le seul POST de ce type réellement déclenché est `POST /api/sync/xtream/all` — un 500 après création du job peut en lancer un second. `POST /api/accounts` et `POST /api/sync/xtream` sont sans déclencheur : risque latent seulement. | `tv:core/network/src/main/java/com/chakir/plexhubtv/core/network/util/SafeApiCall.kt:70-79`, `tv:data/src/main/java/com/chakir/plexhubtv/data/repository/BackendRepositoryImpl.kt:664` | moyenne | pas de retry sur POST, ou clé d'idempotence |
 | 11 | **Visibilité liste ≠ détail** : `GET /api/media/{rk}` et `movies/stats` ignorent catégories et comptes en panne alors que les listes les masquent. | `app/api/media.py:506`, `app/api/media.py:164` | faible | acté (FR-BE-510) ; à documenter côté client |
-| 12 | **Conventions d'erreur multiples sur `/admin*`** : 409/422 swappés (scraper), 200 + message en ligne (enqueue des téléchargements), 200 + bandeau (import NFO), ids inconnus ignorés (cancel/retry/revoke). Routes héritées mortes encore routées (`/admin/movies`, `/admin/movies/stats`) et doublons avec `/` final. | `app/api/admin.py:176`, `app/api/admin_downloads.py:377-378`, `app/api/admin.py:815` | faible | une règle par type d'action |
-| 13 | **Trois conventions de montage des gardes** : seule l'assertion de boot garantit qu'aucune route `/api/*` n'est publiée sans garde ; elle ne couvre ni `/admin*` ni `/dav`. | `app/main.py:633-722`, `app/api/route_audit.py:76-85` | faible | CR-A04 |
+| 12 | **Conventions d'erreur multiples sur `/admin*`** : 409/422 swappés (scraper), 200 + message en ligne (enqueue des téléchargements), 200 + bandeau (import NFO), ids inconnus ignorés (cancel/retry/revoke). Routes héritées mortes (`/admin/movies`, `/admin/movies/stats`) retirées au Lot 10 ; doublons avec `/` final. | `app/api/admin.py:176`, `app/api/admin_downloads.py:377-378`, `app/api/admin.py:776` | faible | une règle par type d'action |
+| 13 | **Trois conventions de montage des gardes** : seule l'assertion de boot garantit qu'aucune route `/api/*` n'est publiée sans garde ; elle ne couvre ni `/admin*` ni `/dav`. | `app/main.py:660-749`, `app/api/route_audit.py:66-99` | faible | CR-A04 |
 | 14 | **Dérive de documentation TV** : l'interface `AiRecommendationApi` est propre (annotations `api/ai/*`) ; ce sont les KDoc des **DTO** IA qui citent encore /v1/rank, /v1/rank-multi, /v1/embed/status. Le KDoc du seeder d'hôtes annonce des posters « sous /api/… » alors qu'aucune route d'image n'existe (cf. question 1). Deux URL backend configurables indépendamment (média vs IA/appairage) sans contrôle croisé. | `tv:core/network/src/main/java/com/chakir/plexhubtv/core/network/ai/dto/RankRequestDto.kt:7`, `tv:core/network/src/main/java/com/chakir/plexhubtv/core/network/ai/dto/RankMultiRequestDto.kt:9`, `tv:core/network/src/main/java/com/chakir/plexhubtv/core/network/ai/dto/EmbedStatusDto.kt:7`, `tv:data/src/main/java/com/chakir/plexhubtv/data/network/BackendHostSeeder.kt:14-18` | faible | corriger les KDoc côté TV |
+| 15 | **`POST /api/tv-auth/approve` sans limiteur de débit** (le code l'avoue en docstring : l'espace de codes fait 31^8 et une clé valide est exigée) et **page d'approbation qui n'impose pas HTTPS** : la clé saisie circule en clair si l'adresse affichée par la TV est en `http://`. Observations ouvertes au Lot 10, non corrigées. | `app/api/tv_auth.py:476-491`, `app/templates/pairing/approve.html:240-246` | faible | limiteur par IP sur le POST ; avertissement ou refus hors HTTPS |
 
 ## Questions ouvertes (à vérifier par test)
 
-1. ~~**Posters sous `/api/…`**~~ — **tranché par lecture (2026-09-26)** : aucun poster n'est servi sous `/api`. Le backend remplit `resolved_thumb_url` avec la vignette fournisseur brute (`app/workers/sync_worker.py:215`, `app/workers/sync_worker.py:260`, `app/workers/sync_worker.py:366`) ou une URL TMDB à l'enrichissement ; aucune route d'image n'existe sous `/api` (seul proxy d'image : `/admin/.../poster`, hors `/api`). Le KDoc du seeder TV (`tv:data/src/main/java/com/chakir/plexhubtv/data/network/BackendHostSeeder.kt:14-18`) est périmé ; le seed reste utile pour l'hôte. Reste à tester : la clé `X-API-Key` ne part-elle jamais vers ces hôtes tiers (filtrage d'hôte de l'intercepteur) ?
+1. ~~**Posters sous `/api/…`**~~ — **tranché par lecture (2026-09-26)** : aucun poster n'est servi sous `/api`. Le backend remplit `resolved_thumb_url` avec la vignette fournisseur brute (`app/workers/sync_worker.py:207`, `app/workers/sync_worker.py:252`, `app/workers/sync_worker.py:358`) ou une URL TMDB à l'enrichissement ; aucune route d'image n'existe sous `/api` (seul proxy d'image : `/admin/.../poster`, hors `/api`). Le KDoc du seeder TV (`tv:data/src/main/java/com/chakir/plexhubtv/data/network/BackendHostSeeder.kt:14-18`) est périmé ; le seed reste utile pour l'hôte. Reste à tester : la clé `X-API-Key` ne part-elle jamais vers ces hôtes tiers (filtrage d'hôte de l'intercepteur) ?
 2. **Alignement champ à champ des DTO TV** : les lecteurs n'ont relevé aucun écart de nom, mais aucun test de contrat ne le prouve. Test : générer `/openapi.json` et le confronter aux DTO Kotlin (`BackendMediaItemDto`, `BackendSyncStatusResponse`, `TvAuthStatusResponseDto`…).
-3. **`SyncRequest.force`** : le backend l'ignore-t-il bien sans 422 ? Test : requête `POST /api/sync/xtream` avec et sans `force` (sans urgence : aucun déclencheur TV).
+3. ~~**`SyncRequest.force`**~~ — **tranché au Lot 10** : le champ est retiré et un ancien client qui l'envoie ne reçoit pas de 422 (`tests/test_legacy_request_fields.py:11-14`).
 4. **Retry TV sur `POST /api/sync/xtream/all`** (remplace la question sur `POST /api/accounts`, sans déclencheur) : un 500 renvoyé après création du job produit-il deux jobs ? Test : faux serveur 500 puis 202, compter les requêtes reçues.
 5. **`/api/tv-auth/status` renvoie-t-il un jour 410 ?** L'app mappe 404/410 en « expiré », le backend répond 200 `expired`. Test : session expirée → vérifier que l'app arrête bien le sondage sur 200 `expired`.
 6. **Démarrage à froid IA** : `/rank` au premier appel dépasse-t-il 15 s sur la cible Docker ? Test : chronométrer un `/rank` juste après boot.

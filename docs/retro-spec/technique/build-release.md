@@ -1,6 +1,6 @@
 # Build, release et déploiement — PlexHub Backend
 
-**Reconstitué le** : 2026-09-26 · **HEAD** : `913374b` (branche `develop`, backend v1.10.9) · **Méthode** : `/retro-spec technique build-release` — 2 lecteurs `Explore` (`sonnet`) en lecture seule (image, CI, versionnage, branches ; migrations, démarrage, sauvegardes), rédaction par la session principale. **Preuves rouvertes par la session principale** : Dockerfile (utilisateur, HEALTHCHECK, CMD), `docker-compose.yml` en entier, `.github/workflows/docker.yml` en entier, `run_migrations` et la migration 008, l'élection master dans `lifespan`, `.claude/commands/release.md` phases 1bis à 5, `APP_VERSION` et sa lecture par `/api/health`, les deux preuves `tv:`. Mesures git faites par la session principale (un lecteur n'avait pas le droit de lancer `git`). **Deux affirmations de lecteur corrigées** : les lignes `versionCode`/`versionName` de la TV sont 129-130 et non 30-35 ; le retard de `develop` sur `main` annoncé par le bandeau de `CLAUDE.md` n'existe plus (§7).
+**Reconstitué le** : 2026-09-26 · recalé le 2026-10-02 (Lot 10) · **HEAD** : `aa3270f` (branche `develop`, backend v1.10.9) · **Méthode** : `/retro-spec technique build-release` — 2 lecteurs `Explore` (`sonnet`) en lecture seule (image, CI, versionnage, branches ; migrations, démarrage, sauvegardes), rédaction par la session principale. **Preuves rouvertes par la session principale** : Dockerfile (utilisateur, HEALTHCHECK, CMD), `docker-compose.yml` en entier, `.github/workflows/docker.yml` en entier, `run_migrations` et la migration 008, l'élection master dans `lifespan`, `.claude/commands/release.md` phases 1bis à 5, `APP_VERSION` et sa lecture par `/api/health`, les deux preuves `tv:`. Mesures git faites par la session principale (un lecteur n'avait pas le droit de lancer `git`). **Deux affirmations de lecteur corrigées** : les lignes `versionCode`/`versionName` de la TV sont 129-130 et non 30-35 ; le retard de `develop` sur `main` annoncé par le bandeau de `CLAUDE.md` n'existe plus (§7).
 **Sources** : le code et la configuration du dépôt, l'inventaire [`../_genere/inventaire.md`](../_genere/inventaire.md), les fiches [CAP-BE-01](../fonctionnel/CAP-BE-01-sante-supervision.md) (santé, `isMaster`) et [CAP-BE-24](../fonctionnel/CAP-BE-24-sauvegarde-maintenance-base.md) (sauvegardes, maintenance) auxquelles on renvoie, le [C4](00-c4.md) et le volet [sécurité](securite.md) §9 ; côté TV (lecture seule) PlexHubTV, preuves `tv:`.
 **Règle** : aucune valeur secrète, aucune adresse privée, aucune donnée réelle. Les variables sont nommées, jamais valorisées (sauf défauts non secrets du code).
 
@@ -19,7 +19,7 @@ flowchart LR
     D1 --> GHCR[(GHCR)]
     D2 --> GHCR
     GHCR -->|compose de production<br/>hors dépôt| RUN[Conteneur uid 1000<br/>un seul process uvicorn]
-    RUN --> BOOT[init_db → 27 migrations rejouées<br/>→ élection master flock]
+    RUN --> BOOT[init_db → 28 migrations rejouées<br/>→ élection master flock]
 ```
 
 Il n'existe **aucun lien automatique** entre `tests.yml` et `docker.yml` : les deux workflows sont indépendants, sans `needs:` (§4).
@@ -83,7 +83,7 @@ Déclencheurs : `push` sur `main`, `push` de tags `v*`, `pull_request` vers `mai
 
 ## 6. Versionnage
 
-- **Source unique** : `APP_VERSION` — `app/main.py:38` (1.10.9 à ce HEAD), passée à `FastAPI(version=…)` — `app/main.py:584`, relue par `/api/health` via `request.app.version` — `app/api/health.py:34` (FR-BE-039). `pyproject.toml` n'a pas de table `[project]` : aucune seconde version à désynchroniser.
+- **Source unique** : `APP_VERSION` — `app/main.py:39` (1.10.9 à ce HEAD), passée à `FastAPI(version=…)` — `app/main.py:611`, relue par `/api/health` via `request.app.version` — `app/api/health.py:34` (FR-BE-039). `pyproject.toml` n'a pas de table `[project]` : aucune seconde version à désynchroniser.
 - **Tag git** `vX.Y.Z` annoté sur `main` ; tag d'image **sans `v`** (motif semver de `docker.yml`). Dernier tag : `v1.10.9` → commit `d00da2b`.
 - Le bump se fait **sur `develop`** avant le merge (procédure `/release`, `.claude/commands/release.md:18`) ; rien dans la CI ne vérifie que le tag et `APP_VERSION` coïncident.
 
@@ -119,7 +119,7 @@ sequenceDiagram
     participant DB as SQLite (DATA_DIR)
     U->>L: démarrage ASGI
     L->>DB: mkdir DATA_DIR, init_db()
-    Note over DB: PRAGMA WAL, busy_timeout 60 s…<br/>create_all puis run_migrations 001→027
+    Note over DB: PRAGMA WAL, busy_timeout 60 s…<br/>create_all puis run_migrations 001→028
     alt une migration lève
         DB-->>L: exception non rattrapée
         L-->>U: boot en échec (aucune requête servie)
@@ -133,20 +133,20 @@ sequenceDiagram
     L-->>U: yield (sert les requêtes)
 ```
 
-- **Rejeu intégral à chaque boot** : `run_migrations` appelle les 27 migrations en séquence — `app/db/migrations.py:20-64` ; 008 sur une connexion dédiée pour charger sqlite-vec — `app/db/migrations.py:37-42`. **Aucun registre** de migrations appliquées ni migration descendante : l'« application unique » repose sur l'idempotence de chaque migration (`IF NOT EXISTS`, sonde `_column_exists` — `app/db/migrations.py:67-82`), couverte par `tests/test_migrations_no_duplicate_warning.py:93`.
-- **Migrations exécutées par chaque process, avant l'élection** — `app/main.py:285` précède `app/main.py:301-313` ; sans conséquence en pratique puisque l'image ne lance qu'un process.
-- **Échec = boot interrompu** : pas de `try/except` autour de `init_db()` — `app/main.py:281-286`.
-- **Migration 008 non gardée** : `CREATE VIRTUAL TABLE … USING vec0` sans `try/except` ni lecture de l'indicateur de chargement — `app/db/migrations.py:318-342` —, alors que l'échec de chargement de sqlite-vec est, lui, avalé pour dégrader l'IA en 503 (CLAUDE.md §9 piège 2). Si l'extension manque, c'est tout le boot qui tombe, pas seulement `/api/ai`.
+- **Rejeu intégral à chaque boot** : `run_migrations` appelle les 28 migrations en séquence (028 : dédoublonnage de `epg_entries` et index unique `uix_epg_dedup`, Lot 10, qui lève en cas d'échec au lieu de l'avaler) — `app/db/migrations.py:20-65` ; 008 sur une connexion dédiée pour charger sqlite-vec — `app/db/migrations.py:37-42`. **Aucun registre** de migrations appliquées ni migration descendante : l'« application unique » repose sur l'idempotence de chaque migration (`IF NOT EXISTS`, sonde `_column_exists` — `app/db/migrations.py:68-83`), couverte par `tests/test_migrations_no_duplicate_warning.py:93`.
+- **Migrations exécutées par chaque process, avant l'élection** — `app/main.py:289` précède `app/main.py:305-317` ; sans conséquence en pratique puisque l'image ne lance qu'un process.
+- **Échec = boot interrompu** : pas de `try/except` autour de `init_db()` — `app/main.py:285-290`.
+- **Migration 008 non gardée** : `CREATE VIRTUAL TABLE … USING vec0` sans `try/except` ni lecture de l'indicateur de chargement — `app/db/migrations.py:319-343` —, alors que l'échec de chargement de sqlite-vec est, lui, avalé pour dégrader l'IA en 503 (CLAUDE.md §9 piège 2). Si l'extension manque, c'est tout le boot qui tombe, pas seulement `/api/ai`.
 - **Migration 023 (`ANALYZE`)** : garde one-shot sur `sqlite_stat1` (incident de démarrage de 14 min documenté dans la docstring) — détail FR-BE-870.
-- **Élection master** : `OSError` générique → esclave, sans distinguer verrou tenu et permission refusée — `app/main.py:308-313` ; l'état est publié tel quel (`isMaster`, gauge `plexhub_is_master`, FR-BE-043 / FR-BE-057). Le runbook `docs/32-ops-docker-nonroot.md` décrit ce piège (volumes à `chown 1000:1000`). Câblage couvert avec `fcntl` simulé — `tests/test_startup_wiring.py:194`.
+- **Élection master** : `OSError` générique → esclave, sans distinguer verrou tenu et permission refusée — `app/main.py:312-317` ; l'état est publié tel quel (`isMaster`, gauge `plexhub_is_master`, FR-BE-043 / FR-BE-057). Le runbook `docs/32-ops-docker-nonroot.md` décrit ce piège (volumes à `chown 1000:1000`). Câblage couvert avec `fcntl` simulé — `tests/test_startup_wiring.py:196`.
 
 ## 9. Sauvegardes et maintenance
 
 Détail exigence par exigence dans [CAP-BE-24](../fonctionnel/CAP-BE-24-sauvegarde-maintenance-base.md) (FR-BE-855 à FR-BE-879). Ce qui compte pour le déploiement :
 
-- Job quotidien `db_backup`, **master seul** et seulement si `BACKUP_ENABLED` — `app/main.py:420-431` (FR-BE-855) ; variables `BACKUP_ENABLED`, `BACKUP_DIR`, `BACKUP_RETENTION_DAYS`, `BACKUP_HOUR` — `app/config.py:152-155`.
-- **Destination par défaut sous `./data/backups`** — `app/config.py:153` —, donc dans le même volume que la base : la perte du volume emporte base et sauvegardes (aucune copie hors hôte, FR-BE-878 *absent*).
-- **Aucune restauration outillée** (FR-BE-874 *absent*) : le retour arrière d'une release qui migre dépend d'une sauvegarde manuelle prise avant déploiement (`.claude/commands/release.md:39`).
+- Job quotidien `db_backup`, **master seul** et seulement si `BACKUP_ENABLED` — `app/main.py:424-435` (FR-BE-855) ; variables `BACKUP_ENABLED`, `BACKUP_DIR`, `BACKUP_RETENTION_DAYS`, `BACKUP_HOUR` — `app/config.py:162-165`.
+- **Destination par défaut sous `./data/backups`** — `app/config.py:163` —, donc dans le même volume que la base : la perte du volume emporte base et sauvegardes (aucune copie hors hôte, FR-BE-878 *absent*).
+- **Restauration outillée depuis le Lot 10** (FR-BE-874 *implémenté*) : `python -m app.scripts.restore_db <fichier> [--apply]`, dry-run par défaut, application arrêtée (verrou master), source vérifiée par `integrity_check`, base courante conservée en `plexhub.pre-restore-*.db`, WAL/SHM supprimés, remplacement atomique ; runbook `docs/ops-backup-restore.md`. Le retour arrière d'une release qui migre reste une restauration de sauvegarde, à prendre avant déploiement (`.claude/commands/release.md:39`). Les sauvegardes sont écrites de façon atomique et vérifiées (FR-BE-875, FR-BE-876).
 - Copies de sécurité des scripts correctifs (`--apply`) hors rétention (FR-BE-868) ; `ANALYZE` + `PRAGMA optimize` en fin de pipeline planifié, jamais fatals (FR-BE-870 à FR-BE-873).
 
 ## 10. Côté app TV (lecture seule)
@@ -161,14 +161,14 @@ Détail exigence par exigence dans [CAP-BE-24](../fonctionnel/CAP-BE-24-sauvegar
 | # | Constat | Preuve | Nature | Gravité |
 |---|---|---|---|---|
 | 1 | Tout push sur `main` publie une image `main` + SHA **sans smoke ni dépendance aux tests** ; le smoke n'existe que dans la procédure `/release`. Un déploiement qui suit le tag flottant `main` récupère donc une image jamais démarrée. | `.github/workflows/docker.yml:3-8`, `.github/workflows/docker.yml:41-55` | risque release | haute |
-| 2 | Migration 008 sans garde : sqlite-vec absent ⇒ **boot en échec** au lieu du 503 IA prévu ; non testé. | `app/db/migrations.py:318-342` | risque disponibilité | haute |
-| 3 | Sauvegardes par défaut dans le volume de la base, sans restauration outillée ni copie hors hôte. | `app/config.py:153` ; FR-BE-874, FR-BE-878 | risque données | haute |
-| 4 | Aucun registre de migrations ni migration descendante : retour arrière d'un schéma = restauration d'une sauvegarde manuelle. | `app/db/migrations.py:20-64` | risque release | moyenne |
-| 5 | Élection master : permission refusée confondue avec verrou tenu ⇒ esclave silencieux, healthcheck vert. | `app/main.py:308-313` | risque exploitation (documenté) | moyenne |
+| 2 | Migration 008 sans garde : sqlite-vec absent ⇒ **boot en échec** au lieu du 503 IA prévu ; non testé. | `app/db/migrations.py:319-343` | risque disponibilité | haute |
+| 3 | Sauvegardes par défaut dans le volume de la base, sans copie hors hôte ni contrôle d'espace libre ; l'atomicité, le contrôle d'intégrité et la restauration outillée sont faits au Lot 10. | `app/config.py:163` ; FR-BE-877, FR-BE-878 | risque données | moyenne |
+| 4 | Aucun registre de migrations ni migration descendante : retour arrière d'un schéma = restauration d'une sauvegarde manuelle. | `app/db/migrations.py:20-65` | risque release | moyenne |
+| 5 | Élection master : permission refusée confondue avec verrou tenu ⇒ esclave silencieux, healthcheck vert. | `app/main.py:312-317` | risque exploitation (documenté) | moyenne |
 | 6 | Pas de fichier de verrouillage des dépendances, `yt-dlp` sans borne haute : build non reproductible. | `requirements.txt:26-31` | risque build | moyenne |
 | 7 | `latest` attendu par la procédure (phase 5) mais non déclaré dans `docker.yml`. | `.claude/commands/release.md:28`, `.github/workflows/docker.yml:41-45` | doc ↔ config | basse |
 | 8 | Bandeau de CLAUDE.md : « develop a 9 commits de retard sur main » — périmé, mesuré 0 à `913374b`. | mesure git §7 | doc périmée | basse |
-| 9 | CLAUDE.md §2 annonce APP_VERSION 1.10.0 (main.py:38) ; le code porte 1.10.9. CLAUDE.md §3 annonce « CI : Python 3.13 » alors que pytest tourne en 3.12 et 3.13. | `app/main.py:38`, `.github/workflows/tests.yml:42` | doc périmée | basse |
+| 9 | CLAUDE.md §2 annonce APP_VERSION 1.10.0 (main.py:38) ; le code porte 1.10.9. CLAUDE.md §3 annonce « CI : Python 3.13 » alors que pytest tourne en 3.12 et 3.13. | `app/main.py:39`, `.github/workflows/tests.yml:42` | doc périmée | basse |
 | 10 | Le compose du dépôt construit localement (`build: .`) ; le compose de production, hors dépôt, n'est ni versionné ni vérifiable ici (source des différences d'injection de configuration). | `docker-compose.yml:3` | écart dépôt ↔ prod | moyenne |
 | 11 | Aucune protection automatique du modèle de branches ni de concordance tag ↔ `APP_VERSION` : tout repose sur `/release`. | `.claude/commands/release.md:16-28` | risque release | moyenne |
 | 12 | `black` installé en CI sans être appelé ; `mypy` hors CI ; `docs/23-git-strategy.md` absent. | `pyproject.toml:111-128` | dette outillage | basse |
@@ -179,7 +179,7 @@ Détail exigence par exigence dans [CAP-BE-24](../fonctionnel/CAP-BE-24-sauvegar
 
 1. **Tag `latest`** : un push de `vX.Y.Z` produit-il `latest` sur GHCR avec la configuration actuelle ? Vérifier la liste des tags du paquet après la prochaine release.
 2. **Boot sans sqlite-vec** : démarrer sur une base neuve avec l'extension indisponible (chargement simulé en échec) — boot en échec (écart 2) ou dégradation 503 attendue ?
-3. **Test de restauration** : restaurer une sauvegarde `db_backup` sur une copie, démarrer l'image, `/api/health` 200 et deuxième boot sans avertissement de migration.
+3. **Test de restauration** : restaurer une sauvegarde `db_backup` sur une copie avec `restore_db` (sous Linux : le test du vrai verrou est ignoré sous Windows), démarrer l'image, `/api/health` 200 et deuxième boot sans avertissement de migration.
 4. **Permission refusée sur `server_start.lock`** : volume non inscriptible par l'uid 1000 → vérifier `isMaster: false` et l'absence d'alerte ; faut-il distinguer `EACCES` de `EWOULDBLOCK` ?
 5. **Reproductibilité** : deux builds du même commit à quelques jours d'écart produisent-ils le même `pip freeze` ?
 6. **Architecture cible** : l'hôte de production est-il bien `amd64` (image mono-architecture) ?

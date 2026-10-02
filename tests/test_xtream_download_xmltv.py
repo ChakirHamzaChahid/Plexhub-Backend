@@ -4,7 +4,6 @@ network."""
 from __future__ import annotations
 
 import gzip
-import logging
 
 import httpx
 import pytest
@@ -12,6 +11,7 @@ import respx
 
 from app.services import xtream_service as xs_module
 from app.services.xtream_service import XmltvTooLargeError, XtreamService
+from tests._records import Records
 
 SECRET = "S3CR3T-PASSWORD"
 URL = "http://prov.example:8080/xmltv.php"
@@ -97,33 +97,35 @@ async def test_gzip_bomb_is_cut_on_the_decompressed_size(svc, tmp_path):
     await svc.close()
 
 
-async def test_503_is_retried_and_the_file_restarts_clean(svc, tmp_path, caplog):
+async def test_503_is_retried_and_the_file_restarts_clean(svc, tmp_path):
     dest = tmp_path / "out.xml"
     with respx.mock:
         route = respx.get(URL).mock(side_effect=[
             httpx.Response(503, headers={"Retry-After": "1"}),
             httpx.Response(200, content=b"<tv/>"),
         ])
-        with caplog.at_level(logging.DEBUG, logger="plexhub"):
+        with Records("plexhub") as logs:
             written = await svc.download_xmltv(_Acc(), dest, max_bytes=1_000)
     await svc.close()
 
     assert route.call_count == 2
     assert dest.read_bytes() == b"<tv/>" and written == 5
-    assert SECRET not in caplog.text, "the credentialed URL must never be logged"
+    assert "got HTTP 503" in logs.text, "the retry must have been logged"
+    assert SECRET not in logs.text, "the credentialed URL must never be logged"
 
 
-async def test_connect_error_is_retried_then_raised_without_leaking(svc, tmp_path, caplog):
+async def test_connect_error_is_retried_then_raised_without_leaking(svc, tmp_path):
     dest = tmp_path / "out.xml"
     with respx.mock:
         route = respx.get(URL).mock(side_effect=httpx.ConnectError("down"))
-        with caplog.at_level(logging.DEBUG, logger="plexhub"):
+        with Records("plexhub") as logs:
             with pytest.raises(httpx.ConnectError):
                 await svc.download_xmltv(_Acc(), dest, max_bytes=1_000)
     await svc.close()
 
     assert route.call_count == 4  # 1 attempt + 3 retries (1s, 2s, 4s backoff)
-    assert SECRET not in caplog.text
+    assert "attempt 1 failed (ConnectError)" in logs.text
+    assert SECRET not in logs.text
 
 
 async def test_404_is_not_retried(svc, tmp_path):

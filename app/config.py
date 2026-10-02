@@ -187,6 +187,12 @@ class Settings:
     # Rows per write transaction: small on purpose, so the single SQLite writer
     # is never held for long while the pipeline / the API also write.
     EPG_SYNC_BATCH_SIZE: int = _safe_int("EPG_SYNC_BATCH_SIZE", 500)
+    # Pause between two batches (ms). 0 = just yield to the event loop. The XML
+    # parsing thread shares the GIL with the loop (measured: API reads 2-4x
+    # slower while it parses), so on the 1-CPU container a few ms of pause
+    # trades sync duration for API latency -- tune only from a prod-scale
+    # measurement.
+    EPG_SYNC_BATCH_PAUSE_MS: int = _safe_int("EPG_SYNC_BATCH_PAUSE_MS", 0)
     # Wall-clock ceiling for ONE XMLTV download attempt (seconds).
     EPG_SYNC_DOWNLOAD_TIMEOUT_SECONDS: int = _safe_int("EPG_SYNC_DOWNLOAD_TIMEOUT_SECONDS", 600)
     CORS_ORIGINS: list[str] = [

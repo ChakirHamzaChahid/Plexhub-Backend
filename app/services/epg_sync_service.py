@@ -49,7 +49,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Iterator
 
-from sqlalchemy import func, or_, select, tuple_
+from sqlalchemy import delete, func, or_, select, tuple_
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -71,6 +71,9 @@ _MAX_DESCRIPTION_CHARS = 4000
 # internal subset). A document that DECLARES ENTITIES is never a legitimate
 # XMLTV and is the vector for entity-expansion attacks: refuse it outright.
 _DOCTYPE_SCAN_BYTES = 64 * 1024
+# Ended programmes are deleted per CONTIGUOUS RANGE of this many stream_ids per
+# transaction (see _prune_ended: locality, not row count, is what bounds the WAL).
+_PRUNE_STREAMS_PER_TXN = 250
 
 
 class EpgSyncError(Exception):
@@ -94,6 +97,7 @@ class AccountEpgReport:
     inserted: int = 0
     updated: int = 0                  # existing rows whose content actually changed
     unchanged: int = 0                # existing rows already identical (not rewritten)
+    pruned: int = 0                   # ended programmes deleted after a successful sync
     truncated: bool = False           # EPG_SYNC_MAX_PROGRAMMES reached
     error: str | None = None
     duration_s: float = 0.0
@@ -127,6 +131,10 @@ class EpgSyncReport:
     @property
     def unchanged(self) -> int:
         return sum(a.unchanged for a in self.accounts)
+
+    @property
+    def pruned(self) -> int:
+        return sum(a.pruned for a in self.accounts)
 
 
 # ─── Pure helpers: time, error text ─────────────────────────────────────────
@@ -374,6 +382,61 @@ async def _write_batch(
     return await write_with_retry(work, session_factory=session_factory, op="epg_sync.batch")
 
 
+async def _prune_ended(
+    session_factory: SessionFactory, server_id: str, cutoff_ms: int,
+) -> int:
+    """Delete this server's programmes that ended before ``cutoff_ms``.
+
+    Why the sync prunes instead of leaving it all to the nightly
+    ``_cleanup_stale_epg``: every programme enters the table ~12 h before it
+    airs and would otherwise sit there, ended, until 03:00 -- up to ~2.8x the
+    window's rows -- and the nightly job then removes them in ONE transaction
+    that holds SQLite's single writer for the whole delete. Pruning here keeps
+    ``epg_entries`` at roughly window size. The nightly purge stays as the safety
+    net (accounts the sync no longer visits, short-EPG rows, a sync that is off).
+
+    Same semantics as the nightly purge (``end_time`` in the past), only with
+    the cutoff at the window start so the last ``EPG_SYNC_PAST_HOURS`` of
+    history stay readable.
+
+    HOW it deletes matters more than how fast (measured, ADR 0006 D4): the
+    ended rows of a guide are the OLDEST programme of EVERY channel, so they are
+    scattered across all the stream-ordered indexes (``epg_entries`` carries 7).
+    A delete chunked by AGE ("the next 2 000 stale rows") therefore dirties
+    nearly every index page on every chunk, and the WAL (which logs whole pages)
+    ballooned to ~250 MB for a 63 000-row table. Chunking by contiguous
+    ``stream_id`` RANGE keeps each transaction on a small, adjacent slice of
+    those indexes (and on the oldest slice of the time index), so each page is
+    logged about once per run. Each transaction still stays short.
+    """
+    async with session_factory() as session:
+        stale_streams = (await session.execute(
+            select(EpgEntry.stream_id).where(
+                EpgEntry.server_id == server_id,
+                EpgEntry.end_time < cutoff_ms,
+                EpgEntry.stream_id.is_not(None),
+            ).distinct().order_by(EpgEntry.stream_id)
+        )).scalars().all()
+
+    total = 0
+    for i in range(0, len(stale_streams), _PRUNE_STREAMS_PER_TXN):
+        lo = stale_streams[i]
+        hi = stale_streams[min(i + _PRUNE_STREAMS_PER_TXN, len(stale_streams)) - 1]
+
+        async def work(session: AsyncSession, lo=lo, hi=hi) -> int:
+            res = await session.execute(delete(EpgEntry).where(
+                EpgEntry.server_id == server_id,
+                EpgEntry.stream_id.between(lo, hi),
+                EpgEntry.end_time < cutoff_ms,
+            ))
+            await session.commit()
+            return res.rowcount or 0
+
+        total += await write_with_retry(work, session_factory=session_factory, op="epg_sync.prune")
+        await asyncio.sleep(0)
+    return total
+
+
 # ─── Per-account and whole-run orchestration ────────────────────────────────
 
 
@@ -451,7 +514,8 @@ async def _sync_account(
                 report.inserted += ins
                 report.updated += upd
                 report.unchanged += unch
-                await asyncio.sleep(0)  # let API requests breathe between batches
+                # Let API requests breathe between batches (0 ms = just yield).
+                await asyncio.sleep(max(0, settings.EPG_SYNC_BATCH_PAUSE_MS) / 1000)
         finally:
             report.programmes_seen = stats.programmes_seen
             report.skipped_invalid = stats.skipped_invalid
@@ -459,6 +523,15 @@ async def _sync_account(
             report.skipped_unmapped = stats.skipped_unmapped
             report.rows_emitted = stats.rows_emitted
             report.truncated = stats.truncated
+
+        # The account synced cleanly: drop what has ended (best-effort -- a
+        # failed prune must never fail an otherwise good sync).
+        try:
+            report.pruned = await _prune_ended(session_factory, server_id, win_start)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "EPG prune failed for account %s: %s", account.id, _safe_error(exc),
+            )
     except Exception as exc:  # noqa: BLE001 — one account must never stop the run
         report.status = "failed"
         report.error = _safe_error(exc)
@@ -515,9 +588,10 @@ async def run_epg_sync(session_factory: SessionFactory | None = None) -> EpgSync
     report.duration_s = round(time.monotonic() - started, 3)
     logger.info(
         "EPG sync done in %.1fs: %d account(s) ok, %d failed, %d skipped (outage); "
-        "%d inserted, %d updated, %d unchanged",
+        "%d inserted, %d updated, %d unchanged, %d pruned",
         report.duration_s, report.accounts_ok, report.accounts_failed,
         report.accounts_skipped, report.inserted, report.updated, report.unchanged,
+        report.pruned,
     )
     return report
 

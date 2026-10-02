@@ -6,12 +6,12 @@
 >
 > ℹ️ Les 3 docs sont alignées à HEAD `4887ee6` : la fonctionnalité **#7 LLM génératif (Ollama `/describe` `/chat` `/llm/status`)** est désormais documentée dans `ARCHITECTURE.md` §6.7 et `CLAUDE.md` §5.7 (vérifiée dans `app/api/ai.py:493-540`).
 
-Le backend a **8 fonctionnalités** :
+Le backend a **9 fonctionnalités** :
 
 | # | Fonctionnalité | Déclencheur | Réf code |
 |---|---|---|---|
 | 0 | Boot + élection master/worker + pipeline planifié | Démarrage app | `main.py:226-227,248-321` |
-| 1 | Sync Xtream (VOD/séries/épisodes/Live/EPG) | Pipeline / `POST /api/sync` | `workers/sync_worker.py` |
+| 1 | Sync Xtream (VOD/séries/épisodes/Live) | Pipeline / `POST /api/sync` | `workers/sync_worker.py` |
 | 2 | Enrichissement TMDB | Pipeline (après sync) | `workers/enrichment_worker.py` |
 | 3 | Validation de flux (santé streams) | Pipeline + cron 2h | `workers/health_check_worker.py` |
 | 4 | Génération bibliothèque Plex (NFO/arbo) | Pipeline / `POST /api/plex/generate` / CLI | `plex_generator/*` |
@@ -19,6 +19,7 @@ Le backend a **8 fonctionnalités** :
 | 6 | Re-embedding (rebuild vecteurs) | `POST /api/ai/embed/rebuild` | `workers/embedding_worker.py` |
 | 7 | LLM génératif (descriptions / chat) | `POST /api/ai/describe`, `/chat` | `api/ai.py`, `services/ollama_service.py` |
 | 8 | Appairage TV (device-flow) | `POST /api/tv-auth/*` | `api/tv_auth.py` |
+| 9 | Synchro EPG en masse (XMLTV → `epg_entries`), opt-in | Cron `epg_sync` (master, `EPG_SYNC_ENABLED`) | `services/epg_sync_service.py` |
 
 ---
 
@@ -45,6 +46,7 @@ sequenceDiagram
         L->>SCH: add_job(health_check.run, cron hour=2)
         L->>SCH: add_job(cleanup_stale_epg, cron hour=3)
         L->>SCH: add_job(backup_db, cron hour=BACKUP_HOUR) [si BACKUP_ENABLED]
+        L->>SCH: add_job(epg_sync, interval=EPG_SYNC_INTERVAL_HOURS, max_instances=1) [si EPG_SYNC_ENABLED, défaut false]
         L->>SCH: scheduler.start()
         L->>PIPE: initial_sync_then_enrich() (background, non bloquant)
         Note over SCH,PIPE: À chaque intervalle :<br/>sync → enrichment → validation → génération Plex (en série)
@@ -80,7 +82,7 @@ sequenceDiagram
         RA->>SA: sync_account(account_id)
         SA->>LK: acquire (1 sync par compte à la fois)
         SA->>XS: get_categories() (VOD, séries, Live)
-        SA->>XS: get_vod_streams / get_series / get_live_streams / get_epg
+        SA->>XS: get_vod_streams / get_series / get_live_streams
         XS-->>SA: DTOs bruts
         loop par catégorie / par lot
             SA->>MAP: DTO → row (calcule dto_hash, content_hash)
@@ -392,6 +394,41 @@ sequenceDiagram
     S->>DB: scrub session (one-shot)
     S-->>TV: 200 OK (TV configurée)
 ```
+
+---
+
+## 9. Synchro EPG en masse — job `epg_sync` (Lot 10-D, opt-in)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant SCH as APScheduler (master, EPG_SYNC_ENABLED)
+    participant J as epg_sync_service.run_epg_sync_job
+    participant OUT as account_outage_service
+    participant DB as SQLite (worker pool)
+    participant XS as xtream_service.download_xmltv
+    participant TMP as fichier temporaire
+    participant TH as thread (iterparse)
+
+    SCH->>J: interval EPG_SYNC_INTERVAL_HOURS (max_instances=1, coalesce)
+    J->>DB: comptes actifs
+    J->>OUT: masked_server_ids()
+    loop pour chaque compte non masqué (un échec n'arrête pas les autres)
+        J->>DB: carte epg_channel_id -> stream_id (chaînes visibles)
+        J->>XS: GET xmltv.php (stream, retries/backoff)
+        XS->>TMP: écrit par blocs de 256 Kio (plafond EPG_SYNC_MAX_BYTES)
+        loop jusqu'à épuisement du fichier
+            J->>TH: next(batch) via asyncio.to_thread
+            TH->>TMP: iterparse, filtre fenêtre [now-PAST, now+FUTURE], map channel->stream_id
+            TH-->>J: <= EPG_SYNC_BATCH_SIZE lignes
+            J->>DB: write_with_retry: INSERT … ON CONFLICT(server_id, stream_id, start_time) DO UPDATE … WHERE changé
+        end
+        J->>TMP: unlink (toujours, finally)
+    end
+    J-->>SCH: rapport (ok / échec / outage) ; lève si TOUS les comptes tentés ont échoué
+```
+
+Chemin à la demande inchangé en surface : `GET /api/live/channels/{stream_id}/epg` → cache-miss → `live_service.ingest_short_epg` → **même upsert** (migration 028 garantit l'index unique).
 
 ---
 

@@ -234,6 +234,7 @@ Tous sur `/api/ai` (**authentifié + garde 503 sqlite-vec**) :
 - `sync_enrich_generate` : sync → enrichissement → validation → génération Plex, `interval=SYNC_INTERVAL_HOURS` (6 h), `max_instances=1`, `coalesce=True`, `misfire_grace_time=300` (`main.py:249-274`).
 - `health_check` : cron `hour=2` (`main.py:275-283`).
 - `epg_cleanup` : cron `hour=3` → `_cleanup_stale_epg` (`main.py:180-192`, `:284-292`).
+- `epg_sync` *(ajouté après cette cartographie — Lot 10-D, 2026-10-02)* : interval `EPG_SYNC_INTERVAL_HOURS`, **opt-in** (`EPG_SYNC_ENABLED=false` par défaut → job non enregistré), master seul → `epg_sync_service.run_epg_sync_job` (XMLTV → `epg_entries`, migration 028). Voir `flux-cles.md` §5.1 et l'ADR 0006.
 - `subtitle_cache_cleanup` : cron `hour=3` → `subtitle_service.cleanup_cache` (`main.py:294-307`).
 - `db_backup` : cron `hour=BACKUP_HOUR` (défaut 4) si `BACKUP_ENABLED` ; `sqlite3.backup` en `asyncio.to_thread` (`main.py:309-324`).
 

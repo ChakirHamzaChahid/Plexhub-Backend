@@ -20,6 +20,7 @@ from app.models.database import EpgEntry, LiveChannel, XtreamAccount
 from app.services import epg_sync_service as svc
 from app.services.epg_sync_service import parse_xmltv_time, run_epg_sync
 from app.services.xtream_service import xtream_service
+from tests._records import Records
 
 NOW_MS = (int(time.time()) // 60) * 60 * 1000  # whole minute: exact assertions
 MIN = 60_000
@@ -369,7 +370,7 @@ async def test_one_failing_account_does_not_stop_the_others(db_factory, monkeypa
     assert report.inserted == 2
 
 
-async def test_http_error_text_never_leaks_credentials(db_factory, monkeypatch, caplog):
+async def test_http_error_text_never_leaks_credentials(db_factory, monkeypatch):
     """httpx puts the full request URL (username/password query params) in the
     HTTPStatusError message: neither the report nor the logs may carry it."""
     await seed(db_factory, account("a"), channel(10, "xtream_a", "ch1"))
@@ -380,13 +381,14 @@ async def test_http_error_text_never_leaks_credentials(db_factory, monkeypatch, 
         response=httpx.Response(500, request=request),
     )
     fake_download(monkeypatch, {"a": err})
-    with caplog.at_level(logging.DEBUG, logger="plexhub"):
+    with Records("plexhub") as logs:
         report = await run_epg_sync(db_factory)
 
     acc = report.accounts[0]
     assert acc.status == "failed" and acc.error == "HTTPStatusError: HTTP 500"
     assert SECRET not in repr(report)
-    assert SECRET not in caplog.text
+    assert "EPG sync failed for account a" in logs.text, "the failure must have been logged"
+    assert SECRET not in logs.text
 
 
 async def test_invalid_xml_fails_the_account_but_keeps_already_written_batches(
@@ -536,3 +538,120 @@ async def test_served_by_the_live_routes_after_sync(api_client, db_factory, monk
     )
     assert resp.status_code == 200, resp.text
     assert [i["title"] for i in resp.json()["items"]] == ["En ce moment"]
+
+
+# ─── pruning of ended programmes ────────────────────────────────────────────
+
+
+def _row(server_id, stream_id, start, end, title="old"):
+    return EpgEntry(
+        server_id=server_id, epg_channel_id="ch1", stream_id=stream_id, title=title,
+        start_time=start, end_time=end,
+    )
+
+
+async def test_successful_sync_prunes_programmes_that_ended_before_the_window(
+    db_factory, monkeypatch,
+):
+    hour = 60 * MIN
+    await seed(
+        db_factory, account("a"), channel(10, "xtream_a", "ch1"),
+        _row("xtream_a", 10, NOW_MS - 5 * hour, NOW_MS - 4 * hour, "ended long ago"),
+        _row("xtream_a", 10, NOW_MS - 2 * hour, NOW_MS - 90 * MIN, "ended before window"),
+        _row("xtream_a", 10, NOW_MS - 50 * MIN, NOW_MS - 20 * MIN, "ended inside past hour"),
+        # another server's stale rows are not this sync's business
+        _row("xtream_other", 10, NOW_MS - 5 * hour, NOW_MS - 4 * hour, "other server"),
+    )
+    fake_download(monkeypatch, {"a": xmltv(
+        prog("ch1", xt(NOW_MS + MIN), xt(NOW_MS + 2 * MIN), "fresh"),
+    )})
+
+    report = await run_epg_sync(db_factory)
+
+    assert report.accounts[0].pruned == 2 and report.pruned == 2
+    titles = sorted(r.title for r in await rows(db_factory))
+    assert titles == ["ended inside past hour", "fresh", "other server"]
+
+
+async def test_prune_runs_in_several_short_transactions_by_stream_range(db_factory, monkeypatch):
+    """2 streams per transaction over 5 stale streams = 3 delete transactions,
+    each one a contiguous stream_id range; everything stale is still removed."""
+    monkeypatch.setattr(svc, "_PRUNE_STREAMS_PER_TXN", 2)
+    hour = 60 * MIN
+    seen_ranges: list[str] = []
+    real_write = svc.write_with_retry
+
+    async def _spy(work, **kw):
+        if kw.get("op") == "epg_sync.prune":
+            seen_ranges.append(kw["op"])
+        return await real_write(work, **kw)
+
+    monkeypatch.setattr(svc, "write_with_retry", _spy)
+    await seed(
+        db_factory, account("a"), channel(10, "xtream_a", "ch1"),
+        *[_row("xtream_a", sid, NOW_MS - 9 * hour + i * MIN, NOW_MS - 8 * hour + i * MIN, f"o{sid}-{i}")
+          for sid in (3, 4, 5, 6, 7) for i in range(3)],
+        # a recent row of one of those streams must survive the range delete
+        _row("xtream_a", 5, NOW_MS + MIN, NOW_MS + 2 * MIN, "still airing"),
+    )
+    fake_download(monkeypatch, {"a": xmltv(
+        prog("ch1", xt(NOW_MS + 10 * MIN), xt(NOW_MS + 11 * MIN), "fresh"),
+    )})
+    report = await run_epg_sync(db_factory)
+    assert report.accounts[0].pruned == 15
+    assert len(seen_ranges) == 3, "5 stale streams / 2 per txn = 3 short transactions"
+    assert sorted(r.title for r in await rows(db_factory)) == ["fresh", "still airing"]
+
+
+async def test_failed_account_is_not_pruned(db_factory, monkeypatch):
+    await seed(
+        db_factory, account("a"), channel(10, "xtream_a", "ch1"),
+        _row("xtream_a", 10, NOW_MS - 9 * 60 * MIN, NOW_MS - 8 * 60 * MIN, "keep me"),
+    )
+    fake_download(monkeypatch, {"a": httpx.ConnectError("down")})
+    report = await run_epg_sync(db_factory)
+    assert report.accounts[0].status == "failed" and report.accounts[0].pruned == 0
+    assert [r.title for r in await rows(db_factory)] == ["keep me"]
+
+
+async def test_prune_failure_does_not_fail_the_account(db_factory, monkeypatch):
+    await seed(db_factory, account("a"), channel(10, "xtream_a", "ch1"))
+    fake_download(monkeypatch, {"a": xmltv(
+        prog("ch1", xt(NOW_MS + MIN), xt(NOW_MS + 2 * MIN), "fresh"),
+    )})
+
+    async def _boom(*a, **k):
+        raise RuntimeError("disk on fire")
+
+    monkeypatch.setattr(svc, "_prune_ended", _boom)
+    with Records("plexhub.epg_sync", logging.WARNING) as logs:
+        report = await run_epg_sync(db_factory)
+
+    acc = report.accounts[0]
+    assert acc.status == "ok" and acc.inserted == 1 and acc.pruned == 0
+    assert "prune failed" in logs.text
+
+
+async def test_batch_pause_setting_is_applied_between_batches(db_factory, monkeypatch):
+    monkeypatch.setattr(settings, "EPG_SYNC_BATCH_SIZE", 2)
+    monkeypatch.setattr(settings, "EPG_SYNC_BATCH_PAUSE_MS", 7)
+    await seed(db_factory, account("a"), channel(10, "xtream_a", "ch1"))
+    fake_download(monkeypatch, {"a": xmltv(*[
+        prog("ch1", xt(NOW_MS + i * MIN), xt(NOW_MS + (i + 1) * MIN), f"P{i}") for i in range(5)
+    ])})
+
+    import asyncio
+
+    real_sleep = asyncio.sleep
+    pauses: list[float] = []
+
+    async def _spy(delay, *a, **k):
+        pauses.append(delay)
+        return await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", _spy)
+    report = await run_epg_sync(db_factory)
+
+    assert report.accounts[0].inserted == 5
+    # 5 rows / 2 per batch = 3 batches -> 3 inter-batch pauses of 7 ms
+    assert pauses.count(0.007) == 3

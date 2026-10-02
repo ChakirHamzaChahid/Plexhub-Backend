@@ -21,6 +21,7 @@ from app.services import epg_sync_service as svc
 from app.services.epg_sync_service import run_epg_sync
 from app.services.xtream_service import xtream_service
 from app.utils.db_retry import write_with_retry
+from tests._records import Records
 
 _HOLD_SECONDS = 0.35
 NOW_MS = (int(time.time()) // 60) * 60 * 1000
@@ -108,7 +109,7 @@ async def _seed(factory):
         await s.commit()
 
 
-async def test_bulk_ingest_survives_a_real_held_write_lock(tmp_path, monkeypatch, caplog):
+async def test_bulk_ingest_survives_a_real_held_write_lock(tmp_path, monkeypatch):
     """A writer holds the SQLite write lock for 350 ms while the sync runs.
     With a 50 ms busy_timeout the first batch gets a genuine `database is
     locked`: `write_with_retry` (fresh session per attempt) must carry it
@@ -131,7 +132,7 @@ async def test_bulk_ingest_survives_a_real_held_write_lock(tmp_path, monkeypatch
         blocker.start()
         assert acquired.wait(timeout=5)
 
-        with caplog.at_level("WARNING", logger="plexhub.db.retry"):
+        with Records("plexhub.db.retry", 30) as logs:
             report = await run_epg_sync(factory)
 
         blocker.join(timeout=5)
@@ -139,7 +140,7 @@ async def test_bulk_ingest_survives_a_real_held_write_lock(tmp_path, monkeypatch
         acc = report.accounts[0]
         assert acc.status == "ok", acc.error
         assert acc.inserted == 200
-        assert "epg_sync.batch hit 'database is locked'" in caplog.text, (
+        assert "epg_sync.batch hit 'database is locked'" in logs.text, (
             "the test must have really collided with the held lock"
         )
         async with factory() as s:

@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models.database import Media, EnrichmentQueue, XtreamAccount
+from app.services import job_registry
 from app.services.xtream_service import xtream_service
 from app.workers import sync_worker as sync_worker_module
 from app.workers.sync_worker import (
@@ -15,9 +16,6 @@ from app.workers.sync_worker import (
     _safe_duration,
     _get_account_lock,
     _compute_dto_hash,
-    _record_sync_job,
-    get_sync_job,
-    get_all_sync_jobs,
     cleanup_orphan_enrichment_queue,
     differential_cleanup_episodes,
     upsert_media_batch,
@@ -137,18 +135,18 @@ class TestDtoHash:
 
 class TestSyncJobTracking:
     def test_record_and_get(self):
-        _record_sync_job("test_job_1", {"status": "processing"})
-        job = get_sync_job("test_job_1")
+        job_registry.set_job("test_job_1", {"status": "processing"})
+        job = job_registry.get_job("test_job_1")
         assert job is not None
         assert job["status"] == "processing"
 
     def test_get_nonexistent(self):
-        assert get_sync_job("nonexistent_job_xyz") is None
+        assert job_registry.get_job("nonexistent_job_xyz") is None
 
     def test_get_all_jobs(self):
-        _record_sync_job("list_test_1", {"status": "done"})
-        _record_sync_job("list_test_2", {"status": "processing"})
-        jobs = get_all_sync_jobs()
+        job_registry.set_job("list_test_1", {"status": "done"})
+        job_registry.set_job("list_test_2", {"status": "processing"})
+        jobs = job_registry.get_all_jobs()
         assert isinstance(jobs, list)
         ids = [j["job_id"] for j in jobs]
         assert "list_test_1" in ids

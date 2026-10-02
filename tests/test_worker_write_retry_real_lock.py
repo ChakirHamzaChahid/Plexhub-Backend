@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.config import settings
 from app.models.database import Base, Media, XtreamAccount
+from app.services import job_registry
 from app.services.xtream_service import xtream_service
 from app.workers import enrichment_backfill_worker as backfill
 from app.workers import enrichment_worker as ew
@@ -168,7 +169,7 @@ async def test_sync_account_finalize_survives_real_lock(tmp_path, monkeypatch):
     blocker.join(timeout=5)
     assert not blocker.is_alive()
 
-    job = sync_worker_module.get_sync_job(job_id)
+    job = job_registry.get_job(job_id)
     assert job is not None
     assert job["status"] == "completed", job
 

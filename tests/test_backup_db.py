@@ -428,3 +428,141 @@ class TestBackupUnderRealWalWriter:
         # Snapshot is a consistent prefix: ids are contiguous 1..N (no torn/partial state).
         assert n >= 50
         assert (lo, hi) == (1, n)
+
+
+# ---------------------------------------------------------------------------
+# Lot 10 sous-lot A — suivis de revue (sidecars, prune tolérant, durée)
+# ---------------------------------------------------------------------------
+
+
+def _age(path: Path, seconds: float) -> None:
+    ts = time.time() - seconds
+    os.utime(path, (ts, ts))
+
+
+class TestSweepSidecarsAndRestoreTmp:
+    def test_sidecars_of_old_orphan_are_swept(self, tmp_path):
+        names = [
+            "plexhub-20250101-000000-000001.db.tmp",
+            "plexhub-20250101-000000-000001.db.tmp-wal",
+            "plexhub-20250101-000000-000001.db.tmp-shm",
+            "plexhub-20250101-000000-000001.db.tmp-journal",
+        ]
+        recent = tmp_path / "plexhub-20990101-000000-000001.db.tmp-wal"
+        recent.write_bytes(b"x")
+        for n in names:
+            p = tmp_path / n
+            p.write_bytes(b"x")
+            _age(p, 7200)
+        deleted = backup_db.sweep_orphan_tmp(tmp_path)
+        assert sorted(p.name for p in deleted) == sorted(names)
+        assert recent.exists()  # younger than 1 h: maybe a running backup
+
+    def test_sweep_ignores_foreign_sidecar_names(self, tmp_path):
+        other = tmp_path / "other.db.tmp-wal"
+        real = tmp_path / "plexhub-20250101-000000-000001.db-wal"
+        for p in (other, real):
+            p.write_bytes(b"x")
+            _age(p, 7200)
+        assert backup_db.sweep_orphan_tmp(tmp_path) == []
+
+    def test_orphan_restore_tmp_beside_db_is_swept(self, tmp_path):
+        db = tmp_path / "plexhub.db"
+        db.write_bytes(b"live")
+        old = tmp_path / "plexhub.db.restore-tmp"
+        old_wal = tmp_path / "plexhub.db.restore-tmp-wal"
+        for p in (old, old_wal):
+            p.write_bytes(b"x")
+            _age(p, 7200)
+        deleted = backup_db.sweep_orphan_restore_tmp(db)
+        assert sorted(p.name for p in deleted) == sorted([old.name, old_wal.name])
+        assert db.exists()
+
+    def test_recent_restore_tmp_is_kept(self, tmp_path):
+        db = tmp_path / "plexhub.db"
+        db.write_bytes(b"live")
+        recent = tmp_path / "plexhub.db.restore-tmp"
+        recent.write_bytes(b"x")
+        assert backup_db.sweep_orphan_restore_tmp(db) == []
+        assert recent.exists()
+
+    def test_run_backup_sweeps_restore_tmp_next_to_db(self, tmp_path, monkeypatch):
+        live = tmp_path / "live.db"
+        _make_db(live)
+        orphan = tmp_path / "live.db.restore-tmp"
+        orphan.write_bytes(b"x")
+        _age(orphan, 7200)
+        monkeypatch.setattr(backup_db.settings, "DB_PATH", live)
+        monkeypatch.setattr(backup_db.settings, "BACKUP_DIR", tmp_path / "backups")
+        monkeypatch.setattr(backup_db.settings, "BACKUP_RETENTION_DAYS", 7)
+        backup_db.run_backup()
+        assert not orphan.exists()
+
+
+class TestPruneToleratesUnlinkError:
+    def test_permission_error_on_one_file_does_not_abort(self, tmp_path, monkeypatch, caplog):
+        def _mk(age_days: int, micro: int) -> Path:
+            ts = datetime.now(timezone.utc) - timedelta(days=age_days)
+            p = tmp_path / f"plexhub-{ts.strftime('%Y%m%d-%H%M%S')}-{micro:06d}.db"
+            p.write_bytes(b"x")
+            return p
+
+        stuck = _mk(20, 1)
+        fine = _mk(10, 2)
+        real_unlink = Path.unlink
+
+        def _unlink(self, *a, **kw):
+            if self == stuck:
+                raise PermissionError("locked")
+            return real_unlink(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "unlink", _unlink)
+        with caplog.at_level(logging.WARNING, logger="plexhub.scripts.backup"):
+            deleted = backup_db.prune_old_backups(tmp_path, retention_days=7)
+        assert deleted == [fine]
+        assert stuck.exists()
+        assert any("Could not prune" in r.getMessage() for r in caplog.records)
+
+    def test_run_backup_succeeds_despite_prune_failure(self, tmp_path, monkeypatch):
+        live = tmp_path / "live.db"
+        _make_db(live)
+        backups = tmp_path / "backups"
+        backups.mkdir()
+        old_ts = (datetime.now(timezone.utc) - timedelta(days=60)).strftime("%Y%m%d-%H%M%S")
+        old = backups / f"plexhub-{old_ts}.db"
+        old.write_bytes(b"x")
+        monkeypatch.setattr(backup_db.settings, "DB_PATH", live)
+        monkeypatch.setattr(backup_db.settings, "BACKUP_DIR", backups)
+        monkeypatch.setattr(backup_db.settings, "BACKUP_RETENTION_DAYS", 7)
+        real_unlink = Path.unlink
+
+        def _unlink(self, *a, **kw):
+            if self == old:
+                raise PermissionError("locked")
+            return real_unlink(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "unlink", _unlink)
+        target = backup_db.run_backup()
+        assert target.is_file()
+        assert old.exists()
+
+
+class TestIntegrityDurationLogged:
+    def test_duration_in_seconds_is_logged(self, tmp_path, caplog):
+        db = tmp_path / "ok.db"
+        _make_db(db)
+        with caplog.at_level(logging.INFO, logger="plexhub.scripts.backup"):
+            backup_db.check_integrity(db)
+        msgs = [r.getMessage() for r in caplog.records if "integrity_check duration" in r.getMessage()]
+        assert len(msgs) == 1
+        assert msgs[0].split(": ")[1].split("s ")[0].replace(".", "").isdigit()
+
+    def test_custom_logger_receives_duration(self, tmp_path, caplog):
+        db = tmp_path / "ok.db"
+        _make_db(db)
+        with caplog.at_level(logging.INFO, logger="plexhub.scripts.restore"):
+            backup_db.check_integrity(db, logging.getLogger("plexhub.scripts.restore"))
+        assert any(
+            r.name == "plexhub.scripts.restore" and "integrity_check duration" in r.getMessage()
+            for r in caplog.records
+        )

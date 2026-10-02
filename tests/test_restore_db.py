@@ -248,3 +248,41 @@ class TestRealMasterLock:
         monkeypatch.setattr(builtins, "__import__", _no_fcntl)
         with pytest.raises(restore_db.LockUnverifiable, match="fcntl indisponible"):
             restore_db._acquire_master_lock(tmp_path / "server_start.lock")
+
+
+class TestRawCopyFallbackAtomic:
+    def test_failed_raw_copy_leaves_no_prerestore_file(self, env, monkeypatch):
+        """A raw-copy failure must not leave a truncated plexhub.pre-restore-*.db."""
+        def _snapshot_fails(*a, **kw):
+            raise sqlite3.DatabaseError("file is not a database")
+
+        def _copy_fails(src, dst, *a, **kw):
+            Path(dst).write_bytes(b"partial")  # truncated copy on disk
+            raise OSError("disk full")
+
+        monkeypatch.setattr(restore_db.backup_db, "perform_backup", _snapshot_fails)
+        monkeypatch.setattr(restore_db.shutil, "copy2", _copy_fails)
+        with pytest.raises(OSError, match="disk full"):
+            restore_db._save_current_db(env["db"])
+        assert not [p for p in env["data"].iterdir() if "pre-restore" in p.name]
+
+    def test_raw_copy_success_publishes_final_name_only(self, env, monkeypatch):
+        def _snapshot_fails(*a, **kw):
+            raise sqlite3.DatabaseError("file is not a database")
+
+        monkeypatch.setattr(restore_db.backup_db, "perform_backup", _snapshot_fails)
+        saved = restore_db._save_current_db(env["db"])
+        assert saved.is_file()
+        assert saved.read_bytes() == env["db"].read_bytes()
+        assert not [p for p in env["data"].iterdir() if p.name.endswith(".tmp")]
+
+    def test_restore_logs_integrity_duration(self, env, caplog):
+        import logging
+
+        with caplog.at_level(logging.INFO, logger="plexhub.scripts.restore"):
+            restore_db.restore(env["good"], env["db"], apply=True)
+        durations = [
+            r for r in caplog.records
+            if r.name == "plexhub.scripts.restore" and "integrity_check duration" in r.getMessage()
+        ]
+        assert len(durations) == 2  # source + verified copy

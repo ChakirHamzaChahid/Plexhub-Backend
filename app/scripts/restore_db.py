@@ -38,7 +38,7 @@ from app.scripts import backup_db
 logger = logging.getLogger("plexhub.scripts.restore")
 
 _LOCK_NAME = "server_start.lock"
-_RESTORE_TMP_SUFFIX = ".restore-tmp"
+_RESTORE_TMP_SUFFIX = backup_db.RESTORE_TMP_SUFFIX
 
 
 class RestoreError(RuntimeError):
@@ -104,11 +104,26 @@ def _save_current_db(db_path: Path) -> Path:
         backup_db.perform_backup(db_path, target, verify=False)
     except sqlite3.Error as exc:
         logger.warning(f"Snapshot of current DB failed ({exc}); raw copy fallback")
-        shutil.copy2(db_path, target)
+        _raw_copy_atomic(db_path, target)
         wal = db_path.with_name(db_path.name + "-wal")
         if wal.exists():
             shutil.copy2(wal, target.with_name(target.name + "-wal"))
     return target
+
+
+def _raw_copy_atomic(src: Path, dest: Path) -> None:
+    """Byte copy of `src` published under `dest` only once complete.
+
+    Copies to ``<dest>.tmp`` then ``os.replace`` — a failure mid-copy must never
+    leave a truncated ``plexhub.pre-restore-*.db`` that looks like a valid save.
+    """
+    tmp = dest.with_name(dest.name + ".tmp")
+    try:
+        shutil.copy2(src, tmp)
+        os.replace(tmp, dest)
+    except BaseException:
+        backup_db._unlink_quiet(tmp)
+        raise
 
 
 def restore(source: Path, db_path: Path, *, apply: bool, lock_path: Path | None = None) -> list[str]:
@@ -139,7 +154,7 @@ def restore(source: Path, db_path: Path, *, apply: bool, lock_path: Path | None 
 
         # 2. Source integrity.
         try:
-            backup_db.check_integrity(source)
+            backup_db.check_integrity(source, logger)
         except backup_db.BackupIntegrityError as exc:
             raise RestoreError(f"Source refusée, base corrompue : {exc}") from exc
         lines.append(f"Source : {source} — integrity_check ok.")
@@ -172,7 +187,7 @@ def restore(source: Path, db_path: Path, *, apply: bool, lock_path: Path | None 
         try:
             try:
                 backup_db.snapshot_copy(source, tmp)
-                backup_db.check_integrity(tmp)
+                backup_db.check_integrity(tmp, logger)
             except (sqlite3.Error, backup_db.BackupIntegrityError) as exc:
                 raise RestoreError(f"Copie de la source impossible ou invalide : {exc}") from exc
 

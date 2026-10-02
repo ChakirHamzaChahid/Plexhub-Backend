@@ -37,6 +37,10 @@ logger = logging.getLogger("plexhub.scripts.backup")
 _FILE_PREFIX = "plexhub-"
 _FILE_SUFFIX = ".db"
 _TMP_SUFFIX = ".tmp"
+# SQLite sidecars a hard-killed ``.tmp`` copy may have left behind.
+_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
+# restore_db writes its verified copy as ``<db name>.restore-tmp`` beside the live DB.
+RESTORE_TMP_SUFFIX = ".restore-tmp"
 # Legacy name format (second granularity) — still parsed by the pruner so
 # backups written before the microsecond suffix existed keep being rotated.
 _LEGACY_TIMESTAMP_FMT = "%Y%m%d-%H%M%S"
@@ -95,12 +99,15 @@ def snapshot_copy(source: Path, dest: Path) -> None:
         src.close()
 
 
-def check_integrity(path: Path) -> None:
+def check_integrity(path: Path, log: logging.Logger | None = None) -> None:
     """Run ``PRAGMA integrity_check`` on `path`; raise BackupIntegrityError if not 'ok'.
 
     Plain sqlite3 connection on purpose (no sqlite-vec): virtual vec0 tables
     are skipped-over safely by integrity_check without the extension.
+    The duration is logged (seconds) on `log` (default: this module's logger)
+    so a slow check on a multi-GB DB is visible to the operator.
     """
+    started = time.monotonic()
     conn = sqlite3.connect(str(path))
     try:
         rows = [r[0] for r in conn.execute("PRAGMA integrity_check").fetchall()]
@@ -108,6 +115,7 @@ def check_integrity(path: Path) -> None:
         raise BackupIntegrityError(f"integrity_check could not run on {path.name}: {exc}") from exc
     finally:
         conn.close()
+    (log or logger).info(f"integrity_check duration: {time.monotonic() - started:.2f}s ({path.name})")
     if rows != ["ok"]:
         detail = "; ".join(str(r) for r in rows[:5])
         raise BackupIntegrityError(f"integrity_check failed on {path.name}: {detail}")
@@ -122,8 +130,7 @@ def _unlink_quiet(path: Path) -> None:
 
 def remove_tmp_files(tmp: Path) -> None:
     """Remove a ``.tmp`` copy and any SQLite sidecar it may have spawned."""
-    for p in (tmp, tmp.with_name(tmp.name + "-wal"), tmp.with_name(tmp.name + "-shm"),
-              tmp.with_name(tmp.name + "-journal")):
+    for p in (tmp, *(tmp.with_name(tmp.name + sfx) for sfx in _SIDECAR_SUFFIXES)):
         _unlink_quiet(p)
 
 
@@ -147,18 +154,21 @@ def perform_backup(source: Path, target: Path, *, verify: bool = True) -> None:
         remove_tmp_files(tmp)
 
 
-def sweep_orphan_tmp(backup_dir: Path, max_age_seconds: float = _ORPHAN_TMP_MAX_AGE_SECONDS) -> list[Path]:
-    """Delete ``plexhub-*.db.tmp`` older than `max_age_seconds` (hard-killed backups).
+def _is_orphan_tmp_name(name: str) -> bool:
+    """``plexhub-*.db.tmp`` or one of its SQLite sidecars (``.tmp-wal/-shm/-journal``)."""
+    if not name.startswith(_FILE_PREFIX):
+        return False
+    base = _FILE_SUFFIX + _TMP_SUFFIX
+    return name.endswith(base) or any(name.endswith(base + sfx) for sfx in _SIDECAR_SUFFIXES)
 
-    `prune_old_backups` only matches ``.db`` so it would never see them.
-    Returns the deleted paths.
-    """
+
+def _sweep_older_than(directory: Path, matches, max_age_seconds: float) -> list[Path]:
     deleted: list[Path] = []
-    if not backup_dir.exists():
+    if not directory.exists():
         return deleted
     cutoff = time.time() - max_age_seconds
-    for f in backup_dir.iterdir():
-        if not f.is_file() or not f.name.startswith(_FILE_PREFIX) or not f.name.endswith(_FILE_SUFFIX + _TMP_SUFFIX):
+    for f in directory.iterdir():
+        if not f.is_file() or not matches(f.name):
             continue
         try:
             if f.stat().st_mtime < cutoff:
@@ -167,6 +177,26 @@ def sweep_orphan_tmp(backup_dir: Path, max_age_seconds: float = _ORPHAN_TMP_MAX_
         except OSError as exc:
             logger.warning(f"Could not sweep orphan {f.name}: {exc}")
     return deleted
+
+
+def sweep_orphan_tmp(backup_dir: Path, max_age_seconds: float = _ORPHAN_TMP_MAX_AGE_SECONDS) -> list[Path]:
+    """Delete ``plexhub-*.db.tmp`` (and ``-wal/-shm/-journal`` sidecars) older than `max_age_seconds`.
+
+    Orphans of hard-killed backups; `prune_old_backups` only matches ``.db`` so
+    it would never see them. Returns the deleted paths.
+    """
+    return _sweep_older_than(backup_dir, _is_orphan_tmp_name, max_age_seconds)
+
+
+def sweep_orphan_restore_tmp(db_path: Path, max_age_seconds: float = _ORPHAN_TMP_MAX_AGE_SECONDS) -> list[Path]:
+    """Delete an orphaned ``<db>.restore-tmp`` (+ sidecars) beside the live DB.
+
+    Written by ``restore_db`` (same volume as the target); a hard kill during a
+    restore would leave it behind forever. Returns the deleted paths.
+    """
+    stem = db_path.name + RESTORE_TMP_SUFFIX
+    names = {stem, *(stem + sfx for sfx in _SIDECAR_SUFFIXES)}
+    return _sweep_older_than(db_path.parent, names.__contains__, max_age_seconds)
 
 
 def prune_old_backups(backup_dir: Path, retention_days: int) -> list[Path]:
@@ -189,7 +219,11 @@ def prune_old_backups(backup_dir: Path, retention_days: int) -> list[Path]:
         if ts is None:
             continue  # Unknown filename — leave it alone.
         if ts < cutoff:
-            f.unlink(missing_ok=True)
+            try:
+                f.unlink(missing_ok=True)
+            except OSError as exc:  # a valid fresh backup must not fail on a stuck old one
+                logger.warning(f"Could not prune old backup {f.name}: {exc}")
+                continue
             deleted.append(f)
     return deleted
 
@@ -202,7 +236,7 @@ def run_backup(retention_days: int | None = None) -> Path:
     if not settings.DB_PATH.exists():
         raise FileNotFoundError(f"DB not found at {settings.DB_PATH}")
 
-    swept = sweep_orphan_tmp(settings.BACKUP_DIR)
+    swept = sweep_orphan_tmp(settings.BACKUP_DIR) + sweep_orphan_restore_tmp(settings.DB_PATH)
     if swept:
         logger.info(f"Swept {len(swept)} orphaned backup .tmp file(s)")
 

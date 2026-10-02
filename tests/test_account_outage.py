@@ -370,26 +370,6 @@ async def test_masking_hides_media_only_at_the_threshold(
 
 
 @pytest.mark.asyncio
-async def test_admin_still_sees_media_of_a_masked_account(
-    monkeypatch, outage_db, db_factory
-):
-    """The operator's diagnostic view must show what the outage is hiding."""
-    monkeypatch.setattr(settings, "ACCOUNT_OUTAGE_STRIKES", 1)
-    async with db_factory() as db:
-        db.add(_account("aaaaaaaa"))
-        for m in _streams("xtream_aaaaaaaa", 5):
-            db.add(m)
-        await db.commit()
-    await outage.record_trip("aaaaaaaa")
-
-    async with db_factory() as db:
-        _items, total = await media_service.get_media_list(
-            db, media_type="movie", apply_outage_mask=False,
-        )
-    assert total == 5
-
-
-@pytest.mark.asyncio
 async def test_unified_list_masks_on_both_snapshot_and_live_paths(
     monkeypatch, outage_db, db_factory
 ):

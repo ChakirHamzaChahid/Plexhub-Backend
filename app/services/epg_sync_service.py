@@ -520,3 +520,22 @@ async def run_epg_sync(session_factory: SessionFactory | None = None) -> EpgSync
         report.accounts_skipped, report.inserted, report.updated, report.unchanged,
     )
     return report
+
+
+async def run_epg_sync_job() -> EpgSyncReport:
+    """Scheduler entry point (``main.py`` wraps it in ``track_job("epg_sync")``).
+
+    ``run_epg_sync`` never raises for an account-level problem, so a bare
+    ``track_job`` would stamp the job "fresh" even if EVERY account failed --
+    the exact false reassurance the freshness gauge exists to prevent. Here a
+    run in which at least one account was attempted and none succeeded raises,
+    so the gauge goes stale and the failure shows in the scheduler log. A
+    partial failure (some accounts ok) is a success: the failed accounts are
+    already in the report and the log.
+    """
+    report = await run_epg_sync()
+    if report.accounts_failed and not report.accounts_ok:
+        raise EpgSyncError(
+            f"EPG sync failed for all {report.accounts_failed} attempted account(s)"
+        )
+    return report

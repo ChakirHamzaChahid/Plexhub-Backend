@@ -77,12 +77,14 @@ class _FakeScheduler:
     def __init__(self, instances: list["_FakeScheduler"]):
         instances.append(self)
         self.jobs: dict[str, object] = {}
+        self.job_args: dict[str, tuple] = {}  # id -> (trigger, kwargs)
         self.started = False
         self.shutdown_called = False
 
     def add_job(self, func, trigger=None, **kwargs):
         job_id = kwargs.get("id") or getattr(func, "__name__", str(func))
         self.jobs[job_id] = func
+        self.job_args[job_id] = (trigger, kwargs)
 
     def start(self):
         self.started = True
@@ -316,6 +318,100 @@ class TestLifespanMasterElection:
             assert captured_bg == {}, "a slave must never schedule the boot-time initial sync"
 
         assert calls == []
+
+
+class TestEpgSyncJobWiring:
+    """Lot 10-D (ADR 0006): the bulk EPG cron is registered ONLY when this
+    process is the master AND `EPG_SYNC_ENABLED` is true (no-op by default)."""
+
+    def _wire(self, monkeypatch, tmp_path, request, *, master: bool, enabled: bool):
+        helper = TestLifespanMasterElection()
+        main_module, instances, calls, captured_bg = helper._wire_common(monkeypatch, tmp_path)
+        # The boot-time pipeline coroutine is captured, never run here: close it
+        # so pytest does not warn about a coroutine that was never awaited.
+        request.addfinalizer(
+            lambda: captured_bg["coro"].close() if "coro" in captured_bg else None
+        )
+        monkeypatch.setitem(sys.modules, "fcntl", _fake_fcntl_module(flock_succeeds=master))
+        monkeypatch.setattr(settings, "EPG_SYNC_ENABLED", enabled)
+        monkeypatch.setattr(settings, "EPG_SYNC_INTERVAL_HOURS", 4)
+        return main_module, instances
+
+    async def test_not_registered_by_default(self, monkeypatch, tmp_path, request):
+        assert settings.EPG_SYNC_ENABLED is False, "the feature must ship disabled"
+        main_module, instances = self._wire(monkeypatch, tmp_path, request, master=True, enabled=False)
+        async with main_module.lifespan(main_module.app):
+            scheduler = instances[0]
+            assert "epg_sync" not in scheduler.jobs
+            # the nightly purge is untouched
+            assert "epg_cleanup" in scheduler.jobs
+
+    async def test_registered_for_master_when_enabled(self, monkeypatch, tmp_path, request):
+        main_module, instances = self._wire(monkeypatch, tmp_path, request, master=True, enabled=True)
+        async with main_module.lifespan(main_module.app):
+            scheduler = instances[0]
+            assert "epg_sync" in scheduler.jobs
+            trigger, kwargs = scheduler.job_args["epg_sync"]
+            assert trigger == "interval" and kwargs["hours"] == 4
+            assert kwargs["max_instances"] == 1 and kwargs["coalesce"] is True
+            assert "epg_cleanup" in scheduler.jobs
+
+    async def test_never_registered_on_a_slave_even_when_enabled(self, monkeypatch, tmp_path, request):
+        main_module, instances = self._wire(monkeypatch, tmp_path, request, master=False, enabled=True)
+        async with main_module.lifespan(main_module.app):
+            assert instances == [], "a slave constructs no scheduler, hence no epg_sync job"
+
+    async def test_job_marks_freshness_on_success(self, monkeypatch, tmp_path, request):
+        from app.services import epg_sync_service as svc
+        from app.utils import job_health
+
+        main_module, instances = self._wire(monkeypatch, tmp_path, request, master=True, enabled=True)
+
+        async def _fake_run():
+            return svc.EpgSyncReport(accounts=[svc.AccountEpgReport(account_id="a")])
+
+        monkeypatch.setattr(svc, "run_epg_sync", _fake_run)
+        async with main_module.lifespan(main_module.app):
+            assert job_health.last_success_ms("epg_sync") is None
+            await instances[0].jobs["epg_sync"]()
+            assert job_health.last_success_ms("epg_sync") is not None
+
+    async def test_job_does_not_look_fresh_when_every_account_failed(self, monkeypatch, tmp_path, request):
+        import pytest
+
+        from app.services import epg_sync_service as svc
+        from app.utils import job_health
+
+        main_module, instances = self._wire(monkeypatch, tmp_path, request, master=True, enabled=True)
+
+        async def _fake_run():
+            return svc.EpgSyncReport(accounts=[
+                svc.AccountEpgReport(account_id="a", status="failed", error="ConnectError"),
+                svc.AccountEpgReport(account_id="b", status="failed", error="ConnectError"),
+            ])
+
+        monkeypatch.setattr(svc, "run_epg_sync", _fake_run)
+        async with main_module.lifespan(main_module.app):
+            with pytest.raises(svc.EpgSyncError):
+                await instances[0].jobs["epg_sync"]()
+            assert job_health.last_success_ms("epg_sync") is None
+
+    async def test_partial_failure_still_counts_as_a_successful_run(self, monkeypatch, tmp_path, request):
+        from app.services import epg_sync_service as svc
+        from app.utils import job_health
+
+        main_module, instances = self._wire(monkeypatch, tmp_path, request, master=True, enabled=True)
+
+        async def _fake_run():
+            return svc.EpgSyncReport(accounts=[
+                svc.AccountEpgReport(account_id="a", status="failed", error="ConnectError"),
+                svc.AccountEpgReport(account_id="b"),
+            ])
+
+        monkeypatch.setattr(svc, "run_epg_sync", _fake_run)
+        async with main_module.lifespan(main_module.app):
+            await instances[0].jobs["epg_sync"]()
+            assert job_health.last_success_ms("epg_sync") is not None
 
 
 class TestAutoProvisionGatingInLifespan:

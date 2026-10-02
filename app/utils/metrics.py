@@ -159,6 +159,7 @@ _PIPELINE_JOB_NAMES = (
     "subtitle_cache_cleanup",
     "db_backup",
     "plex_catalogue_sync",
+    "epg_sync",  # bulk XMLTV ingestion (Lot 10-D); registered only when EPG_SYNC_ENABLED
 )
 for _job in _PIPELINE_JOB_NAMES:
     pipeline_last_success_timestamp_seconds.labels(job=_job)

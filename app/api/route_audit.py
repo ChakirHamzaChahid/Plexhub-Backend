@@ -5,7 +5,7 @@ mounts its routers via **three different conventions** — a guard injected at
 `include_router(..., dependencies=[...])` (Pattern A: accounts/categories/
 live/media/stream/sync/plex), a guard declared module-level on the router
 itself (Pattern C: ai/api_keys/downloads/plex_downloads/enrichment), or a
-guard attached per-endpoint (e.g. `tv_auth.router`'s `/approve`). There is no
+guard attached per-endpoint (e.g. `tv_auth.router`'s `POST /approve`). There is no
 structural guarantee that a *new* `/api/*` route carries one of these — a
 forgotten `dependencies=` on a freshly-added Pattern-C router (the most
 recently adopted convention) would ship an unauthenticated route in silence,
@@ -63,26 +63,38 @@ _AUTH_DEPENDENCY_NAMES: frozenset[str] = frozenset(
     }
 )
 
-# Explicit, reviewed allow-list of `/api/*` paths that are legitimately
-# public. Each entry MUST be justified here — adding a path is a deliberate
-# security decision, not something a future refactor should be able to widen
-# by accident. Kept as a frozenset so `tests/test_route_auth_assertion.py`
+# Explicit, reviewed allow-list of `/api/*` (METHOD, path) pairs that are
+# legitimately public. Each entry MUST be justified here — adding one is a
+# deliberate security decision, not something a future refactor should be able
+# to widen by accident. Kept as a frozenset so `tests/test_route_auth_assertion.py`
 # can assert it stays EXACTLY this shape (a growing allow-list is itself a
 # signal worth a human looking at it).
-PUBLIC_API_ALLOWLIST: frozenset[str] = frozenset(
+#
+# Lot 10 sous-lot B — the allow-list reasons on (METHOD, path), NOT on the path
+# alone. `GET /api/tv-auth/approve` (the public pairing HTML page) shares its
+# path with `POST /api/tv-auth/approve` (the guarded approval endpoint); with a
+# path-only list, allow-listing the page would have silently made the POST
+# public too (and a later loss of the POST's guard would have gone undetected).
+# A route is skipped only if EVERY one of its methods is allow-listed for its
+# path.
+PUBLIC_API_ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
     {
         # Monitoring probe. No credential to present (used by uptime checks /
         # container healthchecks before any client is configured).
-        "/api/health",
+        ("GET", "/api/health"),
         # TV device-flow bootstrap (RFC 8628-like, `app/api/tv_auth.py`): the
-        # TV has no key yet by design — it's the thing being paired. `/approve`
-        # (the mobile/web side, which DOES already hold a key) is guarded by
-        # `verify_backend_secret` (aliased `verify_pairing_api_key`) and is
-        # therefore NOT in this allow-list — it's caught by the dependency
-        # walk below like any other guarded route.
-        "/api/tv-auth/start",
-        "/api/tv-auth/status",
-        "/api/tv-auth/complete",
+        # TV has no key yet by design — it's the thing being paired.
+        ("POST", "/api/tv-auth/start"),
+        ("GET", "/api/tv-auth/status"),
+        ("POST", "/api/tv-auth/complete"),
+        # Public pairing page (static HTML served to a phone that scanned the
+        # TV's QR code): carries no session data and performs no DB lookup;
+        # the secret that authorises an approval is typed into the page and
+        # sent by the page's `fetch` to the POST below. ONLY the GET is public:
+        # `POST /api/tv-auth/approve` is guarded by `verify_backend_secret`
+        # (aliased `verify_pairing_api_key`), is deliberately NOT in this list,
+        # and is caught by the dependency walk like any other guarded route.
+        ("GET", "/api/tv-auth/approve"),
     }
 )
 
@@ -100,6 +112,12 @@ def _dependency_names(route: APIRoute) -> set[str]:
     return names
 
 
+def _is_allow_listed(route: APIRoute) -> bool:
+    """True only if EVERY method of `route` is allow-listed for its exact path."""
+    methods = route.methods or set()
+    return bool(methods) and all((m, route.path) in PUBLIC_API_ALLOWLIST for m in methods)
+
+
 def assert_api_routes_authenticated(app: FastAPI) -> None:
     """Raise `RuntimeError` if any `/api/*` route lacks a recognised auth guard.
 
@@ -114,7 +132,7 @@ def assert_api_routes_authenticated(app: FastAPI) -> None:
             continue
         if not route.path.startswith("/api/"):
             continue
-        if route.path in PUBLIC_API_ALLOWLIST:
+        if _is_allow_listed(route):
             continue
         if _dependency_names(route) & _AUTH_DEPENDENCY_NAMES:
             continue
@@ -130,7 +148,7 @@ def assert_api_routes_authenticated(app: FastAPI) -> None:
             + "; ".join(unguarded)
             + ". Either attach a guard (dependencies= at mount site, "
             "module-level on the router, or per-endpoint), or — only if the "
-            "route is genuinely meant to be public — add its exact path to "
+            "route is genuinely meant to be public — add its exact (METHOD, path) to "
             "PUBLIC_API_ALLOWLIST in app/api/route_audit.py with a written "
             "justification."
         )

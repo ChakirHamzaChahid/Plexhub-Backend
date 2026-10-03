@@ -871,17 +871,17 @@ async def test_pipeline_guard_flags_and_always_clears(monkeypatch):
     the snapshot rebuild for the rest of the process's life."""
     from app import main as main_module
 
-    assert unified_group_service.is_pipeline_active() is False
+    assert unified_group_service._pipeline_active is False
 
     async with main_module._pipeline_guard():
-        assert unified_group_service.is_pipeline_active() is True
-    assert unified_group_service.is_pipeline_active() is False
+        assert unified_group_service._pipeline_active is True
+    assert unified_group_service._pipeline_active is False
 
     with pytest.raises(RuntimeError):
         async with main_module._pipeline_guard():
-            assert unified_group_service.is_pipeline_active() is True
+            assert unified_group_service._pipeline_active is True
             raise RuntimeError("pipeline blew up")
-    assert unified_group_service.is_pipeline_active() is False
+    assert unified_group_service._pipeline_active is False
 
 
 async def test_schedule_rebuild_ignores_unsupported_type(db_factory):

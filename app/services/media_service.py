@@ -51,7 +51,7 @@ def _aggregate_and_sort_movies(rows: list[Media]) -> list[MovieGroup]:
 #
 # Mitigation: cache the expensive SORTED GROUPS LIST (never the sliced page)
 # for a short TTL, keyed by:
-#   - the filter tuple (media_type, search, genre, year, include_broken) —
+#   - the filter tuple (media_type, search, genre, year) —
 #     NOT offset/limit, so every page of the same filter reuses one entry;
 #   - a cheap freshness "fingerprint" (COUNT + MAX(updated_at) computed with
 #     the SAME filters, narrow/index-backed — no SELECT * subquery, cf.
@@ -146,14 +146,12 @@ class MediaService:
         sort: str = "added_desc",
         server_id: Optional[str] = None,
         parent_rating_key: Optional[str] = None,
-        include_filtered: bool = False,
         search: Optional[str] = None,
         genre: Optional[str] = None,
         year: Optional[int] = None,
         missing_imdb: bool = False,
         missing_tmdb: bool = False,
         cursor: Optional[str] = None,
-        apply_outage_mask: bool = True,
     ) -> tuple[list[Media], int]:
         """Get paginated media list with total count.
 
@@ -169,7 +167,7 @@ class MediaService:
         """
         logger.debug(f"get_media_list: type={media_type}, limit={limit}, offset={offset}, "
                     f"sort={sort}, server_id={server_id}, parent={parent_rating_key}, "
-                    f"include_filtered={include_filtered}, search={search}, "
+                    f"search={search}, "
                     f"missing_imdb={missing_imdb}, missing_tmdb={missing_tmdb}")
 
         query = select(Media).where(Media.type == media_type)
@@ -199,15 +197,12 @@ class MediaService:
                 query = query.where(Media.grandparent_rating_key == parent_rating_key)
             else:
                 query = query.where(Media.parent_rating_key == parent_rating_key)
-        if not include_filtered:
-            query = query.where(Media.is_in_allowed_categories == True)
-        if apply_outage_mask:
-            # Hide the catalogue of a provider that has been down for several
-            # consecutive validation runs. The admin UI passes False: the
-            # operator must still be able to see what an outage is hiding.
-            query = query.where(
-                *_outage_clause(await account_outage_service.masked_server_ids(db))
-            )
+        query = query.where(Media.is_in_allowed_categories == True)
+        # Hide the catalogue of a provider that has been down for several
+        # consecutive validation runs.
+        query = query.where(
+            *_outage_clause(await account_outage_service.masked_server_ids(db))
+        )
 
         # Count total.
         # CR-P03: count with a narrow `func.count()` over the base table using
@@ -270,7 +265,6 @@ class MediaService:
         search: Optional[str] = None,
         genre: Optional[str] = None,
         year: Optional[int] = None,
-        include_broken: bool = True,
     ) -> tuple[list[MovieGroup], int]:
         """Aggregate movie/show rows across ALL accounts by unification_id.
 
@@ -295,22 +289,20 @@ class MediaService:
         """
         # CR-P01: unfiltered browse pages over the precomputed snapshot. Filtered
         # / searched queries can't (filtering rows changes group membership +
-        # best-row selection), and include_broken=False is never issued by the
-        # API — both correctly fall through to the live aggregation below.
+        # best-row selection) — correctly falls through to the live aggregation below.
         #
         # S2.4 (AUDIT-P3-002, visibility only): every call increments exactly
         # one of the three `plexhub_unified_path_total{path}` series so the two
         # live-aggregation causes are distinguishable in production:
         #   - "snapshot"      — the fast, intended path (precomputed media_group).
         #   - "live_filtered" — EXPECTED live path: the request itself carries a
-        #     filter the snapshot can't serve (search/genre/year, or the
-        #     API-unreachable include_broken=False).
+        #     filter the snapshot can't serve (search/genre/year).
         #   - "live_fallback" — ANOMALOUS live path: an unfiltered request that
         #     *should* have hit the snapshot fell through because
         #     `_unified_list_from_snapshot` returned None (snapshot empty/never
         #     built for this media_type) — this is the silent-degradation
         #     scenario the finding is about; it should page an on-call.
-        if search is None and genre is None and year is None and include_broken:
+        if search is None and genre is None and year is None:
             snapshot = await self._unified_list_from_snapshot(
                 db, media_type, limit, offset,
             )
@@ -335,8 +327,6 @@ class MediaService:
             query = query.where(Media.genres.ilike(f"%{safe}%", escape="\\"))
         if year:
             query = query.where(Media.year == year)
-        if not include_broken:
-            query = query.where(Media.is_broken == False)  # noqa: E712
 
         # Cheap freshness fingerprint over the SAME filters — narrow COUNT +
         # MAX(updated_at), no SELECT * subquery (cf. CR-P03) — so a cache hit
@@ -355,7 +345,7 @@ class MediaService:
         # (e.g. isolated per-test in-memory SQLite engines) even if their
         # filtered row sets coincidentally fingerprint the same.
         cache_key = (
-            id(db.get_bind()), media_type, search, genre, year, include_broken,
+            id(db.get_bind()), media_type, search, genre, year,
             fp_count or 0, fp_max_updated or 0,
             # The masked set is part of the identity of the result: without it
             # a cached page would keep serving a provider's media after it went

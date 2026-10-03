@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from typing import Any, Optional
 
 import httpx
@@ -10,6 +11,10 @@ logger = logging.getLogger("plexhub.xtream")
 
 _RETRY_DELAYS = (1, 2, 4)  # Exponential backoff: 1s, 2s, 4s
 _RETRYABLE = (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError)
+
+
+class XmltvTooLargeError(Exception):
+    """The XMLTV body (declared or actually streamed) exceeds the byte cap."""
 
 
 class XtreamService:
@@ -242,18 +247,102 @@ class XtreamService:
         )
         return data if isinstance(data, dict) else {}
 
-    async def get_xmltv(self, account_or_url, port: int = None, username: str = None, password: str = None) -> str:
-        """Fetch the full XMLTV EPG as raw XML text."""
+    async def download_xmltv(
+        self, account_or_url, dest: str | os.PathLike, *, max_bytes: int,
+        total_timeout: float = 600.0,
+        port: int = None, username: str = None, password: str = None,
+    ) -> int:
+        """Stream the full XMLTV (`xmltv.php`) to the file ``dest`` and return
+        the number of bytes written.
+
+        Replaces the former ``get_xmltv`` (FR-BE-560, Lot 10 sub-lot D), which
+        returned the WHOLE document as one ``str``: a large panel's XMLTV
+        weighs tens to hundreds of MB, and the container is capped at 2 GB of
+        RAM shared with the ONNX models. Here the body goes to disk in 256 KiB
+        chunks (never fully in memory) and is parsed from the file afterwards.
+
+        * ``max_bytes`` caps the DECOMPRESSED size (httpx transparently
+          inflates ``Content-Encoding: gzip``, so a gzip bomb is cut by the
+          same counter). A declared ``Content-Length`` above the cap fails
+          before any byte is read. Exceeding it raises ``XmltvTooLargeError``
+          (never retried) and leaves a partial file the caller must delete.
+        * Same retry/backoff policy as ``_get`` (1/2/4 s on timeouts, connect
+          and protocol errors, and on 429/502/503/504 honouring
+          ``Retry-After``); each attempt restarts the file from scratch and
+          gets its own ``total_timeout`` wall-clock ceiling.
+        * The URL carries the account credentials as query parameters: it is
+          NEVER logged, and httpx exception text (which embeds the URL for
+          ``HTTPStatusError``) is never interpolated into a message — only the
+          exception type and the HTTP status code.
+        """
         if hasattr(account_or_url, 'base_url'):
             base_url, port, username, password = account_or_url.base_url, account_or_url.port, account_or_url.username, account_or_url.password
         else:
             base_url = account_or_url
         client = await self._get_client()
-        base = self._build_base_url(base_url, port)
-        url = f"{base}xmltv.php"
-        resp = await client.get(url, params={"username": username, "password": password}, timeout=120.0)
-        resp.raise_for_status()
-        return resp.text
+        url = f"{self._build_base_url(base_url, port)}xmltv.php"
+        params = {"username": username, "password": password}
+
+        last_exc: Exception | None = None
+        for attempt, delay in enumerate((*_RETRY_DELAYS, None)):
+            try:
+                async with asyncio.timeout(total_timeout):
+                    return await self._stream_to_file(client, url, params, dest, max_bytes)
+            except XmltvTooLargeError:
+                raise
+            except _RETRYABLE as e:
+                last_exc = e
+                if delay is not None:
+                    logger.warning(
+                        "Xtream xmltv attempt %d failed (%s), retrying in %ss",
+                        attempt + 1, type(e).__name__, delay,
+                    )
+                    await asyncio.sleep(delay)
+            except httpx.HTTPStatusError as e:
+                status = e.response.status_code
+                if status in (429, 502, 503, 504) and delay is not None:
+                    last_exc = e
+                    wait = delay
+                    retry_after = e.response.headers.get("Retry-After")
+                    if retry_after:
+                        try:
+                            wait = min(60, max(delay, int(retry_after)))
+                        except (TypeError, ValueError):
+                            pass
+                    logger.warning(
+                        "Xtream xmltv got HTTP %d, retrying in %ss", status, wait,
+                    )
+                    await asyncio.sleep(wait)
+                else:
+                    raise
+        raise last_exc  # type: ignore[misc]
+
+    @staticmethod
+    async def _stream_to_file(
+        client: httpx.AsyncClient, url: str, params: dict, dest, max_bytes: int,
+    ) -> int:
+        """One download attempt: GET ``url`` and write the body to ``dest``."""
+        async with client.stream(
+            "GET", url, params=params,
+            timeout=httpx.Timeout(30.0, read=120.0),
+        ) as resp:
+            resp.raise_for_status()
+            declared = resp.headers.get("Content-Length")
+            if declared and declared.isdigit() and int(declared) > max_bytes:
+                raise XmltvTooLargeError(
+                    f"declared Content-Length {declared} exceeds max_bytes={max_bytes}"
+                )
+            written = 0
+            with open(dest, "wb") as fh:
+                async for chunk in resp.aiter_bytes(chunk_size=256 * 1024):
+                    written += len(chunk)
+                    if written > max_bytes:
+                        raise XmltvTooLargeError(
+                            f"XMLTV body exceeds max_bytes={max_bytes}"
+                        )
+                    # Disk write off the event loop (piège §9-11).
+                    await asyncio.to_thread(fh.write, chunk)
+            return written
 
     def build_live_url(
         self, base_url: str, port: int, username: str, password: str,

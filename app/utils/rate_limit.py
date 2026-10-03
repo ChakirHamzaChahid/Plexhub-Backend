@@ -243,3 +243,7 @@ def check_pending_cap(
 # `app/api/tv_auth.py::start()`.
 tv_auth_start_rate_limiter = SlidingWindowLimiter()
 tv_auth_start_pending_ip_limiter = SlidingWindowLimiter()
+
+# Lot 10 sous-lot B: the PUBLIC pairing page ``GET /api/tv-auth/approve``
+# (``app/api/tv_auth.py::approve_page``) — a third, independent instance.
+tv_auth_approve_page_limiter = SlidingWindowLimiter()

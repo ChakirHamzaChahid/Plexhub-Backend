@@ -21,9 +21,10 @@ allowed-tools: Read, Write, Edit, Glob, Grep, Bash
    | `app/api/**`, `api/deps.py` | §5 (flux endpoints) + conventions d'API §3 (Pydantic v2, `X-API-Key`, 503 IA, OpenAPI) |
    | `requirements.txt`, `requirements-dev.txt` | §10 (état réel / stack & versions) + §4 (build/run/test) |
    | `.claude/**`, `docs/31-board.md`, `docs/80-audit.md` | §7/§7bis (agents & skills), §11 (workflows) |
+4bis. **Rétro-spec** (`docs/retro-spec/`) — `python tools/retro-spec/impact.py OLD` liste les fiches `CAP-*` et volets techniques dont une preuve pointe vers un fichier modifié, avec les FR concernées. Pour chaque FR listée : rouvre la preuve, recale `fichier:ligne`, corrige le statut (implémenté/partiel/mort/absent) si le comportement a changé ; une capacité nouvelle → `/retro-spec capacite`. Puis `python tools/retro-spec/check.py` doit sortir en 0 et `python tools/retro-spec/inventaire.py` régénère la base factuelle. Fiches touchées ajoutées au commit de l'étape 7.
 5. **Réécris le bandeau** en tête : `> 🕒 **À JOUR AU : <date> (HEAD `NEW`).**` + une ligne de delta concise (« depuis `OLD` : <résumé> »). **Supprime les avertissements obsolètes** une fois le contenu réellement reflété. Garde la règle de maintenance + le pointeur workflows.
 6. **Honnêteté** : ce que tu n'as pas pu vérifier en profondeur, marque-le « à confirmer ». Si les changements sont **massifs/structurels** (refonte de modules, schéma SQLite sauté de plusieurs migrations), **recommande `/refresh-context`** (re-cartographie complète) au lieu de bricoler le bandeau.
-7. **Commit** : `docs: sync-context @ HEAD <NEW>` (CLAUDE.md + ARCHITECTURE.md si touché).
+7. **Commit** : `docs: sync-context @ HEAD <NEW>` (CLAUDE.md + ARCHITECTURE.md si touché + fiches `docs/retro-spec/` recalées en 4bis).
 
 ## Limites (vs /refresh-context)
 - `/sync-context` = recalage **incrémental** ciblé (bandeau + sections impactées par le delta). Rapide, à faire souvent.

@@ -26,10 +26,10 @@ def _admin_creds(monkeypatch):
 async def test_admin_movies_missing_imdb_returns_200(
     monkeypatch, api_client, db_factory,
 ):
-    """`GET /admin/movies?missing_imdb=true` must serve HTML even when DB is empty."""
+    """`GET /admin/catalogue?ids=missing_imdb` must serve HTML even when DB is empty."""
     monkeypatch.setattr(db_module, "async_session_factory", db_factory)
 
-    resp = await api_client.get("/admin/movies?missing_imdb=true", auth=ADMIN_AUTH)
+    resp = await api_client.get("/admin/catalogue?ids=missing_imdb", auth=ADMIN_AUTH)
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/html")
     assert "Aucun résultat" in resp.text
@@ -61,8 +61,8 @@ async def test_admin_index_renders_with_seeded_movie(
 async def test_admin_movies_missing_tmdb_returns_200(
     monkeypatch, api_client, db_factory,
 ):
-    """`GET /admin/movies?missing_tmdb=true` serves HTML."""
+    """`GET /admin/catalogue?ids=missing_tmdb` serves HTML."""
     monkeypatch.setattr(db_module, "async_session_factory", db_factory)
-    resp = await api_client.get("/admin/movies?missing_tmdb=true", auth=ADMIN_AUTH)
+    resp = await api_client.get("/admin/catalogue?ids=missing_tmdb", auth=ADMIN_AUTH)
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/html")

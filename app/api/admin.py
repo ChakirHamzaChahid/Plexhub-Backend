@@ -103,7 +103,6 @@ async def _catalogue_ctx(
         "items": page_obj.items,
         "total": page_obj.total,
         "offset": page_obj.offset,
-        "review_keys": page_obj.review_keys,
         "page": page,
         "page_size": page_size,
         "media_type": media_type,
@@ -115,16 +114,10 @@ async def _catalogue_ctx(
 
 async def _stats_ctx(db: AsyncSession) -> dict:
     stats = await manual_scrape_service.catalogue_stats(db)
-    movie = stats["movie"]
     return {
         "stats": stats,
-        "movie_stats": movie,
+        "movie_stats": stats["movie"],
         "show_stats": stats["show"],
-        # Back-compat keys for the pre-ADR-0005 movie-only counters (the
-        # `/admin/movies/stats` alias and its tests still read these).
-        "total_movies": movie.total,
-        "missing_imdb_count": movie.missing_imdb,
-        "missing_tmdb_count": movie.missing_tmdb,
         "outages": await account_outage_service.list_outages(db),
     }
 
@@ -139,7 +132,6 @@ async def admin_index(
     sort: str = Query("added_desc"),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=10, le=500),
-    tab: str = Query("catalogue"),
     db: AsyncSession = Depends(get_db),
 ):
     ctx = await _catalogue_ctx(
@@ -147,7 +139,6 @@ async def admin_index(
         search=search, sort=sort, page=page, page_size=page_size,
     )
     ctx.update(await _stats_ctx(db))
-    ctx["tab"] = "review" if tab == "review" else "catalogue"
     # Reloading /admin while a batch runs must show that batch (with its
     # polling and its Cancel button), not "Aucun lot lancé" followed by a
     # 409 on the next Lancer.
@@ -173,37 +164,7 @@ async def admin_catalogue_fragment(
     return templates.TemplateResponse(request, "admin/_media_table.html", ctx)
 
 
-@router.get("/movies", response_class=HTMLResponse)
-async def admin_movies_fragment(
-    request: Request,
-    missing_imdb: bool = Query(False),
-    missing_tmdb: bool = Query(False),
-    search: Optional[str] = Query(None),
-    sort: str = Query("added_desc"),
-    page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=10, le=500),
-    db: AsyncSession = Depends(get_db),
-):
-    """Pre-ADR-0005 alias (ADR 0005 D10): the old boolean pair maps onto the
-    new `ids` filter — both set means "either id missing" (`incomplete`),
-    neither means `all`."""
-    if missing_imdb and missing_tmdb:
-        ids = "incomplete"
-    elif missing_imdb:
-        ids = "missing_imdb"
-    elif missing_tmdb:
-        ids = "missing_tmdb"
-    else:
-        ids = "all"
-    ctx = await _catalogue_ctx(
-        db, media_type="movie", ids=ids, search=search, sort=sort,
-        page=page, page_size=page_size,
-    )
-    return templates.TemplateResponse(request, "admin/_media_table.html", ctx)
-
-
 @router.get("/stats", response_class=HTMLResponse)
-@router.get("/movies/stats", response_class=HTMLResponse)
 async def admin_stats_fragment(
     request: Request, db: AsyncSession = Depends(get_db),
 ):
@@ -871,7 +832,6 @@ async def admin_import_nfo_run(
             "dry_run": bool(dry_run),
             "error": error,
         },
-        headers={"HX-Trigger": "refresh-stats"} if reports and not dry_run else None,
     )
 
 

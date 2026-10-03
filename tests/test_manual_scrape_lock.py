@@ -303,7 +303,7 @@ class TestSyncUpsertPreservesLockedColumns:
 class TestNfoImportRespectsLock:
     def _nfo(self, **ids):
         return nfo_import_service.NfoEntry(
-            path=Path("x"), folder_name="x", media_type="movie", **ids
+            path=Path("x"), media_type="movie", **ids
         )
 
     def test_locked_row_ignores_overwrite_for_ids_and_images(self):

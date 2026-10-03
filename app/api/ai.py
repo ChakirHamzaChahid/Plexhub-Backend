@@ -930,8 +930,6 @@ class SubtitleTranslateRequest(BaseModel):
     target_lang: str = "fr"                 # JSON: targetLang
     format: str | None = None               # "srt"|"vtt"; auto-detect when null
     source_lang: str | None = None          # JSON: sourceLang (hint)
-    media_id: str | None = None             # JSON: mediaId (optional, traceability)
-    rating_key: str | None = None           # JSON: ratingKey (optional)
 
 
 class SubtitleTranslateResponse(BaseModel):

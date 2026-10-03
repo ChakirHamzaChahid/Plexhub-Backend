@@ -2,7 +2,7 @@
 download source (feature "Télécharger Plex", ticket C5).
 
 Verifies `download_worker._run_job` branches on `is_plex_server_id(job.server_id)`:
-a `plex_*` job resolves its URL via `plex_download_service.resolve_job_url`
+a `plex_*` job resolves its URL via `plex_download_service.resolve_job_urls`
 (NEVER `build_stream_url`/`_load_account`), while an `xtream_*` job keeps the
 existing `_load_account` + `build_stream_url` path byte-for-byte — the ~141
 pre-existing download tests monkeypatch those two names directly by module
@@ -178,7 +178,7 @@ class TestPlexDispatch:
         )
         monkeypatch.setattr(settings, "DOWNLOAD_MIN_FREE_DISK_MB", 0)
 
-        calls = {"build_stream_url": 0, "resolve_job_url": 0}
+        calls = {"build_stream_url": 0, "resolve_job_urls": 0}
 
         real_build = download_worker.build_stream_url
 
@@ -186,12 +186,12 @@ class TestPlexDispatch:
             calls["build_stream_url"] += 1
             return real_build(account, rating_key)
 
-        async def _spy_resolve_job_url(session_factory, job):
-            calls["resolve_job_url"] += 1
-            return None
+        async def _spy_resolve_job_urls(session_factory, job):
+            calls["resolve_job_urls"] += 1
+            return []
 
         monkeypatch.setattr(download_worker, "build_stream_url", _spy_build_stream_url)
-        monkeypatch.setattr(plex_download_service, "resolve_job_url", _spy_resolve_job_url)
+        monkeypatch.setattr(plex_download_service, "resolve_job_urls", _spy_resolve_job_urls)
 
         xtream_mock.get(_url(1)).mock(
             return_value=httpx.Response(200, content=b"ok", headers={"Content-Length": "2"})
@@ -203,7 +203,7 @@ class TestPlexDispatch:
             job = await s.get(DownloadJob, "x1")
         assert job.state == "completed"
         assert calls["build_stream_url"] == 1
-        assert calls["resolve_job_url"] == 0
+        assert calls["resolve_job_urls"] == 0
 
     async def test_missing_base_uri_marks_failed_without_secret_leak(
         self, db_engine, monkeypatch, download_dir, caplog,
@@ -326,25 +326,25 @@ class TestPlexDispatch:
         assert "<movie>" in xml and "<title>Dune</title>" in xml
 
 
-class TestResolveJobUrl:
+class TestResolveJobUrls:
     async def test_returns_none_for_non_plex_server_id(self, db_engine):
         factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
         job = _xtream_job("j1")
-        assert await plex_download_service.resolve_job_url(factory, job) is None
+        assert await plex_download_service.resolve_job_urls(factory, job) == []
 
     async def test_returns_none_when_server_missing(self, db_engine):
         factory = await _seeded_factory(
             db_engine, jobs=[], items=[_plex_item(rating_key="1001")],
         )
         job = _plex_job("j2")
-        assert await plex_download_service.resolve_job_url(factory, job) is None
+        assert await plex_download_service.resolve_job_urls(factory, job) == []
 
     async def test_returns_none_when_item_missing(self, db_engine):
         factory = await _seeded_factory(
             db_engine, jobs=[], servers=[_plex_server()],
         )
         job = _plex_job("j3")
-        assert await plex_download_service.resolve_job_url(factory, job) is None
+        assert await plex_download_service.resolve_job_urls(factory, job) == []
 
     async def test_returns_none_when_access_token_empty(self, db_engine):
         factory = await _seeded_factory(
@@ -353,7 +353,7 @@ class TestResolveJobUrl:
             items=[_plex_item(rating_key="1001")],
         )
         job = _plex_job("j4")
-        assert await plex_download_service.resolve_job_url(factory, job) is None
+        assert await plex_download_service.resolve_job_urls(factory, job) == []
 
     async def test_builds_expected_url_on_success(self, db_engine):
         factory = await _seeded_factory(
@@ -362,8 +362,8 @@ class TestResolveJobUrl:
             items=[_plex_item(rating_key="1001", part_key="/library/parts/1001/file.mkv")],
         )
         job = _plex_job("j5")
-        url = await plex_download_service.resolve_job_url(factory, job)
-        assert url == (
+        urls = await plex_download_service.resolve_job_urls(factory, job)
+        assert urls[0] == (
             "https://5-6-7-8.plex.direct:32400/library/parts/1001/file.mkv"
             f"?download=1&X-Plex-Token={TOKEN}"
         )

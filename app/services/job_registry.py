@@ -3,7 +3,7 @@
 ``/validate-streams``, ``/full-pipeline``).
 
 Extracted from ``app/workers/sync_worker.py`` (formerly a private
-``_sync_jobs`` dict + ``_record_sync_job`` helper, consumed by
+``_sync_jobs`` dict + a record helper, consumed by
 ``sync_account`` only) so that ALL five triggers can register and update a
 job under the SAME ``jobId`` the router hands back to the caller.
 
@@ -61,10 +61,8 @@ def _evict_if_over_cap() -> None:
 def set_job(job_id: str, data: dict[str, Any]) -> None:
     """Raw insert/overwrite of a job entry (FIFO-evicting beyond the cap).
 
-    Low-level primitive -- kept as the building block for ``create_job``/
-    ``update_job`` below, and for backward compatibility with the
-    pre-extraction ``sync_worker._record_sync_job`` call sites/tests.
-    Prefer ``create_job``/``update_job`` for new call sites.
+    Low-level primitive -- the building block for ``create_job``/
+    ``update_job`` below. Prefer those for new call sites.
     """
     _jobs[job_id] = data
     _evict_if_over_cap()

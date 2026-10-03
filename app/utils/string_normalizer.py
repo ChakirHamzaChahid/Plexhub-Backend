@@ -217,41 +217,8 @@ def clean_title(raw: str) -> tuple[str, int | None]:
     return (title, year)
 
 
-def parse_title_and_year(raw: str) -> tuple[str, int | None]:
-    """
-    Parse IPTV title, stripping prefixes/suffixes and extracting year.
-
-    Strips:
-      - Leading IPTV markers: "|VM|", "[XX]"
-      - Leading country/language prefix: "FR - ", "NF - ", "SC - "
-      - Trailing brackets:    "[FHD MULTi-SUBAR]", "[VOSTFR]", "[4K]"
-      - Trailing quality:     " LQ", " HQ", " FHD", " UHD"
-
-    Examples:
-      "|VM| Le Monde apres nous (2023)"          -> ("Le Monde apres nous", 2023)
-      "FR - Better Man (2024)"                    -> ("Better Man", 2024)
-      "FR - Aquaman (2023) LQ"                    -> ("Aquaman", 2023)
-      "Black Widow (2021) [FHD MULTi-SUBAR]"      -> ("Black Widow", 2021)
-    """
-    title = _LEADING_PIPE_RE.sub("", raw)
-    title = _LEADING_BRACK_RE.sub("", title)
-    title = _COUNTRY_PREFIX_RE.sub("", title)
-
-    # Trailing junk can sit before AND after the year, so strip both sides of it.
-    title = _strip_trailing_junk(title)
-
-    year_match = _YEAR_RE.search(title)
-    year = int(year_match.group(1)) if year_match else None
-    if year_match:
-        title = title[: year_match.start()].rstrip()
-
-    title = _strip_trailing_junk(title)
-
-    return title.strip() or "Unknown", year
-
-
 def parse_title_year_and_suffix(raw: str) -> tuple[str, int | None, str | None]:
-    """Like parse_title_and_year, but also extracts a qualifier suffix.
+    """Parse an IPTV title like the legacy year-only parser, but also extract a qualifier suffix.
 
     The Xtream catalog often distinguishes versions of the same media via a
     qualifier in parentheses — e.g. "Les Experts (2000) (US)" vs

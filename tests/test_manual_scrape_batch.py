@@ -715,11 +715,9 @@ async def test_catalogue_stats_and_filter_see_pending_reviews(db_factory):
     async with db_factory() as s:
         stats = await mss.catalogue_stats(s)
         page = await mss.list_catalogue(s, media_type="movie", id_filter="review")
-        all_page = await mss.list_catalogue(s, media_type="movie", id_filter="all")
 
     assert stats["movie"].review_pending == 1
     assert [i.rating_key for i in page.items] == ["vod_1.mp4"]
-    assert all_page.review_keys == {("xtream_a", "vod_1.mp4")}
 
 
 async def test_deleting_an_account_purges_its_reviews(db_session, db_factory):
@@ -794,7 +792,9 @@ async def test_upsert_review_reopens_a_resolved_row(db_factory):
         title="One", year=1999, reason="no_candidates", candidates=[],
         session_factory=db_factory,
     )
-    await mss.resolve_review("xtream_a", "vod_1.mp4", session_factory=db_factory)
+    await mss._set_review_status(
+        "xtream_a", "vod_1.mp4", "resolved", session_factory=db_factory,
+    )
 
     await mss.upsert_review(
         server_id="xtream_a", rating_key="vod_1.mp4", media_type="movie",

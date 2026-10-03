@@ -94,6 +94,16 @@ class Settings:
     # (not recommended).
     TV_AUTH_PENDING_SESSIONS_CAP: int = _safe_int("TV_AUTH_PENDING_SESSIONS_CAP", 500)
 
+    # Lot 10 sous-lot B — rate limit of the PUBLIC pairing page
+    # GET /api/tv-auth/approve (static HTML, no DB access): per-client-IP cap,
+    # max requests per rolling window. <=0 disables it.
+    TV_AUTH_APPROVE_PAGE_RATE_LIMIT_MAX: int = _safe_int(
+        "TV_AUTH_APPROVE_PAGE_RATE_LIMIT_MAX", 30
+    )
+    TV_AUTH_APPROVE_PAGE_RATE_LIMIT_WINDOW_SECONDS: int = _safe_int(
+        "TV_AUTH_APPROVE_PAGE_RATE_LIMIT_WINDOW_SECONDS", 60
+    )
+
     # Xtream credential encryption at rest (CR-S03) — see
     # app/utils/crypto_fields.py for full key-resolution semantics.
     # Optional explicit Fernet key (urlsafe base64, 32 bytes) used to encrypt
@@ -153,6 +163,40 @@ class Settings:
     BACKUP_DIR: Path = Path(os.getenv("BACKUP_DIR", "./data/backups"))
     BACKUP_RETENTION_DAYS: int = _safe_int("BACKUP_RETENTION_DAYS", 7)
     BACKUP_HOUR: int = _safe_int("BACKUP_HOUR", 4)  # daily cron hour
+
+    # Bulk EPG sync (Lot 10 sub-lot D, FR-BE-222, ADR 0006) — pulls each active
+    # Xtream account's XMLTV (`xmltv.php`) into `epg_entries` so the TV's
+    # "now playing" seed is warm instead of filled channel-by-channel on demand.
+    # NO-OP BY DEFAULT (same convention as DAV_ENABLED / the backups): the cron
+    # is not even registered until the operator sets EPG_SYNC_ENABLED=true.
+    # Master-only like every other cron. Measure on a prod-scale copy BEFORE
+    # enabling in production (docs/architecture/adr/0006-epg-sync-en-masse.md).
+    EPG_SYNC_ENABLED: bool = os.getenv("EPG_SYNC_ENABLED", "false").lower() in ("true", "1", "yes")
+    EPG_SYNC_INTERVAL_HOURS: int = _safe_int("EPG_SYNC_INTERVAL_HOURS", 6)
+    # Retained window [now - PAST, now + FUTURE]: a programme is kept when it
+    # OVERLAPS the window (so a film that started 2 h ago and is still airing is
+    # kept even with PAST=1). Wider = more rows written per run.
+    EPG_SYNC_PAST_HOURS: int = _safe_int("EPG_SYNC_PAST_HOURS", 1)
+    EPG_SYNC_FUTURE_HOURS: int = _safe_int("EPG_SYNC_FUTURE_HOURS", 12)
+    # Hard ceilings per account and per run: decompressed XMLTV bytes streamed
+    # to a temp file (default 256 MiB) and rows written (default 500 000).
+    # Hitting the byte cap FAILS that account (a truncated XML is not parseable);
+    # hitting the programme cap stops that account cleanly (partial, reported).
+    EPG_SYNC_MAX_BYTES: int = _safe_int("EPG_SYNC_MAX_BYTES", 256 * 1024 * 1024)
+    EPG_SYNC_MAX_PROGRAMMES: int = _safe_int("EPG_SYNC_MAX_PROGRAMMES", 500_000)
+    # Rows per write transaction: small on purpose, so the single SQLite writer
+    # is never held for long while the pipeline / the API also write. Capped at
+    # 2000 in the service (9 bound values per row; ~3 600 rows would exceed
+    # SQLite's 32 766-variable limit and fail every batch).
+    EPG_SYNC_BATCH_SIZE: int = _safe_int("EPG_SYNC_BATCH_SIZE", 500)
+    # Pause between two batches (ms). 0 = just yield to the event loop. The XML
+    # parsing thread shares the GIL with the loop (measured: API reads 2-4x
+    # slower while it parses), so on the 1-CPU container a few ms of pause
+    # trades sync duration for API latency -- tune only from a prod-scale
+    # measurement.
+    EPG_SYNC_BATCH_PAUSE_MS: int = _safe_int("EPG_SYNC_BATCH_PAUSE_MS", 0)
+    # Wall-clock ceiling for ONE XMLTV download attempt (seconds).
+    EPG_SYNC_DOWNLOAD_TIMEOUT_SECONDS: int = _safe_int("EPG_SYNC_DOWNLOAD_TIMEOUT_SECONDS", 600)
     CORS_ORIGINS: list[str] = [
         o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",") if o.strip()
     ]

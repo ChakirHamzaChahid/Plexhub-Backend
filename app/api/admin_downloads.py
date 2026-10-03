@@ -393,10 +393,8 @@ async def admin_downloads_enqueue(
     ``movie``/``series_all`` take a single ``source``; ``seasons``/``episodes``
     take one source PER unit via the repeated ``season_pick``/``episode_pick``
     selectors, so one operator action can span multiple accounts. The old
-    ``series_seasons`` (checkbox) scope is intentionally no longer reachable
-    from this router — ``download_service.enqueue_selection`` still supports
-    it for its own tests, but the UI now offers ``seasons`` (with a per-season
-    source picker) instead."""
+    ``series_seasons`` (checkbox) scope no longer exists (removed, Lot 10 C):
+    the UI offers ``seasons`` (with a per-season source picker) instead."""
     error: Optional[str] = None
 
     if type not in ("movie", "show") or scope not in (

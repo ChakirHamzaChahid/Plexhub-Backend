@@ -9,7 +9,61 @@
             "command": "node .claude/hooks/session-start.js"
           }
         ]
+      },
+      {
+        "matcher": "startup|resume|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/tools/lot-state.py inject",
+            "timeout": 20
+          }
+        ]
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/tools/cost-tracker.py hook",
+            "async": true,
+            "timeout": 60
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/tools/lot-state.py save",
+            "timeout": 60
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/subagent-model-guard.js",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "deny": [
+      "Read(.env)",
+      "Edit(.env)"
+    ],
+    "ask": [
+      "Edit(/pyproject.toml)"
     ]
   }
 }

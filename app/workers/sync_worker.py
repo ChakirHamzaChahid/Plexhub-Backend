@@ -67,14 +67,6 @@ def _get_account_lock(account_id: str) -> asyncio.Lock:
     return _account_locks[account_id]
 
 
-def _record_sync_job(job_id: str, data: dict) -> None:
-    """Deprecated shim over ``job_registry.set_job`` (ADR 0004 Décision 2 --
-    the tracker was extracted so all 5 ``/api/sync`` triggers, not just
-    ``sync_account``, can register/update a job under the router-issued
-    ``jobId``). Kept for backward compatibility."""
-    job_registry.set_job(job_id, data)
-
-
 def _safe_duration(value) -> int | None:
     """Convert episode_run_time (minutes) to milliseconds, or None on failure."""
     if not value:
@@ -1781,15 +1773,3 @@ async def run_all_accounts():
         await sync_account(account.id)
 
     logger.info("All accounts sync complete")
-
-
-def get_sync_job(job_id: str) -> dict | None:
-    """Deprecated shim over ``job_registry.get_job`` -- kept for backward
-    compatibility (see ``_record_sync_job``)."""
-    return job_registry.get_job(job_id)
-
-
-def get_all_sync_jobs() -> list[dict]:
-    """Deprecated shim over ``job_registry.get_all_jobs`` -- kept for
-    backward compatibility (see ``_record_sync_job``)."""
-    return job_registry.get_all_jobs()

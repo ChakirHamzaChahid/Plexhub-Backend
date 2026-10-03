@@ -162,39 +162,18 @@ async def test_search_filters_by_title(api_client, db_factory):
     assert "Matrix Reloaded" in resp.text and "Amélie" not in resp.text
 
 
-# ─── back-compat aliases ─────────────────────────────────────────────────
+# ─── stats fragment ──────────────────────────────────────────────────────
 
 
-async def test_movies_alias_maps_missing_imdb(api_client, db_factory):
-    async with db_factory() as s:
-        s.add(_media("a", "Has Imdb", imdb_id="tt1"))
-        s.add(_media("b", "No Imdb"))
-        await s.commit()
-
-    resp = await api_client.get("/admin/movies?missing_imdb=true", auth=ADMIN_AUTH)
-    assert resp.status_code == 200
-    assert "No Imdb" in resp.text and "Has Imdb" not in resp.text
-
-
-async def test_movies_alias_without_flags_lists_everything(api_client, db_factory):
-    async with db_factory() as s:
-        s.add(_media("a", "Has Imdb", imdb_id="tt1", tmdb_id="1"))
-        await s.commit()
-
-    resp = await api_client.get("/admin/movies", auth=ADMIN_AUTH)
-    assert "Has Imdb" in resp.text
-
-
-async def test_stats_aliases_both_return_the_fragment(api_client, db_factory):
+async def test_stats_returns_the_fragment(api_client, db_factory):
     async with db_factory() as s:
         s.add(_media("a", "One", imdb_id="tt1", tmdb_id="1"))
         await s.commit()
 
-    for path in ("/admin/stats", "/admin/movies/stats"):
-        resp = await api_client.get(path, auth=ADMIN_AUTH)
-        assert resp.status_code == 200, path
-        assert "Sans IMDb" in resp.text
-        assert "Séries" in resp.text
+    resp = await api_client.get("/admin/stats", auth=ADMIN_AUTH)
+    assert resp.status_code == 200
+    assert "Sans IMDb" in resp.text
+    assert "Séries" in resp.text
 
 
 # ─── poster proxy ────────────────────────────────────────────────────────

@@ -9,7 +9,7 @@ expired. This file exercises that behavior end-to-end against an in-memory
 DB (no mocking of the service itself), the same way `app/api/deps.py`'s
 `verify_backend_secret` does in production.
 
-`create_key`/`list_keys`/`get_key`/`revoke_key` take an explicit `db` session
+`create_key`/`list_keys`/`revoke_key` take an explicit `db` session
 (the caller's transaction), so `db_session` is used directly for those.
 `resolve` deliberately opens its OWN short-lived session via the
 module-level `async_session_factory` name (see its docstring) — that name is
@@ -306,7 +306,7 @@ def test_revoked_takes_priority_over_expiry_in_status_of():
     assert api_key_service.status_of(key, at=1_000) == "revoked"
 
 
-# ─── list_keys / get_key ────────────────────────────────────────────────────
+# ─── list_keys ────────────────────────────────────────────────────
 
 
 async def test_list_keys_orders_newest_first(db_session, monkeypatch):
@@ -319,14 +319,3 @@ async def test_list_keys_orders_newest_first(db_session, monkeypatch):
 
     keys = await api_key_service.list_keys(db_session)
     assert [k.id for k in keys] == [row_c.id, row_b.id, row_a.id]
-
-
-async def test_get_key_returns_none_for_unknown_id(db_session):
-    assert await api_key_service.get_key(db_session, "nope") is None
-
-
-async def test_get_key_returns_the_row(db_session):
-    row, _ = await api_key_service.create_key(db_session, label="Findable")
-    fetched = await api_key_service.get_key(db_session, row.id)
-    assert fetched is not None
-    assert fetched.id == row.id

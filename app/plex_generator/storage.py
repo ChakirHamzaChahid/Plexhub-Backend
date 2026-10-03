@@ -96,9 +96,6 @@ class LibraryStorage(ABC):
     def delete_file(self, rel_path: str) -> None: ...
 
     @abstractmethod
-    def read_strm(self, rel_path: str) -> str | None: ...
-
-    @abstractmethod
     def cleanup_empty_dirs(self, rel_path: str) -> None: ...
 
     @abstractmethod
@@ -180,12 +177,6 @@ class LocalStorage(LibraryStorage):
         if full.exists():
             full.unlink()
 
-    def read_strm(self, rel_path: str) -> str | None:
-        full = self._resolve(rel_path)
-        if not full.exists():
-            return None
-        return full.read_text(encoding="utf-8").strip()
-
     def cleanup_empty_dirs(self, rel_path: str) -> None:
         """Remove empty parent directories up to Films/ or Series/."""
         full = self._resolve(rel_path)
@@ -245,9 +236,6 @@ class DryRunStorage(LibraryStorage):
 
     def delete_file(self, rel_path: str) -> None:
         logger.info(f"[DRY-RUN] delete_file: {rel_path}")
-
-    def read_strm(self, rel_path: str) -> str | None:
-        return None
 
     def cleanup_empty_dirs(self, rel_path: str) -> None:
         pass

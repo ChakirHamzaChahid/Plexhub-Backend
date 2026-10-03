@@ -4,6 +4,7 @@ from logging.handlers import RotatingFileHandler as _RotatingFileHandler
 import os
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -35,7 +36,10 @@ from app.api import (
 from app.utils.request_context import RequestIdLogFilter, RequestIdMiddleware
 from app.utils.job_health import mark_job_success, set_master, track_job
 
-APP_VERSION = "1.10.9"
+APP_VERSION = "1.11.0"
+
+# First run of the opt-in `epg_sync` job, counted from boot (see lifespan).
+_EPG_SYNC_FIRST_RUN_DELAY = timedelta(minutes=5)
 
 logger = logging.getLogger("plexhub")
 
@@ -432,6 +436,29 @@ async def lifespan(app: FastAPI):
                     max_instances=1,
                     coalesce=True,
                     misfire_grace_time=3600,
+                )
+
+            # Bulk EPG sync (Lot 10 sub-lot D, ADR 0006) -- OPT-IN: the job is
+            # not even registered unless the operator sets EPG_SYNC_ENABLED=true
+            # (no-op by default, same convention as DAV / backups). Master-only
+            # by construction: this whole block sits under `if is_master:`.
+            if settings.EPG_SYNC_ENABLED:
+                from app.services import epg_sync_service
+
+                scheduler.add_job(
+                    track_job("epg_sync")(epg_sync_service.run_epg_sync_job),
+                    "interval",
+                    hours=max(1, settings.EPG_SYNC_INTERVAL_HOURS),
+                    id="epg_sync",
+                    max_instances=1,
+                    coalesce=True,
+                    misfire_grace_time=3600,
+                    # A bare `interval` trigger first fires one full interval
+                    # after boot: a container restarted more often than every
+                    # EPG_SYNC_INTERVAL_HOURS would never sync. First run 5 min
+                    # after boot instead (the live_channels it maps onto come
+                    # from the boot-time sync).
+                    next_run_time=datetime.now(timezone.utc) + _EPG_SYNC_FIRST_RUN_DELAY,
                 )
 
             # Plex catalogue sync cron (feature "Télécharger Plex", ticket C7)

@@ -18,6 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models.database import LiveChannel, Media, XtreamAccount
+from app.services import job_registry
 from app.services.xtream_service import xtream_service
 from app.workers import sync_worker as sync_worker_module
 
@@ -139,7 +140,7 @@ class TestSyncAccountEndToEnd:
         assert {e.rating_key for e in episodes} == {"ep_1.mp4", "ep_2.mp4"}
         assert len(live) == 1 and live[0].name == "Channel One"
 
-        job = sync_worker_module.get_sync_job(job_id)
+        job = job_registry.get_job(job_id)
         assert job is not None
         assert job["status"] == "completed"
         assert job["progress"]["total"] > 0
@@ -243,7 +244,7 @@ class TestSyncAccountEndToEnd:
 
         job_id = await sync_worker_module.sync_account(account_id)
 
-        job = sync_worker_module.get_sync_job(job_id)
+        job = job_registry.get_job(job_id)
         assert job is not None
         assert job["status"] == "failed"
         assert "commit exploded" in job["progress"]["error"]
@@ -263,7 +264,7 @@ class TestPerAccountLockGuardsSyncAccount:
             await s.commit()
 
         jobs_before = [
-            j for j in sync_worker_module.get_all_sync_jobs() if account_id in j["job_id"]
+            j for j in job_registry.get_all_jobs() if account_id in j["job_id"]
         ]
         assert jobs_before == []
 
@@ -272,10 +273,10 @@ class TestPerAccountLockGuardsSyncAccount:
             result = await sync_worker_module.sync_account(account_id)
 
         assert result == f"sync_{account_id}_skipped"
-        # The skip path returns before ever calling `_record_sync_job` --
+        # The skip path returns before ever calling `job_registry.set_job` --
         # no job should have been recorded under this account.
         jobs_after = [
-            j for j in sync_worker_module.get_all_sync_jobs() if account_id in j["job_id"]
+            j for j in job_registry.get_all_jobs() if account_id in j["job_id"]
         ]
         assert jobs_after == []
 
@@ -292,7 +293,7 @@ class TestPerAccountLockGuardsSyncAccount:
 
         second = await sync_worker_module.sync_account(account_id)
         assert not second.endswith("_skipped")
-        assert sync_worker_module.get_sync_job(second)["status"] == "completed"
+        assert job_registry.get_job(second)["status"] == "completed"
 
 
 # ─── run_all_accounts ────────────────────────────────────────────────────

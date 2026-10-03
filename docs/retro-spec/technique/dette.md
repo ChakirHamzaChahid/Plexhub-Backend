@@ -37,7 +37,7 @@ Avant de citer une dette, croiser avec ce tableau : le registre `docs/context/et
 | AUDIT-P4-005 — deux écrivains de `display_rating` qui oscillent | **fermé** : l'import NFO passe par `rating_blend` ; l'ancienne formule ne survit que comme import mort (§5) | `app/services/nfo_import_service.py:536-544` |
 | AUDIT-P3-003 — `DatabaseSource` agrège sur la boucle | **fermé** : agrégation via `asyncio.to_thread` | `app/plex_generator/source.py:179` |
 | CR-T02 — aucun test de rejet d'authentification | **fermé** : tests 401 paramétrés par routeur | `tests/test_auth_guard.py:67` |
-| AUDIT-P5-004 — client TV legacy sans `server_id` sur `/api/media/episodes` | **fermé côté TV** : paramètre non nullable | `tv:core/network/src/main/java/com/chakir/plexhubtv/core/network/backend/BackendApiService.kt:38` |
+| AUDIT-P5-004 — client TV legacy sans `server_id` sur `/api/media/episodes` | **fermé côté TV** : paramètre non nullable | `tv:core/network/src/main/java/com/chakir/plexhubtv/core/network/backend/BackendApiService.kt:37` |
 | CLAUDE.md §3 — le générateur écrit « directement sur la boucle » (CR-C01) | corrigé (thread), voir CAP-BE-16 | — |
 | CLAUDE.md §9 piège 10 — `/metrics` non authentifié | faux, contredit par le piège 19b et le code | voir [sécurité](securite.md) |
 | CLAUDE.md §2 et `flux-cles.md` §5.1 — le Backend annonce une synchro EPG, et le QR d'appairage une page d'approbation | **résolu au Lot 10** : page publique `GET /api/tv-auth/approve` (FR-BE-075) et synchro XMLTV en masse `epg_sync` (FR-BE-222), **désactivée par défaut**, mesure à l'échelle de la production non faite | `app/api/tv_auth.py:436-469`, `app/services/epg_sync_service.py:583-648`, `app/main.py:441-462` |

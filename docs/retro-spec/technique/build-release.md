@@ -151,7 +151,7 @@ Détail exigence par exigence dans [CAP-BE-24](../fonctionnel/CAP-BE-24-sauvegar
 
 ## 10. Côté app TV (lecture seule)
 
-- La TV lit le champ `version` de `/api/health` pour l'afficher dans les informations de connexion — `tv:data/src/main/java/com/chakir/plexhubtv/data/repository/BackendRepositoryImpl.kt:126`, `tv:data/src/main/java/com/chakir/plexhubtv/data/repository/BackendRepositoryImpl.kt:146`. **Aucune version minimale** de backend n'est exigée (pas de comparaison trouvée) : la compatibilité TV ↔ backend n'est garantie que par la discipline de contrat ([contrat d'API](contrat-api.md)).
+- La TV lit le champ `version` de `/api/health` pour l'afficher dans les informations de connexion — `tv:data/src/main/java/com/chakir/plexhubtv/data/repository/BackendRepositoryImpl.kt:133`, `tv:data/src/main/java/com/chakir/plexhubtv/data/repository/BackendRepositoryImpl.kt:120`. **Aucune version minimale** de backend n'est exigée (pas de comparaison trouvée) : la compatibilité TV ↔ backend n'est garantie que par la discipline de contrat ([contrat d'API](contrat-api.md)).
 - Versionnage TV indépendant : `versionCode = major×10000 + minor×100 + patch`, `versionName` dérivé — `tv:app/build.gradle.kts:129-130`. Les deux dépôts n'ont aucun numéro de version commun.
 
 ---
@@ -173,7 +173,7 @@ Détail exigence par exigence dans [CAP-BE-24](../fonctionnel/CAP-BE-24-sauvegar
 | 11 | Aucune protection automatique du modèle de branches ni de concordance tag ↔ `APP_VERSION` : tout repose sur `/release`. | `.claude/commands/release.md:16-28` | risque release | moyenne |
 | 12 | `black` installé en CI sans être appelé ; `mypy` hors CI ; `docs/23-git-strategy.md` absent. | `pyproject.toml:111-128` | dette outillage | basse |
 | 13 | Image mono-architecture (pas de `platforms`). | `.github/workflows/docker.yml:47-55` | contrainte | basse |
-| 14 | La TV n'exige aucune version minimale de backend. | `tv:data/src/main/java/com/chakir/plexhubtv/data/repository/BackendRepositoryImpl.kt:126` | risque compatibilité | basse |
+| 14 | La TV n'exige aucune version minimale de backend. | `tv:data/src/main/java/com/chakir/plexhubtv/data/repository/BackendRepositoryImpl.kt:133` | risque compatibilité | basse |
 
 ## Questions ouvertes (à vérifier par test)
 

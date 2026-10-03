@@ -20,7 +20,7 @@ Le backend recopie en base locale le catalogue de chaque compte Xtream actif : f
 - **US-BE-05.5** (P2) — En tant qu'opérateur, j'annule une synchro en cours.
   - Parcours : `DELETE /api/sync/cancel/{task_name}` (`app/api/sync.py:71-80`) · Maestro : aucun
 - **US-BE-05.6** (P2) — En tant que spectateur TV, je déclenche depuis les réglages une resynchronisation Xtream côté backend.
-  - Parcours : réglages → `SettingsAction.TriggerBackendXtreamSync` (`tv:app/src/main/java/com/chakir/plexhubtv/feature/settings/SettingsViewModel.kt:1191-1216`) → `POST /api/sync/xtream` ou `/xtream/all` · Maestro : aucun
+  - Parcours : réglages → `SettingsAction.TriggerBackendXtreamSync` (`tv:app/src/main/java/com/chakir/plexhubtv/feature/settings/SettingsViewModel.kt:1138-1163`) → `POST /api/sync/xtream` ou `/xtream/all` · Maestro : aucun
 - **US-BE-05.7** (P1) — En tant qu'opérateur, je garde mes corrections d'identité et l'enrichissement déjà acquis quand le fournisseur modifie ou réordonne son catalogue.
   - Parcours : `upsert_media_batch` (`app/workers/sync_worker.py:588-784`) · Maestro : sans objet
 
@@ -105,8 +105,8 @@ Le backend recopie en base locale le catalogue de chaque compte Xtream actif : f
 
 ### App TV cliente
 
-- **FR-BE-239** — L'app TV déclenche la synchro backend d'un compte ou de tous les comptes et récupère le `jobId`, sans jamais envoyer `force`. — *implémenté* — preuve `tv:core/network/src/main/java/com/chakir/plexhubtv/core/network/backend/BackendApiService.kt:65-68`, `tv:core/network/src/main/java/com/chakir/plexhubtv/core/network/backend/BackendApiService.kt:115-116`, `tv:data/src/main/java/com/chakir/plexhubtv/data/repository/BackendRepositoryImpl.kt:657-680`
-- **FR-BE-240** — L'app TV suit l'avancement du job déclenché (`GET /api/sync/status/{jobId}`). — *mort* (méthode Retrofit `getSyncStatus` déclarée, jamais appelée dans le dépôt TV ; l'écran affiche seulement « Sync triggered (N server(s)) » ; l'endpoint backend `GET /api/sync/status/{job_id}` est **conservé volontairement** au Lot 10 : API publique testée, le code mort est côté TV) — preuve `tv:core/network/src/main/java/com/chakir/plexhubtv/core/network/backend/BackendApiService.kt:70-73`, `tv:app/src/main/java/com/chakir/plexhubtv/feature/settings/SettingsViewModel.kt:1191-1216`
+- **FR-BE-239** — L'app TV déclenche la synchro backend d'un compte ou de tous les comptes et récupère le `jobId`, sans jamais envoyer `force`. — *implémenté* — preuve `tv:core/network/src/main/java/com/chakir/plexhubtv/core/network/backend/BackendApiService.kt:65-68`, `tv:core/network/src/main/java/com/chakir/plexhubtv/core/network/backend/BackendApiService.kt:92-93`, `tv:data/src/main/java/com/chakir/plexhubtv/data/repository/BackendRepositoryImpl.kt:533-542`
+- **FR-BE-240** — L'app TV suit l'avancement du job déclenché (`GET /api/sync/status/{jobId}`). — *mort* (méthode Retrofit `getSyncStatus` déclarée, jamais appelée dans le dépôt TV ; l'écran affiche seulement « Sync triggered (N server(s)) » ; l'endpoint backend `GET /api/sync/status/{job_id}` est **conservé volontairement** au Lot 10 : API publique testée, le code mort est côté TV) — preuve `tv:core/network/src/main/java/com/chakir/plexhubtv/core/network/backend/BackendApiService.kt:70-73`, `tv:app/src/main/java/com/chakir/plexhubtv/feature/settings/SettingsViewModel.kt:1138-1163`
 
 ## Règles métier
 
@@ -138,7 +138,7 @@ Le backend recopie en base locale le catalogue de chaque compte Xtream actif : f
 ## Dépendances
 
 - Autres capacités : `CAP-BE-04` (comptes, catégories, visibilité, `update_media_adult_flags`), `CAP-BE-06` (enrichissement, étape 2 du pipeline), `CAP-BE-07` (validation, étape 3), `CAP-BE-08` (panne fournisseur : le masquage est décidé par la validation, pas par la synchro), `CAP-BE-16` (génération, étape 4), `CAP-BE-09` (snapshot `media_group` lu par le catalogue), `CAP-BE-11` (EPG à la demande et synchro EPG en masse opt-in), `CAP-BE-22` (verrou `match_locked`), `CAP-BE-01` (métriques et fraîcheur du pipeline).
-- Autre dépôt : appels `tv:core/network/src/main/java/com/chakir/plexhubtv/core/network/backend/BackendApiService.kt:65` (`triggerSync`), `:115` (`triggerSyncAll`) ; `:70` (`getSyncStatus`, jamais appelé). La « synchro » visible côté TV (`syncMedia`) est une autre chose : elle lit le catalogue déjà synchronisé via `/api/media/*` (`tv:data/src/main/java/com/chakir/plexhubtv/data/repository/BackendRepositoryImpl.kt:152-209`).
+- Autre dépôt : appels `tv:core/network/src/main/java/com/chakir/plexhubtv/core/network/backend/BackendApiService.kt:64` (`triggerSync`), `:92` (`triggerSyncAll`) ; `:69` (`getSyncStatus`, jamais appelé). La « synchro » visible côté TV (`syncMedia`) est une autre chose : elle lit le catalogue déjà synchronisé via `/api/media/*` (`tv:data/src/main/java/com/chakir/plexhubtv/data/repository/BackendRepositoryImpl.kt:139-201`).
 - Données : `media`, `live_channels`, `xtream_categories`, `xtream_accounts` (`last_synced_at`), `enrichment_queue`, `epg_entries` (purge nocturne ; remplie par `epg_sync` quand il est activé), `media_group`/`media_group_member` (via le pipeline) — voir `docs/retro-spec/technique/db/`.
 
 ## Écarts relevés

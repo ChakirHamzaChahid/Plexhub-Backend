@@ -106,7 +106,7 @@ def android(root, files):
     flows = []
     for f in sorted(x for x in files if x.startswith(".maestro/") and x.endswith((".yaml", ".yml"))):
         t = read(root, f)
-        first = next((l.strip("# ").strip() for l in t.splitlines() if l.strip().startswith("#")), "")
+        first = next((ln.strip("# ").strip() for ln in t.splitlines() if ln.strip().startswith("#")), "")
         flows.append({"file": f, "comment": first[:120], "steps": len(re.findall(r"^\s*-\s", t, re.M))})
     inv["maestro_flows"] = flows
     return inv
@@ -160,7 +160,7 @@ def _guards_in(src, aliases=None):
             out.append(label)
     for var, labels in (aliases or {}).items():
         if re.search(r"\b%s\b" % re.escape(var), src):
-            out += [l for l in labels if l not in out]
+            out += [lbl for lbl in labels if lbl not in out]
     return out
 
 
@@ -325,7 +325,8 @@ def main(argv):
         kind, inv = "fastapi", fastapi(root, files)
         body = fastapi_md(inv)
     else:
-        print("type de dépôt non reconnu"); return 2
+        print("type de dépôt non reconnu")
+        return 2
     head = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=root, capture_output=True, text=True).stdout.strip()
     md = ("# Inventaire généré (%s)\n\n> ⚙️ **Généré par `tools/retro-spec/inventaire.py` — ne pas éditer à la main.** "
           "Base factuelle de la rétro-spécification : chaque ligne porte sa preuve `fichier:ligne`. "

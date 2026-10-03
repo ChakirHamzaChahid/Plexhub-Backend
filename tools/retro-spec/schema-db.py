@@ -170,11 +170,11 @@ def remote_tbls(target, dst, out_dir):
         def get_dir(rd, ld):
             os.makedirs(ld, exist_ok=True)
             for a in sftp.listdir_attr(rd):
-                r, l = posixpath.join(rd, a.filename), os.path.join(ld, a.filename)
+                r, loc = posixpath.join(rd, a.filename), os.path.join(ld, a.filename)
                 if stat.S_ISDIR(a.st_mode):
-                    get_dir(r, l)
+                    get_dir(r, loc)
                 else:
-                    sftp.get(r, l)
+                    sftp.get(r, loc)
         get_dir(rdir + "/out", out_dir)
         sftp.close()
         c.close()

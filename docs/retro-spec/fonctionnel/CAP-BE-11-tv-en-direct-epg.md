@@ -36,7 +36,7 @@ Le backend expose les chaînes Live IPTV des comptes Xtream, répliquées locale
 ### Détail d'une chaîne (`GET /api/live/channels/{stream_id}`)
 
 - **FR-BE-537** — `server_id` est obligatoire (sinon 422) ; la paire `(stream_id, server_id)` doit exister, sinon 404 « Channel not found ». Pas de validation du format de `server_id`, et pas de filtre de visibilité : une chaîne masquée par catégorie reste lisible par son identifiant. — *implémenté* — preuve `app/api/live.py:86-102` · test `tests/test_router_http_coverage.py:315-328`
-- **FR-BE-538** — L'app TV n'appelle jamais cet endpoint : la méthode Retrofit `getLiveChannel` est déclarée mais absente de l'interface `BackendRepository` et sans appelant. — *mort* (côté TV ; l'endpoint backend fonctionne et reste **conservé volontairement** : API publique testée, le code mort est côté TV) — preuve : déclaration Retrofit `getLiveChannel` retiré au Lot 6 A (TV `d12ec586`, 2026-10-03) ; `tv:domain/src/main/java/com/chakir/plexhubtv/domain/repository/BackendRepository.kt:128` (seul `getLiveChannels` y figure) · test : aucun
+- **FR-BE-538** — L'app TV n'appelait jamais cet endpoint : la méthode Retrofit `getLiveChannel` était déclarée mais absente de l'interface `BackendRepository` et sans appelant. — *retiré* côté TV au Lot 6 A (l'endpoint backend fonctionne et reste **conservé volontairement** : API publique testée, le code mort est côté TV) — preuve : déclaration Retrofit `getLiveChannel` retiré au Lot 6 A (TV `d12ec586`, 2026-10-03) ; `tv:domain/src/main/java/com/chakir/plexhubtv/domain/repository/BackendRepository.kt:128` (seul `getLiveChannels` y figure) · test : aucun
 
 ### URL de lecture live (`GET /api/live/channels/{stream_id}/stream`)
 

@@ -1112,7 +1112,15 @@ async def _fetch_streams_by_categories(
 async def _refresh_categories(db, account, account_id: str):
     """Fetch categories from Xtream and upsert into xtream_categories table."""
     from app.models.database import XtreamCategory
+    from app.services.category_service import default_is_allowed_for_new_category
     from sqlalchemy.dialects.sqlite import insert as sqlite_upsert
+
+    # A category the provider just introduced must not be synced/shown until
+    # the operator has reviewed it (blacklist mode excepted). The upsert below
+    # never touches is_allowed on conflict, so known categories keep their flag.
+    new_allowed = default_is_allowed_for_new_category(
+        getattr(account, "category_filter_mode", None) or "all"
+    )
 
     try:
         vod_cats = await xtream_service.get_vod_categories(account)
@@ -1138,7 +1146,7 @@ async def _refresh_categories(db, account, account_id: str):
                 "category_id": cat_id,
                 "category_type": cat_type,
                 "category_name": cat_name,
-                "is_allowed": True,
+                "is_allowed": new_allowed,
                 "last_fetched_at": now,
             })
         return rows

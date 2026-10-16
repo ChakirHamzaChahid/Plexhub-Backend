@@ -63,6 +63,17 @@ async def get_categories(
     return list(categories), filter_mode
 
 
+def default_is_allowed_for_new_category(filter_mode: str | None) -> bool:
+    """Initial ``is_allowed`` of a category the provider has just introduced.
+
+    Only ``blacklist`` ("everything except what I block") keeps a new category
+    allowed. In ``whitelist`` -- and in ``all``, where the flag is cosmetic
+    until the operator switches mode -- a category nobody has reviewed yet must
+    not sync or surface its media (typically non-FR content).
+    """
+    return filter_mode == "blacklist"
+
+
 async def upsert_category(
     db: AsyncSession,
     account_id: str,
@@ -545,8 +556,10 @@ async def refresh_categories_from_provider(
     """Force-refresh VOD + series categories from the Xtream provider.
 
     Fetches current categories from Xtream and upserts them (preserves
-    existing is_allowed settings — upsert_category only sets is_allowed=True
-    on first insert; already-known categories keep their prior flag).
+    existing is_allowed settings — upsert_category only sets is_allowed on
+    first insert, from ``default_is_allowed_for_new_category`` (False unless
+    the account is in blacklist mode); already-known categories keep their
+    prior flag).
 
     Caller commits (CR-C04 lock-retry stays with the caller, unchanged).
 
@@ -583,6 +596,8 @@ async def refresh_categories_from_provider(
         account.password,
     )
 
+    new_allowed = default_is_allowed_for_new_category(account.category_filter_mode)
+
     # Upsert VOD categories
     for cat in vod_categories:
         await upsert_category(
@@ -591,7 +606,7 @@ async def refresh_categories_from_provider(
             cat.get("category_id", ""),
             "vod",
             cat.get("category_name", "Unknown"),
-            is_allowed=True,  # Default to allowed, preserves existing if already exists
+            is_allowed=new_allowed,  # first insert only; existing rows keep their flag
         )
 
     # Upsert Series categories
@@ -602,7 +617,7 @@ async def refresh_categories_from_provider(
             cat.get("category_id", ""),
             "series",
             cat.get("category_name", "Unknown"),
-            is_allowed=True,
+            is_allowed=new_allowed,
         )
 
     return len(vod_categories), len(series_categories)

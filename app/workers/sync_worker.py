@@ -1032,13 +1032,33 @@ def _get_allowed_category_ids(filter_mode: str, allowed_categories: dict) -> lis
     return [cat_id for cat_id, is_allowed in allowed_categories.items() if is_allowed]
 
 
+def _cleanup_category_ids(
+    allowed: dict[str, bool], failed_category_ids: set[str], content_type: str,
+) -> list[str]:
+    """Categories whose rows the differential cleanup may delete (FR-366).
+
+    Choice (a) over (b) (ADR 0007): the fetch is per category, so a category
+    whose fetch failed is simply excluded from the cleanup scope -- its
+    existing rows are kept -- while fully fetched categories are still
+    cleaned. (b) "skip the whole type if anything failed" would let one
+    flaky category freeze delisting for every other one. A total failure
+    yields no keys at all, so the `if all_*_keys` guard still skips cleanup.
+    """
+    skipped = sorted(k for k, v in allowed.items() if v and k in failed_category_ids)
+    if skipped:
+        logger.warning(
+            f"{content_type}: cleanup skipped for {len(skipped)} categories whose fetch failed: {skipped}"
+        )
+    return [k for k, v in allowed.items() if v and k not in failed_category_ids]
+
+
 async def _fetch_streams_by_categories(
     fetch_fn,
     account,
     category_ids: list[str],
     content_type: str,
     concurrency: int = 10,
-) -> list[dict]:
+) -> tuple[list[dict], set[str]]:
     """
     Fetch streams from Xtream API per-category with concurrency control.
 
@@ -1050,7 +1070,11 @@ async def _fetch_streams_by_categories(
         concurrency: Max concurrent API calls
 
     Returns:
-        Merged list of all stream DTOs across requested categories.
+        ``(streams, failed_category_ids)``: the merged stream DTOs of every
+        category that was fetched, and the ids (str) of the categories whose
+        fetch raised. FR-366 (ADR 0007): a failed category yields no streams
+        but is NOT an empty category -- callers must exclude it from the
+        differential cleanup, or all its existing rows would be deleted.
     """
     # Clamp to the provider's max_connections cap when set (>0). Xtream uses
     # 0 to mean "unlimited", so only narrow concurrency, never widen it past
@@ -1061,15 +1085,14 @@ async def _fetch_streams_by_categories(
         concurrency = min(concurrency, max_conns)
     sem = asyncio.Semaphore(max(1, concurrency))
     all_streams: list[dict] = []
-    failed = 0
+    failed_ids: set[str] = set()
 
     async def _fetch_one(cat_id: str) -> list[dict]:
-        nonlocal failed
         try:
             async with sem:
                 return await fetch_fn(account, category_id=cat_id)
         except Exception as e:
-            failed += 1
+            failed_ids.add(str(cat_id))
             logger.warning(f"Failed to fetch {content_type} category {cat_id}: {e}")
             return []
 
@@ -1081,15 +1104,23 @@ async def _fetch_streams_by_categories(
     logger.info(
         f"{content_type}: fetched {len(all_streams)} items from "
         f"{len(category_ids)} allowed categories "
-        f"({failed} failed)"
+        f"({len(failed_ids)} failed)"
     )
-    return all_streams
+    return all_streams, failed_ids
 
 
 async def _refresh_categories(db, account, account_id: str):
     """Fetch categories from Xtream and upsert into xtream_categories table."""
     from app.models.database import XtreamCategory
+    from app.services.category_service import default_is_allowed_for_new_category
     from sqlalchemy.dialects.sqlite import insert as sqlite_upsert
+
+    # A category the provider just introduced must not be synced/shown until
+    # the operator has reviewed it (blacklist mode excepted). The upsert below
+    # never touches is_allowed on conflict, so known categories keep their flag.
+    new_allowed = default_is_allowed_for_new_category(
+        getattr(account, "category_filter_mode", None) or "all"
+    )
 
     try:
         vod_cats = await xtream_service.get_vod_categories(account)
@@ -1115,7 +1146,7 @@ async def _refresh_categories(db, account, account_id: str):
                 "category_id": cat_id,
                 "category_type": cat_type,
                 "category_name": cat_name,
-                "is_allowed": True,
+                "is_allowed": new_allowed,
                 "last_fetched_at": now,
             })
         return rows
@@ -1236,10 +1267,11 @@ async def sync_account(account_id: str, job_id: str | None = None):
                 # --- VOD Sync (incremental with detailed metadata) ---
                 logger.info(f"Syncing VOD for account {account_id}")
                 vod_cat_ids = _get_allowed_category_ids(filter_mode, allowed_vod)
+                vod_failed_cats: set[str] = set()
                 try:
                     if vod_cat_ids is not None:
                         logger.info(f"VOD: fetching {len(vod_cat_ids)} allowed categories (whitelist mode)")
-                        vod_streams = await _fetch_streams_by_categories(
+                        vod_streams, vod_failed_cats = await _fetch_streams_by_categories(
                             xtream_service.get_vod_streams, account_snapshot, vod_cat_ids, "VOD"
                         )
                     else:
@@ -1247,6 +1279,7 @@ async def sync_account(account_id: str, job_id: str | None = None):
                 except Exception as e:
                     logger.error(f"Failed to fetch VOD streams: {e}")
                     vod_streams = []
+                    vod_failed_cats = set()  # whole-type failure: empty keys -> no cleanup
 
                 # Load existing dto_hashes for incremental sync
                 hash_result = await db.execute(
@@ -1340,10 +1373,11 @@ async def sync_account(account_id: str, job_id: str | None = None):
                     else:
                         # In whitelist/blacklist mode: only cleanup items in allowed categories
                         # (don't touch items in non-synced categories)
-                        synced_cat_ids = [k for k, v in allowed_vod.items() if v]
-                        await differential_cleanup_filtered(
-                            db, server_id, synced_cat_ids, all_vod_keys, media_type="movie"
-                        )
+                        synced_cat_ids = _cleanup_category_ids(allowed_vod, vod_failed_cats, "VOD")
+                        if synced_cat_ids:
+                            await differential_cleanup_filtered(
+                                db, server_id, synced_cat_ids, all_vod_keys, media_type="movie"
+                            )
                 if vod_rows:
                     await enqueue_for_enrichment(db, vod_rows)
                 # Same-session coupling -- see module-level note (ADR 0004
@@ -1356,10 +1390,11 @@ async def sync_account(account_id: str, job_id: str | None = None):
                 # --- Series Sync (incremental) ---
                 logger.info(f"Syncing Series for account {account_id}")
                 series_cat_ids = _get_allowed_category_ids(filter_mode, allowed_series)
+                series_failed_cats: set[str] = set()
                 try:
                     if series_cat_ids is not None:
                         logger.info(f"Series: fetching {len(series_cat_ids)} allowed categories (whitelist mode)")
-                        series_list = await _fetch_streams_by_categories(
+                        series_list, series_failed_cats = await _fetch_streams_by_categories(
                             xtream_service.get_series, account_snapshot, series_cat_ids, "Series"
                         )
                     else:
@@ -1367,6 +1402,7 @@ async def sync_account(account_id: str, job_id: str | None = None):
                 except Exception as e:
                     logger.error(f"Failed to fetch series: {e}")
                     series_list = []
+                    series_failed_cats = set()
 
                 # Load existing series dto_hashes
                 hash_result = await db.execute(
@@ -1439,10 +1475,13 @@ async def sync_account(account_id: str, job_id: str | None = None):
                     if filter_mode == "all":
                         await differential_cleanup(db, server_id, "all", all_series_keys, media_type="show")
                     else:
-                        synced_series_cat_ids = [k for k, v in allowed_series.items() if v]
-                        await differential_cleanup_filtered(
-                            db, server_id, synced_series_cat_ids, all_series_keys, media_type="show"
+                        synced_series_cat_ids = _cleanup_category_ids(
+                            allowed_series, series_failed_cats, "Series"
                         )
+                        if synced_series_cat_ids:
+                            await differential_cleanup_filtered(
+                                db, server_id, synced_series_cat_ids, all_series_keys, media_type="show"
+                            )
                 # Same-session coupling -- see module-level note (ADR 0004
                 # D4): the Episodes phase right after reads/writes the SAME
                 # `db`. Left honest-not-retrying.
@@ -1614,10 +1653,11 @@ async def sync_account(account_id: str, job_id: str | None = None):
                 # --- Live Channels Sync (incremental) ---
                 logger.info(f"Syncing Live channels for account {account_id}")
                 live_cat_ids = _get_allowed_category_ids(filter_mode, allowed_live)
+                live_failed_cats: set[str] = set()
                 try:
                     if live_cat_ids is not None:
                         logger.info(f"Live: fetching {len(live_cat_ids)} allowed categories (whitelist mode)")
-                        live_streams = await _fetch_streams_by_categories(
+                        live_streams, live_failed_cats = await _fetch_streams_by_categories(
                             xtream_service.get_live_streams, account_snapshot, live_cat_ids, "Live"
                         )
                     else:
@@ -1625,6 +1665,7 @@ async def sync_account(account_id: str, job_id: str | None = None):
                 except Exception as e:
                     logger.error(f"Failed to fetch live streams: {e}")
                     live_streams = []
+                    live_failed_cats = set()
 
                 # Load existing live dto_hashes for incremental sync
                 hash_result = await db.execute(
@@ -1680,10 +1721,11 @@ async def sync_account(account_id: str, job_id: str | None = None):
                     if filter_mode == "all":
                         await differential_cleanup_live(db, server_id, all_live_ids)
                     else:
-                        synced_live_cat_ids = [k for k, v in allowed_live.items() if v]
-                        await differential_cleanup_live_filtered(
-                            db, server_id, synced_live_cat_ids, all_live_ids
-                        )
+                        synced_live_cat_ids = _cleanup_category_ids(allowed_live, live_failed_cats, "Live")
+                        if synced_live_cat_ids:
+                            await differential_cleanup_live_filtered(
+                                db, server_id, synced_live_cat_ids, all_live_ids
+                            )
 
                 # Same-session coupling -- see module-level note (ADR 0004
                 # D4): the visibility/adult/cleanup finalize block right

@@ -57,7 +57,9 @@ async def test_refresh_categories_upserts_and_returns_counts(monkeypatch, db_ses
     assert by_key[("1", "vod")].category_name == "Action"
     assert by_key[("2", "vod")].category_name == "Comedy"
     assert by_key[("10", "series")].category_name == "Drama"
-    assert all(r.is_allowed for r in rows)  # default-allowed on first insert
+    # Account is in the default 'all' mode: a never-reviewed category starts
+    # disallowed (only blacklist mode keeps new categories allowed).
+    assert not any(r.is_allowed for r in rows)
 
 
 async def test_refresh_categories_preserves_existing_is_allowed(monkeypatch, db_session):

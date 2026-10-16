@@ -120,7 +120,7 @@ Côté app TV : aucun parcours (voir Dépendances).
 ## Dépendances
 
 - Autres capacités : `CAP-BE-02` (Basic Auth admin, garde CSRF, page des clés) ; `CAP-BE-22` (tiroir de scrape, proxy de poster, boutons Appliquer, Déverrouiller, Effacer et Re-scrape de la ligne, section « À vérifier », lot) ; `CAP-BE-08` (`list_outages` pour le bandeau) ; `CAP-BE-06` (le worker d'enrichissement consomme `enrichment_queue` et honore le verrou) ; `CAP-BE-09` (reconstruction du snapshot unifié, lu par les endpoints `/api/media/*/unified`) ; `CAP-BE-23`, `CAP-BE-18`, `CAP-BE-19`, `CAP-BE-20` (liens de la barre de navigation).
-- Autre dépôt : l'app TV n'appelle jamais `/admin*`. Son interface backend ne déclare que des chemins `api/…` (`tv:core/network/src/main/java/com/chakir/plexhubtv/core/network/backend/BackendApiService.kt:12`, `tv:core/network/src/main/java/com/chakir/plexhubtv/core/network/backend/BackendApiService.kt:18`). Elle voit l'effet des corrections d'ids par le catalogue unifié.
+- Autre dépôt : l'app TV n'appelle jamais `/admin*`. Son interface backend ne déclare que des chemins `api/…` (`tv:core/network/src/main/java/com/chakir/plexhubtv/core/network/backend/BackendApiService.kt:11`, `tv:core/network/src/main/java/com/chakir/plexhubtv/core/network/backend/BackendApiService.kt:17`). Elle voit l'effet des corrections d'ids par le catalogue unifié.
 - Données : `media` (lecture, et écriture des ids, du verrou, de `unification_id`), `enrichment_queue`, `scrape_review` (lecture), `xtream_accounts` (bandeau de panne), `media_group`/`media_group_member` (reconstruction planifiée). Schéma : `docs/retro-spec/technique/db/`.
 
 ## Écarts relevés

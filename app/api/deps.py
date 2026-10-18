@@ -10,6 +10,10 @@ Dependencies:
     missing/invalid key. No sqlite-vec dependency.
   verify_api_key — same auth, plus the AI-specific sqlite-vec check (503 when the
     vector extension failed to load). Used by the AI router.
+  verify_scrape_scope / verify_scrape_admin_scope — scrape gateway guards
+    (ADR 0008 § D2.4): master secret or a key carrying `scrape` (resp.
+    `scrape.admin`). Errors are gateway-shaped: 401 `invalid_api_key`,
+    403 `insufficient_scope` (detail = {"code", "message"}).
   verify_master_key — accepts ONLY the master secret; guards key-management
     endpoints so a per-user key cannot mint or revoke other keys.
   verify_admin_basic_auth — HTTP Basic Auth for the browser /admin UI.
@@ -19,12 +23,21 @@ Dependencies:
     speaks basic_auth: natively). METRICS_PUBLIC=true is an explicit,
     logged escape hatch that reopens the endpoint with no credential check.
 
+Scopes (ADR 0008): a per-user key whose `scopes` column is NOT empty is
+*confined* to the routes of its scopes — `verify_backend_secret` and
+`verify_api_key` refuse it with 403 `insufficient_scope`, even if the column
+only holds unknown values (which grant nothing). Master and unscoped keys
+keep their exact former behaviour (same error texts). The resolved
+`Principal` is put on `request.state.principal` (first use of request.state
+in the repo — read by the gateway's per-key limiter, ADR 0009).
+
 Constant-time comparison on the master secret avoids timing oracles — plain `==`
 is forbidden and gated by a grep-based acceptance test.
 """
 from __future__ import annotations
 
 import secrets
+from dataclasses import dataclass
 
 from fastapi import Depends, Header, HTTPException, Request, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -51,26 +64,85 @@ def _is_master(x_api_key: str | None) -> bool:
     return secrets.compare_digest(x_api_key.encode("utf-8"), master.encode("utf-8"))
 
 
+@dataclass(frozen=True)
+class Principal:
+    """Who is calling (ADR 0008 § D2.3).
+
+    ``scopes`` holds only KNOWN scopes (unknown values grant nothing).
+    ``confined`` is True as soon as the stored column is non-empty — even with
+    unknown values only — so such a key never falls back to "unscoped" rights.
+    Always False for the master secret.
+    """
+
+    is_master: bool
+    key_id: str | None
+    scopes: frozenset[str]
+    confined: bool = False
+
+
+_MASTER_PRINCIPAL = Principal(is_master=True, key_id=None, scopes=frozenset())
+
+
+async def _resolve_principal(
+    x_api_key: str | None, request: Request | None
+) -> Principal | None:
+    """Resolve the caller ONCE per request: master (constant-time) or an active
+    per-user key (``api_key_service.resolve``). None when unauthenticated.
+    Sets ``request.state.principal`` when ``request`` is not None."""
+    principal: Principal | None = None
+    if x_api_key:
+        if _is_master(x_api_key):
+            principal = _MASTER_PRINCIPAL
+        else:
+            row = await api_key_service.resolve(x_api_key, client_ip=_client_ip(request))
+            if row is not None:
+                raw = getattr(row, "scopes", "") or ""
+                principal = Principal(
+                    is_master=False,
+                    key_id=row.id,
+                    scopes=api_key_service.parse_scopes(raw),
+                    confined=bool(raw.strip()),
+                )
+    if request is not None:
+        request.state.principal = principal
+    return principal
+
+
 async def _authenticate(x_api_key: str | None, request: Request | None) -> bool:
     """True when x_api_key is the master secret OR an active per-user key."""
-    if not x_api_key:
-        return False
-    if _is_master(x_api_key):
-        return True
-    row = await api_key_service.resolve(x_api_key, client_ip=_client_ip(request))
-    return row is not None
+    return await _resolve_principal(x_api_key, request) is not None
+
+
+def _insufficient_scope(message: str) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={"code": "insufficient_scope", "message": message},
+    )
+
+
+_SCOPED_KEY_REFUSED = "This API key is restricted to its scopes and cannot call this route"
+
+
+async def _verify_unscoped_access(x_api_key: str | None, request: Request | None) -> None:
+    """Shared body of verify_backend_secret / verify_api_key (after any
+    guard-specific pre-check): 401 text unchanged, 403 for a confined key."""
+    principal = await _resolve_principal(x_api_key, request)
+    if principal is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid API key",
+        )
+    if principal.confined:
+        raise _insufficient_scope(_SCOPED_KEY_REFUSED)
 
 
 async def verify_backend_secret(
     request: Request,
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
 ) -> None:
-    """Guard the JSON API. Master secret or any active per-user key. Fail-closed."""
-    if not await _authenticate(x_api_key, request):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid API key",
-        )
+    """Guard the JSON API. Master secret or any active UNSCOPED per-user key.
+    Fail-closed (401); a key carrying scopes gets 403 insufficient_scope."""
+    await _verify_unscoped_access(x_api_key, request)
 
 
 async def verify_api_key(
@@ -83,11 +155,40 @@ async def verify_api_key(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="AI vector storage unavailable",
         )
-    if not await _authenticate(x_api_key, request):
+    await _verify_unscoped_access(x_api_key, request)
+
+
+async def _require_scope(
+    scope: str, x_api_key: str | None, request: Request | None
+) -> Principal:
+    principal = await _resolve_principal(x_api_key, request)
+    if principal is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid API key",
+            detail={"code": "invalid_api_key", "message": "Missing, unknown, revoked or expired API key"},
         )
+    if not principal.is_master and scope not in principal.scopes:
+        raise _insufficient_scope(f"This API key lacks the required scope '{scope}'")
+    return principal
+
+
+# Two NAMED guards, no `verify_scope("…")` factory: route_audit recognises a
+# guard by its function __name__, which a closure would not carry (ADR 0008 § D2.4).
+async def verify_scrape_scope(
+    request: Request,
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+) -> None:
+    """Scrape gateway read routes: master secret or a key carrying `scrape`."""
+    await _require_scope("scrape", x_api_key, request)
+
+
+async def verify_scrape_admin_scope(
+    request: Request,
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+) -> None:
+    """Scrape gateway admin routes (invalidate/purge): master secret or a key
+    carrying `scrape.admin` (independent of `scrape`)."""
+    await _require_scope("scrape.admin", x_api_key, request)
 
 
 async def verify_master_key(

@@ -60,6 +60,11 @@ _AUTH_DEPENDENCY_NAMES: frozenset[str] = frozenset(
         "verify_api_key",
         "verify_master_key",
         "verify_admin_basic_auth",
+        # Scrape gateway guards (ADR 0008 § D2.4, lot B1). route_audit does not
+        # tell them apart: a structural test checks the expected guard per
+        # gateway route (B1-11).
+        "verify_scrape_scope",
+        "verify_scrape_admin_scope",
     }
 )
 

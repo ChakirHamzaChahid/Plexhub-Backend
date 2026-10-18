@@ -109,7 +109,7 @@ def test_guarded_api_route_via_endpoint_level_dependency_passes():
 
 
 def test_recognised_dependency_names_are_required_not_just_any_dependency():
-    """A dependency that ISN'T one of the 4 recognised guards doesn't count —
+    """A dependency that ISN'T one of the 6 recognised guards doesn't count —
     the audit checks for a *known* auth callable, not merely "has deps"."""
 
     async def _unrelated_dependency():
@@ -128,6 +128,62 @@ def test_recognised_dependency_names_are_required_not_just_any_dependency():
 
     with pytest.raises(RuntimeError):
         assert_api_routes_authenticated(app)
+
+
+def test_recognised_guard_names_are_exactly_the_six_known_guards():
+    """Fige l'ensemble EXACT des gardes reconnus (ADR 0008 § D2.4, B1-03) :
+    l'élargir sans toucher ce test doit échouer."""
+    from app.api.route_audit import _AUTH_DEPENDENCY_NAMES
+
+    assert _AUTH_DEPENDENCY_NAMES == frozenset(
+        {
+            "verify_backend_secret",
+            "verify_api_key",
+            "verify_master_key",
+            "verify_admin_basic_auth",
+            "verify_scrape_scope",
+            "verify_scrape_admin_scope",
+        }
+    )
+
+
+def test_every_recognised_guard_name_is_a_real_function_of_deps():
+    from app.api import deps
+    from app.api.route_audit import _AUTH_DEPENDENCY_NAMES
+
+    for name in _AUTH_DEPENDENCY_NAMES:
+        fn = getattr(deps, name)
+        assert fn.__name__ == name
+
+
+@pytest.mark.parametrize("guard_name", ["verify_scrape_scope", "verify_scrape_admin_scope"])
+def test_scope_guards_satisfy_the_audit_per_route(guard_name):
+    """Les deux gardes de la passerelle, posés PAR ROUTE (sans dépendance de
+    router), satisfont l'audit ; retirer le garde le fait mordre."""
+    from app.api import deps
+
+    guard = getattr(deps, guard_name)
+
+    guarded = FastAPI()
+    router = APIRouter(prefix="/api/scrape-test")
+
+    @router.get("/x", dependencies=[Depends(guard)])
+    async def x():
+        return {}
+
+    guarded.include_router(router)
+    assert_api_routes_authenticated(guarded)  # must not raise
+
+    bare = FastAPI()
+    bare_router = APIRouter(prefix="/api/scrape-test")
+
+    @bare_router.get("/x")
+    async def y():
+        return {}
+
+    bare.include_router(bare_router)
+    with pytest.raises(RuntimeError):
+        assert_api_routes_authenticated(bare)
 
 
 def test_removing_a_real_guard_makes_the_boot_assertion_bite():

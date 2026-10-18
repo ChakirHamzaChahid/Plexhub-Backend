@@ -122,9 +122,16 @@ def test_parse_scopes_known_values():
 
 def test_parse_scopes_ignores_unknown_and_logs_once(caplog):
     api_key_service._LOGGED_UNKNOWN_SCOPES.discard("zz-unknown-scope")
-    with caplog.at_level(logging.WARNING, logger="plexhub.apikey"):
-        assert api_key_service.parse_scopes("scrape zz-unknown-scope") == frozenset({"scrape"})
-        assert api_key_service.parse_scopes("zz-unknown-scope") == frozenset()
+    # Le logger `plexhub` ne propage plus vers la racine une fois `app.main`
+    # importé (config de logging) : on attache le handler de capture directement.
+    svc_logger = api_key_service.logger
+    svc_logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.WARNING, logger="plexhub.apikey"):
+            assert api_key_service.parse_scopes("scrape zz-unknown-scope") == frozenset({"scrape"})
+            assert api_key_service.parse_scopes("zz-unknown-scope") == frozenset()
+    finally:
+        svc_logger.removeHandler(caplog.handler)
     hits = [r for r in caplog.records if "zz-unknown-scope" in r.getMessage()]
     assert len(hits) == 1
 

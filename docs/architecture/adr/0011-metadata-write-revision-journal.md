@@ -72,6 +72,22 @@ durationImplausible = duration < IMPLAUSIBLE_DURATION_MS`. `variants.items` ≤ 
 `(filter, sort_order)` en octets) en tête. `lookup` ≤ 50 + `truncated`, `items` paginé par curseur opaque keyset sur
 `(server_id, rating_key)`, `episodes` ≤ 2 000. Lignes cachées et adultes comprises.
 
+### D2.9 Durcissements issus des relectures indépendantes (2026-10-18)
+- **Plafond de concurrence** : `MAX_CONCURRENT_WRITERS = 3` écrivains au plus attendent / tiennent le verrou d'écriture
+  (sémaphore, une connexion du pool API chacun) ; les autres font la queue sans connexion et rendent 503 `database_busy`
+  à l'échéance. Une salve de PATCH ne peut plus vider le pool qui sert le reste de l'API.
+- **`busy_timeout` restauré sur annulation** (nettoyage protégé par `asyncio.shield`).
+- **Caractères** : contrôle, substituts isolés et points de code non attribués / non-caractères sont refusés (400
+  `invalid_field`) ; les caractères de format (ex. la liaison de largeur nulle persane) restent permis. `reason` suit les
+  mêmes règles et sa borne (200) est un 400, pas un 422 (le 422 de Pydantic recopie l'entrée et ne peut pas être rendu si elle
+  contient un substitut isolé — 500 après le `COMMIT`).
+- **Identifiants** : regex ASCII + `fullmatch` (chiffres Unicode et saut de ligne final refusés) ; `votes` ≤ 2^31−1.
+- **Curseurs** : `at_ms` borné ; une imbrication profonde ou un entier démesuré donne 400.
+- **Annulation et regroupement** : la restitution du `unification_id` enregistré n'est valable que si titre, année et ids
+  du résultat sont ceux d'avant l'édition ; sinon il est recalculé depuis le résultat (une édition de titre postérieure ne
+  laisse plus un groupe périmé sur une ligne verrouillée). Le 409 de regroupement expose la première variante qui
+  regroupe réellement (jamais « avant == après »).
+
 ### D2.8 Précisions retenues à l'implémentation (2026-10-18)
 - **Règle du verrou à l'annulation** : elle ne s'applique que si l'édition annulée a *changé* le verrou
   (`lockBefore ≠ lockAfter`) ; une édition faite sur une ligne déjà verrouillée n'a rien à restituer côté verrou et

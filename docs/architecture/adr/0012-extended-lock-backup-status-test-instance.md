@@ -65,6 +65,11 @@ Booléen d'environnement, défaut `true` (production inchangée). `false` ⇒ `f
 pas de reap Plex ; l'auto-provision Xtream reste commandée par ses variables. `POST /api/accounts` lance toujours sa
 synchro. Documenté au runbook ; lu par `config.py`, présent dans `.env.example` (invariant testé).
 
+### D2.6 Durcissement (revue de sécurité, 2026-10-18)
+`BACKGROUND_JOBS_ENABLED` ne passe à faux que sur `false`/`0`/`no`/`off` explicites : une valeur vide (`FOO=` injecté par
+un `env_file`), mal orthographiée ou inconnue vaut `true`. Le contraire (idiome `in ("true","1")`) aurait coupé en silence
+toutes les tâches de fond d'une production. Une sauvegarde sur base absente enregistre une tentative `failed`.
+
 ### D2.5 Précisions retenues à l'implémentation (2026-10-18)
 - **L'import NFO supplante la règle ADR 0005 L5 pour les ids** : une ligne verrouillée ne reçoit plus aucun id du NFO,
   même en mode « fill-missing » (un id laissé vide peut être un effacement voulu via l'API). Les colonnes d'images
@@ -72,7 +77,7 @@ synchro. Documenté au runbook ; lu par `config.py`, présent dans `.env.example
   Sur une ligne verrouillée, le NFO ne recalcule ni `unification_id`/`history_group_key` ni `display_rating`.
 - **L'upsert de synchronisation** protège `(METADATA_WRITABLE_COLUMNS ∪ {resolved_thumb_url, resolved_art_url})   {tmdb_id, unification_id, history_group_key}` par `CASE(match_locked)` ; ces trois-là gardent leurs blocs dédiés.
   Les bandes-annonces de séries passent par `sync_worker.apply_series_trailers` (extraite pour être testable).
-- **Le test d'inventaire** (`tests/test_media_writers_inventory.py`) compte 28 couples (fichier, fonction, opération) ;
+- **Le test d'inventaire** (`tests/test_media_writers_inventory.py`) compte 38 sites d'écriture, soit 26 couples (fichier, fonction, opération) ;
   les chaînes SQL des docstrings sont ignorées.
 - **Écrivains « opérateur »** (`metadata_service.write`, `update_external_ids`, `manual_scrape_service.work`) ne sont pas
   des écrivains automatiques : ils posent ou respectent le verrou eux-mêmes.

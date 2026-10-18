@@ -44,6 +44,12 @@ inchangée. Test structurel **route par route** : une route d'écriture ne porte
 (`METADATA_WRITE_RATE_LIMIT_PER_MINUTE`, 90), compte par clé (`key_id` ou `master`), dépendance déclarée **après** le
 garde, 429 `rate_limited` + `Retry-After` avant tout traitement. Remise à zéro dans `tests/conftest.py`.
 
+### D2.5 Précision (revue de sécurité, 2026-10-18)
+L'indépendance `media.write` / `media.read` vaut pour les **routes** : une clé `media.write` seule n'atteint aucune lecture ni
+simulation. Mais le résultat d'une écriture (`before`, `after`, `variants`) et le `currentRevision` d'un 412 rendent le contenu
+de l'élément visé — des métadonnées non secrètes. Choix : le documenter (écart X31) plutôt que d'appauvrir ces réponses, dont le
+client a besoin ; la clé d'écriture de plexhubTMM porte de toute façon les deux scopes.
+
 ## D3 — Alternatives écartées
 - Garde unique `verify_scope(...)` paramétrique : closure non reconnue par identité (ADR 0008 D2.4).
 - Second `add_middleware(body_limit)` : casse l'ordre figé et double l'enveloppe ASGI.

@@ -85,7 +85,7 @@ SQLite mono-écrivain : tout writer critique est testé sous **vrai verrou WAL**
 retry sur la même session ; migrations idempotentes en fin de chaîne, défauts au niveau SQL (leçons 025/027) ; aucune
 clé, URL fournisseur ni corps complet dans les journaux INFO ; état process-local (limiteurs) ⇒ pas de `--workers N>1`.
 
-## Écarts au contrat (X1 → X16, à reporter dans plexhubTMM)
+## Écarts au contrat (X1 → X16 à la spec ; liste **finale** X1 → X33 dans `docs/b2-remise-plexhubtmm.md`)
 
 | # | Contrat | Retenu | Action plexhubTMM |
 |---|---|---|---|

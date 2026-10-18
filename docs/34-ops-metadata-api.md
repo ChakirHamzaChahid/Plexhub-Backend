@@ -16,6 +16,9 @@ Spec : `docs/10-prd-metadata-api.md`, ADR 0010 / 0011 / 0012. Remise à plexhubT
   plus sur les colonnes que l'API écrit.
 - Tout est journalisé (`metadata_edits`) avec l'image avant/après de **chaque variante** : on peut annuler.
 - Les clés ne sont jamais créées par le code : vous les créez vous-même (§ 1).
+- `PATCH /api/media/{rating_key}` (route historique, clé sans scope) reste possible et **n'est pas journalisé** : il peut
+  écraser les ids d'une ligne verrouillée par cette API. Une clé `media.write` seule peut lire l'état d'un élément par le
+  résultat d'une écriture (ADR 0010 D2.5).
 
 ## 1. Créer les clés
 
@@ -44,8 +47,8 @@ Règles à connaître :
 
 ## 2. Révoquer, renouveler
 
-- Révocation immédiate : `/admin/keys` (bouton Révoquer) ou `DELETE /api/admin/keys/{id}` avec la clé maître. La
-  clé révoquée ou expirée reçoit 401 `invalid_api_key`.
+- Révocation immédiate : `/admin/keys` (bouton Révoquer) ou `POST /api/admin/keys/{id}/revoke` avec la clé maître
+  (`DELETE /api/admin/keys/{id}` est aussi une révocation douce : la ligne reste, pour l'audit). Une clé révoquée ou expirée reçoit 401 `invalid_api_key`.
 - Renouvellement : créer la nouvelle clé, la remettre à plexhubTMM, puis révoquer l'ancienne **avant** l'expiration.
 - L'historique garde l'identifiant **interne** de la clé (`keyId`), jamais la clé ni son préfixe ; `master` pour le
   secret maître.
@@ -62,7 +65,11 @@ curl -sS -H "X-API-Key: $KEY" "$BACKEND_URL/api/metadata/v1/edits/$EDIT_ID"
 
 Du plus récent au plus ancien ; `nextCursor` pour la suite. L'historique reste lisible même si la synchronisation
 a supprimé l'élément (un titre retiré du fournisseur disparaît, ses éditions restent). Il n'y a **aucune purge
-automatique** : le volume est faible (écritures manuelles).
+automatique** : le volume est faible (écritures manuelles) — mais **aucun plafond non plus** : une
+écriture pèse jusqu'à ~100 Ko (image avant/après de toutes les variantes + réponse rejouable). Surveiller la taille de
+la table (`SELECT count(*), sum(length(response_json)+length(before_json)+length(after_json)) FROM metadata_edits;`
+sur une **copie** de la base) et, si une clé boucle, la révoquer (§ 2) et baisser
+`METADATA_WRITE_RATE_LIMIT_PER_MINUTE`.
 
 ## 4. Annuler une édition
 

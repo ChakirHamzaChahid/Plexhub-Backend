@@ -435,6 +435,10 @@ class ApiKey(Base):
     revoked_at = Column(BigInteger)              # epoch ms, NULL = active
     last_used_at = Column(BigInteger)            # epoch ms, NULL = never used
     last_used_ip = Column(Text)                  # last client IP seen
+    # Space-separated, sorted, deduplicated scope names (ADR 0008 D2.1, M030).
+    # '' = key without scope. server_default: a NOT NULL without SQL DEFAULT
+    # breaks raw INSERTs (migration-025 lesson).
+    scopes = Column(Text, nullable=False, default="", server_default=text("''"))
 
     __table_args__ = (
         Index("ix_api_keys_key_hash", "key_hash"),

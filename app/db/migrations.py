@@ -62,6 +62,7 @@ async def run_migrations(engine: AsyncEngine) -> None:
     await _migration_027_create_scrape_review(engine)
     await _migration_028_epg_dedup_unique_index(engine)
     await _migration_029_scrape_cache(engine)
+    await _migration_030_api_key_scopes(engine)
 
     logger.info("All migrations completed successfully")
 
@@ -1437,3 +1438,36 @@ async def _migration_029_scrape_cache(engine: AsyncEngine) -> None:
             "CREATE INDEX IF NOT EXISTS ix_scrape_cache_expires_at "
             "ON scrape_cache (expires_at)"
         ))
+
+
+async def _migration_030_api_key_scopes(engine: AsyncEngine) -> None:
+    """Add `api_keys.scopes` (ADR 0008 D2.1, Lot B1).
+
+    `scopes` (TEXT NOT NULL DEFAULT '') -- space-separated, sorted, deduplicated
+    scope names; the empty string means "key without scope" (behaviour of every
+    existing key is unchanged). The SQL-level `DEFAULT ''` is deliberate (the
+    migration-025 lesson, CLAUDE.md piege 6): a `NOT NULL` column without it
+    breaks every raw `INSERT` that enumerates columns, and the ORM column
+    carries `server_default=text("''")` so `create_all` emits the same DDL.
+
+    No backfill: '' is the correct state for every existing key. Validation of
+    the scope values lives in `api_key_service.create_key`, not here.
+
+    Idempotent: the column is probed (PRAGMA table_info) before ADD COLUMN, so
+    a fresh DB (already built by `Base.metadata.create_all`, CR-C05) is a
+    silent no-op; the try/except stays as a safety net for a race with another
+    process's init_db() (piege 7).
+    """
+    logger.info("Migration 030: Adding scopes column to api_keys")
+
+    async with engine.begin() as conn:
+        if await _column_exists(conn, "api_keys", "scopes"):
+            logger.debug("Migration 030: scopes already present, skipping ADD COLUMN")
+            return
+        try:
+            await conn.execute(text(
+                "ALTER TABLE api_keys ADD COLUMN scopes TEXT NOT NULL DEFAULT ''"
+            ))
+            logger.info("Migration 030: scopes column added")
+        except Exception as e:
+            logger.warning("Migration 030: scopes may already exist: %s", e)

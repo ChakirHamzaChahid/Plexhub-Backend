@@ -430,6 +430,20 @@ class Settings:
     # app/utils/ssrf.py, it doesn't narrow it. <=0 disables caching entirely.
     SSRF_DNS_CACHE_SECONDS: int = _safe_int("SSRF_DNS_CACHE_SECONDS", 60)
 
+    # Scrape gateway (lot B1, ADR 0009 D2.3 / PRD FR-012, FR-033, FR-034).
+    # The config only READS the raw values; the clamping to the documented
+    # ranges (TTL success 1..365 d, negative 1..30 d, timeout 5..28 s) lives in
+    # the pure functions of app/services/scrape_keys.py — same split as the EPG
+    # sync (config reads, the service bounds). These TTLs apply ONLY to the new
+    # `scrape_cache` table; the constants of scrape_cache_service and
+    # omdb_scrape_cache_service are deliberately left untouched.
+    SCRAPE_TTL_SUCCESS_DAYS: int = _safe_int("SCRAPE_TTL_SUCCESS_DAYS", 30)
+    SCRAPE_TTL_NEGATIVE_DAYS: int = _safe_int("SCRAPE_TTL_NEGATIVE_DAYS", 3)
+    # Per-API-key rate limit over a sliding minute; <= 0 disables it.
+    SCRAPE_RATE_LIMIT_PER_MINUTE: int = _safe_int("SCRAPE_RATE_LIMIT_PER_MINUTE", 300)
+    # Overall deadline of one gateway request, in seconds.
+    SCRAPE_REQUEST_TIMEOUT_SECONDS: int = _safe_int("SCRAPE_REQUEST_TIMEOUT_SECONDS", 25)
+
     @property
     def has_xtream_env(self) -> bool:
         return bool(self.XTREAM_BASE_URL and self.XTREAM_USERNAME and self.XTREAM_PASSWORD)

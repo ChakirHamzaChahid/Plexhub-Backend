@@ -88,20 +88,23 @@ class PatchFields(_In):
     youtube_trailer: str | None = None
 
 
+# `reason` (0..200 characters) is NOT bounded here: a pydantic length error is a 422 that echoes
+# the offending input back, which crashes the response when it holds a lone surrogate. The bound
+# and the character rules live in `metadata_fields.validate_reason` (400 `invalid_field`).
 class PatchBody(_In):
     fields: PatchFields = Field(default_factory=PatchFields)
     allow_regroup: bool = False
-    reason: str | None = Field(default=None, max_length=200)
+    reason: str | None = None
 
 
 class RevertBody(_In):
     allow_regroup: bool = False
-    reason: str | None = Field(default=None, max_length=200)
+    reason: str | None = None
 
 
 class LockBody(_In):
     locked: bool
-    reason: str | None = Field(default=None, max_length=200)
+    reason: str | None = None
 
 
 # ─── Building blocks ─────────────────────────────────────────────────────────

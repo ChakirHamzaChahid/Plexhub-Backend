@@ -38,7 +38,7 @@ from app.api import (
 from app.utils.request_context import RequestIdLogFilter, RequestIdMiddleware
 from app.utils.job_health import mark_job_success, set_master, track_job
 
-APP_VERSION = "1.12.0"
+APP_VERSION = "1.13.0"
 
 # First run of the opt-in `epg_sync` job, counted from boot (see lifespan).
 _EPG_SYNC_FIRST_RUN_DELAY = timedelta(minutes=5)

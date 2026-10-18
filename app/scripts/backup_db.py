@@ -304,6 +304,7 @@ def run_backup(retention_days: int | None = None) -> Path:
     Returns the new backup path. Pruning only runs after a valid backup.
     """
     if not settings.DB_PATH.exists():
+        write_attempt_state(settings.BACKUP_DIR, "failed")
         raise FileNotFoundError(f"DB not found at {settings.DB_PATH}")
 
     swept = sweep_orphan_tmp(settings.BACKUP_DIR) + sweep_orphan_restore_tmp(settings.DB_PATH)

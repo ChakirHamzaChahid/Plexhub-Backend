@@ -52,6 +52,7 @@ logger = logging.getLogger("plexhub.metadata")
 MASTER_KEY_ID = "master"
 LOOKUP_LIMIT = 50
 EPISODES_LIMIT = 2_000
+_MAX_CURSOR_MS = 2**62  # a forged huge integer would overflow SQLite and surface as a 500
 
 # Every column read to build a variant + the context of the canonical row.
 _ROW_COLUMNS: tuple[str, ...] = (
@@ -224,7 +225,7 @@ def _decode_cursor(cursor: str, size: int) -> list[Any]:
     try:
         raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
         parts = json.loads(raw)
-    except (binascii.Error, ValueError):
+    except (binascii.Error, ValueError, RecursionError):
         raise InvalidParameter("Invalid cursor") from None
     if not isinstance(parts, list) or len(parts) != size:
         raise InvalidParameter("Invalid cursor")
@@ -310,7 +311,7 @@ def patch_dict(body: Any) -> dict[str, Any]:
 def body_sha256(path: str, body: Mapping[str, Any]) -> str:
     """Fingerprint of the canonical body, path included (idempotency, contract § 4.5)."""
     blob = json.dumps({"path": path, **body}, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+    return hashlib.sha256(blob.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def _check_if_match(item: Item, if_match: str | None) -> None:
@@ -539,7 +540,10 @@ async def history(
     conditions = [MetadataEdit.server_id == server_id, MetadataEdit.rating_key == rating_key]
     if cursor:
         at_ms, edit_id = _decode_cursor(cursor, 2)
-        if not isinstance(at_ms, int) or not isinstance(edit_id, str):
+        if (
+            isinstance(at_ms, bool) or not isinstance(at_ms, int) or not 0 <= at_ms < _MAX_CURSOR_MS
+            or not isinstance(edit_id, str)
+        ):
             raise InvalidParameter("Invalid cursor")
         conditions.append(or_(
             MetadataEdit.at_ms < at_ms,

@@ -1193,7 +1193,6 @@
           "reason": {
             "anyOf": [
               {
-                "maxLength": 200,
                 "type": "string"
               },
               {
@@ -1426,7 +1425,6 @@
           "reason": {
             "anyOf": [
               {
-                "maxLength": 200,
                 "type": "string"
               },
               {
@@ -1896,7 +1894,6 @@
           "reason": {
             "anyOf": [
               {
-                "maxLength": 200,
                 "type": "string"
               },
               {

@@ -83,7 +83,7 @@ LIMITS: dict[str, dict[str, object]] = {
     "ids.tmdb": {"pattern": r"^\d{1,9}$"},
     "ids.tvdb": {"pattern": r"^\d{1,12}$"},
     "ids.wikidata": {"pattern": r"^Q\d+$"},
-    "ratings": {"valueMin": 0, "valueMax": 10, "votesMin": 0},
+    "ratings": {"valueMin": 0, "valueMax": 10, "votesMin": 0, "votesMax": 2_147_483_647},
     "cast": {
         "maxItems": 50, "nameMin": 1, "nameMax": 200, "roleMax": 200,
         "urlMax": 2048, "urlScheme": "https", "tvdbIdPattern": r"^\d{1,12}$",

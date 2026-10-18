@@ -27,12 +27,16 @@ from app.utils.string_normalizer import normalize_for_sorting
 
 # Same expressions as the NFO import (`nfo_import_service`): one definition of "a
 # valid id" for every path that writes ids.
-_IMDB_RE = re.compile(r"^tt\d{7,10}$")
-_TMDB_RE = re.compile(r"^\d{1,9}$")
-_TVDB_RE = re.compile(r"^\d{1,12}$")
-_WIKIDATA_RE = re.compile(r"^Q\d+$")
-_YOUTUBE_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")  # utils.youtube.YOUTUBE_ID_RE
-_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# ASCII-only (`\d` alone matches every Unicode digit) and always used with `fullmatch` (`$`
+# accepts a trailing newline): an id written through the API ends up in `unification_id`
+# (`tmdb://…`) and in provider URLs.
+_IMDB_RE = re.compile(r"tt\d{7,10}", re.ASCII)
+_TMDB_RE = re.compile(r"\d{1,9}", re.ASCII)
+_TVDB_RE = re.compile(r"\d{1,12}", re.ASCII)
+_WIKIDATA_RE = re.compile(r"Q\d+", re.ASCII)
+_YOUTUBE_RE = re.compile(r"[A-Za-z0-9_-]{11}", re.ASCII)  # utils.youtube.YOUTUBE_ID_RE
+_ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}", re.ASCII)
+_MAX_VOTES = 2**31 - 1  # an INTEGER column; larger values overflow SQLite at write time
 
 _FLOAT_TOLERANCE = 1e-9
 _CAST_KEYS = ("name", "role", "thumb", "profile", "tvdbId")
@@ -159,8 +163,14 @@ def flat_to_nested(flat: Mapping[str, Any], *, pad: bool = True) -> dict[str, An
 
 
 def _has_control_chars(value: str, *, allow_newlines: bool) -> bool:
+    """Control characters, lone surrogates (cannot be encoded) and unassigned code points /
+    non-characters such as U+FFFE (invalid in the XML 1.0 NFO files generated from these
+    fields). Format characters (Cf, e.g. the Persian zero-width non-joiner) stay allowed."""
     for ch in value:
-        if unicodedata.category(ch) == "Cc" and not (allow_newlines and ch in "\n\r\t"):
+        category = unicodedata.category(ch)
+        if category in ("Cs", "Cn"):
+            return True
+        if category == "Cc" and not (allow_newlines and ch in "\n\r\t"):
             return True
     return False
 
@@ -210,7 +220,7 @@ def _int(name: str, value: Any, lo: int, hi: int) -> int | None:
 def _pattern(name: str, value: Any, regex: re.Pattern[str]) -> str | None:
     if value is None:
         return None
-    if not isinstance(value, str) or not regex.match(value.strip()):
+    if not isinstance(value, str) or not regex.fullmatch(value.strip()):
         raise FieldError(name, "invalid format")
     return value.strip()
 
@@ -218,7 +228,7 @@ def _pattern(name: str, value: Any, regex: re.Pattern[str]) -> str | None:
 def _premiered(name: str, value: Any) -> str | None:
     if value is None:
         return None
-    if not isinstance(value, str) or not _ISO_DATE_RE.match(value.strip()):
+    if not isinstance(value, str) or not _ISO_DATE_RE.fullmatch(value.strip()):
         raise FieldError(name, "must be YYYY-MM-DD")
     try:
         date.fromisoformat(value.strip())
@@ -238,15 +248,18 @@ def _rating_value(name: str, value: Any) -> dict[str, Any] | None:
     if not 0 <= raw <= 10:
         raise FieldError(name, "value must be between 0 and 10")
     if votes is not None:
-        if isinstance(votes, bool) or not isinstance(votes, int) or votes < 0:
-            raise FieldError(name, "votes must be an integer >= 0")
+        if isinstance(votes, bool) or not isinstance(votes, int) or not 0 <= votes <= _MAX_VOTES:
+            raise FieldError(name, f"votes must be an integer between 0 and {_MAX_VOTES}")
     return {"value": float(raw), "votes": votes}
 
 
 def _https_url(name: str, value: Any, hi: int) -> str | None:
     if value is None:
         return None
-    if not isinstance(value, str) or len(value) > hi or any(c.isspace() for c in value):
+    if (
+        not isinstance(value, str) or len(value) > hi
+        or any(c.isspace() for c in value) or _has_control_chars(value, allow_newlines=False)
+    ):
         raise FieldError(name, "invalid URL")
     parsed = urlparse(value)
     if parsed.scheme != "https" or not parsed.netloc:
@@ -270,7 +283,7 @@ def _cast(name: str, value: Any) -> list[dict[str, Any]]:
         role = raw.get("role")
         role = None if role is None else _text(name, role, nullable=False, lo=1, hi=limits["roleMax"])  # type: ignore[arg-type]
         tvdb = raw.get("tvdbId")
-        if tvdb is not None and (not isinstance(tvdb, str) or not _TVDB_RE.match(tvdb)):
+        if tvdb is not None and (not isinstance(tvdb, str) or not _TVDB_RE.fullmatch(tvdb)):
             raise FieldError(name, "tvdbId must be digits")
         out.append({
             "name": entry_name,
@@ -345,6 +358,19 @@ def normalize_patch(patch: Mapping[str, Any], type_: str, *, is_adult: bool) -> 
             raise FieldError(name, "the adult classification is never replaced")
         out[name] = _validate(name, value)
     return out
+
+
+def validate_reason(reason: str | None) -> str | None:
+    """The free-text `reason` of a write is journaled and echoed back: same character rules
+    as a title (a lone surrogate would make the response impossible to encode AFTER the
+    COMMIT), 0..200 characters."""
+    if reason is None:
+        return None
+    if len(reason) > LIMITS["reason"]["max"]:  # type: ignore[operator]
+        raise FieldError("reason", f"length must be at most {LIMITS['reason']['max']}")
+    if _has_control_chars(reason, allow_newlines=False):
+        raise FieldError("reason", "contains a control character or an invalid code point")
+    return reason
 
 
 def apply_patch(flat: Mapping[str, Any], patch_norm: Mapping[str, Any]) -> dict[str, Any]:

@@ -165,7 +165,8 @@ def compute_revision(variants: Sequence[VariantState]) -> str:
         ],
     }
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    digest = hashlib.sha256(blob.encode("utf-8")).digest()[:16]
+    # surrogatepass: odd text already stored must never make the revision (hence a read) crash
+    digest = hashlib.sha256(blob.encode("utf-8", "surrogatepass")).digest()[:16]
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
 
@@ -193,6 +194,13 @@ def _finish(
     noop: bool,
 ) -> Plan:
     names = sorted({n for c in changes for n in c.changed_fields})
+    # The grouping reported to the client is the one of the first variant that REALLY regroups
+    # (the canonical one when none does), so a 409 never reads "before == after".
+    shown = next(
+        (i for i, (b, a) in enumerate(zip(before, after))
+         if b.derived["unificationId"] != a.derived["unificationId"]),
+        0,
+    )
     return Plan(
         kind=kind,
         item_type=before[0].type,
@@ -203,8 +211,8 @@ def _finish(
         changes=changes,
         revision_before=compute_revision(before),
         revision_after=compute_revision(after),
-        unification_before=before[0].derived["unificationId"],
-        unification_after=after[0].derived["unificationId"],
+        unification_before=before[shown].derived["unificationId"],
+        unification_after=after[shown].derived["unificationId"],
         regroup_changes=any(
             b.derived["unificationId"] != a.derived["unificationId"] for b, a in zip(before, after)
         ),
@@ -219,6 +227,11 @@ def _lock_updates(v: VariantState) -> dict[str, Any]:
     if v.lock.locked:
         return {}
     return {"match_locked": True, "match_source": LOCK_SOURCE}
+
+
+def _unification_inputs(flat: Mapping[str, Any]) -> tuple[Any, ...]:
+    """(title, year, imdb, tmdb) in the argument order of `calculate_unification_id`."""
+    return (flat.get("title") or "", flat.get("year"), flat.get("ids.imdb"), flat.get("ids.tmdb"))
 
 
 def plan_patch(variants: Sequence[VariantState], patch_norm: Mapping[str, Any]) -> Plan:
@@ -345,6 +358,23 @@ def plan_revert(
         for column, derived_key in _DERIVED_BY_COLUMN.items():
             if b["derived"][derived_key] != a["derived"][derived_key]:
                 updates[column] = b["derived"][derived_key]
+        if v.type in ("movie", "show") and ("unification_id" in updates or "history_group_key" in updates):
+            # The recorded grouping is only valid while the inputs it was derived from are
+            # what they were before the edit. A later edit may have moved the title / year /
+            # ids (without touching the grouping, e.g. a title change on a row that has an id):
+            # then restoring the recorded key would leave a stale group on a LOCKED row, which
+            # nothing ever corrects. Recompute from the resulting fields instead.
+            if _unification_inputs(flat_after) != _unification_inputs(b["flat"]):
+                uid = calculate_unification_id(*_unification_inputs(flat_after))
+                hgk = calculate_history_group_key(uid, v.rating_key, v.server_id)
+                for column, value, current in (
+                    ("unification_id", uid, v.derived["unificationId"]),
+                    ("history_group_key", hgk, v.derived["historyGroupKey"]),
+                ):
+                    if value != current:
+                        updates[column] = value
+                    else:
+                        updates.pop(column, None)
         if b["lock"] != a["lock"]:
             updates["match_locked"] = b["lock"]["locked"]
             updates["match_source"] = b["lock"]["source"]

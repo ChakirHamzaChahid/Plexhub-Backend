@@ -38,7 +38,7 @@ from app.models import metadata_schemas as S
 from app.services import backup_status_service, metadata_limits
 from app.services import metadata_service as svc
 from app.services.metadata_columns import FIELDS_BY_TYPE, LIMITS
-from app.services.metadata_fields import FieldError
+from app.services.metadata_fields import FieldError, validate_reason
 from app.services.metadata_views import item_summary, item_view
 from app.utils import rate_limit
 from app.utils.time import now_ms
@@ -54,9 +54,10 @@ router = APIRouter(prefix=PREFIX, tags=["metadata"])
 
 _REVISION_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _IDEMPOTENCY_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
-_IMDB_RE = re.compile(r"^tt\d{7,10}$")
-_TMDB_RE = re.compile(r"^\d{1,9}$")
-_TVDB_RE = re.compile(r"^\d{1,12}$")
+# ASCII + fullmatch: `\d` alone matches every Unicode digit and `$` a trailing newline.
+_IMDB_RE = re.compile(r"tt\d{7,10}", re.ASCII)
+_TMDB_RE = re.compile(r"\d{1,9}", re.ASCII)
+_TVDB_RE = re.compile(r"\d{1,12}", re.ASCII)
 
 
 # ─── Errors ──────────────────────────────────────────────────────────────────
@@ -186,6 +187,13 @@ def _request_id() -> str | None:
     return None if rid == "-" else rid
 
 
+async def _validated_reason(reason: str | None) -> None:
+    async def _run():
+        validate_reason(reason)
+
+    await _guarded("reason", _run())
+
+
 def _etag(response: Response, revision: str) -> None:
     response.headers["ETag"] = f'"{revision}"'
 
@@ -234,7 +242,7 @@ async def lookup(
             raise svc.InvalidParameter("Provide exactly one of imdbId, tmdbId, tvdbId, unificationId")
         ((kind, value),) = given.items()
         regex = {"imdb": _IMDB_RE, "tmdb": _TMDB_RE, "tvdb": _TVDB_RE}.get(kind)
-        if (regex is not None and not regex.match(value)) or not value:
+        if (regex is not None and not regex.fullmatch(value)) or not value:
             raise svc.InvalidParameter(f"Malformed {kind} id")
         async with db_module.async_session_factory() as session:
             items, truncated = await svc.lookup(session, type, kind, value)
@@ -426,6 +434,7 @@ async def preview_patch(
     if_match: str | None = Header(default=None, alias="If-Match"),
 ):
     """Simulate `PATCH`: same plan, nothing written (no journal row, no lock)."""
+    await _validated_reason(body.reason)
     return await _simulate(
         "preview", server_id=server_id, rating_key=rating_key, plan_fn=svc.patch_plan_fn(body),
         if_match=if_match, allow_regroup=body.allow_regroup, response=response,
@@ -444,6 +453,7 @@ async def patch_item(
 ):
     """Partial write on EVERY variant, one transaction. Requires `If-Match` and
     `Idempotency-Key`."""
+    await _validated_reason(body.reason)
     return await _commit(
         "patch", request, response, server_id=server_id, rating_key=rating_key,
         plan_fn=svc.patch_plan_fn(body), if_match=if_match, idempotency_key=idempotency_key,
@@ -462,6 +472,7 @@ async def preview_lock(
     body: S.LockBody = Body(),
     if_match: str | None = Header(default=None, alias="If-Match"),
 ):
+    await _validated_reason(body.reason)
     return await _simulate(
         "lock_preview", server_id=server_id, rating_key=rating_key,
         plan_fn=svc.lock_plan_fn(body.locked), if_match=if_match, allow_regroup=True, response=response,
@@ -480,6 +491,7 @@ async def set_lock(
 ):
     """Lock / unlock every variant (journaled). Unlocking gives the row back to the
     automatic enrichment."""
+    await _validated_reason(body.reason)
     return await _commit(
         "lock", request, response, server_id=server_id, rating_key=rating_key,
         plan_fn=svc.lock_plan_fn(body.locked), if_match=if_match, idempotency_key=idempotency_key,
@@ -505,6 +517,7 @@ async def preview_revert(
     if_match: str | None = Header(default=None, alias="If-Match"),
 ):
     body = body or S.RevertBody()
+    await _validated_reason(body.reason)
     server_id, rating_key = await _edit_target(edit_id)
     return await _simulate(
         "revert_preview", server_id=server_id, rating_key=rating_key,
@@ -524,6 +537,7 @@ async def revert_edit(
 ):
     """Undo an edit: fields, variants, derived values and lock, or 409 `revert_conflict`."""
     body = body or S.RevertBody()
+    await _validated_reason(body.reason)
     server_id, rating_key = await _edit_target(edit_id)
     return await _commit(
         "revert", request, response, server_id=server_id, rating_key=rating_key,

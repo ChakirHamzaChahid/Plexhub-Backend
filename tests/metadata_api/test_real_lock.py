@@ -13,7 +13,6 @@ import sqlite3
 import threading
 import time
 
-import pytest
 import pytest_asyncio
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine

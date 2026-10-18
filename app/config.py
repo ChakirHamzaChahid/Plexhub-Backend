@@ -10,6 +10,15 @@ load_dotenv()
 logger = logging.getLogger("plexhub.config")
 
 
+def _env_flag_default_true(env_var: str) -> bool:
+    """True unless the variable is EXPLICITLY false/0/no/off.
+
+    A mistyped, empty (`FOO=` injected by an `env_file`) or unknown value must never switch a
+    production safety feature off silently — the opposite of the usual `in ("true", "1")` idiom,
+    used here only for a flag whose "off" state kills every background job."""
+    return os.getenv(env_var, "true").strip().lower() not in ("false", "0", "no", "off")
+
+
 def _safe_int(env_var: str, default: int) -> int:
     """Parse env var as int with safe fallback and clear error message."""
     raw = os.getenv(env_var, str(default))
@@ -186,7 +195,7 @@ class Settings:
     # Lot B2 (ADR 0012 D2.4): "false" = throwaway TEST instance — no master election
     # (no `fcntl`, so it also boots on Windows), no scheduler, no boot pipeline, no
     # download worker, no Plex reap. Default "true": production is unchanged.
-    BACKGROUND_JOBS_ENABLED: bool = os.getenv("BACKGROUND_JOBS_ENABLED", "true").lower() in ("true", "1", "yes")
+    BACKGROUND_JOBS_ENABLED: bool = _env_flag_default_true("BACKGROUND_JOBS_ENABLED")
     BACKUP_DIR: Path = Path(os.getenv("BACKUP_DIR", "./data/backups"))
     BACKUP_RETENTION_DAYS: int = _safe_int("BACKUP_RETENTION_DAYS", 7)
     BACKUP_HOUR: int = _safe_int("BACKUP_HOUR", 4)  # daily cron hour

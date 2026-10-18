@@ -7,6 +7,10 @@
   <p class="font-medium text-emerald-800 mb-1">
     Clé créée pour « {{ label }} » — copiez-la maintenant, elle ne sera plus affichée.
   </p>
+  <p class="text-emerald-800 mb-2">
+    Scopes :
+    {% if scopes %}<span class="font-mono text-xs">{{ scopes | join(" ") }}</span>{% else %}aucun (accès API habituel){% endif %}
+  </p>
   <div class="flex items-center gap-2">
     <code id="new-key"
           class="font-mono text-xs bg-white border border-emerald-200 rounded px-2 py-1 break-all select-all flex-1">{{ plaintext }}</code>

@@ -9,6 +9,13 @@
     Créez une clé par utilisateur/appareil. La clé n'est affichée qu'une seule fois.
     Révoquez-la pour bloquer immédiatement l'accès au backend.
   </p>
+  <p class="text-sm text-slate-500">
+    Sans scope, la clé ouvre l'API comme aujourd'hui (hors passerelle de scraping).
+    Avec au moins un scope, elle est <strong>confinée</strong> aux routes de ses scopes :
+    <span class="font-mono text-xs">scrape</span> (lecture de la passerelle),
+    <span class="font-mono text-xs">scrape.admin</span> (invalidation et purge du cache).
+    Les scopes d'une clé ne se modifient pas : révoquez-la et recréez-en une.
+  </p>
 </section>
 
 <section class="bg-white p-4 rounded shadow-sm border border-slate-200 mb-6">
@@ -28,6 +35,18 @@
              placeholder="jamais"
              class="border border-slate-300 rounded px-2 py-1 text-sm w-40">
     </div>
+    <fieldset class="flex flex-col">
+      <legend class="text-xs text-slate-500">Scopes (optionnel)</legend>
+      <div class="flex items-center gap-3 py-1">
+        {% for scope in known_scopes %}
+        <label class="inline-flex items-center gap-1 text-sm">
+          <input type="checkbox" name="scopes" value="{{ scope }}"
+                 class="border-slate-300 rounded">
+          <span class="font-mono text-xs">{{ scope }}</span>
+        </label>
+        {% endfor %}
+      </div>
+    </fieldset>
     <button type="submit"
             class="bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium px-4 py-1.5 rounded">
       Créer la clé

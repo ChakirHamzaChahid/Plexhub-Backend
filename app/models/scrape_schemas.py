@@ -323,6 +323,9 @@ class CacheStatsResponse(_ScrapeModel):
     since_start: SinceStart
 
 
+MAX_KEY_LENGTH = 1024  # a canonical key stays under ~350 characters (300-character title)
+
+
 class InvalidateRequest(_ScrapeModel):
     """Contract 5.9. EITHER `keys` (1..500) OR `family` + `tmdbId`; the
     exclusivity is a 400 `invalid_parameter` raised by the service (not a
@@ -335,7 +338,10 @@ class InvalidateRequest(_ScrapeModel):
     `Annotated[X | None, Field(...)] = None` (not `X | None = Field(...)`):
     the latter makes pydantic attach the field metadata to one member of the
     union inside FastAPI's body model (UnsupportedFieldAttributeWarning)."""
-    keys: Annotated[list[str] | None, Field(min_length=1, max_length=500)] = None
+    keys: Annotated[
+        list[Annotated[str, Field(max_length=MAX_KEY_LENGTH)]] | None,
+        Field(min_length=1, max_length=500),
+    ] = None
     family: Annotated[
         str | None, Field(description="movie | show | season (other value: 400)")
     ] = None

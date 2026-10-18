@@ -65,6 +65,12 @@ cache local de plexhubTMM.
 - `match_key(media_type, title, year)` appelle **`scrape_cache_service.make_key`** (import, pas de copie) : toute
   évolution de `normalize_for_sorting` passe donc par ce seul point, et impose `KEY_VERSION += 1`.
 - `KEY_VERSION = 1`, `SCHEMA_VERSION = 1` déclarés ici, nulle part ailleurs.
+- **Liste blanche de langues (revue sécurité B1-11, M1)** : la langue fait partie de la clé, donc chaque langue
+  distincte crée ses propres lignes (et la purge ne retire que les expirées). `SCRAPE_ALLOWED_LANGUAGES` (défaut
+  `fr-FR,en-US`, balises `xx-XX` séparées par des virgules) est lue par `Settings` (éléments invalides ignorés avec
+  un WARNING au démarrage) et parsée par `scrape_keys.allowed_languages()` (liste vide ⇒ défaut). Le service rejette
+  (400 `invalid_parameter`) toute `language` hors liste ; `TMDB_LANGUAGE` reste toujours acceptée (c'est la valeur par
+  défaut d'un paramètre absent). Voir D2.8 pour l'autre garde contre l'abus.
 - Vecteurs d'or : les 2 existants + au moins accents, article, chiffres seuls, Unicode pleine chasse (`｜`),
   apostrophe, année absente, et le piège d'analyse `1|fr-FR|movie|603|` (titre « 603 » sans année, 5 segments,
   famille `match`) contre `1|fr-FR|movie|603` (4 segments, détails) — l'analyse fait un `split("|")` **sans**
@@ -141,9 +147,15 @@ Les méthodes existantes ne changent pas. Ajouts :
   la même clé). La déconnexion d'un client n'annule pas la tâche ; son résultat est mis en cache.
 - **Aucune exception httpx brute ne sort de la tâche** : `create_background_task` journalise l'exception d'une tâche
   avec `exc_info` (`utils/tasks.py:22-30`), et une `HTTPStatusError` embarque l'URL avec `api_key=`/`apikey=`. La
-  coroutine du vol attrape donc **toute** exception et la convertit en `ProviderError` (type + code HTTP seulement,
-  D2.6) avant de la relever. Test : clé TMDB factice reconnaissable, 5xx dans un vol dont tous les attendeurs sont
-  partis, capture des journaux ⇒ la clé n'apparaît nulle part.
+  coroutine du vol attrape donc **toute** exception et la convertit en erreur de passerelle (type + code HTTP
+  seulement, D2.6). Test : clé TMDB factice reconnaissable, 5xx dans un vol dont tous les attendeurs sont partis,
+  capture des journaux ⇒ la clé n'apparaît nulle part.
+- **Résultat-valeur du vol (revue B1-11, code M2 / sécurité L2)** : relever cette erreur dans la tâche faisait
+  journaliser *tout* échec attendu (429, 503, 5xx...) en ERROR avec traceback par `create_background_task`. La
+  coroutine du vol (`_guarded`) ne lève donc plus : elle renvoie un `_FlightOutcome(value | error)`, l'erreur étant
+  une `GatewayError` neuve jamais levée dans le vol (sans `__cause__`/`__context__`). Chaque attendeur (`_wait`)
+  relève **sa propre copie** (`clone()`). Une exception *imprévue* (bug) reste journalisée par `_guarded`, type
+  seulement, sans clé. `utils/tasks.py` est inchangé.
 - Chaque requête attend sous `asyncio.timeout(SCRAPE_REQUEST_TIMEOUT_SECONDS)` (défaut 25, borné 5..28) ; au-delà ⇒
   504 `upstream_timeout`, la tâche continue et peut encore remplir le cache. Cela borne aussi l'attente non
   plafonnée sur `Retry-After` (D1.3) sans modifier `_request` ; `_request_bounded` (D2.6) rend d'ailleurs 429 avant
@@ -156,7 +168,8 @@ Les méthodes existantes ne changent pas. Ajouts :
 défaut 300, `<= 0` désactive), clé du limiteur = `key_id` du principal (`"master"` pour la clé maître), lu sur
 `request.state.principal` (ADR 0008 § D2.3) ; dépassement ⇒ 429 `rate_limited` + `Retry-After`. C'est une
 dépendance de route (`enforce_scrape_rate_limit`) déclarée **après** le garde sur chacune des 9 routes ; elle compte
-toute requête authentifiée, `hit` et erreurs 400/422 comprises. Ajouté à la
+toute requête authentifiée, `hit` et erreurs 400/422 comprises. Le limiteur ne borne pas la *variété* des clés : la
+liste blanche de langues (D2.2) est la parade contre la croissance de `scrape_cache` par multiplication des langues. Ajouté à la
 fixture `_reset_rate_limiters` de `tests/conftest.py`. **Aucun budget quotidien dédié** (décision de Chakir du
 2026-10-18) : un budget OMDb épuisé (garde global) ⇒ `omdbStatus: "budget_exhausted"`, jamais une erreur HTTP.
 
@@ -178,6 +191,12 @@ Pour `movie`/`show` : si `externalIds.imdb` est absent ⇒ `omdbStatus: "no_imdb
 (mis en cache négatif), `not_configured`, `budget_exhausted`, `error` (ni l'un ni l'autre mis en cache). `expiresAt`
 de la réponse = expiration TMDB, ou `min(expiration TMDB, fetchedAt + TTL négatif)` pour `budget_exhausted`/`error`.
 `refresh=true` ne refait pas une entrée `omdb` encore fraîche.
+
+**Plancher de `expiresAt` (revue B1-11, code M1, PRD X31)** : la formule ci-dessus peut donner une valeur passée (un
+`hit` sur une entrée TMDB vieille de plus que le TTL négatif, OMDb en `error`/`budget_exhausted`). Partout où la
+réponse calcule `expiresAt` (règle composite OMDb et `min` de `/match`), la valeur est bornée :
+`expiresAt = max(now_ms(), valeur)`. `cache: "hit"` d'une réponse composite décrit l'entrée TMDB, même si les notes
+OMDb ont été demandées pendant la requête.
 
 ### D2.11 Stats, invalidation, purge
 
@@ -201,6 +220,16 @@ pas de gestionnaire d'exceptions global, aucune route existante ne change de for
 `plexhub_scrape_gateway_requests_total{route, outcome}` à labels fermés (`route` ∈ 9 routes, `outcome` ∈ `hit`,
 `miss`, `coalesced`, `error`), zéro-initialisée à l'import. Journaux : famille, résultat et durée ; jamais de titre
 complet au niveau INFO, jamais de clé.
+
+**Taille des requêtes et des réponses (revue B1-11, sécurité M2/L4/L5, PRD X33)** : un middleware ASGI **pur**
+(`app/api/body_limit.py`, pas `BaseHTTPMiddleware`) limite à 64 Kio le corps des requêtes dont le chemin commence par
+`/api/scrape/v1/` : `Content-Length` trop grand ⇒ 413 sans lire le corps ; corps `chunked` compté au fil de l'eau et
+coupé au-delà ⇒ 413 `{"detail": {"code": "invalid_parameter", "message": "Request body too large"}}` (l'envoi de la
+réponse est intercepté, car FastAPI transformerait l'échec de lecture du corps en 422). Monté dans `main.py` entre
+GZip et RequestId : l'ordre relatif des middlewares existants est inchangé, aucune autre route n'est touchée. Chaque
+clé de `keys` (invalidation) fait au plus 1 024 caractères (422). Une réponse de détails ou de saison dont le JSON
+sérialisé dépasse 4 Mio (`MAX_RESPONSE_BYTES`) est refusée avant d'être stockée et rendue : 502 `upstream_error`,
+rien en cache.
 
 ## D3 — Alternatives écartées
 

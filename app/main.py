@@ -636,6 +636,10 @@ app.add_middleware(
     allow_headers=["X-API-Key", "Content-Type", "Authorization"],
 )
 app.add_middleware(GZipMiddleware, minimum_size=1000)
+# Body size cap (64 KiB) for /api/scrape/v1/ ONLY — pure ASGI, see app/api/body_limit.py.
+# Inserted between GZip and RequestId so the relative order of the existing middlewares is unchanged.
+from app.api.body_limit import ScrapeBodyLimitMiddleware  # noqa: E402
+app.add_middleware(ScrapeBodyLimitMiddleware)
 # Added last so it wraps the others — request_id is set before any other middleware runs.
 app.add_middleware(RequestIdMiddleware)
 # CSRF guard for POST/PUT/PATCH/DELETE /admin* (S4.3, AUDIT-P2-005/CR-S07) — see app/api/csrf.py.

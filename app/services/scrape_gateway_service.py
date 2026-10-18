@@ -27,11 +27,15 @@ Single-flight (D2.7) — do not undo
   `upstream_timeout` while the task keeps running.
 * The task removes itself in `add_done_callback`, comparing the task IDENTITY
   (a newer flight of the same key is never removed by an older one).
-* `create_background_task` logs a failed task with `exc_info`, and an httpx
-  `HTTPStatusError` embeds the request URL (`api_key=` / `apikey=`). The flight
-  body (`_guarded`) therefore catches EVERY exception and re-raises a fresh,
-  context-free `GatewayError` (type + HTTP status only, never `str(exc)`, no
-  traceback text, no locals) — CLAUDE.md pitfalls 21c / 25c.
+* `create_background_task` logs a failed task at ERROR with `exc_info`, and an
+  httpx `HTTPStatusError` embeds the request URL (`api_key=` / `apikey=`). The
+  flight body (`_guarded`) therefore never RAISES: it returns a `_FlightOutcome`
+  holding either the value or a `GatewayError` (type + HTTP status only, never
+  `str(exc)`, no traceback text, no locals) — CLAUDE.md pitfalls 21c / 25c.
+  Every waiter raises its OWN fresh copy of that error (`_wait`), so no
+  `__cause__`/`__context__` survives and an expected failure (429/404/503...)
+  is not an ERROR log. An UNEXPECTED exception (a bug) is still logged, type
+  only, by `_guarded`.
 * `/search` is not coalesced (nothing persisted, cheap).
 
 Counters (`scrape_gateway_cache.counters`): one `hit`, `miss` or `coalesced`
@@ -41,6 +45,7 @@ that ends on an error coming from a provider (or its deadline).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import time
@@ -69,6 +74,10 @@ logger = logging.getLogger("plexhub.scrape_gateway")
 
 MediaType = Literal["movie", "show"]
 Outcome = Literal["hit", "miss", "coalesced"]
+
+# Ceiling of one serialised details / season payload (PRD FR-028); a bigger one
+# is a 502 `upstream_error` and is neither cached nor rendered.
+MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 
 RETRY_AFTER_CAP_SECONDS = 300
 DEFAULT_RETRY_AFTER_SECONDS = 30
@@ -119,6 +128,13 @@ class GatewayError(Exception):
 
 def invalid_parameter(message: str) -> GatewayError:
     return GatewayError(400, "invalid_parameter", message)
+
+
+def _not_in_the_past(expires_at: int) -> int:
+    """`expiresAt` of a response is never before the instant it is served
+    (PRD X31): a hit on an old TMDB entry whose OMDb leg failed would
+    otherwise get `fetchedAt + negative TTL`, which can be days ago."""
+    return max(clock.now_ms(), expires_at)
 
 
 def _cap_retry_after(value: int | None) -> int:
@@ -172,11 +188,29 @@ def _deadline() -> float:
 
 
 def _language(value: str | None) -> str:
+    """Validated language of the request: the `xx-XX` shape (400 otherwise),
+    then membership of `SCRAPE_ALLOWED_LANGUAGES` — `TMDB_LANGUAGE` is always
+    accepted on top (it is the default when the parameter is absent). Every
+    distinct language is a distinct set of `scrape_cache` rows, hence the
+    closed list (security review M1, PRD X32)."""
     language = settings.TMDB_LANGUAGE if value is None else value
     try:
-        return scrape_keys.validate_language(language)
+        scrape_keys.validate_language(language)
     except InvalidCacheKey:
         raise invalid_parameter("language must match ^[a-z]{2}-[A-Z]{2}$") from None
+    if language != settings.TMDB_LANGUAGE and language not in scrape_keys.allowed_languages():
+        raise invalid_parameter("language is not supported by this gateway")
+    return language
+
+
+def _check_size(payload: dict) -> None:
+    """502 `upstream_error` when the serialised payload exceeds
+    `MAX_RESPONSE_BYTES` (checked BEFORE storing and rendering)."""
+    size = len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    if size > MAX_RESPONSE_BYTES:
+        logger.warning("scrape gateway: provider payload over %d bytes, refused (502)",
+                       MAX_RESPONSE_BYTES)
+        raise _bad_response()
 
 
 async def _read(key: CacheKey) -> CachedEntry | None:
@@ -213,25 +247,33 @@ async def _store(items: list[PutItem]) -> list[CachedEntry]:
     return built
 
 
-async def _guarded(coro: Awaitable[Any]) -> Any:
-    """Body of every flight: no exception other than a fresh `GatewayError`
-    (and cancellation) ever leaves it. The new error is raised OUTSIDE the
-    `except` blocks: neither `__cause__` nor `__context__` can carry the
-    original exception (whose message may embed a provider URL)."""
+@dataclass(frozen=True)
+class _FlightOutcome:
+    """Result of a flight: the value, or the `GatewayError` it ended on."""
+    value: Any = None
+    error: GatewayError | None = None
+
+
+async def _guarded(coro: Awaitable[Any]) -> _FlightOutcome:
+    """Body of every flight: it never raises (cancellation apart), so
+    `create_background_task` has nothing to log at ERROR for an expected
+    failure. The error is a fresh `GatewayError` built OUTSIDE the `except`
+    blocks and never raised here: neither `__cause__` nor `__context__` can
+    carry the original exception (whose message may embed a provider URL)."""
     failure: GatewayError
     try:
-        return await coro
+        return _FlightOutcome(value=await coro)
     except GatewayError as exc:
         failure = exc.clone()
     except ProviderError as exc:
         failure = translate_provider_error(exc)
     except (ScrapeMappingError, ValidationError):
         failure = _bad_response()
-    except Exception as exc:  # noqa: BLE001 - anything else is a bad response
+    except Exception as exc:  # noqa: BLE001 - a bug: logged (type only), served as a bad response
         logger.warning("scrape gateway: unexpected error during a provider call (%s)",
                        type(exc).__name__)
         failure = _bad_response()
-    raise failure
+    return _FlightOutcome(error=failure)
 
 
 _in_flight: dict[tuple[str, bool], asyncio.Task] = {}
@@ -265,12 +307,17 @@ async def _wait(task: asyncio.Task, deadline: float) -> Any:
     """Wait for a shared flight until the request deadline. The flight is
     shielded: neither the deadline nor a disconnected client cancels it."""
     remaining = deadline - time.monotonic()
+    outcome: _FlightOutcome | None = None
     try:
         async with asyncio.timeout(max(remaining, 0.0)):
-            return await asyncio.shield(task)
+            outcome = await asyncio.shield(task)
     except TimeoutError:
         pass
-    raise _timeout_error()
+    if outcome is None:
+        raise _timeout_error()
+    if outcome.error is not None:
+        raise outcome.error.clone()  # this waiter's OWN exception, no cause/context
+    return outcome.value
 
 
 async def _wait_counted(task: asyncio.Task, joined: bool, deadline: float) -> tuple[Any, Outcome]:
@@ -396,7 +443,7 @@ async def _compose_details(
     status, ratings = await _omdb_ratings(external.get("imdb"), deadline)
     composed = mappers.with_omdb(details, ratings, status)
     if status in ("budget_exhausted", "error"):
-        expires_at = min(expires_at, fetched_at + scrape_keys.ttl_negative_ms())
+        expires_at = _not_in_the_past(min(expires_at, fetched_at + scrape_keys.ttl_negative_ms()))
     return composed, expires_at
 
 
@@ -418,6 +465,7 @@ async def _fetch_details_raw(media_type: MediaType, tmdb_id: int, language: str,
         raw = await tmdb_service.fetch_tv(tmdb_id, language=language, deadline=deadline)
         details = mappers.map_show(raw, language=language)
         S.ShowDetails.model_validate(mappers.with_omdb(details, None, "no_imdb_id"))
+    _check_size(details)
     return details
 
 
@@ -549,7 +597,7 @@ async def match(
     tmdb_id = None
     if entry.result == "matched" and resolved.details is not None:
         tmdb_id = _matched_tmdb_id(entry)
-        expires_at = min(expires_at, resolved.details.expires_at)
+        expires_at = _not_in_the_past(min(expires_at, resolved.details.expires_at))
         details_body, expires_at = await _compose_details(
             resolved.details.payload or {}, fetched_at, expires_at, deadline,
         )
@@ -604,6 +652,7 @@ async def _fetch_season_entry(key: CacheKey, show_id: int, season: int, language
         return entry
     details = mappers.map_season(raw, show_tmdb_id=show_id, language=language)
     S.SeasonDetails.model_validate(details)
+    _check_size(details)
     (entry,) = await _store([(key, "found", details, fetched_at)])
     return entry
 

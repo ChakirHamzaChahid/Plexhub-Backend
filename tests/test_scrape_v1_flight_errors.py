@@ -7,6 +7,7 @@ traceback and no response body may ever contain it.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 
 import httpx
@@ -234,8 +235,9 @@ async def test_search_errors_are_translated_too(gw_client, gw_http, gw_no_sleep)
 
 async def test_orphan_failing_flight_leaks_no_key(gw_db, gw_providers, gw_http, gw_logs):
     """Every waiter is gone (cancelled client) when the provider fails: the
-    flight's exception is logged by `create_background_task` WITH exc_info —
-    and still carries neither the key nor the URL."""
+    flight does not raise (it returns its error), so `create_background_task`
+    logs nothing at ERROR — and neither the outcome nor any log line carries
+    the key or the URL."""
     gate = asyncio.Event()
 
     async def _slow_failure(request):
@@ -251,14 +253,15 @@ async def test_orphan_failing_flight_leaks_no_key(gw_db, gw_providers, gw_http, 
     with pytest.raises(asyncio.CancelledError):
         await request
     gate.set()
-    with pytest.raises(gateway.GatewayError):
-        await flight
-    await _real_sleep(0.01)                             # let the done-callbacks log
+    outcome = await flight                              # the flight does not raise
+    await _real_sleep(0.01)                             # let the done-callbacks run
     text = all_log_text(gw_logs)
-    assert "Background task failed: scrape-gateway-flight" in text   # it WAS logged...
-    assert "Traceback" in text                                       # ...with exc_info...
-    assert CANARY not in text and "api_key" not in text              # ...without the key
-    assert flight.exception().__context__ is None and flight.exception().__cause__ is None
+    assert isinstance(outcome.error, gateway.GatewayError) and outcome.error.status == 502
+    assert outcome.error.__context__ is None and outcome.error.__cause__ is None
+    assert flight.exception() is None
+    assert "Background task failed" not in text and "Traceback" not in text
+    assert [r for r in gw_logs.records if r.levelno >= logging.ERROR] == []
+    assert CANARY not in text and "api_key" not in text
 
 
 async def test_error_bodies_never_carry_the_key(gw_client, gw_http, gw_logs):

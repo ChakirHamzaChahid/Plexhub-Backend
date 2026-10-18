@@ -23,7 +23,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from app.config import settings
+from app.config import DEFAULT_SCRAPE_ALLOWED_LANGUAGES, parse_language_list, settings
 from app.services import scrape_cache_service
 from app.utils.string_normalizer import normalize_for_sorting
 
@@ -239,3 +239,14 @@ def request_timeout_seconds() -> int:
 def rate_limit_per_minute() -> int:
     """Requests per minute per API key; 0 means disabled (any value <= 0)."""
     return max(0, int(settings.SCRAPE_RATE_LIMIT_PER_MINUTE))
+
+
+def allowed_languages() -> tuple[str, ...]:
+    """Languages a gateway client may ask for (`SCRAPE_ALLOWED_LANGUAGES`).
+
+    Invalid elements are dropped (the WARNING is logged once, at boot, by
+    `Settings`); an empty result falls back to the default `fr-FR,en-US`.
+    `TMDB_LANGUAGE` is NOT part of this tuple: the caller accepts it on top
+    (it is the default when the parameter is absent)."""
+    valid, _ = parse_language_list(settings.SCRAPE_ALLOWED_LANGUAGES)
+    return valid or DEFAULT_SCRAPE_ALLOWED_LANGUAGES

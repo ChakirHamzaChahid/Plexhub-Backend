@@ -1,5 +1,6 @@
 import os
 import logging
+import re
 import uuid
 from pathlib import Path
 from dotenv import load_dotenv
@@ -27,6 +28,28 @@ def _safe_float(env_var: str, default: float) -> float:
     except (ValueError, TypeError):
         logger.warning(f"Invalid float for {env_var}={raw!r}, using default {default}")
         return default
+
+
+DEFAULT_SCRAPE_ALLOWED_LANGUAGES = ("fr-FR", "en-US")
+_LANGUAGE_TAG_RE = re.compile(r"[a-z]{2}-[A-Z]{2}")
+
+
+def parse_language_list(raw: str | None) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Split a comma-separated list of ``xx-XX`` tags into ``(valid, invalid)``.
+
+    Elements are stripped, empty ones skipped silently, duplicates dropped
+    (first occurrence wins, order kept). Pure: callers decide what to log."""
+    valid: list[str] = []
+    invalid: list[str] = []
+    for item in (raw or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if _LANGUAGE_TAG_RE.fullmatch(item) is None:
+            invalid.append(item)
+        elif item not in valid:
+            valid.append(item)
+    return tuple(valid), tuple(invalid)
 
 
 class Settings:
@@ -443,12 +466,29 @@ class Settings:
     SCRAPE_RATE_LIMIT_PER_MINUTE: int = _safe_int("SCRAPE_RATE_LIMIT_PER_MINUTE", 300)
     # Overall deadline of one gateway request, in seconds.
     SCRAPE_REQUEST_TIMEOUT_SECONDS: int = _safe_int("SCRAPE_REQUEST_TIMEOUT_SECONDS", 25)
+    # Languages a gateway client may ask for (comma-separated ``xx-XX`` tags).
+    # Every (type, title, year, language) combination is a distinct row of
+    # `scrape_cache`: an unbounded set of languages lets an authenticated
+    # client grow the table at will (the purge only removes EXPIRED rows).
+    # `TMDB_LANGUAGE` is always accepted on top of this list. Invalid elements
+    # are ignored (WARNING at boot); an empty list falls back to the default.
+    # Parsed by `scrape_keys.allowed_languages()`.
+    SCRAPE_ALLOWED_LANGUAGES: str = os.getenv(
+        "SCRAPE_ALLOWED_LANGUAGES", ",".join(DEFAULT_SCRAPE_ALLOWED_LANGUAGES),
+    )
 
     @property
     def has_xtream_env(self) -> bool:
         return bool(self.XTREAM_BASE_URL and self.XTREAM_USERNAME and self.XTREAM_PASSWORD)
 
     def __init__(self):
+        _, ignored_languages = parse_language_list(self.SCRAPE_ALLOWED_LANGUAGES)
+        if ignored_languages:
+            logger.warning(
+                "SCRAPE_ALLOWED_LANGUAGES: ignoring invalid element(s) %s "
+                "(expected xx-XX tags such as fr-FR)",
+                ", ".join(repr(item) for item in ignored_languages),
+            )
         self.DATA_DIR.mkdir(parents=True, exist_ok=True)
         self.LOG_DIR.mkdir(parents=True, exist_ok=True)
         self.DB_PATH = self.DATA_DIR / "plexhub.db"

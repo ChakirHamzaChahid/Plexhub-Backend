@@ -84,6 +84,21 @@ def _reset_outage_mask_cache():
     account_outage_service.invalidate_mask_cache()
 
 
+# ─── Scrape gateway counters (B1-10) ─────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _reset_scrape_gateway_counters():
+    """`scrape_gateway_cache.counters` (hits/misses/coalesced/upstream_errors)
+    is process-local module state like the limiters above: reset it around
+    every test so one test's traffic never leaks into another's `sinceStart`."""
+    from app.services import scrape_gateway_cache
+
+    scrape_gateway_cache.counters.reset()
+    yield
+    scrape_gateway_cache.counters.reset()
+
+
 # ─── Job freshness / master election (S5.1) ─────────────────────────────
 
 

@@ -21,6 +21,7 @@ bound errors of the declared parameters are FastAPI's native 422.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import re
@@ -34,12 +35,13 @@ from app.api.deps import Principal, verify_media_read_scope, verify_media_write_
 from app.db import database as db_module
 from app.db.immediate_tx import DatabaseBusy
 from app.models import metadata_schemas as S
-from app.services import metadata_limits
+from app.services import backup_status_service, metadata_limits
 from app.services import metadata_service as svc
 from app.services.metadata_columns import FIELDS_BY_TYPE, LIMITS
 from app.services.metadata_fields import FieldError
 from app.services.metadata_views import item_summary, item_view
 from app.utils import rate_limit
+from app.utils.time import now_ms
 from app.utils.request_context import request_id_var
 
 logger = logging.getLogger("plexhub.api.metadata_v1")
@@ -100,7 +102,7 @@ def _map_error(exc: Exception) -> HTTPException | None:
 
 
 _ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
-    code: {"model": S.ErrorResponse} for code in (400, 401, 403, 404, 409, 412, 428, 429, 503)
+    code: {"model": S.MetadataErrorResponse} for code in (400, 401, 403, 404, 409, 412, 428, 429, 503)
 }
 
 
@@ -331,6 +333,15 @@ async def get_edit(edit_id: str = _EDIT_ID):
             return {"schemaVersion": S.SCHEMA_VERSION, "edit": await svc.get_edit(session, edit_id)}
 
     return await _guarded("edit", _run())
+
+
+@router.get("/backup/status", response_model=S.BackupStatusResponse, response_model_by_alias=True,
+            dependencies=_READ_GUARD, responses=_ERROR_RESPONSES)
+async def get_backup_status():
+    """State of the latest backup, computed on every call from the files present (never from the
+    database, never a path or a file name): a client writes only if it is recent and verified."""
+    status_dict = await asyncio.to_thread(backup_status_service.compute_status, now_ms())
+    return {"schemaVersion": S.SCHEMA_VERSION, **status_dict}
 
 
 @router.get("/fields", response_model=S.FieldsResponse, response_model_by_alias=True,

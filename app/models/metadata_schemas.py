@@ -339,6 +339,9 @@ class FieldsResponse(_Out):
 
 
 # ─── Errors ──────────────────────────────────────────────────────────────────
+# Named `Metadata…` on purpose: FastAPI disambiguates two models of the same class name by
+# prefixing the module path, which would also RENAME the scrape gateway components
+# (`ErrorResponse`) and break its committed machine contract.
 
 ErrorCode = Literal[
     "invalid_parameter", "invalid_field", "invalid_api_key", "insufficient_scope",
@@ -348,7 +351,7 @@ ErrorCode = Literal[
 ]
 
 
-class ErrorDetail(_Out):
+class MetadataErrorDetail(_Out):
     """`{"detail": {"code", "message", …extras}}`. Extras (all optional):
     `field` (invalid_field), `retryAfterSeconds`, `currentRevision` (412),
     `header` (428), `fields` (revert_conflict), and the four regroup members."""
@@ -369,5 +372,5 @@ class ErrorDetail(_Out):
     members_after: int | None = None
 
 
-class ErrorResponse(_Out):
-    detail: ErrorDetail
+class MetadataErrorResponse(_Out):
+    detail: MetadataErrorDetail

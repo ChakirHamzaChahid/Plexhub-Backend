@@ -69,8 +69,9 @@ class Principal:
     """Who is calling (ADR 0008 § D2.3).
 
     ``scopes`` holds only KNOWN scopes (unknown values grant nothing).
-    ``confined`` is True as soon as the stored column is non-empty — even with
-    unknown values only — so such a key never falls back to "unscoped" rights.
+    ``confined`` is True as soon as the raw stored column is not the empty
+    string (no strip) — even with unknown values only — so such a key never
+    falls back to "unscoped" rights.
     Always False for the master secret.
     """
 
@@ -96,12 +97,17 @@ async def _resolve_principal(
         else:
             row = await api_key_service.resolve(x_api_key, client_ip=_client_ip(request))
             if row is not None:
-                raw = getattr(row, "scopes", "") or ""
+                raw = getattr(row, "scopes", None)
+                if raw is None:
+                    raw = ""
+                elif not isinstance(raw, str):
+                    raw = str(raw)  # defensive: never a 500, stay confined
                 principal = Principal(
                     is_master=False,
                     key_id=row.id,
                     scopes=api_key_service.parse_scopes(raw),
-                    confined=bool(raw.strip()),
+                    # Raw column, NO strip: "\u00a0" or " " is not "no scope".
+                    confined=raw != "",
                 )
     if request is not None:
         request.state.principal = principal
@@ -173,7 +179,7 @@ async def _require_scope(
 
 
 # Two NAMED guards, no `verify_scope("…")` factory: route_audit recognises a
-# guard by its function __name__, which a closure would not carry (ADR 0008 § D2.4).
+# guard by function identity, which a closure would not provide (ADR 0008 § D2.4).
 async def verify_scrape_scope(
     request: Request,
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),

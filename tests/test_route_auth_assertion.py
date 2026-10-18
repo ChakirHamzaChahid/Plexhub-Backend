@@ -165,7 +165,7 @@ def test_scope_guards_satisfy_the_audit_per_route(guard_name):
     guard = getattr(deps, guard_name)
 
     guarded = FastAPI()
-    router = APIRouter(prefix="/api/scrape-test")
+    router = APIRouter(prefix="/api/scrape/v1")
 
     @router.get("/x", dependencies=[Depends(guard)])
     async def x():
@@ -175,7 +175,7 @@ def test_scope_guards_satisfy_the_audit_per_route(guard_name):
     assert_api_routes_authenticated(guarded)  # must not raise
 
     bare = FastAPI()
-    bare_router = APIRouter(prefix="/api/scrape-test")
+    bare_router = APIRouter(prefix="/api/scrape/v1")
 
     @bare_router.get("/x")
     async def y():
@@ -345,3 +345,77 @@ def test_real_tv_auth_router_raises_if_post_approve_loses_its_guard():
         assert_api_routes_authenticated(app)
     assert "POST /api/tv-auth/approve" in str(exc_info.value)
     assert "GET /api/tv-auth/approve" not in str(exc_info.value)
+
+
+# ─── 5. Reconnaissance par IDENTITÉ de fonction, scope guards cantonnés ──────
+
+
+def test_homonymous_local_guard_does_not_satisfy_the_audit():
+    """Une fonction locale nommée `verify_backend_secret` qui ne vérifie rien
+    ne doit plus satisfaire l'audit (reconnaissance par identité, pas par nom)."""
+
+    async def verify_backend_secret():  # homonyme, sans aucune vérification
+        return None
+
+    app = FastAPI()
+    router = APIRouter()
+
+    @router.get("/fake")
+    async def fake():
+        return {}
+
+    app.include_router(
+        router, prefix="/api", dependencies=[Depends(verify_backend_secret)]
+    )
+    with pytest.raises(RuntimeError) as exc_info:
+        assert_api_routes_authenticated(app)
+    assert "/api/fake" in str(exc_info.value)
+
+
+def test_pairing_alias_is_the_same_object_and_stays_accepted():
+    from app.api import deps, tv_auth
+
+    assert tv_auth.verify_pairing_api_key is deps.verify_backend_secret
+    app = FastAPI()
+    router = APIRouter()
+
+    @router.post("/pair", dependencies=[Depends(tv_auth.verify_pairing_api_key)])
+    async def pair():
+        return {}
+
+    app.include_router(router, prefix="/api")
+    assert_api_routes_authenticated(app)  # must not raise
+
+
+@pytest.mark.parametrize("guard_name", ["verify_scrape_scope", "verify_scrape_admin_scope"])
+def test_scope_guards_outside_scrape_gateway_prefix_count_as_unguarded(guard_name):
+    """Les gardes de scope ne valent que sous `/api/scrape/v1/` : posés ailleurs
+    (ex. `/api/media/…`), ils laisseraient passer une clé sans scope ⇒ boot refusé."""
+    from app.api import deps
+
+    guard = getattr(deps, guard_name)
+    app = FastAPI()
+    router = APIRouter()
+
+    @router.get("/media/oops", dependencies=[Depends(guard)])
+    async def oops():
+        return {}
+
+    app.include_router(router, prefix="/api")
+    with pytest.raises(RuntimeError) as exc_info:
+        assert_api_routes_authenticated(app)
+    assert "/api/media/oops" in str(exc_info.value)
+
+
+def test_scope_guard_with_a_general_guard_outside_gateway_is_still_ok():
+    from app.api.deps import verify_backend_secret, verify_scrape_scope
+
+    app = FastAPI()
+    router = APIRouter()
+
+    @router.get("/both", dependencies=[Depends(verify_backend_secret), Depends(verify_scrape_scope)])
+    async def both():
+        return {}
+
+    app.include_router(router, prefix="/api")
+    assert_api_routes_authenticated(app)  # must not raise

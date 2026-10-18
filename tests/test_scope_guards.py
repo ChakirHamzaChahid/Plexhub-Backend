@@ -297,11 +297,13 @@ def test_route_walk_sees_the_expected_families():
     assert len(walked) > 30
 
 
-async def test_scrape_key_gets_403_on_every_json_api_route(api_client, keys):
+@pytest.mark.parametrize("who", ["scrape", "unknown"])
+async def test_confined_key_gets_403_on_every_json_api_route(api_client, keys, who):
+    """Aussi pour une clé dont la colonne ne contient QUE des scopes inconnus."""
     failures = []
     for method, path in _guarded_by_json_guards():
         resp = await api_client.request(
-            method, _concrete(path), headers={"X-API-Key": keys["scrape"]},
+            method, _concrete(path), headers={"X-API-Key": keys[who]},
         )
         ok = resp.status_code == 403
         if ok:
@@ -333,3 +335,66 @@ async def test_unscoped_key_still_reaches_sample_routes(api_client, keys, path):
     assert 200 <= resp.status_code < 300, resp.text
     resp = await api_client.get(path, headers={"X-API-Key": keys["scrape"]})
     assert resp.status_code == 403
+
+
+# ─── Correctifs de revue US1 ───────────────────────────────────────────────
+
+
+class _FakeRow:
+    def __init__(self, scopes):
+        self.id = "fake-id"
+        self.scopes = scopes
+
+
+@pytest.mark.parametrize("raw", ["\u00a0", " ", "	", 123, b"scrape", ["scrape"]])
+async def test_confined_as_soon_as_raw_column_is_not_empty(monkeypatch, raw):
+    """`confined` = colonne brute non vide (aucun strip) ; valeur non-texte
+    tolérée (str() défensif) : confinée, pas de 500."""
+
+    async def fake_resolve(plaintext, *, client_ip=None):
+        return _FakeRow(raw)
+
+    monkeypatch.setattr(api_key_service, "resolve", fake_resolve)
+    principal = await deps._resolve_principal("phk_whatever", None)
+    assert principal is not None
+    assert principal.confined is True
+    assert principal.scopes == frozenset()
+    with pytest.raises(HTTPException) as exc:
+        await verify_backend_secret(request=None, x_api_key="phk_whatever")
+    assert exc.value.status_code == 403
+
+
+@pytest.mark.parametrize("raw", ["", None])
+async def test_empty_or_null_column_is_unconfined(monkeypatch, raw):
+    async def fake_resolve(plaintext, *, client_ip=None):
+        return _FakeRow(raw)
+
+    monkeypatch.setattr(api_key_service, "resolve", fake_resolve)
+    principal = await deps._resolve_principal("phk_whatever", None)
+    assert principal is not None and principal.confined is False
+    assert await verify_backend_secret(request=None, x_api_key="phk_whatever") is None
+
+
+async def test_resolve_failure_log_does_not_leak_key_digest(monkeypatch, caplog):
+    """Le warning du `except Exception` ne porte que le nom du type : le texte
+    d'une erreur SQLAlchemy contient le SHA-256 de la clé."""
+    import logging
+
+    plaintext = "phk_secret-token-for-log-test"
+    digest = api_key_service._hash(plaintext)
+
+    def boom():
+        raise RuntimeError(f"SELECT ... WHERE key_hash = '{digest}' failed")
+
+    monkeypatch.setattr(api_key_service, "async_session_factory", boom)
+    svc_logger = api_key_service.logger
+    svc_logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.DEBUG, logger="plexhub.apikey"):
+            assert await api_key_service.resolve(plaintext) is None
+    finally:
+        svc_logger.removeHandler(caplog.handler)
+    messages = " ".join(r.getMessage() for r in caplog.records)
+    assert "RuntimeError" in messages
+    assert digest not in messages
+    assert plaintext not in messages

@@ -40,7 +40,10 @@ droit et ne rend pas la clé « sans scope ».
 
 ### D2.3 Résolution unique
 `_authenticate` est remplacé par `_resolve_principal(x_api_key, request) -> Principal | None`, où `Principal` est un
-petit objet figé (`is_master: bool`, `key_id: str | None`, `scopes: frozenset[str]`). `_authenticate` reste comme
+petit objet figé à **4 champs** : `is_master: bool`, `key_id: str | None`, `scopes: frozenset[str]` (scopes
+connus seulement) et `confined: bool` (colonne brute `scopes` **différente de la chaîne vide `""`**, sans `strip` :
+une colonne `" "` ou `" "` confine la clé ; `None` = vide ; une valeur non textuelle est passée par `str()` et
+confine, sans 500 ; toujours `False` pour le maître). `_authenticate` reste comme
 enveloppe booléenne pour les appelants existants. Le `Principal` résolu est posé sur `request.state.principal`
 quand `request` n'est pas `None` (sert au limiteur par clé de la passerelle, ADR 0009 § D2.8). Aucune deuxième
 lecture de la table par requête.
@@ -51,6 +54,13 @@ lecture de la table par requête.
 - Deux **nouvelles fonctions nommées** : `verify_scrape_scope` (maître ou `scrape`) et `verify_scrape_admin_scope`
   (maître ou `scrape.admin`). Erreurs au format de la passerelle (`invalid_api_key` 401, `insufficient_scope` 403).
 - Pas de fabrique `verify_scope("…")` : sa closure ne serait pas reconnue par `route_audit`.
+- `route_audit` reconnaît les gardes par **identité de fonction** (`dependant.call` dans l'ensemble des fonctions de
+  `deps`), plus par nom : une fonction locale homonyme sans vérification ne satisfait pas l'audit ; les alias
+  (`verify_pairing_api_key`) sont le même objet et restent acceptés. `_AUTH_DEPENDENCY_NAMES` n'est plus qu'un
+  dérivé (message d'erreur, tests).
+- Les deux gardes de scope ne sont acceptés **que sur les routes sous `/api/scrape/v1/`** ; sur toute autre route
+  `/api/*` ils ne comptent pas comme garde (route non gardée ⇒ boot refusé), car ils laisseraient passer une clé
+  sans scope.
 - `_AUTH_DEPENDENCY_NAMES` gagne ces deux noms ; `PUBLIC_API_ALLOWLIST` ne change pas (5 entrées) ; B1-03
   **crée** un test qui fige l'ensemble des gardes reconnus (il n'en existe pas aujourd'hui) et met à jour le texte
   « 4 gardes » de `tests/test_route_auth_assertion.py`.

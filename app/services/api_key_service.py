@@ -187,8 +187,9 @@ async def resolve(plaintext: str, *, client_ip: str | None = None) -> ApiKey | N
                     )
                     await db.commit()
                 except Exception as exc:  # DB locked etc. — ignore, auth still valid
-                    logger.debug("last_used bump skipped for %s: %s", row.id, exc)
+                    logger.debug("last_used bump skipped for %s: %s", row.id, type(exc).__name__)
             return row
     except Exception as exc:
-        logger.warning("API key resolve failed: %s", exc)
+        # Type name only: a SQLAlchemy error text embeds the key's SHA-256.
+        logger.warning("API key resolve failed: %s", type(exc).__name__)
         return None

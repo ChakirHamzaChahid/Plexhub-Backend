@@ -29,6 +29,7 @@ from app.api import (
     media,
     plex,
     plex_downloads,
+    metadata_v1,
     scrape_v1,
     stream,
     sync,
@@ -755,6 +756,12 @@ app.include_router(enrichment.router)
 #     routes, verify_scrape_admin_scope ALONE on /cache/invalidate|purge,
 #     ADR 0008 D2.4) followed by the per-key rate limit.
 app.include_router(scrape_v1.router)
+#   - `metadata_v1.router` (lot B2, metadata edit API for plexhubTMM) — same
+#     convention: /api/metadata/v1 prefix, NO router-level dependency, each route
+#     declares verify_media_read_scope (reads + simulations) or
+#     verify_media_write_scope (the 3 routes that validate a write), then the
+#     per-key rate limits (ADR 0010 D2.2/D2.4).
+app.include_router(metadata_v1.router)
 # `dav.router` (WebDAV virtual filesystem for Plex, ticket DAV-2) — its own
 # /dav prefix + module-level verify_dav_basic_auth. Deliberately OUTSIDE
 # /api: rclone (the only client this endpoint targets) speaks HTTP Basic

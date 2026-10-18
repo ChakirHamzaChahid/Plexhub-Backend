@@ -132,9 +132,10 @@ def columns_to_flat(cols: Mapping[str, Any], type_: str) -> dict[str, Any]:
     return {name: full[name] for name in FIELDS_BY_TYPE[type_]}
 
 
-def flat_to_nested(flat: Mapping[str, Any]) -> dict[str, Any]:
-    """API shape: `ids` and `ratings` grouped; every other key as is. `ids` is
-    complete whenever ANY id field is present (all four keys, null when empty)."""
+def flat_to_nested(flat: Mapping[str, Any], *, pad: bool = True) -> dict[str, Any]:
+    """API shape: `ids` and `ratings` grouped; every other key as is. With `pad`
+    (full images) `ids`/`ratings` carry all their keys, null when empty; without
+    it (partial images of an edit: modified fields only) only the present ones."""
     nested: dict[str, Any] = {}
     ids: dict[str, Any] = {}
     ratings: dict[str, Any] = {}
@@ -146,9 +147,11 @@ def flat_to_nested(flat: Mapping[str, Any]) -> dict[str, Any]:
         else:
             nested[name] = value
     if ids:
-        nested["ids"] = {k: ids.get(k) for k in ("imdb", "tmdb", "tvdb", "wikidata")}
+        nested["ids"] = (
+            {k: ids.get(k) for k in ("imdb", "tmdb", "tvdb", "wikidata")} if pad else ids
+        )
     if ratings:
-        nested["ratings"] = {k: ratings.get(k) for k in ("imdb", "tmdb")}
+        nested["ratings"] = {k: ratings.get(k) for k in ("imdb", "tmdb")} if pad else ratings
     return nested
 
 

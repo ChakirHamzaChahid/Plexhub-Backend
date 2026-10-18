@@ -74,7 +74,11 @@ async def test_enabled_still_elects_a_master_and_starts_the_scheduler(monkeypatc
     captured_bg["coro"].close()
 
 
-async def test_the_health_endpoint_reports_not_master(api_client, monkeypatch):
+async def test_the_health_endpoint_reports_not_master(api_client, db_factory, monkeypatch):
+    from app.db import database as db_module
+
+    # /api/health counts rows: wire it to the test DB (a fresh CI runner has no real one)
+    monkeypatch.setattr(db_module, "async_session_factory", db_factory)
     monkeypatch.setattr(settings, "BACKGROUND_JOBS_ENABLED", False)
     body = (await api_client.get("/api/health")).json()
     assert body["isMaster"] is False

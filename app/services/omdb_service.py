@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -42,6 +43,7 @@ from typing import Generator, Optional
 import httpx
 
 from app.config import settings
+from app.services.scrape_provider_errors import ProviderError
 from app.utils.metrics import omdb_requests_total
 
 logger = logging.getLogger("plexhub.omdb")
@@ -170,6 +172,64 @@ def _parse_imdb_votes(value) -> int | None:
     return int(digits) if digits.isdigit() else None
 
 
+@dataclass(frozen=True)
+class OmdbRatings:
+    """Raw parsed ratings of `OMDbService.fetch_ratings` (B1-08): IMDb 0..10 +
+    votes, Rotten Tomatoes 0..100 and Metacritic 0..100 as ints. "N/A" or
+    absent -> None."""
+    imdb_rating: float | None
+    imdb_votes: int | None
+    rotten_tomatoes: int | None
+    metacritic: int | None
+
+
+_DEFAULT_RETRY_AFTER = 30
+# Normalised (lower-case, trailing "." / "!" stripped) OMDb `Error` strings.
+_OMDB_NOT_FOUND = frozenset({"incorrect imdb id", "movie not found", "error getting data"})
+_OMDB_NOT_CONFIGURED = frozenset({"invalid api key", "no api key provided"})
+
+
+def _parse_retry_after(value: str | None) -> int | None:
+    """Integer `Retry-After` seconds, or None (absent / HTTP-date / garbage)."""
+    if value is None:
+        return None
+    value = value.strip()
+    return int(value) if value.isdigit() else None
+
+
+def _score_0_100(text) -> int | None:
+    """"87%" / "74/100" / "74" -> int in 0..100, else None."""
+    cleaned = _clean_str(text)
+    if cleaned is None:
+        return None
+    head = cleaned.split("/", 1)[0].strip().rstrip("%").strip()
+    if not head.isdigit():
+        return None
+    value = int(head)
+    return value if 0 <= value <= 100 else None
+
+
+def _parse_ratings(data: dict) -> OmdbRatings:
+    rt: int | None = None
+    mc: int | None = None
+    for entry in data.get("Ratings") or []:
+        if not isinstance(entry, dict):
+            continue
+        source = entry.get("Source")
+        if source == "Rotten Tomatoes" and rt is None:
+            rt = _score_0_100(entry.get("Value"))
+        elif source == "Metacritic" and mc is None:
+            mc = _score_0_100(entry.get("Value"))
+    if mc is None:
+        mc = _score_0_100(data.get("Metascore"))
+    return OmdbRatings(
+        imdb_rating=_parse_imdb_rating(data.get("imdbRating")),
+        imdb_votes=_parse_imdb_votes(data.get("imdbVotes")),
+        rotten_tomatoes=rt,
+        metacritic=mc,
+    )
+
+
 class OMDbService:
     BASE_URL = "https://www.omdbapi.com"
 
@@ -288,6 +348,151 @@ class OMDbService:
                 else:
                     raise
         raise last_exc  # type: ignore[misc]
+
+    async def _request_bounded(self, params: dict, *, deadline: float) -> tuple[int, dict]:
+        """Strict sibling of `_request` (B1-08): same retry loop / counters,
+        bounded by `deadline` (absolute `time.monotonic()`), every failure
+        translated into `ProviderError` raised OUTSIDE the `except` blocks
+        (no `__cause__`/`__context__`, so the `apikey=` URL cannot survive).
+
+        Returns `(status_code, json_body)` for a 2xx, and ALSO for a 401 whose
+        body is a JSON object: OMDb answers "Invalid API key!" and "Request
+        limit reached!" with HTTP 401 + a JSON `Error`, which the caller must
+        tell apart. Any other failure raises."""
+        client = await self._get_client()
+        url = f"{self.BASE_URL}/"
+        final: ProviderError | None = None
+        for attempt, delay in enumerate((*_RETRY_DELAYS, None)):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                final = ProviderError("timeout", provider="omdb")
+                break
+            self.real_request_count += 1
+            tally = _request_tally.get()
+            if tally is not None:
+                tally.add()
+
+            wait: float | None = None
+            wait_kind = "timeout"
+            wait_retry_after: int | None = None
+            try:
+                resp = await client.get(url, params=params, timeout=min(10.0, remaining))
+                status = resp.status_code
+                if status == 429:
+                    header_ra = _parse_retry_after(resp.headers.get("Retry-After"))
+                    if delay is not None:
+                        wait = float(header_ra if header_ra is not None else delay)
+                        wait_kind = "rate_limited"
+                        wait_retry_after = int(wait)
+                    else:
+                        final = ProviderError(
+                            "rate_limited", provider="omdb", status_code=429,
+                            retry_after=header_ra if header_ra is not None else _DEFAULT_RETRY_AFTER,
+                        )
+                elif status in (502, 503, 504):
+                    if delay is not None:
+                        wait, wait_kind = float(delay), "unavailable"
+                    else:
+                        final = ProviderError("unavailable", provider="omdb", status_code=status)
+                elif status == 401:
+                    try:
+                        body = resp.json()
+                    except ValueError:
+                        body = None
+                    if isinstance(body, dict):
+                        return status, body
+                    final = ProviderError("not_configured", provider="omdb", status_code=status)
+                elif status == 403:
+                    final = ProviderError("not_configured", provider="omdb", status_code=status)
+                elif status == 404:
+                    final = ProviderError("not_found", provider="omdb", status_code=status)
+                elif status >= 400:
+                    final = ProviderError("bad_response", provider="omdb", status_code=status)
+                else:
+                    body = resp.json()
+                    if not isinstance(body, dict):
+                        final = ProviderError("bad_response", provider="omdb", status_code=status)
+                    else:
+                        return status, body
+            except httpx.TimeoutException as e:
+                logger.warning("OMDb attempt %d timed out (%s)", attempt + 1, type(e).__name__)
+                if delay is not None:
+                    wait, wait_kind = float(delay), "timeout"
+                else:
+                    final = ProviderError("timeout", provider="omdb")
+            except (httpx.ConnectError, httpx.RemoteProtocolError) as e:
+                logger.warning("OMDb attempt %d failed (%s)", attempt + 1, type(e).__name__)
+                if delay is not None:
+                    wait, wait_kind = float(delay), "unavailable"
+                else:
+                    final = ProviderError("unavailable", provider="omdb")
+            except Exception as e:  # noqa: BLE001 - everything else is a bad response
+                logger.warning("OMDb bad response (%s)", type(e).__name__)
+                final = ProviderError("bad_response", provider="omdb")
+
+            if final is not None:
+                break
+            if wait is not None:
+                if wait >= deadline - time.monotonic():
+                    if wait_kind == "rate_limited":
+                        final = ProviderError(
+                            "rate_limited", provider="omdb",
+                            retry_after=wait_retry_after, status_code=429,
+                        )
+                    else:
+                        final = ProviderError("timeout", provider="omdb")
+                    break
+                logger.warning("OMDb retrying in %ss (%s)", wait, wait_kind)
+                await asyncio.sleep(wait)
+        if final is None:  # defensive: the last attempt always sets `final`
+            final = ProviderError("unavailable", provider="omdb")
+        raise final
+
+    async def fetch_ratings(self, imdb_id: str, *, deadline: float) -> OmdbRatings:
+        """Strict ratings lookup for the gateway (B1-08, ADR 0009 D2.6).
+
+        Raises `ProviderError` (never returns None): `not_configured` (no key,
+        "Invalid API key!", "No API key provided."), `budget_exhausted`
+        (`OMDB_DAILY_LIMIT` reached, or "Request limit reached!"),
+        `not_found` ("Incorrect IMDb ID.", "Movie not found!", "Error getting
+        data."), `rate_limited`/`unavailable`/`timeout` (transport),
+        `bad_response` (anything else). Same counter and the same
+        `plexhub_omdb_requests_total` metric as `get_by_imdb_id`, one
+        increment per call. Nothing is cached here."""
+        if not self.is_configured:
+            raise ProviderError("not_configured", provider="omdb")
+        if self._budget_exhausted():
+            omdb_requests_total.labels(result="budget_exhausted").inc()
+            raise ProviderError("budget_exhausted", provider="omdb")
+        try:
+            status, data = await self._request_bounded(
+                {"i": imdb_id, "plot": "short"}, deadline=deadline,
+            )
+        except ProviderError as err:
+            omdb_requests_total.labels(
+                result="rate_limited" if err.kind == "rate_limited"
+                else "not_found" if err.kind == "not_found" else "error"
+            ).inc()
+            raise
+
+        response = data.get("Response")
+        if response == "True" and status < 400:
+            omdb_requests_total.labels(result="ok").inc()
+            return _parse_ratings(data)
+
+        error = data.get("Error") if isinstance(data.get("Error"), str) else ""
+        norm = error.strip().rstrip(".!").strip().lower()
+        if response == "False" and norm in _OMDB_NOT_FOUND:
+            omdb_requests_total.labels(result="not_found").inc()
+            raise ProviderError("not_found", provider="omdb", status_code=status)
+        if response == "False" and norm == "request limit reached":
+            omdb_requests_total.labels(result="budget_exhausted").inc()
+            raise ProviderError("budget_exhausted", provider="omdb", status_code=status)
+        if response == "False" and norm in _OMDB_NOT_CONFIGURED:
+            omdb_requests_total.labels(result="error").inc()
+            raise ProviderError("not_configured", provider="omdb", status_code=status)
+        omdb_requests_total.labels(result="error").inc()
+        raise ProviderError("bad_response", provider="omdb", status_code=status)
 
     async def get_by_imdb_id(self, imdb_id: str) -> OMDbData | None:
         """Look up a title by its imdb_id. Validation-only flow — this is

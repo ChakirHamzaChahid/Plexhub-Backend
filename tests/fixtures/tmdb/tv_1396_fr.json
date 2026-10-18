@@ -1,0 +1,78 @@
+{
+  "adult": false,
+  "backdrop_path": "/tsRy63Mu5cu8etL1X7ZLyf7UP1M.jpg",
+  "created_by": [
+    {"id": 66633, "credit_id": "52542282760ee313280017f9", "name": "Vince Gilligan", "gender": 2, "profile_path": "/z3E0DhBg1V1PZVEtS9vfFPzOWYB.jpg"},
+    {"id": 66633, "credit_id": "dup-creator", "name": "Vince Gilligan", "gender": 2, "profile_path": "/z3E0DhBg1V1PZVEtS9vfFPzOWYB.jpg"}
+  ],
+  "episode_run_time": [0, 47, 45],
+  "first_air_date": "2008-01-20",
+  "genres": [{"id": 18, "name": "Drame"}, {"id": 80, "name": "Crime"}],
+  "homepage": "https://www.sonypictures.com/tv/breakingbad",
+  "id": 1396,
+  "in_production": false,
+  "languages": ["en", "es"],
+  "last_air_date": "2013-09-29",
+  "name": "Breaking Bad",
+  "networks": [
+    {"id": 174, "logo_path": "/alqLicR1ZMHMaZGP3xRQxn9sq7p.png", "name": "AMC", "origin_country": "US"},
+    {"id": 175, "logo_path": null, "name": "AMC", "origin_country": "US"}
+  ],
+  "number_of_episodes": 62,
+  "number_of_seasons": 5,
+  "origin_country": ["US"],
+  "original_language": "en",
+  "original_name": "Breaking Bad",
+  "overview": "Walter White, professeur de chimie, apprend qu'il est atteint d'un cancer. Pour assurer l'avenir de sa famille, il se lance dans la fabrication de méthamphétamine.",
+  "popularity": 120.5,
+  "poster_path": "/ineLOBPG8AZsluYwnkMpHRyu7L.jpg",
+  "production_companies": [
+    {"id": 11073, "logo_path": "/aCbASRcI1MI7DXjPbSW9Fcv9uGR.png", "name": "Sony Pictures Television Studios", "origin_country": "US"},
+    {"id": 33742, "logo_path": null, "name": "High Bridge Productions", "origin_country": "US"}
+  ],
+  "production_countries": [{"iso_3166_1": "US", "name": "United States of America"}],
+  "seasons": [
+    {"air_date": "2010-03-21", "episode_count": 13, "id": 3573, "name": "Saison 3", "overview": "", "poster_path": "/ggFHVNu6YYI5L9pCfOacjizRGt.jpg", "season_number": 3, "vote_average": 8.2},
+    {"air_date": "2008-01-20", "episode_count": 7, "id": 3572, "name": "Saison 1", "overview": "", "poster_path": "/1BP4xYv9ZG4ZVHkL7ocOziBMby4.jpg", "season_number": 1, "vote_average": 8.0},
+    {"air_date": "2009-02-17", "episode_count": 5, "id": 3577, "name": "Épisodes spéciaux", "overview": "", "poster_path": null, "season_number": 0, "vote_average": 0.0},
+    {"air_date": "", "episode_count": 13, "id": 3575, "name": "", "overview": "", "poster_path": "", "season_number": 2, "vote_average": 8.1},
+    {"air_date": "2010-03-21", "episode_count": 13, "id": 99999, "name": "Doublon saison 3", "overview": "", "poster_path": null, "season_number": 3, "vote_average": 0.0},
+    {"air_date": "2010-03-21", "episode_count": 13, "id": 88888, "name": "Sans numero", "overview": "", "poster_path": null, "season_number": null, "vote_average": 0.0}
+  ],
+  "status": "Ended",
+  "tagline": "Marchez sur la ligne.",
+  "type": "Scripted",
+  "vote_average": 8.9,
+  "vote_count": 12900,
+  "content_ratings": {
+    "results": [
+      {"descriptors": [], "iso_3166_1": "DE", "rating": "16"},
+      {"descriptors": [], "iso_3166_1": "US", "rating": "TV-MA"},
+      {"descriptors": [], "iso_3166_1": "FR", "rating": "16"}
+    ]
+  },
+  "credits": {
+    "cast": [
+      {"adult": false, "gender": 2, "id": 17419, "known_for_department": "Acting", "name": "Bryan Cranston", "profile_path": "/7Jahy5LZX2Fo8fGJltMreAI49hC.jpg", "character": "Walter White", "credit_id": "52542282760ee313280017f9", "order": 0},
+      {"adult": false, "gender": 2, "id": 84497, "known_for_department": "Acting", "name": "Aaron Paul", "profile_path": "/8Kce1utfVQU2yRBl8OHdA3RrEPm.jpg", "character": "Jesse Pinkman", "credit_id": "52542282760ee313280017fd", "order": 1}
+    ],
+    "crew": [
+      {"adult": false, "gender": 2, "id": 66633, "known_for_department": "Writing", "name": "Vince Gilligan", "profile_path": "/z3E0DhBg1V1PZVEtS9vfFPzOWYB.jpg", "credit_id": "c1", "department": "Writing", "job": "Creator"},
+      {"adult": false, "gender": 2, "id": 66633, "known_for_department": "Writing", "name": "Vince Gilligan", "profile_path": "/z3E0DhBg1V1PZVEtS9vfFPzOWYB.jpg", "credit_id": "c2", "department": "Writing", "job": "Writer"},
+      {"adult": false, "gender": 2, "id": 1223, "known_for_department": "Directing", "name": "Michelle MacLaren", "profile_path": null, "credit_id": "c3", "department": "Directing", "job": "Director"},
+      {"adult": false, "gender": 2, "id": 55555, "known_for_department": "Production", "name": "Mark Johnson", "profile_path": null, "credit_id": "c4", "department": "Production", "job": "Executive Producer"}
+    ]
+  },
+  "external_ids": {"imdb_id": "tt0903747", "freebase_mid": "/m/03d34x8", "tvdb_id": 81189, "tvrage_id": 18164, "wikidata_id": "Q1079", "facebook_id": "BreakingBad", "instagram_id": "breakingbad", "twitter_id": "BreakingBad_AMC"},
+  "videos": {
+    "results": [
+      {"iso_639_1": "en", "iso_3166_1": "US", "name": "Season 5 trailer", "key": "enTvTrailer", "site": "YouTube", "size": 1080, "type": "Trailer", "official": true},
+      {"iso_639_1": "fr", "iso_3166_1": "FR", "name": "Bande-annonce", "key": "frTvTrailer", "site": "YouTube", "size": 1080, "type": "Trailer", "official": true}
+    ]
+  },
+  "images": {
+    "backdrops": [{"iso_639_1": null, "file_path": "/tv_bd_null.jpg"}, {"iso_639_1": "fr", "file_path": "/tv_bd_fr.jpg"}],
+    "logos": [{"iso_639_1": "en", "file_path": "/tv_logo_en.png"}],
+    "posters": [{"iso_639_1": "en", "file_path": "/tv_p_en.jpg"}, {"iso_639_1": "fr", "file_path": "/tv_p_fr.jpg"}]
+  }
+}

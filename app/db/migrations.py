@@ -61,6 +61,8 @@ async def run_migrations(engine: AsyncEngine) -> None:
     await _migration_026_add_media_match_lock(engine)
     await _migration_027_create_scrape_review(engine)
     await _migration_028_epg_dedup_unique_index(engine)
+    await _migration_029_scrape_cache(engine)
+    await _migration_030_api_key_scopes(engine)
 
     logger.info("All migrations completed successfully")
 
@@ -1397,3 +1399,82 @@ async def _migration_028_epg_dedup_unique_index(engine: AsyncEngine) -> None:
             exc_info=True,
         )
         raise
+
+
+async def _migration_029_scrape_cache(engine: AsyncEngine) -> None:
+    """Create the scrape-gateway cache table (ADR 0009 D2.1, Lot B1).
+
+    One table for every family (`movie`, `show`, `season`, `match`, `omdb`,
+    `find`): purge and stats in a single query. Not to be confused with the
+    TMDB worker cache `tmdb_scrape_cache` (migration 010).
+
+    No column carries a SQL `DEFAULT` (ADR 0009 D2.1): every write goes through
+    the gateway code, which supplies all values. Types are `TEXT`/`INTEGER`
+    only (no BIGINT) so the DDL is byte-for-byte what the ORM model
+    `ScrapeCacheEntry` emits through `create_all`.
+
+    Idempotent (`IF NOT EXISTS` on table and index): a fresh DB already has the
+    table from `Base.metadata.create_all` (CR-C05), an upgraded one gets it
+    here, and a re-run is a silent no-op.
+    """
+    logger.info("Migration 029: Creating scrape_cache table")
+
+    async with engine.begin() as conn:
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS scrape_cache (
+                family          TEXT    NOT NULL,
+                key_version     INTEGER NOT NULL,
+                language        TEXT    NOT NULL,
+                cache_key       TEXT    NOT NULL,
+                result          TEXT    NOT NULL,
+                schema_version  INTEGER NOT NULL,
+                payload         TEXT,
+                fetched_at      INTEGER NOT NULL,
+                expires_at      INTEGER NOT NULL,
+                PRIMARY KEY (family, key_version, language, cache_key)
+            )
+        """))
+        await conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_scrape_cache_expires_at "
+            "ON scrape_cache (expires_at)"
+        ))
+
+
+async def _migration_030_api_key_scopes(engine: AsyncEngine) -> None:
+    """Add `api_keys.scopes` (ADR 0008 D2.1, Lot B1).
+
+    `scopes` (TEXT NOT NULL DEFAULT '') -- space-separated, sorted, deduplicated
+    scope names; the empty string means "key without scope" (behaviour of every
+    existing key is unchanged). The SQL-level `DEFAULT ''` is deliberate (the
+    migration-025 lesson, CLAUDE.md piege 6): a `NOT NULL` column without it
+    breaks every raw `INSERT` that enumerates columns, and the ORM column
+    carries `server_default=text("''")` so `create_all` emits the same DDL.
+
+    No backfill: '' is the correct state for every existing key. Validation of
+    the scope values lives in `api_key_service.create_key`, not here.
+
+    Idempotent: the column is probed (PRAGMA table_info) before ADD COLUMN, so
+    a fresh DB (already built by `Base.metadata.create_all`, CR-C05) is a
+    silent no-op; the try/except stays as a safety net for a race with another
+    process's init_db() (piege 7).
+    """
+    logger.info("Migration 030: Adding scopes column to api_keys")
+
+    async with engine.begin() as conn:
+        if await _column_exists(conn, "api_keys", "scopes"):
+            logger.debug("Migration 030: scopes already present, skipping ADD COLUMN")
+            return
+        try:
+            await conn.execute(text(
+                "ALTER TABLE api_keys ADD COLUMN scopes TEXT NOT NULL DEFAULT ''"
+            ))
+            logger.info("Migration 030: scopes column added")
+        except Exception as e:
+            # Only a concurrent init_db() that added the column first is benign.
+            # Any other failure (lock past busy_timeout, disk error, missing
+            # table) must stop the boot: without `scopes`, every ORM read of
+            # ApiKey fails and api_key_service.resolve() turns that into a
+            # silent 401 for every per-user key.
+            if "duplicate column" not in str(e).lower():
+                raise
+            logger.warning("Migration 030: scopes added concurrently: %s", e)

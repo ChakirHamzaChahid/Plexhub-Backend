@@ -29,6 +29,7 @@ from app.api import (
     media,
     plex,
     plex_downloads,
+    scrape_v1,
     stream,
     sync,
     tv_auth,
@@ -36,7 +37,7 @@ from app.api import (
 from app.utils.request_context import RequestIdLogFilter, RequestIdMiddleware
 from app.utils.job_health import mark_job_success, set_master, track_job
 
-APP_VERSION = "1.11.1"
+APP_VERSION = "1.12.0"
 
 # First run of the opt-in `epg_sync` job, counted from boot (see lifespan).
 _EPG_SYNC_FIRST_RUN_DELAY = timedelta(minutes=5)
@@ -635,6 +636,10 @@ app.add_middleware(
     allow_headers=["X-API-Key", "Content-Type", "Authorization"],
 )
 app.add_middleware(GZipMiddleware, minimum_size=1000)
+# Body size cap (64 KiB) for /api/scrape/v1/ ONLY — pure ASGI, see app/api/body_limit.py.
+# Inserted between GZip and RequestId so the relative order of the existing middlewares is unchanged.
+from app.api.body_limit import ScrapeBodyLimitMiddleware  # noqa: E402
+app.add_middleware(ScrapeBodyLimitMiddleware)
 # Added last so it wraps the others — request_id is set before any other middleware runs.
 app.add_middleware(RequestIdMiddleware)
 # CSRF guard for POST/PUT/PATCH/DELETE /admin* (S4.3, AUDIT-P2-005/CR-S07) — see app/api/csrf.py.
@@ -737,6 +742,12 @@ app.include_router(api_keys.router)
 app.include_router(downloads.router)
 app.include_router(plex_downloads.router)
 app.include_router(enrichment.router)
+#   - `scrape_v1.router` (lot B1, scrape gateway for plexhubTMM) — its own
+#     /api/scrape/v1 prefix and, deliberately, NO router-level dependency:
+#     each route declares its guard (verify_scrape_scope on the 7 read
+#     routes, verify_scrape_admin_scope ALONE on /cache/invalidate|purge,
+#     ADR 0008 D2.4) followed by the per-key rate limit.
+app.include_router(scrape_v1.router)
 # `dav.router` (WebDAV virtual filesystem for Plex, ticket DAV-2) — its own
 # /dav prefix + module-level verify_dav_basic_auth. Deliberately OUTSIDE
 # /api: rclone (the only client this endpoint targets) speaks HTTP Basic

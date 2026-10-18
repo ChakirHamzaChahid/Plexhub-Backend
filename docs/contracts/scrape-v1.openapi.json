@@ -1,0 +1,3360 @@
+{
+  "components": {
+    "schemas": {
+      "CacheStatsResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "families": {
+            "items": {
+              "$ref": "#/components/schemas/FamilyStats"
+            },
+            "title": "Families",
+            "type": "array"
+          },
+          "generatedAt": {
+            "title": "Generatedat",
+            "type": "integer"
+          },
+          "sinceStart": {
+            "$ref": "#/components/schemas/SinceStart"
+          },
+          "ttl": {
+            "$ref": "#/components/schemas/TtlInfo"
+          }
+        },
+        "required": [
+          "generatedAt",
+          "ttl",
+          "sinceStart"
+        ],
+        "title": "CacheStatsResponse",
+        "type": "object"
+      },
+      "Candidate": {
+        "additionalProperties": false,
+        "description": "Contract 6.6.",
+        "properties": {
+          "mediaType": {
+            "enum": [
+              "movie",
+              "show"
+            ],
+            "title": "Mediatype",
+            "type": "string"
+          },
+          "originalTitle": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Originaltitle"
+          },
+          "overview": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Overview"
+          },
+          "posterPath": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Posterpath"
+          },
+          "score": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Score",
+            "type": "number"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "tmdbId": {
+            "title": "Tmdbid",
+            "type": "integer"
+          },
+          "year": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Year"
+          }
+        },
+        "required": [
+          "tmdbId",
+          "mediaType",
+          "title",
+          "score"
+        ],
+        "title": "Candidate",
+        "type": "object"
+      },
+      "CastMember": {
+        "additionalProperties": false,
+        "properties": {
+          "character": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Character"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "order": {
+            "title": "Order",
+            "type": "integer"
+          },
+          "profilePath": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Profilepath"
+          },
+          "tmdbPersonId": {
+            "title": "Tmdbpersonid",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "order",
+          "tmdbPersonId"
+        ],
+        "title": "CastMember",
+        "type": "object"
+      },
+      "Collection": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "tmdbId": {
+            "title": "Tmdbid",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "tmdbId",
+          "name"
+        ],
+        "title": "Collection",
+        "type": "object"
+      },
+      "CrewMember": {
+        "additionalProperties": false,
+        "properties": {
+          "department": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Department"
+          },
+          "job": {
+            "title": "Job",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "profilePath": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Profilepath"
+          },
+          "tmdbPersonId": {
+            "title": "Tmdbpersonid",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "job",
+          "tmdbPersonId"
+        ],
+        "title": "CrewMember",
+        "type": "object"
+      },
+      "EpisodeDetails": {
+        "additionalProperties": false,
+        "properties": {
+          "airDate": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Airdate"
+          },
+          "crew": {
+            "items": {
+              "$ref": "#/components/schemas/CrewMember"
+            },
+            "maxItems": 10,
+            "title": "Crew",
+            "type": "array"
+          },
+          "episodeNumber": {
+            "minimum": 1.0,
+            "title": "Episodenumber",
+            "type": "integer"
+          },
+          "guestStars": {
+            "items": {
+              "$ref": "#/components/schemas/CastMember"
+            },
+            "maxItems": 20,
+            "title": "Gueststars",
+            "type": "array"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "overview": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Overview"
+          },
+          "ratings": {
+            "items": {
+              "$ref": "#/components/schemas/Rating"
+            },
+            "title": "Ratings",
+            "type": "array"
+          },
+          "runtimeMinutes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Runtimeminutes"
+          },
+          "seasonNumber": {
+            "title": "Seasonnumber",
+            "type": "integer"
+          },
+          "stillPath": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stillpath"
+          },
+          "tmdbId": {
+            "title": "Tmdbid",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "tmdbId",
+          "episodeNumber",
+          "seasonNumber"
+        ],
+        "title": "EpisodeDetails",
+        "type": "object"
+      },
+      "ErrorDetail": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "enum": [
+              "invalid_parameter",
+              "invalid_api_key",
+              "insufficient_scope",
+              "rate_limited",
+              "upstream_error",
+              "upstream_unavailable",
+              "provider_not_configured",
+              "upstream_timeout"
+            ],
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "retryAfterSeconds": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retryafterseconds"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "ErrorDetail",
+        "type": "object"
+      },
+      "ErrorResponse": {
+        "additionalProperties": false,
+        "description": "Body of every gateway error: `{\"detail\": {\"code\", \"message\",\n\"retryAfterSeconds\"?}}` (FastAPI `HTTPException(detail=dict)`).",
+        "properties": {
+          "detail": {
+            "$ref": "#/components/schemas/ErrorDetail"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "ErrorResponse",
+        "type": "object"
+      },
+      "ExternalIds": {
+        "additionalProperties": false,
+        "properties": {
+          "imdb": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Imdb"
+          },
+          "tvdb": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tvdb"
+          },
+          "wikidata": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Wikidata"
+          }
+        },
+        "title": "ExternalIds",
+        "type": "object"
+      },
+      "FamilyStats": {
+        "additionalProperties": false,
+        "description": "One `(family, keyVersion)` line of `/cache/stats`. `entries` is the sum\nof the three result classes; `expired` is counted IN ADDITION (a subset of\n`entries`, not a fourth class).",
+        "properties": {
+          "ambiguous": {
+            "minimum": 0.0,
+            "title": "Ambiguous",
+            "type": "integer"
+          },
+          "entries": {
+            "minimum": 0.0,
+            "title": "Entries",
+            "type": "integer"
+          },
+          "expired": {
+            "minimum": 0.0,
+            "title": "Expired",
+            "type": "integer"
+          },
+          "family": {
+            "enum": [
+              "match",
+              "movie",
+              "show",
+              "season",
+              "omdb",
+              "find"
+            ],
+            "title": "Family",
+            "type": "string"
+          },
+          "keyVersion": {
+            "title": "Keyversion",
+            "type": "integer"
+          },
+          "negative": {
+            "minimum": 0.0,
+            "title": "Negative",
+            "type": "integer"
+          },
+          "newestFetchedAt": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Newestfetchedat"
+          },
+          "oldestFetchedAt": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oldestfetchedat"
+          },
+          "positive": {
+            "minimum": 0.0,
+            "title": "Positive",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "family",
+          "keyVersion",
+          "entries",
+          "positive",
+          "ambiguous",
+          "negative",
+          "expired"
+        ],
+        "title": "FamilyStats",
+        "type": "object"
+      },
+      "FindMatch": {
+        "additionalProperties": false,
+        "description": "Contract 5.7: `showTmdbId`/`seasonNumber`/`episodeNumber` are set for\nan `episode` match only (null otherwise).",
+        "properties": {
+          "episodeNumber": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Episodenumber"
+          },
+          "mediaType": {
+            "enum": [
+              "movie",
+              "show",
+              "episode"
+            ],
+            "title": "Mediatype",
+            "type": "string"
+          },
+          "seasonNumber": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seasonnumber"
+          },
+          "showTmdbId": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Showtmdbid"
+          },
+          "tmdbId": {
+            "title": "Tmdbid",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "mediaType",
+          "tmdbId"
+        ],
+        "title": "FindMatch",
+        "type": "object"
+      },
+      "FindResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "cache": {
+            "enum": [
+              "hit",
+              "miss"
+            ],
+            "title": "Cache",
+            "type": "string"
+          },
+          "cacheKey": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cachekey"
+          },
+          "expiresAt": {
+            "title": "Expiresat",
+            "type": "integer"
+          },
+          "fetchedAt": {
+            "title": "Fetchedat",
+            "type": "integer"
+          },
+          "language": {
+            "title": "Language",
+            "type": "string"
+          },
+          "matches": {
+            "items": {
+              "$ref": "#/components/schemas/FindMatch"
+            },
+            "maxItems": 5,
+            "title": "Matches",
+            "type": "array"
+          },
+          "result": {
+            "enum": [
+              "found",
+              "not_found"
+            ],
+            "title": "Result",
+            "type": "string"
+          },
+          "schemaVersion": {
+            "minimum": 1.0,
+            "title": "Schemaversion",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "cacheKey",
+          "language",
+          "fetchedAt",
+          "expiresAt",
+          "cache",
+          "result"
+        ],
+        "title": "FindResponse",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "Images": {
+        "additionalProperties": false,
+        "description": "Contract 6.7: raw TMDB paths (`/abc.jpg`), bounded lists.",
+        "properties": {
+          "backdrop": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Backdrop"
+          },
+          "backdrops": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Backdrops",
+            "type": "array"
+          },
+          "logos": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 10,
+            "title": "Logos",
+            "type": "array"
+          },
+          "poster": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Poster"
+          },
+          "posters": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Posters",
+            "type": "array"
+          }
+        },
+        "title": "Images",
+        "type": "object"
+      },
+      "InvalidateBody": {
+        "$ref": "#/components/schemas/InvalidateRequest",
+        "description": "Request body of `POST /cache/invalidate` (same JSON as\n`InvalidateRequest`, which it wraps).\n\nWhy a wrapper: for a single non-embedded body model, FastAPI 0.115\n(pinned < 0.116, CLAUDE.md section 10) builds one `TypeAdapter` per field\nof that model with `Annotated[annotation, field_info]`; on an optional\n(`X | None`) field carrying an alias, pydantic >= 2.12 then emits an\n`UnsupportedFieldAttributeWarning` (9 of them for the 3 fields here, B1-09\nreview). The `Annotated[...] = None` form above does not avoid it (the\nwarning comes from FastAPI's re-wrapping, not from the declaration); a\nroot model has a single, non-optional, alias-less `root` field, so\nnothing is re-wrapped.",
+        "title": "InvalidateBody"
+      },
+      "InvalidateRequest": {
+        "additionalProperties": false,
+        "description": "Contract 5.9. EITHER `keys` (1..500) OR `family` + `tmdbId`; the\nexclusivity is a 400 `invalid_parameter` raised by the service (not a\nPydantic validation error), hence every field is optional here.\n\n`family` is a plain string on purpose: a family other than\nmovie|show|season is a 400 `invalid_parameter` (PRD FR-015b), not a 422.\nThe bounds of `keys` and `tmdbId` stay native 422s.\n\n`Annotated[X | None, Field(...)] = None` (not `X | None = Field(...)`):\nthe latter makes pydantic attach the field metadata to one member of the\nunion inside FastAPI's body model (UnsupportedFieldAttributeWarning).",
+        "properties": {
+          "family": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "movie | show | season (other value: 400)",
+            "title": "Family"
+          },
+          "keys": {
+            "anyOf": [
+              {
+                "items": {
+                  "maxLength": 1024,
+                  "type": "string"
+                },
+                "maxItems": 500,
+                "minItems": 1,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Keys"
+          },
+          "tmdbId": {
+            "anyOf": [
+              {
+                "maximum": 999999999.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tmdbid"
+          }
+        },
+        "title": "InvalidateRequest",
+        "type": "object"
+      },
+      "InvalidateResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "deleted": {
+            "minimum": 0.0,
+            "title": "Deleted",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "deleted"
+        ],
+        "title": "InvalidateResponse",
+        "type": "object"
+      },
+      "MatchResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "cache": {
+            "enum": [
+              "hit",
+              "miss"
+            ],
+            "title": "Cache",
+            "type": "string"
+          },
+          "cacheKey": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cachekey"
+          },
+          "candidates": {
+            "items": {
+              "$ref": "#/components/schemas/Candidate"
+            },
+            "maxItems": 10,
+            "title": "Candidates",
+            "type": "array"
+          },
+          "confidence": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence"
+          },
+          "details": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MovieDetails"
+              },
+              {
+                "$ref": "#/components/schemas/ShowDetails"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Details"
+          },
+          "expiresAt": {
+            "title": "Expiresat",
+            "type": "integer"
+          },
+          "fetchedAt": {
+            "title": "Fetchedat",
+            "type": "integer"
+          },
+          "language": {
+            "title": "Language",
+            "type": "string"
+          },
+          "mediaType": {
+            "enum": [
+              "movie",
+              "show"
+            ],
+            "title": "Mediatype",
+            "type": "string"
+          },
+          "result": {
+            "enum": [
+              "matched",
+              "ambiguous",
+              "nomatch"
+            ],
+            "title": "Result",
+            "type": "string"
+          },
+          "schemaVersion": {
+            "minimum": 1.0,
+            "title": "Schemaversion",
+            "type": "integer"
+          },
+          "tmdbId": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tmdbid"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "cacheKey",
+          "language",
+          "fetchedAt",
+          "expiresAt",
+          "cache",
+          "result",
+          "confidence",
+          "mediaType"
+        ],
+        "title": "MatchResponse",
+        "type": "object"
+      },
+      "MovieDetails": {
+        "additionalProperties": false,
+        "properties": {
+          "cast": {
+            "items": {
+              "$ref": "#/components/schemas/CastMember"
+            },
+            "maxItems": 30,
+            "title": "Cast",
+            "type": "array"
+          },
+          "collection": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Collection"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "contentRating": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contentrating"
+          },
+          "countries": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Countries",
+            "type": "array"
+          },
+          "crew": {
+            "items": {
+              "$ref": "#/components/schemas/CrewMember"
+            },
+            "maxItems": 30,
+            "title": "Crew",
+            "type": "array"
+          },
+          "externalIds": {
+            "$ref": "#/components/schemas/ExternalIds"
+          },
+          "genres": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Genres",
+            "type": "array"
+          },
+          "imageBaseUrl": {
+            "title": "Imagebaseurl",
+            "type": "string"
+          },
+          "images": {
+            "$ref": "#/components/schemas/Images"
+          },
+          "omdbStatus": {
+            "enum": [
+              "ok",
+              "not_configured",
+              "budget_exhausted",
+              "not_found",
+              "error",
+              "no_imdb_id"
+            ],
+            "title": "Omdbstatus",
+            "type": "string"
+          },
+          "originalTitle": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Originaltitle"
+          },
+          "overview": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Overview"
+          },
+          "ratings": {
+            "items": {
+              "$ref": "#/components/schemas/Rating"
+            },
+            "title": "Ratings",
+            "type": "array"
+          },
+          "releaseDate": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Releasedate"
+          },
+          "runtimeMinutes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Runtimeminutes"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "studios": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 5,
+            "title": "Studios",
+            "type": "array"
+          },
+          "tagline": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tagline"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "tmdbId": {
+            "title": "Tmdbid",
+            "type": "integer"
+          },
+          "trailer": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Trailer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "year": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Year"
+          }
+        },
+        "required": [
+          "tmdbId",
+          "externalIds",
+          "omdbStatus",
+          "images",
+          "imageBaseUrl"
+        ],
+        "title": "MovieDetails",
+        "type": "object"
+      },
+      "MovieResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "cache": {
+            "enum": [
+              "hit",
+              "miss"
+            ],
+            "title": "Cache",
+            "type": "string"
+          },
+          "cacheKey": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cachekey"
+          },
+          "details": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MovieDetails"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "expiresAt": {
+            "title": "Expiresat",
+            "type": "integer"
+          },
+          "fetchedAt": {
+            "title": "Fetchedat",
+            "type": "integer"
+          },
+          "language": {
+            "title": "Language",
+            "type": "string"
+          },
+          "result": {
+            "enum": [
+              "found",
+              "not_found"
+            ],
+            "title": "Result",
+            "type": "string"
+          },
+          "schemaVersion": {
+            "minimum": 1.0,
+            "title": "Schemaversion",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "cacheKey",
+          "language",
+          "fetchedAt",
+          "expiresAt",
+          "cache",
+          "result"
+        ],
+        "title": "MovieResponse",
+        "type": "object"
+      },
+      "PurgeRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "default": 10000,
+            "maximum": 100000.0,
+            "minimum": 1.0,
+            "title": "Limit",
+            "type": "integer"
+          }
+        },
+        "title": "PurgeRequest",
+        "type": "object"
+      },
+      "PurgeResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "deleted": {
+            "minimum": 0.0,
+            "title": "Deleted",
+            "type": "integer"
+          },
+          "remaining": {
+            "minimum": 0.0,
+            "title": "Remaining",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "deleted",
+          "remaining"
+        ],
+        "title": "PurgeResponse",
+        "type": "object"
+      },
+      "Rating": {
+        "additionalProperties": false,
+        "description": "Contract 6.4. `tmdb`/`imdb` are 0..10 over 10; `rottenTomatoes` and\n`metacritic` are 0..100 over 100 with `votes: null`.",
+        "properties": {
+          "max": {
+            "exclusiveMinimum": 0.0,
+            "title": "Max",
+            "type": "number"
+          },
+          "source": {
+            "enum": [
+              "tmdb",
+              "imdb",
+              "rottenTomatoes",
+              "metacritic"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "value": {
+            "minimum": 0.0,
+            "title": "Value",
+            "type": "number"
+          },
+          "votes": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Votes"
+          }
+        },
+        "required": [
+          "source",
+          "value",
+          "max"
+        ],
+        "title": "Rating",
+        "type": "object"
+      },
+      "ScrapeSearchResponse": {
+        "additionalProperties": false,
+        "description": "`GET /search` (contract 5.3). Named `Scrape…` because `app/api/ai.py`\nalready publishes a `SearchResponse` component: two classes of the same\nname make FastAPI rename BOTH OpenAPI components to\n`app__api__ai__SearchResponse` / `app__models__…`, which would change the\nexisting AI contract (B1-11).",
+        "properties": {
+          "cache": {
+            "enum": [
+              "hit",
+              "miss"
+            ],
+            "title": "Cache",
+            "type": "string"
+          },
+          "cacheKey": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cachekey"
+          },
+          "candidates": {
+            "items": {
+              "$ref": "#/components/schemas/Candidate"
+            },
+            "maxItems": 10,
+            "title": "Candidates",
+            "type": "array"
+          },
+          "expiresAt": {
+            "title": "Expiresat",
+            "type": "integer"
+          },
+          "fetchedAt": {
+            "title": "Fetchedat",
+            "type": "integer"
+          },
+          "language": {
+            "title": "Language",
+            "type": "string"
+          },
+          "result": {
+            "enum": [
+              "found",
+              "not_found"
+            ],
+            "title": "Result",
+            "type": "string"
+          },
+          "schemaVersion": {
+            "minimum": 1.0,
+            "title": "Schemaversion",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "cacheKey",
+          "language",
+          "fetchedAt",
+          "expiresAt",
+          "cache",
+          "result"
+        ],
+        "title": "ScrapeSearchResponse",
+        "type": "object"
+      },
+      "SeasonDetails": {
+        "additionalProperties": false,
+        "properties": {
+          "airDate": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Airdate"
+          },
+          "episodes": {
+            "items": {
+              "$ref": "#/components/schemas/EpisodeDetails"
+            },
+            "maxItems": 500,
+            "title": "Episodes",
+            "type": "array"
+          },
+          "externalIds": {
+            "$ref": "#/components/schemas/SeasonExternalIds"
+          },
+          "imageBaseUrl": {
+            "title": "Imagebaseurl",
+            "type": "string"
+          },
+          "images": {
+            "$ref": "#/components/schemas/Images"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "overview": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Overview"
+          },
+          "seasonNumber": {
+            "title": "Seasonnumber",
+            "type": "integer"
+          },
+          "showTmdbId": {
+            "title": "Showtmdbid",
+            "type": "integer"
+          },
+          "tmdbId": {
+            "title": "Tmdbid",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "showTmdbId",
+          "tmdbId",
+          "seasonNumber",
+          "externalIds",
+          "images",
+          "imageBaseUrl"
+        ],
+        "title": "SeasonDetails",
+        "type": "object"
+      },
+      "SeasonExternalIds": {
+        "additionalProperties": false,
+        "description": "Contract 6.3: a season only carries `{tvdb}`.",
+        "properties": {
+          "tvdb": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tvdb"
+          }
+        },
+        "title": "SeasonExternalIds",
+        "type": "object"
+      },
+      "SeasonResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "cache": {
+            "enum": [
+              "hit",
+              "miss"
+            ],
+            "title": "Cache",
+            "type": "string"
+          },
+          "cacheKey": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cachekey"
+          },
+          "details": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SeasonDetails"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "expiresAt": {
+            "title": "Expiresat",
+            "type": "integer"
+          },
+          "fetchedAt": {
+            "title": "Fetchedat",
+            "type": "integer"
+          },
+          "language": {
+            "title": "Language",
+            "type": "string"
+          },
+          "result": {
+            "enum": [
+              "found",
+              "not_found"
+            ],
+            "title": "Result",
+            "type": "string"
+          },
+          "schemaVersion": {
+            "minimum": 1.0,
+            "title": "Schemaversion",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "cacheKey",
+          "language",
+          "fetchedAt",
+          "expiresAt",
+          "cache",
+          "result"
+        ],
+        "title": "SeasonResponse",
+        "type": "object"
+      },
+      "SeasonSummary": {
+        "additionalProperties": false,
+        "description": "Contract 6.2: one entry of `ShowDetails.seasons`.",
+        "properties": {
+          "airDate": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Airdate"
+          },
+          "episodeCount": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Episodecount"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "posterPath": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Posterpath"
+          },
+          "seasonNumber": {
+            "title": "Seasonnumber",
+            "type": "integer"
+          },
+          "tmdbId": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tmdbid"
+          }
+        },
+        "required": [
+          "seasonNumber"
+        ],
+        "title": "SeasonSummary",
+        "type": "object"
+      },
+      "ShowDetails": {
+        "additionalProperties": false,
+        "properties": {
+          "cast": {
+            "items": {
+              "$ref": "#/components/schemas/CastMember"
+            },
+            "maxItems": 30,
+            "title": "Cast",
+            "type": "array"
+          },
+          "contentRating": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contentrating"
+          },
+          "countries": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Countries",
+            "type": "array"
+          },
+          "crew": {
+            "items": {
+              "$ref": "#/components/schemas/CrewMember"
+            },
+            "maxItems": 30,
+            "title": "Crew",
+            "type": "array"
+          },
+          "episodeRuntimeMinutes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Episoderuntimeminutes"
+          },
+          "externalIds": {
+            "$ref": "#/components/schemas/ExternalIds"
+          },
+          "firstAirDate": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Firstairdate"
+          },
+          "genres": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Genres",
+            "type": "array"
+          },
+          "imageBaseUrl": {
+            "title": "Imagebaseurl",
+            "type": "string"
+          },
+          "images": {
+            "$ref": "#/components/schemas/Images"
+          },
+          "numberOfEpisodes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Numberofepisodes"
+          },
+          "numberOfSeasons": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Numberofseasons"
+          },
+          "omdbStatus": {
+            "enum": [
+              "ok",
+              "not_configured",
+              "budget_exhausted",
+              "not_found",
+              "error",
+              "no_imdb_id"
+            ],
+            "title": "Omdbstatus",
+            "type": "string"
+          },
+          "originalTitle": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Originaltitle"
+          },
+          "overview": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Overview"
+          },
+          "ratings": {
+            "items": {
+              "$ref": "#/components/schemas/Rating"
+            },
+            "title": "Ratings",
+            "type": "array"
+          },
+          "seasons": {
+            "items": {
+              "$ref": "#/components/schemas/SeasonSummary"
+            },
+            "title": "Seasons",
+            "type": "array"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "studios": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 5,
+            "title": "Studios",
+            "type": "array"
+          },
+          "tagline": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tagline"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "tmdbId": {
+            "title": "Tmdbid",
+            "type": "integer"
+          },
+          "trailer": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Trailer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "year": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Year"
+          }
+        },
+        "required": [
+          "tmdbId",
+          "externalIds",
+          "omdbStatus",
+          "images",
+          "imageBaseUrl"
+        ],
+        "title": "ShowDetails",
+        "type": "object"
+      },
+      "ShowResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "cache": {
+            "enum": [
+              "hit",
+              "miss"
+            ],
+            "title": "Cache",
+            "type": "string"
+          },
+          "cacheKey": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cachekey"
+          },
+          "details": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ShowDetails"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "expiresAt": {
+            "title": "Expiresat",
+            "type": "integer"
+          },
+          "fetchedAt": {
+            "title": "Fetchedat",
+            "type": "integer"
+          },
+          "language": {
+            "title": "Language",
+            "type": "string"
+          },
+          "result": {
+            "enum": [
+              "found",
+              "not_found"
+            ],
+            "title": "Result",
+            "type": "string"
+          },
+          "schemaVersion": {
+            "minimum": 1.0,
+            "title": "Schemaversion",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "cacheKey",
+          "language",
+          "fetchedAt",
+          "expiresAt",
+          "cache",
+          "result"
+        ],
+        "title": "ShowResponse",
+        "type": "object"
+      },
+      "SinceStart": {
+        "additionalProperties": false,
+        "properties": {
+          "coalesced": {
+            "minimum": 0.0,
+            "title": "Coalesced",
+            "type": "integer"
+          },
+          "hits": {
+            "minimum": 0.0,
+            "title": "Hits",
+            "type": "integer"
+          },
+          "misses": {
+            "minimum": 0.0,
+            "title": "Misses",
+            "type": "integer"
+          },
+          "upstreamErrors": {
+            "minimum": 0.0,
+            "title": "Upstreamerrors",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "hits",
+          "misses",
+          "coalesced",
+          "upstreamErrors"
+        ],
+        "title": "SinceStart",
+        "type": "object"
+      },
+      "Trailer": {
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "site": {
+            "const": "YouTube",
+            "title": "Site",
+            "type": "string"
+          }
+        },
+        "required": [
+          "site",
+          "key"
+        ],
+        "title": "Trailer",
+        "type": "object"
+      },
+      "TtlInfo": {
+        "additionalProperties": false,
+        "properties": {
+          "negativeDays": {
+            "title": "Negativedays",
+            "type": "integer"
+          },
+          "successDays": {
+            "title": "Successdays",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "successDays",
+          "negativeDays"
+        ],
+        "title": "TtlInfo",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "PlexHub Backend - scrape gateway /api/scrape/v1",
+    "version": "v1"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/scrape/v1/cache/invalidate": {
+      "post": {
+        "description": "Delete entries by canonical keys, or by family + tmdbId (5.9).",
+        "operationId": "cache_invalidate_api_scrape_v1_cache_invalidate_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-API-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InvalidateBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidateResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Gateway"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Gateway Timeout"
+          }
+        },
+        "summary": "Cache Invalidate",
+        "tags": [
+          "scrape-gateway"
+        ]
+      }
+    },
+    "/api/scrape/v1/cache/purge": {
+      "post": {
+        "description": "Delete up to `limit` expired / foreign-version entries (5.10).",
+        "operationId": "cache_purge_api_scrape_v1_cache_purge_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-API-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/PurgeRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PurgeResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Gateway"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Gateway Timeout"
+          }
+        },
+        "summary": "Cache Purge",
+        "tags": [
+          "scrape-gateway"
+        ]
+      }
+    },
+    "/api/scrape/v1/cache/stats": {
+      "get": {
+        "description": "Per (family, keyVersion) counts, TTLs and in-memory counters (5.8).",
+        "operationId": "cache_stats_api_scrape_v1_cache_stats_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-API-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CacheStatsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Gateway"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Gateway Timeout"
+          }
+        },
+        "summary": "Cache Stats",
+        "tags": [
+          "scrape-gateway"
+        ]
+      }
+    },
+    "/api/scrape/v1/find": {
+      "get": {
+        "description": "External id -> TMDB records (contract 5.7). Exactly one id, else 400.\nNo `refresh` here: contract 5.7 does not define one for this route.",
+        "operationId": "find_api_scrape_v1_find_get",
+        "parameters": [
+          {
+            "description": "^tt[0-9]{7,10}$",
+            "in": "query",
+            "name": "imdbId",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "^tt[0-9]{7,10}$",
+              "title": "Imdbid"
+            }
+          },
+          {
+            "description": "1 to 12 digits",
+            "in": "query",
+            "name": "tvdbId",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "1 to 12 digits",
+              "title": "Tvdbid"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-API-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FindResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Gateway"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Gateway Timeout"
+          }
+        },
+        "summary": "Find",
+        "tags": [
+          "scrape-gateway"
+        ]
+      }
+    },
+    "/api/scrape/v1/match": {
+      "get": {
+        "description": "Match (type, cleaned title, year) to a TMDB record (contract 5.2).",
+        "operationId": "match_api_scrape_v1_match_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "type",
+            "required": true,
+            "schema": {
+              "enum": [
+                "movie",
+                "show"
+              ],
+              "title": "Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "title",
+            "required": true,
+            "schema": {
+              "maxLength": 300,
+              "minLength": 1,
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "year",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 2200,
+                  "minimum": 1850,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Year"
+            }
+          },
+          {
+            "description": "Language tag ^[a-z]{2}-[A-Z]{2}$ (default TMDB_LANGUAGE); other value: 400",
+            "in": "query",
+            "name": "language",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Language tag ^[a-z]{2}-[A-Z]{2}$ (default TMDB_LANGUAGE); other value: 400",
+              "title": "Language"
+            }
+          },
+          {
+            "description": "Ignore the cached entry (explicit user action)",
+            "in": "query",
+            "name": "refresh",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Ignore the cached entry (explicit user action)",
+              "title": "Refresh",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-API-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MatchResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Gateway"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Gateway Timeout"
+          }
+        },
+        "summary": "Match",
+        "tags": [
+          "scrape-gateway"
+        ]
+      }
+    },
+    "/api/scrape/v1/movie/{tmdbId}": {
+      "get": {
+        "description": "Movie details + OMDb ratings (contract 5.4).",
+        "operationId": "movie_api_scrape_v1_movie__tmdbId__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tmdbId",
+            "required": true,
+            "schema": {
+              "maximum": 999999999,
+              "minimum": 1,
+              "title": "Tmdbid",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Language tag ^[a-z]{2}-[A-Z]{2}$ (default TMDB_LANGUAGE); other value: 400",
+            "in": "query",
+            "name": "language",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Language tag ^[a-z]{2}-[A-Z]{2}$ (default TMDB_LANGUAGE); other value: 400",
+              "title": "Language"
+            }
+          },
+          {
+            "description": "Ignore the cached entry (explicit user action)",
+            "in": "query",
+            "name": "refresh",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Ignore the cached entry (explicit user action)",
+              "title": "Refresh",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-API-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MovieResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Gateway"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Gateway Timeout"
+          }
+        },
+        "summary": "Movie",
+        "tags": [
+          "scrape-gateway"
+        ]
+      }
+    },
+    "/api/scrape/v1/search": {
+      "get": {
+        "description": "Candidates for a free query (contract 5.3); nothing is persisted.",
+        "operationId": "search_api_scrape_v1_search_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "type",
+            "required": true,
+            "schema": {
+              "enum": [
+                "movie",
+                "show"
+              ],
+              "title": "Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "query",
+            "required": true,
+            "schema": {
+              "maxLength": 300,
+              "minLength": 1,
+              "title": "Query",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "year",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 2200,
+                  "minimum": 1850,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Year"
+            }
+          },
+          {
+            "description": "Language tag ^[a-z]{2}-[A-Z]{2}$ (default TMDB_LANGUAGE); other value: 400",
+            "in": "query",
+            "name": "language",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Language tag ^[a-z]{2}-[A-Z]{2}$ (default TMDB_LANGUAGE); other value: 400",
+              "title": "Language"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-API-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScrapeSearchResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Gateway"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Gateway Timeout"
+          }
+        },
+        "summary": "Search",
+        "tags": [
+          "scrape-gateway"
+        ]
+      }
+    },
+    "/api/scrape/v1/tv/{tmdbId}": {
+      "get": {
+        "description": "Show details + OMDb ratings (contract 5.5).",
+        "operationId": "tv_api_scrape_v1_tv__tmdbId__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tmdbId",
+            "required": true,
+            "schema": {
+              "maximum": 999999999,
+              "minimum": 1,
+              "title": "Tmdbid",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Language tag ^[a-z]{2}-[A-Z]{2}$ (default TMDB_LANGUAGE); other value: 400",
+            "in": "query",
+            "name": "language",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Language tag ^[a-z]{2}-[A-Z]{2}$ (default TMDB_LANGUAGE); other value: 400",
+              "title": "Language"
+            }
+          },
+          {
+            "description": "Ignore the cached entry (explicit user action)",
+            "in": "query",
+            "name": "refresh",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Ignore the cached entry (explicit user action)",
+              "title": "Refresh",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-API-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShowResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Gateway"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Gateway Timeout"
+          }
+        },
+        "summary": "Tv",
+        "tags": [
+          "scrape-gateway"
+        ]
+      }
+    },
+    "/api/scrape/v1/tv/{tmdbId}/season/{seasonNumber}": {
+      "get": {
+        "description": "One season and its episodes, one TMDB call (contract 5.6).",
+        "operationId": "season_api_scrape_v1_tv__tmdbId__season__seasonNumber__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tmdbId",
+            "required": true,
+            "schema": {
+              "maximum": 999999999,
+              "minimum": 1,
+              "title": "Tmdbid",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "seasonNumber",
+            "required": true,
+            "schema": {
+              "maximum": 999,
+              "minimum": 0,
+              "title": "Seasonnumber",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Language tag ^[a-z]{2}-[A-Z]{2}$ (default TMDB_LANGUAGE); other value: 400",
+            "in": "query",
+            "name": "language",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Language tag ^[a-z]{2}-[A-Z]{2}$ (default TMDB_LANGUAGE); other value: 400",
+              "title": "Language"
+            }
+          },
+          {
+            "description": "Ignore the cached entry (explicit user action)",
+            "in": "query",
+            "name": "refresh",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Ignore the cached entry (explicit user action)",
+              "title": "Refresh",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-API-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeasonResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Gateway"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Gateway Timeout"
+          }
+        },
+        "summary": "Season",
+        "tags": [
+          "scrape-gateway"
+        ]
+      }
+    }
+  },
+  "x-key-version": 1,
+  "x-schema-version": 1
+}

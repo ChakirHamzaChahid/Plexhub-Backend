@@ -46,21 +46,46 @@ never enter the loop below — see `docs/plans/2026-07-26-refacto-audit-v1-plan.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Any
+
 from fastapi import FastAPI
 from fastapi.routing import APIRoute
 
-# Recognised auth-guard callables (from app/api/deps.py). A route is
-# considered guarded if ANY dependency in its chain (any nesting depth) is
-# one of these. `verify_dav_basic_auth` is deliberately excluded: `/dav`
-# never carries the `/api/` prefix, so it can't reach this set anyway, and
-# listing it here would invite confusion about scope.
-_AUTH_DEPENDENCY_NAMES: frozenset[str] = frozenset(
+from app.api import deps
+
+# Recognised auth guards (from app/api/deps.py), matched by FUNCTION IDENTITY,
+# not by name: a local function that merely happens to be called
+# `verify_backend_secret` must not satisfy the audit. A route is considered
+# guarded if ANY dependency in its chain (any nesting depth) is one of these.
+# Aliases (`tv_auth.verify_pairing_api_key`) are the same function object and
+# are therefore accepted. `verify_dav_basic_auth` is deliberately excluded:
+# `/dav` never carries the `/api/` prefix, so it can't reach this set anyway.
+_GENERAL_GUARDS: frozenset[Callable[..., Any]] = frozenset(
     {
-        "verify_backend_secret",
-        "verify_api_key",
-        "verify_master_key",
-        "verify_admin_basic_auth",
+        deps.verify_backend_secret,
+        deps.verify_api_key,
+        deps.verify_master_key,
+        deps.verify_admin_basic_auth,
     }
+)
+
+# Scrape gateway scope guards (ADR 0008 § D2.4, lot B1). They are ONLY
+# accepted on routes under SCRAPE_GATEWAY_PREFIX: elsewhere they would let an
+# unscoped key through, so the route counts as unguarded (boot refused).
+# route_audit does not tell the two apart: a structural test checks the
+# expected guard per gateway route (B1-11).
+_SCOPE_GUARDS: frozenset[Callable[..., Any]] = frozenset(
+    {
+        deps.verify_scrape_scope,
+        deps.verify_scrape_admin_scope,
+    }
+)
+SCRAPE_GATEWAY_PREFIX = "/api/scrape/v1/"
+
+# Names of all recognised guards (error message, tests); NOT used for matching.
+_AUTH_DEPENDENCY_NAMES: frozenset[str] = frozenset(
+    fn.__name__ for fn in _GENERAL_GUARDS | _SCOPE_GUARDS
 )
 
 # Explicit, reviewed allow-list of `/api/*` (METHOD, path) pairs that are
@@ -99,17 +124,35 @@ PUBLIC_API_ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
 )
 
 
-def _dependency_names(route: APIRoute) -> set[str]:
-    """All dependency callable names attached to `route`, at any nesting depth."""
-    names: set[str] = set()
+def _dependency_calls(route: APIRoute) -> set[Callable[..., Any]]:
+    """All dependency callables attached to `route`, at any nesting depth."""
+    calls: set[Callable[..., Any]] = set()
     stack = list(route.dependant.dependencies)
     while stack:
         dependant = stack.pop()
-        name = getattr(dependant.call, "__name__", None)
-        if name:
-            names.add(name)
+        if dependant.call is not None:
+            calls.add(dependant.call)
         stack.extend(dependant.dependencies)
-    return names
+    return calls
+
+
+def _dependency_names(route: APIRoute) -> set[str]:
+    """Names of all dependency callables of `route` (diagnostics/tests only —
+    the audit itself matches by identity, see `_is_guarded`)."""
+    return {
+        name
+        for call in _dependency_calls(route)
+        if (name := getattr(call, "__name__", None))
+    }
+
+
+def _is_guarded(route: APIRoute) -> bool:
+    """True if the route carries a recognised guard (by identity). Scope guards
+    only count under SCRAPE_GATEWAY_PREFIX."""
+    calls = _dependency_calls(route)
+    if calls & _GENERAL_GUARDS:
+        return True
+    return route.path.startswith(SCRAPE_GATEWAY_PREFIX) and bool(calls & _SCOPE_GUARDS)
 
 
 def _is_allow_listed(route: APIRoute) -> bool:
@@ -134,7 +177,7 @@ def assert_api_routes_authenticated(app: FastAPI) -> None:
             continue
         if _is_allow_listed(route):
             continue
-        if _dependency_names(route) & _AUTH_DEPENDENCY_NAMES:
+        if _is_guarded(route):
             continue
         methods = ",".join(sorted(route.methods or ())) or "?"
         unguarded.append(f"{methods} {route.path}")
@@ -144,7 +187,8 @@ def assert_api_routes_authenticated(app: FastAPI) -> None:
             "Route auth audit failed (AUDIT-P4-001 / CR-A04): the following "
             "/api/* route(s) are reachable WITHOUT a recognised auth "
             "dependency (one of "
-            f"{sorted(_AUTH_DEPENDENCY_NAMES)}): "
+            f"{sorted(_AUTH_DEPENDENCY_NAMES)}; the scope guards only count "
+            f"under {SCRAPE_GATEWAY_PREFIX}): "
             + "; ".join(unguarded)
             + ". Either attach a guard (dependencies= at mount site, "
             "module-level on the router, or per-endpoint), or — only if the "

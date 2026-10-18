@@ -434,3 +434,54 @@ async def test_masking_never_touches_the_generated_library(
 
     assert acc.is_active is True           # generator still loads the account
     assert not any(r.is_broken for r in rows)  # and still publishes its versions
+
+
+@pytest.mark.parametrize("entrypoint", ["cron", "pipeline"])
+async def test_head_reset_get_video_clears_outage(
+    monkeypatch, outage_db, db_factory, xtream_mock, caplog, entrypoint
+):
+    import httpx
+    from app.services.stream_service import build_stream_url
+
+    monkeypatch.setattr(settings, "STREAM_VALIDATION_ENABLED", True)
+    monkeypatch.setattr(settings, "HEALTH_CHECK_BATCH_SIZE", 20)
+    monkeypatch.setattr(settings, "ACCOUNT_OUTAGE_STRIKES", 3)
+    async with db_factory() as db:
+        account = _account("8fb2c0f3", max_conn=1)
+        account.outage_strikes = 58
+        account.outage_since = now_ms()
+        items = _streams("xtream_8fb2c0f3", 12)
+        for i, item in enumerate(items):
+            item.rating_key = f"vod_{i}.mp4"
+        db.add(account)
+        db.add_all(items)
+        await db.commit()
+    async with db_factory() as db:
+        _, total = await media_service.get_media_list(db, media_type="movie")
+        assert total == 0
+
+    for item in items:
+        url = build_stream_url(account, item.rating_key)
+        xtream_mock.head(url).mock(side_effect=httpx.ReadError("HEAD reset"))
+        xtream_mock.get(url, headers={"Range": "bytes=0-8191"}).respond(
+            206, headers={"content-type": "video/mp4", "content-range": "bytes 0-8191/2000000000"}
+        )
+    async with httpx.AsyncClient() as client:
+        async def get_client():
+            return client
+        monkeypatch.setattr(hc, "_get_client", get_client)
+        with caplog.at_level("INFO", logger="plexhub.health_check"):
+            if entrypoint == "cron":
+                await hc._run_health_check_batch()
+            else:
+                await hc._run_pipeline_validation_impl()
+    assert await _strikes(db_factory, "8fb2c0f3") == 0
+    assert "'head_transport_fallback': 12" in caplog.text
+    assert "CIRCUIT BREAKER" not in caplog.text
+    assert hc._probe_reasons.get() is None
+    async with db_factory() as db:
+        rows, total = await media_service.get_media_list(db, media_type="movie")
+        assert total == 12
+        assert all(not row.is_broken and row.file_size == 2_000_000_000 for row in rows)
+        account = await db.get(XtreamAccount, "8fb2c0f3")
+        assert account.outage_since is None

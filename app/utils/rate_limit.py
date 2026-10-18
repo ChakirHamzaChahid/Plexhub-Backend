@@ -247,3 +247,10 @@ tv_auth_start_pending_ip_limiter = SlidingWindowLimiter()
 # Lot 10 sous-lot B: the PUBLIC pairing page ``GET /api/tv-auth/approve``
 # (``app/api/tv_auth.py::approve_page``) — a third, independent instance.
 tv_auth_approve_page_limiter = SlidingWindowLimiter()
+
+# Lot B1 (ADR 0009 D2.8, PRD FR-033): per-API-KEY limit of the scrape gateway
+# `/api/scrape/v1` — a fourth, independent instance, keyed by the caller's
+# `Principal.key_id` ("master" for the master secret), NEVER by IP. Consumed
+# exclusively by `app/api/scrape_v1.py::enforce_scrape_rate_limit` (window
+# 60 s, `SCRAPE_RATE_LIMIT_PER_MINUTE`, `<= 0` disables it).
+scrape_gateway_rate_limiter = SlidingWindowLimiter()

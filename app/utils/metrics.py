@@ -70,6 +70,11 @@ tmdb_match_total = Counter(
     labelnames=("media_type", "result"),  # result: matched | nomatch | ambiguous
 )
 
+head_transport_fallback_total = Counter(
+    "plexhub_head_transport_fallback_total",
+    "Stream probes falling back to Range GET after a HEAD transport error.",
+)
+
 streams_alive_ratio = Gauge(
     "plexhub_streams_alive_ratio",
     "Ratio (0-1) of non-broken streams per account, computed at health check end.",
@@ -265,6 +270,27 @@ plex_sync_total = Counter(
 _PLEX_SYNC_RESULTS = ("ok", "disabled", "already_running", "error")
 for _plex_sync_result in _PLEX_SYNC_RESULTS:
     plex_sync_total.labels(result=_plex_sync_result)
+
+# Lot B1 (ADR 0009 D2.12, PRD FR-036) — scrape gateway `/api/scrape/v1`.
+# CLOSED labels only: the route NAME (never the path, a title or a key) and
+# the outcome. `hit` = served without a provider call (for the three
+# `/cache/*` routes, every success is a `hit`), `miss` = this request led a
+# provider call (or ran `/search`), `coalesced` = it waited on another
+# request's call, `error` = any error body produced by the gateway itself
+# (400 and upstream errors; 401/403/422/429 of the guards/limiter/FastAPI
+# never reach the route handler and are not counted here).
+SCRAPE_GATEWAY_ROUTES = (
+    "match", "search", "movie", "tv", "season", "find",
+    "cache_stats", "cache_invalidate", "cache_purge",
+)
+SCRAPE_GATEWAY_OUTCOMES = ("hit", "miss", "coalesced", "error")
+scrape_gateway_requests_total = Counter(
+    "plexhub_scrape_gateway_requests_total",
+    "Scrape gateway requests, partitioned by route and outcome.",
+    labelnames=("route", "outcome"),
+)
+for _sg_route, _sg_outcome in itertools.product(SCRAPE_GATEWAY_ROUTES, SCRAPE_GATEWAY_OUTCOMES):
+    scrape_gateway_requests_total.labels(route=_sg_route, outcome=_sg_outcome)
 
 
 def setup_instrumentator(app, *, dependencies: list | None = None) -> None:

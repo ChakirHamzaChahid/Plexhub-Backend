@@ -6,6 +6,8 @@ plaintext token is returned exactly once, by the create endpoint.
 """
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
@@ -31,6 +33,10 @@ class ApiKeyCreate(BaseModel):
 
     label: str = Field(min_length=1, max_length=120)
     expires_in_days: int | None = Field(default=None, ge=1, le=3650)
+    # First barrier only: api_key_service.create_key re-validates (ADR 0008
+    # § D2.1). Keep in sync with api_key_service.KNOWN_SCOPES (asserted by
+    # tests/test_api_key_scopes.py). Duplicates are deduplicated by the service.
+    scopes: list[Literal["scrape", "scrape.admin"]] = Field(default_factory=list)
 
 
 class ApiKeyOut(BaseModel):
@@ -45,6 +51,9 @@ class ApiKeyOut(BaseModel):
     revoked_at: int | None = None
     last_used_at: int | None = None
     last_used_ip: str | None = None
+    # Stored values, as-is ([] for a key without scope). An unknown value read
+    # from the DB is shown (it still confines the key) but grants nothing.
+    scopes: list[str] = Field(default_factory=list)
 
 
 class ApiKeyCreated(ApiKeyOut):
@@ -62,6 +71,7 @@ def _to_out(row: ApiKey) -> ApiKeyOut:
         revoked_at=row.revoked_at,
         last_used_at=row.last_used_at,
         last_used_ip=row.last_used_ip,
+        scopes=(row.scopes or "").split(),
     )
 
 
@@ -81,9 +91,14 @@ async def create_api_key(body: ApiKeyCreate, db: AsyncSession = Depends(get_db))
     expires_at = None
     if body.expires_in_days is not None:
         expires_at = now_ms() + body.expires_in_days * 86_400_000
-    row, plaintext = await api_key_service.create_key(
-        db, label=body.label, expires_at=expires_at
-    )
+    try:
+        row, plaintext = await api_key_service.create_key(
+            db, label=body.label, expires_at=expires_at, scopes=body.scopes
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
     out = _to_out(row)
     return ApiKeyCreated(**out.model_dump(), key=plaintext)
 

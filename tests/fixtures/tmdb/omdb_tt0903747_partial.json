@@ -1,0 +1,16 @@
+{
+  "Title": "Breaking Bad",
+  "Year": "2008-2013",
+  "Rated": "TV-MA",
+  "Metascore": "N/A",
+  "imdbRating": "9.5",
+  "imdbVotes": "2,300,000",
+  "imdbID": "tt0903747",
+  "Type": "series",
+  "totalSeasons": "5",
+  "Ratings": [
+    {"Source": "Internet Movie Database", "Value": "9.5/10"},
+    {"Source": "Rotten Tomatoes", "Value": "N/A"}
+  ],
+  "Response": "True"
+}

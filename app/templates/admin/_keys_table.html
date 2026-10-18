@@ -3,6 +3,7 @@
     <tr>
       <th class="text-left px-3 py-2">Utilisateur</th>
       <th class="text-left px-3 py-2">Clé</th>
+      <th class="text-left px-3 py-2">Scopes</th>
       <th class="text-left px-3 py-2">Statut</th>
       <th class="text-left px-3 py-2">Créée</th>
       <th class="text-left px-3 py-2">Expire</th>
@@ -16,6 +17,9 @@
     <tr class="border-t border-slate-100">
       <td class="px-3 py-2 font-medium">{{ k.label }}</td>
       <td class="px-3 py-2 font-mono text-xs text-slate-500">{{ k.key_prefix }}…</td>
+      <td class="px-3 py-2 font-mono text-xs">
+        {% if k.scopes %}{{ k.scopes | join(" ") }}{% else %}<span class="text-slate-400 font-sans">aucun</span>{% endif %}
+      </td>
       <td class="px-3 py-2">
         {% if k.status == "active" %}
           <span class="inline-block px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-xs">active</span>
@@ -44,7 +48,7 @@
       </td>
     </tr>
     {% else %}
-    <tr><td colspan="8" class="px-3 py-6 text-center text-slate-400">Aucune clé pour le moment.</td></tr>
+    <tr><td colspan="9" class="px-3 py-6 text-center text-slate-400">Aucune clé pour le moment.</td></tr>
     {% endfor %}
   </tbody>
 </table>

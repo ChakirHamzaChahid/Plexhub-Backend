@@ -14,6 +14,7 @@ import hashlib
 import logging
 import secrets
 import uuid
+from collections.abc import Iterable
 
 from sqlalchemy import select, update
 
@@ -26,6 +27,57 @@ logger = logging.getLogger("plexhub.apikey")
 _TOKEN_PREFIX = "phk_"
 _DISPLAY_PREFIX_LEN = 10          # chars of plaintext kept for display
 _LAST_USED_THROTTLE_MS = 60_000   # only bump last_used at most once/min per key
+
+# Closed set of scope names (ADR 0008 § D2.1). The ONLY definition in the repo:
+# the API `Literal`, the admin form and the guards all derive from it.
+KNOWN_SCOPES: frozenset[str] = frozenset({"scrape", "scrape.admin"})
+
+# Unknown values already reported by parse_scopes (log once per value).
+_LOGGED_UNKNOWN_SCOPES: set[str] = set()
+
+
+class InvalidScopeError(ValueError):
+    """A requested scope is not in KNOWN_SCOPES (or is malformed)."""
+
+
+def normalize_scopes(scopes: Iterable[str]) -> str:
+    """Validate requested scopes and return the stored form.
+
+    Closed set, sorted, deduplicated, space-separated. Any unknown value, any
+    value containing whitespace, any non-string, or a bare string (which would
+    otherwise be iterated character by character) raises InvalidScopeError.
+    """
+    if isinstance(scopes, (str, bytes)):
+        raise InvalidScopeError("scopes doit être une liste de valeurs, pas une chaîne")
+    clean: set[str] = set()
+    for value in scopes:
+        if not isinstance(value, str) or value not in KNOWN_SCOPES:
+            shown = repr(value)[:40]
+            raise InvalidScopeError(
+                f"Scope inconnu : {shown} (valeurs admises : "
+                f"{', '.join(sorted(KNOWN_SCOPES))})"
+            )
+        clean.add(value)
+    return " ".join(sorted(clean))
+
+
+def parse_scopes(raw: str | None) -> frozenset[str]:
+    """Known scopes stored in an ``api_keys.scopes`` value.
+
+    Unknown values grant nothing and are dropped (logged once per value —
+    never with the key). NB: a key whose column holds only unknown values
+    is still a *scoped* key for the guards (they test the raw column).
+    """
+    if not raw:
+        return frozenset()
+    known: set[str] = set()
+    for value in raw.split():
+        if value in KNOWN_SCOPES:
+            known.add(value)
+        elif value not in _LOGGED_UNKNOWN_SCOPES:
+            _LOGGED_UNKNOWN_SCOPES.add(value)
+            logger.warning("Ignoring unknown API-key scope read from DB: %r", value[:40])
+    return frozenset(known)
 
 
 def _hash(plaintext: str) -> str:
@@ -55,9 +107,21 @@ def status_of(key: ApiKey, *, at: int | None = None) -> str:
     return "active"
 
 
-async def create_key(db, *, label: str, expires_at: int | None = None) -> tuple[ApiKey, str]:
+async def create_key(
+    db,
+    *,
+    label: str,
+    expires_at: int | None = None,
+    scopes: Iterable[str] = (),
+) -> tuple[ApiKey, str]:
     """Create a key. Returns (row, plaintext). The plaintext is the ONLY time
-    the caller can see the token — it is not recoverable afterwards."""
+    the caller can see the token — it is not recoverable afterwards.
+
+    ``scopes`` is validated against KNOWN_SCOPES BEFORE anything is written
+    (InvalidScopeError, a ValueError): this is the single validation point for
+    both the JSON API and the admin HTML form (ADR 0008 § D2.1).
+    """
+    stored_scopes = normalize_scopes(scopes)
     plaintext = generate_token()
     row = ApiKey(
         id=uuid.uuid4().hex,
@@ -66,11 +130,15 @@ async def create_key(db, *, label: str, expires_at: int | None = None) -> tuple[
         label=label.strip() or "unnamed",
         created_at=now_ms(),
         expires_at=expires_at,
+        scopes=stored_scopes,
     )
     db.add(row)
     await db.commit()
     await db.refresh(row)
-    logger.info("API key created: id=%s label=%r prefix=%s", row.id, row.label, row.key_prefix)
+    logger.info(
+        "API key created: id=%s label=%r prefix=%s scopes=%r",
+        row.id, row.label, row.key_prefix, row.scopes,
+    )
     return row, plaintext
 
 
@@ -119,8 +187,9 @@ async def resolve(plaintext: str, *, client_ip: str | None = None) -> ApiKey | N
                     )
                     await db.commit()
                 except Exception as exc:  # DB locked etc. — ignore, auth still valid
-                    logger.debug("last_used bump skipped for %s: %s", row.id, exc)
+                    logger.debug("last_used bump skipped for %s: %s", row.id, type(exc).__name__)
             return row
     except Exception as exc:
-        logger.warning("API key resolve failed: %s", exc)
+        # Type name only: a SQLAlchemy error text embeds the key's SHA-256.
+        logger.warning("API key resolve failed: %s", type(exc).__name__)
         return None

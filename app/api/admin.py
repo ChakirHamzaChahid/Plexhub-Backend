@@ -853,10 +853,16 @@ async def _keys_ctx(db: AsyncSession) -> dict:
             "expires_at": r.expires_at,
             "last_used_at": r.last_used_at,
             "last_used_ip": r.last_used_ip,
+            # Stored values as-is (an unknown value still confines the key).
+            "scopes": (r.scopes or "").split(),
         }
         for r in rows
     ]
-    return {"keys": keys, "now": now}
+    return {
+        "keys": keys,
+        "now": now,
+        "known_scopes": sorted(api_key_service.KNOWN_SCOPES),
+    }
 
 
 @router.get("/keys", response_class=HTMLResponse)
@@ -878,6 +884,10 @@ async def admin_keys_create(
     request: Request,
     label: str = Form(...),
     expires_in_days: Optional[str] = Form(None),
+    # Repeated form field (one per checked box). Validated by
+    # api_key_service.create_key against the closed set (ADR 0008 § D2.1):
+    # never trusted here.
+    scopes: list[str] = Form(default=[]),
     db: AsyncSession = Depends(get_db),
 ):
     label = (label or "").strip()
@@ -896,11 +906,28 @@ async def admin_keys_create(
                 expires_at = now_ms() + days * 86_400_000
         except ValueError:
             pass
-    row, plaintext = await api_key_service.create_key(db, label=label, expires_at=expires_at)
+    try:
+        row, plaintext = await api_key_service.create_key(
+            db, label=label, expires_at=expires_at, scopes=scopes
+        )
+    except ValueError as exc:
+        # 422 + the SAME fragment: swapped thanks to the htmx:beforeSwap opt-in
+        # of base.html (htmx 1.x never swaps a 4xx otherwise). No key created.
+        return templates.TemplateResponse(
+            request,
+            "admin/_key_created.html",
+            {"error": str(exc), "plaintext": None},
+            status_code=422,
+        )
     return templates.TemplateResponse(
         request,
         "admin/_key_created.html",
-        {"plaintext": plaintext, "label": row.label, "error": None},
+        {
+            "plaintext": plaintext,
+            "label": row.label,
+            "scopes": (row.scopes or "").split(),
+            "error": None,
+        },
         headers={"HX-Trigger": "refresh-keys"},
     )
 

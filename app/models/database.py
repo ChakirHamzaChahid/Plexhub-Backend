@@ -435,6 +435,10 @@ class ApiKey(Base):
     revoked_at = Column(BigInteger)              # epoch ms, NULL = active
     last_used_at = Column(BigInteger)            # epoch ms, NULL = never used
     last_used_ip = Column(Text)                  # last client IP seen
+    # Space-separated, sorted, deduplicated scope names (ADR 0008 D2.1, M030).
+    # '' = key without scope. server_default: a NOT NULL without SQL DEFAULT
+    # breaks raw INSERTs (migration-025 lesson).
+    scopes = Column(Text, nullable=False, default="", server_default=text("''"))
 
     __table_args__ = (
         Index("ix_api_keys_key_hash", "key_hash"),
@@ -738,4 +742,30 @@ class ScrapeReview(Base):
 
     __table_args__ = (
         Index("ix_scrape_review_status_type", "status", "media_type"),
+    )
+
+
+class ScrapeCacheEntry(Base):
+    """Scrape-gateway cache entry (ADR 0009 D2.1, migration 029).
+
+    One table for all families. Types are `Text`/`Integer` (NOT `BigInteger`)
+    so `create_all` emits the same DDL as the migration (BIGINT would diverge
+    in `PRAGMA table_info`). No column has a default: the gateway supplies
+    every value. Distinct from `TmdbScrapeCache` (worker cache).
+    """
+
+    __tablename__ = "scrape_cache"
+
+    family = Column(Text, primary_key=True, nullable=False)
+    key_version = Column(Integer, primary_key=True, nullable=False, autoincrement=False)
+    language = Column(Text, primary_key=True, nullable=False)
+    cache_key = Column(Text, primary_key=True, nullable=False)
+    result = Column(Text, nullable=False)
+    schema_version = Column(Integer, nullable=False)
+    payload = Column(Text)
+    fetched_at = Column(Integer, nullable=False)
+    expires_at = Column(Integer, nullable=False)
+
+    __table_args__ = (
+        Index("ix_scrape_cache_expires_at", "expires_at"),
     )

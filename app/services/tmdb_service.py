@@ -1,15 +1,18 @@
 import asyncio
 import json
 import logging
+import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Generator, Literal, Optional
+from urllib.parse import quote
 
 import httpx
 from rapidfuzz import fuzz
 
 from app.config import settings
+from app.services.scrape_provider_errors import ProviderError
 from app.utils.string_normalizer import normalize_for_sorting
 from app.utils.ttl_cache import TTLCache
 
@@ -246,6 +249,43 @@ class MatchExtras:
     poster_urls: list[str]         # w185, main poster first, deduped, <= _MAX_POSTER_VARIANTS
 
 
+@dataclass(frozen=True)
+class GatewayCandidate:
+    """One scored hit of `search_scored`/`search_candidates_raw` (B1-08). Raw
+    TMDB fields only (poster_path is the bare path, no host/size)."""
+    tmdb_id: int
+    kind: Literal["movie", "show"]
+    title: str
+    original_title: str | None
+    year: int | None
+    overview: str | None
+    poster_path: str | None
+    score: float
+
+
+@dataclass(frozen=True)
+class ScoredSearch:
+    """Result of `TMDBService.search_scored` (B1-08). `verdict` is
+    "matched" | "ambiguous" | "nomatch"; `best_tmdb_id` is the top-scoring
+    candidate of the retained attempt (None when no hit); `candidates` (<=10)
+    are re-sorted AFTER the verdict by score desc then tmdb_id asc."""
+    verdict: str
+    confidence: float
+    best_tmdb_id: int | None
+    candidates: list[GatewayCandidate]
+
+
+def _parse_retry_after(value: str | None) -> int | None:
+    """Integer `Retry-After` seconds, or None (absent / HTTP-date / garbage)."""
+    if value is None:
+        return None
+    value = value.strip()
+    return int(value) if value.isdigit() else None
+
+
+_DEFAULT_RETRY_AFTER = 30  # seconds reported when a final 429 has no usable header
+
+
 class TMDBService:
     BASE_URL = "https://api.themoviedb.org/3"
 
@@ -429,6 +469,256 @@ class TMDBService:
             results, title, None, None,
             title_key=title_key, orig_key=orig_key, date_key=date_key,
         )
+
+    async def _request_bounded(self, path: str, params: dict | None = None, *, deadline: float) -> dict:
+        """Strict sibling of `_request` (B1-08, ADR 0009 D2.6).
+
+        Same loop (delays `_RETRY_DELAYS`, same retry cases, same
+        `real_request_count` / `RequestTally` / `tmdb_requests_total`
+        accounting per real attempt) but: bounded by `deadline` (absolute
+        `time.monotonic()` value) - a `Retry-After` or retry delay longer than
+        the remaining time raises at once instead of sleeping - and EVERY
+        failure is translated into `ProviderError`. The error is raised
+        OUTSIDE the `except` blocks with no cause, so neither `__cause__` nor
+        `__context__` can carry the httpx exception (its URL embeds the
+        api_key). Log lines carry exception type / status only."""
+        from app.utils.metrics import tmdb_requests_total
+
+        client = await self._get_client()
+        url = f"{self.BASE_URL}{path}"
+        kind = self._metric_kind(path)
+        rate_limited = False
+        final: ProviderError | None = None
+        for attempt, delay in enumerate((*_RETRY_DELAYS, None)):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                final = ProviderError("timeout", provider="tmdb")
+                break
+            self.real_request_count += 1
+            tally = _request_tally.get()
+            if tally is not None:
+                tally.add()
+
+            wait: float | None = None            # sleep before the next attempt
+            wait_kind = "timeout"                # error raised if `wait` cannot fit
+            wait_retry_after: int | None = None
+            try:
+                resp = await client.get(url, params=params, timeout=min(10.0, remaining))
+                status = resp.status_code
+                if status == 429:
+                    rate_limited = True
+                    header_ra = _parse_retry_after(resp.headers.get("Retry-After"))
+                    if delay is not None:
+                        wait = float(header_ra if header_ra is not None else delay)
+                        wait_kind = "rate_limited"
+                        wait_retry_after = int(wait)
+                    else:
+                        final = ProviderError(
+                            "rate_limited", provider="tmdb", status_code=429,
+                            retry_after=header_ra if header_ra is not None else _DEFAULT_RETRY_AFTER,
+                        )
+                elif status in (502, 503, 504):
+                    if delay is not None:
+                        wait = float(delay)
+                        wait_kind = "unavailable"
+                    else:
+                        final = ProviderError("unavailable", provider="tmdb", status_code=status)
+                elif status in (401, 403):
+                    final = ProviderError("not_configured", provider="tmdb", status_code=status)
+                elif status == 404:
+                    final = ProviderError("not_found", provider="tmdb", status_code=status)
+                elif status >= 400:
+                    final = ProviderError("bad_response", provider="tmdb", status_code=status)
+                else:
+                    body = resp.json()
+                    if not isinstance(body, dict):
+                        final = ProviderError("bad_response", provider="tmdb", status_code=status)
+                    else:
+                        tmdb_requests_total.labels(
+                            kind=kind, result="rate_limited" if rate_limited else "ok",
+                        ).inc()
+                        return body
+            except httpx.TimeoutException as e:
+                logger.warning("TMDB %s attempt %d timed out (%s)", path, attempt + 1, type(e).__name__)
+                if delay is not None:
+                    wait, wait_kind = float(delay), "timeout"
+                else:
+                    final = ProviderError("timeout", provider="tmdb")
+            except (httpx.ConnectError, httpx.RemoteProtocolError) as e:
+                logger.warning("TMDB %s attempt %d failed (%s)", path, attempt + 1, type(e).__name__)
+                if delay is not None:
+                    wait, wait_kind = float(delay), "unavailable"
+                else:
+                    final = ProviderError("unavailable", provider="tmdb")
+            except Exception as e:  # noqa: BLE001 - everything else is a bad response
+                logger.warning("TMDB %s bad response (%s)", path, type(e).__name__)
+                final = ProviderError("bad_response", provider="tmdb")
+
+            if final is not None:
+                break
+            if wait is not None:
+                if wait >= deadline - time.monotonic():
+                    # The wait cannot fit before the deadline: fail now.
+                    if wait_kind == "rate_limited":
+                        final = ProviderError(
+                            "rate_limited", provider="tmdb",
+                            retry_after=wait_retry_after, status_code=429,
+                        )
+                    else:
+                        final = ProviderError("timeout", provider="tmdb")
+                    break
+                logger.warning("TMDB %s retrying in %ss (%s)", path, wait, wait_kind)
+                await asyncio.sleep(wait)
+        if final is None:  # defensive: the last attempt always sets `final`
+            final = ProviderError("unavailable", provider="tmdb")
+        tmdb_requests_total.labels(
+            kind=kind, result="rate_limited" if final.kind == "rate_limited" else "error",
+        ).inc()
+        raise final
+
+    def _require_configured(self) -> None:
+        if not self.is_configured:
+            raise ProviderError("not_configured", provider="tmdb")
+
+    @staticmethod
+    def _image_language_filter(language: str) -> str:
+        short = (language or "").split("-", 1)[0].strip().lower()
+        parts: list[str] = []
+        for p in (short, "en", "null"):
+            if p and p not in parts:
+                parts.append(p)
+        return ",".join(parts)
+
+    async def _fetch_detail(
+        self, path: str, append: str, language: str, deadline: float,
+        *, with_videos: bool = True,
+    ) -> dict:
+        self._require_configured()
+        params: dict = {
+            "append_to_response": append,
+            "language": language,
+            "include_image_language": self._image_language_filter(language),
+        }
+        if with_videos:
+            params["include_video_language"] = _VIDEO_LANGUAGE_FILTER
+        return await self._request_bounded(path, params, deadline=deadline)
+
+    async def fetch_movie(self, tmdb_id: int, *, language: str, deadline: float) -> dict:
+        """Raw `/movie/{id}` JSON for the gateway (B1-08). Not cached here."""
+        return await self._fetch_detail(
+            f"/movie/{int(tmdb_id)}", "credits,external_ids,release_dates,videos,images",
+            language, deadline,
+        )
+
+    async def fetch_tv(self, tmdb_id: int, *, language: str, deadline: float) -> dict:
+        """Raw `/tv/{id}` JSON for the gateway (B1-08)."""
+        return await self._fetch_detail(
+            f"/tv/{int(tmdb_id)}", "credits,external_ids,content_ratings,videos,images",
+            language, deadline,
+        )
+
+    async def fetch_season(self, tmdb_id: int, season: int, *, language: str, deadline: float) -> dict:
+        """Raw `/tv/{id}/season/{n}` JSON for the gateway (B1-08)."""
+        return await self._fetch_detail(
+            f"/tv/{int(tmdb_id)}/season/{int(season)}", "external_ids,images",
+            language, deadline, with_videos=False,
+        )
+
+    async def find_external(
+        self, source: Literal["imdb", "tvdb"], external_id: str, *, deadline: float,
+    ) -> dict:
+        """Raw `/find/{id}` JSON reduced to movie_results / tv_results /
+        tv_episode_results (seasons and persons ignored). No `language`."""
+        self._require_configured()
+        ext = {"imdb": "imdb_id", "tvdb": "tvdb_id"}.get(source)
+        if ext is None:
+            raise ValueError(f"unsupported external source: {source!r}")
+        data = await self._request_bounded(
+            f"/find/{quote(str(external_id), safe='')}",
+            {"external_source": ext}, deadline=deadline,
+        )
+        return {k: data.get(k) or [] for k in ("movie_results", "tv_results", "tv_episode_results")}
+
+    @staticmethod
+    def _kind_keys(kind: str) -> tuple[str, str, str, str, str]:
+        if kind == "movie":
+            return "/search/movie", "title", "original_title", "release_date", "year"
+        if kind == "show":
+            return "/search/tv", "name", "original_name", "first_air_date", "first_air_date_year"
+        raise ValueError(f"unsupported kind: {kind!r}")
+
+    async def _search_scored_once(
+        self, kind: str, title: str, year: int | None, *, language: str, deadline: float,
+    ) -> tuple[TMDBSearchOutcome, list[GatewayCandidate]]:
+        path, title_key, orig_key, date_key, year_param = self._kind_keys(kind)
+        params: dict = {"query": title, "language": language}
+        if year:
+            params[year_param] = year
+        data = await self._request_bounded(path, params, deadline=deadline)
+        results = data.get("results") or []
+        scored = self._score_results(
+            [r for r in results if isinstance(r, dict) and isinstance(r.get("id"), int)],
+            title, year, title_key=title_key, orig_key=orig_key, date_key=date_key,
+        )
+        verdict = self._verdict(scored, None)
+        candidates = [
+            GatewayCandidate(
+                tmdb_id=m.tmdb_id, kind=kind,  # type: ignore[arg-type]
+                title=raw.get(title_key) or "",
+                original_title=raw.get(orig_key) or None,
+                year=m.year,
+                overview=raw.get("overview") or None,
+                poster_path=raw.get("poster_path") or None,
+                score=m.confidence,
+            )
+            for m, raw in scored
+        ]
+        # Re-sort AFTER the verdict: score desc, then tmdb_id asc (deterministic).
+        candidates.sort(key=lambda c: (-c.score, c.tmdb_id))
+        return verdict, candidates[:10]
+
+    @staticmethod
+    def _to_scored_search(verdict: TMDBSearchOutcome, cands: list[GatewayCandidate]) -> ScoredSearch:
+        return ScoredSearch(
+            verdict=verdict.result,
+            confidence=verdict.confidence,
+            best_tmdb_id=verdict.best.tmdb_id if verdict.best else None,
+            candidates=cands,
+        )
+
+    async def search_candidates_raw(
+        self, kind: Literal["movie", "show"], title: str, year: int | None,
+        *, language: str, deadline: float,
+    ) -> ScoredSearch:
+        """ONE `/search/movie|tv` call (the gateway `/search` route)."""
+        self._require_configured()
+        verdict, cands = await self._search_scored_once(
+            kind, title, year, language=language, deadline=deadline,
+        )
+        return self._to_scored_search(verdict, cands)
+
+    async def search_scored(
+        self, kind: Literal["movie", "show"], title: str, year: int | None,
+        *, language: str, deadline: float,
+    ) -> ScoredSearch:
+        """Gateway `/match` search (B1-08): search with the year, then (if not
+        auto-matched and a year was given) without it - the worker's first two
+        steps, WITHOUT the en-US retry or /search/multi. Reuses
+        `_score_results`/`_verdict` (no summary). Returns the first matched
+        attempt, else the attempt with the highest confidence."""
+        self._require_configured()
+        attempts: list[tuple[TMDBSearchOutcome, list[GatewayCandidate]]] = []
+        attempts.append(await self._search_scored_once(
+            kind, title, year, language=language, deadline=deadline,
+        ))
+        if attempts[-1][0].result != "matched" and year is not None:
+            attempts.append(await self._search_scored_once(
+                kind, title, None, language=language, deadline=deadline,
+            ))
+        chosen = next((a for a in attempts if a[0].result == "matched"), None)
+        if chosen is None:
+            chosen = max(attempts, key=lambda a: a[0].confidence)
+        return self._to_scored_search(*chosen)
 
     async def get_movie_details(self, tmdb_id: int) -> TMDBEnrichmentData:
         """Fetch movie details + external_ids + certifications + videos in one
@@ -993,7 +1283,7 @@ def _select_youtube_trailer(videos_json: dict) -> str | None:
     return candidates[0]["key"]
 
 
-def _parse_movie_certification(release_dates_json: dict) -> str | None:
+def _parse_movie_certification(release_dates_json: dict, region: str | None = None) -> str | None:
     """Parse a TMDb /movie/{id}?append_to_response=release_dates response.
 
     Prefers the configured TMDB_LANGUAGE region (e.g. 'FR' from 'fr-FR'),
@@ -1002,13 +1292,16 @@ def _parse_movie_certification(release_dates_json: dict) -> str | None:
     (type==3) is tried first; the first non-empty certification in any
     release_date entry is returned otherwise.
 
+    `region` (optional ISO-3166 code, B1-08) overrides the region derived from
+    TMDB_LANGUAGE; None keeps the worker behaviour.
+
     Returns the RAW certification string (e.g. 'PG-13', 'U', '12') or None
     when no certification is found.  The Android app normalises via
     ContentRatingHelper — do NOT normalise here.
     """
     results = (release_dates_json.get("release_dates") or {}).get("results") or []
 
-    preferred = TMDBService._preferred_region()
+    preferred = (region or "").upper() or TMDBService._preferred_region()
     by_region: dict[str, dict] = {
         r["iso_3166_1"]: r for r in results if r.get("iso_3166_1")
     }
@@ -1038,7 +1331,7 @@ def _parse_movie_certification(release_dates_json: dict) -> str | None:
     return None
 
 
-def _parse_tv_certification(content_ratings_json: dict) -> str | None:
+def _parse_tv_certification(content_ratings_json: dict, region: str | None = None) -> str | None:
     """Parse a TMDb /tv/{id}?append_to_response=content_ratings response.
 
     Prefers the configured TMDB_LANGUAGE region (e.g. 'FR'), falls back to
@@ -1048,7 +1341,7 @@ def _parse_tv_certification(content_ratings_json: dict) -> str | None:
     """
     results = (content_ratings_json.get("content_ratings") or {}).get("results") or []
 
-    preferred = TMDBService._preferred_region()
+    preferred = (region or "").upper() or TMDBService._preferred_region()
     by_region: dict[str, dict] = {
         r["iso_3166_1"]: r for r in results if r.get("iso_3166_1")
     }

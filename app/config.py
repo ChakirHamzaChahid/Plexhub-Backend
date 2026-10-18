@@ -10,6 +10,15 @@ load_dotenv()
 logger = logging.getLogger("plexhub.config")
 
 
+def _env_flag_default_true(env_var: str) -> bool:
+    """True unless the variable is EXPLICITLY false/0/no/off.
+
+    A mistyped, empty (`FOO=` injected by an `env_file`) or unknown value must never switch a
+    production safety feature off silently — the opposite of the usual `in ("true", "1")` idiom,
+    used here only for a flag whose "off" state kills every background job."""
+    return os.getenv(env_var, "true").strip().lower() not in ("false", "0", "no", "off")
+
+
 def _safe_int(env_var: str, default: int) -> int:
     """Parse env var as int with safe fallback and clear error message."""
     raw = os.getenv(env_var, str(default))
@@ -183,6 +192,10 @@ class Settings:
 
     # DB backups (online sqlite .backup snapshots)
     BACKUP_ENABLED: bool = os.getenv("BACKUP_ENABLED", "true").lower() in ("true", "1", "yes")
+    # Lot B2 (ADR 0012 D2.4): "false" = throwaway TEST instance — no master election
+    # (no `fcntl`, so it also boots on Windows), no scheduler, no boot pipeline, no
+    # download worker, no Plex reap. Default "true": production is unchanged.
+    BACKGROUND_JOBS_ENABLED: bool = _env_flag_default_true("BACKGROUND_JOBS_ENABLED")
     BACKUP_DIR: Path = Path(os.getenv("BACKUP_DIR", "./data/backups"))
     BACKUP_RETENTION_DAYS: int = _safe_int("BACKUP_RETENTION_DAYS", 7)
     BACKUP_HOUR: int = _safe_int("BACKUP_HOUR", 4)  # daily cron hour
@@ -476,6 +489,13 @@ class Settings:
     SCRAPE_ALLOWED_LANGUAGES: str = os.getenv(
         "SCRAPE_ALLOWED_LANGUAGES", ",".join(DEFAULT_SCRAPE_ALLOWED_LANGUAGES),
     )
+
+    # Metadata API (lot B2, ADR 0010 D2.4 / ADR 0011 D2.4). The config only READS
+    # the raw values; the clamping (timeout 5..28 s, rate <= 0 disables) lives in
+    # app/services/metadata_limits.py, same split as the scrape gateway.
+    METADATA_RATE_LIMIT_PER_MINUTE: int = _safe_int("METADATA_RATE_LIMIT_PER_MINUTE", 300)
+    METADATA_WRITE_RATE_LIMIT_PER_MINUTE: int = _safe_int("METADATA_WRITE_RATE_LIMIT_PER_MINUTE", 90)
+    METADATA_REQUEST_TIMEOUT_SECONDS: int = _safe_int("METADATA_REQUEST_TIMEOUT_SECONDS", 15)
 
     @property
     def has_xtream_env(self) -> bool:

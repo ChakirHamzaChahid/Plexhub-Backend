@@ -470,11 +470,21 @@ async def test_head_reset_get_video_clears_outage(
         async def get_client():
             return client
         monkeypatch.setattr(hc, "_get_client", get_client)
-        with caplog.at_level("INFO", logger="plexhub.health_check"):
-            if entrypoint == "cron":
-                await hc._run_health_check_batch()
-            else:
-                await hc._run_pipeline_validation_impl()
+        # `app.main` sets `plexhub.propagate = False` once imported anywhere in the
+        # process, so a root-attached caplog sees nothing: attach its handler to the
+        # originating logger (works whatever ran before).
+        import logging
+
+        hc_logger = logging.getLogger("plexhub.health_check")
+        hc_logger.addHandler(caplog.handler)
+        try:
+            with caplog.at_level("INFO", logger="plexhub.health_check"):
+                if entrypoint == "cron":
+                    await hc._run_health_check_batch()
+                else:
+                    await hc._run_pipeline_validation_impl()
+        finally:
+            hc_logger.removeHandler(caplog.handler)
     assert await _strikes(db_factory, "8fb2c0f3") == 0
     assert "'head_transport_fallback': 12" in caplog.text
     assert "CIRCUIT BREAKER" not in caplog.text

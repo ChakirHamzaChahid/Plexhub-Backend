@@ -38,7 +38,9 @@ async def _wire(monkeypatch, db_factory):
 
 
 def test_known_scopes_is_the_closed_set():
-    assert api_key_service.KNOWN_SCOPES == frozenset({"scrape", "scrape.admin"})
+    assert api_key_service.KNOWN_SCOPES == frozenset(
+        {"scrape", "scrape.admin", "media.read", "media.write"}
+    )
     assert isinstance(api_key_service.KNOWN_SCOPES, frozenset)
 
 

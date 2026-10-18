@@ -126,10 +126,14 @@ def _make_wal_db(path: Path, n_rows: int = 3) -> None:
 
 
 def _residuals(directory: Path) -> list[str]:
-    """Anything in `directory` that is a backup file or a leftover temp file."""
+    """Anything in `directory` that is a backup file or a leftover temp file.
+
+    The B2 bookkeeping files (``*.verified`` sidecars, the attempt-state file) are not backups
+    and have their own tests (`tests/test_backup_status.py`)."""
     return sorted(
         p.name for p in directory.iterdir()
-        if p.name.startswith("plexhub-") or p.name.endswith((".tmp", "-wal", "-shm", "-journal"))
+        if (p.name.startswith("plexhub-") or p.name.endswith((".tmp", "-wal", "-shm", "-journal")))
+        and not p.name.endswith(".verified") and p.name != "plexhub-backup-state.json"
     )
 
 

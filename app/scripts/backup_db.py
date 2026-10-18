@@ -16,13 +16,21 @@ final name once it is known to be sound:
 A ``.tmp`` orphaned by a hard kill (SIGKILL / power loss) is swept by the next
 run once it is older than ``_ORPHAN_TMP_MAX_AGE_SECONDS``.
 
+Lot B2 (ADR 0012 D2.3) — the state of the latest backup is readable WITHOUT touching the
+database (``GET /api/metadata/v1/backup/status``): before the final rename, a sidecar
+``<name>.verified`` records the file's name, size and ``mtime_ns`` together with the
+``integrity_check`` result, and ``plexhub-backup-state.json`` records the last attempt.
+Neither lives in the database (a restore would make the state regress). A backup made before
+this lot has no sidecar: ``--verify-latest`` runs a real check once and writes it.
+
 Usage (manual):
-    python -m app.scripts.backup_db [--retention-days N]
+    python -m app.scripts.backup_db [--retention-days N] [--verify-latest]
 Restore: see ``app/scripts/restore_db.py`` and ``docs/ops-backup-restore.md``.
 """
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sqlite3
@@ -48,6 +56,10 @@ _LEGACY_TIMESTAMP_FMT = "%Y%m%d-%H%M%S"
 _TIMESTAMP_FMT = "%Y%m%d-%H%M%S-%f"
 # A ``.tmp`` younger than this may belong to a backup still running.
 _ORPHAN_TMP_MAX_AGE_SECONDS = 3600
+# Lot B2: ``<backup>.db.verified`` records that exact file's integrity_check; the attempt state
+# file sits in the same directory and is not a backup (never matched by prune/sweep).
+_VERIFIED_SUFFIX = ".verified"
+STATE_FILE_NAME = "plexhub-backup-state.json"
 
 
 class BackupIntegrityError(RuntimeError):
@@ -121,6 +133,50 @@ def check_integrity(path: Path, log: logging.Logger | None = None) -> None:
         raise BackupIntegrityError(f"integrity_check failed on {path.name}: {detail}")
 
 
+def is_backup_name(name: str) -> bool:
+    """``plexhub-<stamp>.db`` with a parsable stamp (the files the pruner manages)."""
+    if not (name.startswith(_FILE_PREFIX) and name.endswith(_FILE_SUFFIX)):
+        return False
+    return _parse_backup_stamp(name[len(_FILE_PREFIX):-len(_FILE_SUFFIX)]) is not None
+
+
+def verified_sidecar_path(db_file: Path) -> Path:
+    return db_file.with_name(db_file.name + _VERIFIED_SUFFIX)
+
+
+def _write_json_atomic(path: Path, payload: dict) -> None:
+    tmp = path.with_name(path.name + ".part")
+    tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def write_verified_sidecar(measured: Path, final_name_path: Path) -> None:
+    """Record that `measured` (the file as it will be published) passed ``integrity_check``.
+
+    `measured` is stat-ed AFTER the check connection was closed. The sidecar is only valid for
+    a file whose name, size AND mtime still match: replacing or editing the file voids it.
+    """
+    st = measured.stat()
+    _write_json_atomic(verified_sidecar_path(final_name_path), {
+        "name": final_name_path.name,
+        "size": st.st_size,
+        "mtime_ns": st.st_mtime_ns,
+        "integrity": "ok",
+        "verified_at": int(time.time() * 1000),
+    })
+
+
+def write_attempt_state(backup_dir: Path, outcome: str) -> None:
+    """Persist the last backup attempt (``ok`` | ``failed``); never raises."""
+    try:
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        _write_json_atomic(backup_dir / STATE_FILE_NAME, {
+            "at_ms": int(time.time() * 1000), "outcome": outcome,
+        })
+    except OSError as exc:
+        logger.warning(f"Could not record the backup attempt state: {exc}")
+
+
 def _unlink_quiet(path: Path) -> None:
     try:
         path.unlink(missing_ok=True)
@@ -147,11 +203,15 @@ def perform_backup(source: Path, target: Path, *, verify: bool = True) -> None:
         if verify:
             check_integrity(tmp)
             logger.info(f"Backup integrity_check: ok ({target.name})")
+            if is_backup_name(target.name):
+                write_verified_sidecar(tmp, target)   # BEFORE the rename: a crash leaves an orphan sidecar
         os.replace(tmp, target)
     finally:
         # After a successful replace `tmp` no longer exists (sidecars neither);
         # on any failure/interrupt this guarantees no partial leftover.
         remove_tmp_files(tmp)
+        if not target.exists():
+            _unlink_quiet(verified_sidecar_path(target))
 
 
 def _is_orphan_tmp_name(name: str) -> bool:
@@ -183,9 +243,18 @@ def sweep_orphan_tmp(backup_dir: Path, max_age_seconds: float = _ORPHAN_TMP_MAX_
     """Delete ``plexhub-*.db.tmp`` (and ``-wal/-shm/-journal`` sidecars) older than `max_age_seconds`.
 
     Orphans of hard-killed backups; `prune_old_backups` only matches ``.db`` so
-    it would never see them. Returns the deleted paths.
+    it would never see them. Also removes ``*.db.verified`` files whose backup is gone
+    (lot B2). Returns the deleted paths.
     """
-    return _sweep_older_than(backup_dir, _is_orphan_tmp_name, max_age_seconds)
+    deleted = _sweep_older_than(backup_dir, _is_orphan_tmp_name, max_age_seconds)
+    deleted += _sweep_older_than(
+        backup_dir,
+        lambda name: name.startswith(_FILE_PREFIX)
+        and name.endswith(_FILE_SUFFIX + _VERIFIED_SUFFIX)
+        and not (backup_dir / name[: -len(_VERIFIED_SUFFIX)]).exists(),
+        max_age_seconds,
+    )
+    return deleted
 
 
 def sweep_orphan_restore_tmp(db_path: Path, max_age_seconds: float = _ORPHAN_TMP_MAX_AGE_SECONDS) -> list[Path]:
@@ -224,6 +293,7 @@ def prune_old_backups(backup_dir: Path, retention_days: int) -> list[Path]:
             except OSError as exc:  # a valid fresh backup must not fail on a stuck old one
                 logger.warning(f"Could not prune old backup {f.name}: {exc}")
                 continue
+            _unlink_quiet(verified_sidecar_path(f))
             deleted.append(f)
     return deleted
 
@@ -234,6 +304,7 @@ def run_backup(retention_days: int | None = None) -> Path:
     Returns the new backup path. Pruning only runs after a valid backup.
     """
     if not settings.DB_PATH.exists():
+        write_attempt_state(settings.BACKUP_DIR, "failed")
         raise FileNotFoundError(f"DB not found at {settings.DB_PATH}")
 
     swept = sweep_orphan_tmp(settings.BACKUP_DIR) + sweep_orphan_restore_tmp(settings.DB_PATH)
@@ -241,7 +312,12 @@ def run_backup(retention_days: int | None = None) -> Path:
         logger.info(f"Swept {len(swept)} orphaned backup .tmp file(s)")
 
     target = _build_target_path(settings.BACKUP_DIR)
-    perform_backup(settings.DB_PATH, target)
+    try:
+        perform_backup(settings.DB_PATH, target)
+    except BaseException:
+        write_attempt_state(settings.BACKUP_DIR, "failed")
+        raise
+    write_attempt_state(settings.BACKUP_DIR, "ok")
     size_mb = target.stat().st_size / (1024 * 1024)
     logger.info(f"DB backup written: {target.name} ({size_mb:.1f} MB, integrity ok)")
 
@@ -252,17 +328,50 @@ def run_backup(retention_days: int | None = None) -> Path:
     return target
 
 
+def verify_latest(backup_dir: Path) -> str | None:
+    """Run a REAL ``integrity_check`` on the newest backup and record its sidecar.
+
+    For a backup made before sidecars existed (lot B2). Returns the file name, or None when there
+    is no backup. Raises ``BackupIntegrityError`` (and writes nothing) on a corrupt file.
+    """
+    if not backup_dir.exists():
+        return None
+    candidates = [
+        f for f in backup_dir.iterdir()
+        if f.is_file() and is_backup_name(f.name) and f.stat().st_size > 0
+    ]
+    if not candidates:
+        return None
+    newest = max(
+        candidates,
+        key=lambda f: _parse_backup_stamp(f.name[len(_FILE_PREFIX):-len(_FILE_SUFFIX)]),
+    )
+    check_integrity(newest)
+    write_verified_sidecar(newest, newest)
+    logger.info(f"Verified existing backup: {newest.name}")
+    return newest.name
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--retention-days", type=int, default=None,
         help=f"Override BACKUP_RETENTION_DAYS (default: {settings.BACKUP_RETENTION_DAYS})",
     )
+    parser.add_argument(
+        "--verify-latest", action="store_true",
+        help="Run a real integrity_check on the newest existing backup and record its .verified "
+             "sidecar (for a backup made before the metadata API existed); takes no new backup",
+    )
     args = parser.parse_args()
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    if args.verify_latest:
+        name = verify_latest(settings.BACKUP_DIR)
+        print(f"verified: {name}" if name else "no backup found")
+        return
     run_backup(args.retention_days)
 
 

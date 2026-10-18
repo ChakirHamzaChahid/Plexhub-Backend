@@ -179,7 +179,7 @@ class TestSyncUpsertPreservesLockedColumns:
             "rating_key": "vod_locked.mp4", "server_id": sid, "library_section_id": "xtream_vod",
             "filter": "all", "sort_order": "default", "page_offset": 0,
             "title": "Provider Renamed It", "title_sortable": "provider renamed it",
-            "type": "movie", "year": 2020,
+            "type": "movie", "year": 2020, "thumb_url": "http://provider/new-thumb.jpg",
             "resolved_thumb_url": "http://provider/wrong-thumb.jpg",
             "resolved_art_url": "http://provider/wrong-art.jpg",
             "summary": "Wrong provider summary", "genres": "Wrong Genre",
@@ -205,9 +205,12 @@ class TestSyncUpsertPreservesLockedColumns:
         assert row.summary == "Correct scraped summary"
         assert row.genres == "Action"
         assert row.year == 1999
-        # ...while an unprotected column (title) still follows the provider,
-        # proving the UPDATE genuinely fired (content_hash did change).
-        assert row.title == "Provider Renamed It"
+        # Lot B2 (ADR 0012): the title is now protected too (the metadata API can
+        # write it)...
+        assert row.title == "Locked Movie"
+        # ...while an unprotected column (the provider thumb) still follows the
+        # provider, proving the UPDATE genuinely fired (content_hash did change).
+        assert row.thumb_url == "http://provider/new-thumb.jpg"
 
     async def test_locked_row_with_cleared_tmdb_id_does_not_get_reseeded(self, db_session):
         """BLOCKING review fix: an operator who cleared a wrong provider
@@ -234,7 +237,7 @@ class TestSyncUpsertPreservesLockedColumns:
             "rating_key": "vod_cleared.mp4", "server_id": sid, "library_section_id": "xtream_vod",
             "filter": "all", "sort_order": "default", "page_offset": 0,
             "title": "Provider Renamed It Again", "title_sortable": "provider renamed it again",
-            "type": "movie", "year": 2020,
+            "type": "movie", "year": 2020, "thumb_url": "http://provider/again.jpg",
             "tmdb_id": "77777",  # the provider's (wrong) id, would reseed an unlocked row
             "unification_id": "title_providerrenameditagain_2020",
             "history_group_key": "hg_provider2",
@@ -252,8 +255,10 @@ class TestSyncUpsertPreservesLockedColumns:
         assert row.tmdb_id is None  # stays cleared, not reseeded
         assert row.unification_id == "title_clearedwrongmatch_1999"  # stays title-based
         assert row.history_group_key == "title_clearedwrongmatch_1999"
-        # Unprotected column still follows the provider (UPDATE genuinely fired).
-        assert row.title == "Provider Renamed It Again"
+        # Unprotected column still follows the provider (UPDATE genuinely fired);
+        # the title no longer does (lot B2, ADR 0012).
+        assert row.title == "Cleared Wrong Match"
+        assert row.thumb_url == "http://provider/again.jpg"
 
     async def test_unlocked_row_still_takes_provider_tmdb_id_and_unification(self, db_session):
         """Non-regression (L4): an UNLOCKED row with no tmdb_id yet still
@@ -315,10 +320,11 @@ class TestNfoImportRespectsLock:
             resolved_art_url="http://old/art.jpg",
             match_locked=True,
         )
+        row.audience_rating = 5.0
         parsed = self._nfo(
             imdb_id="tt9999999", tmdb_id="99999",
             poster_url="http://new/thumb.jpg", fanart_url="http://new/art.jpg",
-            summary="A brand-new summary from the NFO",
+            summary="A brand-new summary from the NFO", audience_rating=7.7,
         )
         updates = nfo_import_service._compute_updates(row, parsed, overwrite=True)
 
@@ -328,12 +334,17 @@ class TestNfoImportRespectsLock:
         assert "tmdb_id" not in updates
         assert "resolved_thumb_url" not in updates
         assert "resolved_art_url" not in updates
-        # A column outside the locked fill-only set still honors overwrite=True.
-        assert updates["summary"] == "A brand-new summary from the NFO"
+        # Lot B2 (ADR 0012): the summary is a metadata-API column, hence locked too.
+        assert "summary" not in updates
+        # A column OUTSIDE the protected set (provider-origin audience rating) still
+        # honors overwrite=True.
+        assert updates["audience_rating"] == 7.7
 
-    def test_locked_row_still_fills_a_genuinely_missing_id(self):
-        """The lock forces fill-MISSING (not "never touch") for ids/images —
-        an empty slot on a locked row is still fillable."""
+    def test_locked_row_no_longer_refills_an_empty_id(self):
+        """Lot B2 (ADR 0012 D2.2) SUPERSEDES the ADR 0005 L5 fill-missing rule for the
+        ids: an id left empty on a locked row may be a deliberate clear made through
+        the metadata API, which the NFO import must not undo (fill-missing mode
+        included). The poster columns keep their fill-only behaviour."""
         row = Media(
             rating_key="vod_2", server_id="xtream_a", library_section_id="1",
             title="Locked No Tmdb", type="movie", year=2020,
@@ -342,7 +353,7 @@ class TestNfoImportRespectsLock:
         )
         parsed = self._nfo(tmdb_id="424242")
         updates = nfo_import_service._compute_updates(row, parsed, overwrite=True)
-        assert updates["tmdb_id"] == "424242"
+        assert "tmdb_id" not in updates
 
     def test_unlocked_row_still_overwrites_ids_normally(self):
         """Control: an UNLOCKED row is unaffected by the new guard — a

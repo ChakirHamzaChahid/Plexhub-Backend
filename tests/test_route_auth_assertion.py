@@ -130,9 +130,9 @@ def test_recognised_dependency_names_are_required_not_just_any_dependency():
         assert_api_routes_authenticated(app)
 
 
-def test_recognised_guard_names_are_exactly_the_six_known_guards():
-    """Fige l'ensemble EXACT des gardes reconnus (ADR 0008 § D2.4, B1-03) :
-    l'élargir sans toucher ce test doit échouer."""
+def test_recognised_guard_names_are_exactly_the_eight_known_guards():
+    """Fige l'ensemble EXACT des gardes reconnus (ADR 0008 § D2.4, B1-03 ;
+    ADR 0010 § D2.3, B2-02) : l'élargir sans toucher ce test doit échouer."""
     from app.api.route_audit import _AUTH_DEPENDENCY_NAMES
 
     assert _AUTH_DEPENDENCY_NAMES == frozenset(
@@ -143,6 +143,8 @@ def test_recognised_guard_names_are_exactly_the_six_known_guards():
             "verify_admin_basic_auth",
             "verify_scrape_scope",
             "verify_scrape_admin_scope",
+            "verify_media_read_scope",
+            "verify_media_write_scope",
         }
     )
 

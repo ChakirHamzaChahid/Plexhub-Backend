@@ -306,6 +306,9 @@ async def _update_db_for_account(
         select(Media.rating_key, Media.title, Media.year, Media.type)
         .where(Media.server_id == server_id)
         .where(Media.type.in_(("movie", "show")))
+        # Lot B2 (ADR 0012): a row locked through the metadata API / the manual
+        # scraper keeps the title (and year) the operator wrote.
+        .where(Media.match_locked == False)  # noqa: E712
     )
     # Use the suffix-aware parser so we strip "(US)", "(HD)" etc. from the
     # stored title — they remain encoded on disk via the folder name when
@@ -339,7 +342,7 @@ async def _update_db_for_account(
     result = await db.execute(
         select(
             Media.rating_key, Media.title, Media.parent_title,
-            Media.grandparent_title,
+            Media.grandparent_title, Media.match_locked,
         )
         .where(Media.server_id == server_id)
         .where(Media.type == "episode")
@@ -354,8 +357,10 @@ async def _update_db_for_account(
             return None
         return new
 
-    for rating_key, title, parent_title, gp_title in result.all():
-        new_title = _clean(title)
+    for rating_key, title, parent_title, gp_title, locked in result.all():
+        # A locked episode keeps its (possibly API-written) title; the season label
+        # and show title are not metadata-API columns and are still cleaned.
+        new_title = None if locked else _clean(title)
         new_parent = _clean(parent_title)
         new_gp = _clean(gp_title)
         if not (new_title or new_parent or new_gp):

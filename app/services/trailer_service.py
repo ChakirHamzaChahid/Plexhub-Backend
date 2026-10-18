@@ -260,7 +260,13 @@ async def _write_back_youtube_trailer(
     async def _work(session: AsyncSession) -> None:
         await session.execute(
             update(Media)
-            .where(Media.rating_key == rating_key, Media.server_id == server_id)
+            .where(
+                Media.rating_key == rating_key,
+                Media.server_id == server_id,
+                # Lot B2 (ADR 0012): a locked row's empty trailer may be a deliberate
+                # clear made through the metadata API — never re-seed it from TMDB.
+                Media.match_locked == False,  # noqa: E712
+            )
             .values(youtube_trailer=youtube_id)
         )
         await session.commit()

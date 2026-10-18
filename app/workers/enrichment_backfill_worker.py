@@ -192,6 +192,8 @@ async def _run_phase_a(
                     Media.imdb_id != "",
                     Media.imdb_rating.is_(None),
                     Media.type.in_(media_types),
+                    # Lot B2 (ADR 0012): a locked row's ratings are the operator's.
+                    Media.match_locked == False,  # noqa: E712
                 )
             )
             if cursor_server is not None:
@@ -310,7 +312,11 @@ async def _run_phase_a(
                             )
                             await db.execute(
                                 update(Media)
-                                .where(Media.server_id == server_id, Media.rating_key == rating_key)
+                                .where(
+                                    Media.server_id == server_id,
+                                    Media.rating_key == rating_key,
+                                    Media.match_locked == False,  # noqa: E712 - re-checked at write time
+                                )
                                 .values(**update_values)
                             )
                             _bump(job_id, imdbFilled=1)

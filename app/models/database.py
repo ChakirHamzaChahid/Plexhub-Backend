@@ -769,3 +769,41 @@ class ScrapeCacheEntry(Base):
     __table_args__ = (
         Index("ix_scrape_cache_expires_at", "expires_at"),
     )
+
+
+class MetadataEdit(Base):
+    """Metadata edit journal (ADR 0011 D2.5, migration 031).
+
+    Append-only for the API (only `reverted_by` is set, in the revert
+    transaction). `before_json`/`after_json` hold the image of EVERY variant
+    (fields, lock, derived) so a revert restores divergent variants exactly;
+    `response_json` is the exact response replayed on an idempotent retry. The
+    API key is never stored: `key_id` is the internal key id (`master` for the
+    master secret). Same `server_default` on the JSON columns as the migration.
+    """
+
+    __tablename__ = "metadata_edits"
+
+    edit_id = Column(Text, primary_key=True)
+    kind = Column(Text, nullable=False)                 # patch | revert | lock
+    at_ms = Column(Integer, nullable=False)
+    server_id = Column(Text, nullable=False)
+    rating_key = Column(Text, nullable=False)
+    item_type = Column(Text, nullable=False)            # movie | show | episode
+    key_id = Column(Text, nullable=False)
+    request_id = Column(Text)
+    idempotency_key = Column(Text)
+    body_sha256 = Column(Text)
+    reason = Column(Text)
+    revision_before = Column(Text, nullable=False)
+    revision_after = Column(Text, nullable=False)
+    before_json = Column(Text, nullable=False, default="{}", server_default=text("'{}'"))
+    after_json = Column(Text, nullable=False, default="{}", server_default=text("'{}'"))
+    response_json = Column(Text, nullable=False, default="{}", server_default=text("'{}'"))
+    reverts = Column(Text)
+    reverted_by = Column(Text)
+
+    __table_args__ = (
+        Index("ix_metadata_edits_item", "server_id", "rating_key", "at_ms"),
+        Index("ux_metadata_edits_idempotency", "key_id", "idempotency_key", unique=True),
+    )

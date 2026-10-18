@@ -70,18 +70,20 @@ _GENERAL_GUARDS: frozenset[Callable[..., Any]] = frozenset(
     }
 )
 
-# Scrape gateway scope guards (ADR 0008 § D2.4, lot B1). They are ONLY
-# accepted on routes under SCRAPE_GATEWAY_PREFIX: elsewhere they would let an
-# unscoped key through, so the route counts as unguarded (boot refused).
-# route_audit does not tell the two apart: a structural test checks the
-# expected guard per gateway route (B1-11).
-_SCOPE_GUARDS: frozenset[Callable[..., Any]] = frozenset(
-    {
-        deps.verify_scrape_scope,
-        deps.verify_scrape_admin_scope,
-    }
-)
+# Scope guards (ADR 0008 § D2.4 lot B1, ADR 0010 § D2.3 lot B2). Each is ONLY
+# accepted on routes under ITS OWN prefix: elsewhere it would let an unscoped
+# key through (or a key scoped to another API), so the route counts as
+# unguarded (boot refused). route_audit does not tell the guards of a same
+# prefix apart: structural tests check the expected guard route by route.
 SCRAPE_GATEWAY_PREFIX = "/api/scrape/v1/"
+METADATA_API_PREFIX = "/api/metadata/v1/"
+_SCOPE_GUARD_PREFIXES: dict[Callable[..., Any], str] = {
+    deps.verify_scrape_scope: SCRAPE_GATEWAY_PREFIX,
+    deps.verify_scrape_admin_scope: SCRAPE_GATEWAY_PREFIX,
+    deps.verify_media_read_scope: METADATA_API_PREFIX,
+    deps.verify_media_write_scope: METADATA_API_PREFIX,
+}
+_SCOPE_GUARDS: frozenset[Callable[..., Any]] = frozenset(_SCOPE_GUARD_PREFIXES)
 
 # Names of all recognised guards (error message, tests); NOT used for matching.
 _AUTH_DEPENDENCY_NAMES: frozenset[str] = frozenset(
@@ -147,12 +149,14 @@ def _dependency_names(route: APIRoute) -> set[str]:
 
 
 def _is_guarded(route: APIRoute) -> bool:
-    """True if the route carries a recognised guard (by identity). Scope guards
-    only count under SCRAPE_GATEWAY_PREFIX."""
+    """True if the route carries a recognised guard (by identity). A scope guard
+    only counts under the prefix registered for THAT guard."""
     calls = _dependency_calls(route)
     if calls & _GENERAL_GUARDS:
         return True
-    return route.path.startswith(SCRAPE_GATEWAY_PREFIX) and bool(calls & _SCOPE_GUARDS)
+    return any(
+        route.path.startswith(_SCOPE_GUARD_PREFIXES[guard]) for guard in calls & _SCOPE_GUARDS
+    )
 
 
 def _is_allow_listed(route: APIRoute) -> bool:
@@ -187,8 +191,8 @@ def assert_api_routes_authenticated(app: FastAPI) -> None:
             "Route auth audit failed (AUDIT-P4-001 / CR-A04): the following "
             "/api/* route(s) are reachable WITHOUT a recognised auth "
             "dependency (one of "
-            f"{sorted(_AUTH_DEPENDENCY_NAMES)}; the scope guards only count "
-            f"under {SCRAPE_GATEWAY_PREFIX}): "
+            f"{sorted(_AUTH_DEPENDENCY_NAMES)}; each scope guard only counts "
+            f"under its own prefix {SCRAPE_GATEWAY_PREFIX} / {METADATA_API_PREFIX}): "
             + "; ".join(unguarded)
             + ". Either attach a guard (dependencies= at mount site, "
             "module-level on the router, or per-endpoint), or — only if the "

@@ -1,4 +1,11 @@
-"""Request body size limit of the scrape gateway (lot B1, security review M2).
+"""Request body size limits of the scrape gateway and the metadata API (lots B1/B2).
+
+B2 (ADR 0010 D2.4): ONE middleware instance now carries a per-prefix table
+(`/api/scrape/v1/` 64 KiB, `/api/metadata/v1/` 256 KiB, passed by `main.py` as
+`extra_limits`). A second `add_middleware` would double the ASGI wrapper and
+break the pinned relative order of the middlewares.
+
+Original B1 text (security review M2):
 
 The routes of `/api/scrape/v1` take at most a small JSON body (`/cache/invalidate`
 carries up to 500 keys of 1 024 characters at the very most, `/cache/purge` a
@@ -25,11 +32,14 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping
 
 logger = logging.getLogger("plexhub.scrape_v1")
 
 GUARDED_PREFIX = "/api/scrape/v1/"
 MAX_BODY_BYTES = 65_536
+METADATA_PREFIX = "/api/metadata/v1/"
+METADATA_MAX_BODY_BYTES = 262_144
 
 _BODY = json.dumps(
     {"detail": {"code": "invalid_parameter", "message": "Request body too large"}},
@@ -46,18 +56,32 @@ class _BodyTooLarge(Exception):
 
 
 class ScrapeBodyLimitMiddleware:
-    def __init__(self, app, max_bytes: int = MAX_BODY_BYTES, prefix: str = GUARDED_PREFIX) -> None:
+    def __init__(
+        self,
+        app,
+        max_bytes: int = MAX_BODY_BYTES,
+        prefix: str = GUARDED_PREFIX,
+        extra_limits: Mapping[str, int] | None = None,
+    ) -> None:
         self.app = app
         self.max_bytes = max_bytes
         self.prefix = prefix
+        self.limits: dict[str, int] = {prefix: max_bytes, **(extra_limits or {})}
+
+    def _limit_for(self, path: str) -> int | None:
+        for prefix, limit in self.limits.items():
+            if path.startswith(prefix):
+                return limit
+        return None
 
     async def __call__(self, scope, receive, send) -> None:
-        if scope["type"] != "http" or not scope.get("path", "").startswith(self.prefix):
+        limit = self._limit_for(scope.get("path", "")) if scope["type"] == "http" else None
+        if limit is None:
             await self.app(scope, receive, send)
             return
 
         declared = _content_length(scope)
-        if declared is not None and declared > self.max_bytes:
+        if declared is not None and declared > limit:
             logger.info("scrape gateway: body refused (Content-Length over the limit)")
             await _send_413(send)
             return
@@ -68,7 +92,7 @@ class ScrapeBodyLimitMiddleware:
             message = await receive()
             if message["type"] == "http.request":
                 state["received"] += len(message.get("body", b""))
-                if state["received"] > self.max_bytes:
+                if state["received"] > limit:
                     state["exceeded"] = True
                     raise _BodyTooLarge
             return message

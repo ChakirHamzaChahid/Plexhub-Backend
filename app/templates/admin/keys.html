@@ -10,10 +10,12 @@
     Révoquez-la pour bloquer immédiatement l'accès au backend.
   </p>
   <p class="text-sm text-slate-500">
-    Sans scope, la clé ouvre l'API comme aujourd'hui (hors passerelle de scraping).
+    Sans scope, la clé ouvre l'API comme aujourd'hui (hors passerelle de scraping et API d'édition).
     Avec au moins un scope, elle est <strong>confinée</strong> aux routes de ses scopes :
     <span class="font-mono text-xs">scrape</span> (lecture de la passerelle),
-    <span class="font-mono text-xs">scrape.admin</span> (invalidation et purge du cache).
+    <span class="font-mono text-xs">scrape.admin</span> (invalidation et purge du cache),
+    <span class="font-mono text-xs">media.read</span> (lecture et simulations de l'API d'édition),
+    <span class="font-mono text-xs">media.write</span> (écritures de l'API d'édition ; ne donne pas la lecture).
     Les scopes d'une clé ne se modifient pas : révoquez-la et recréez-en une.
   </p>
 </section>

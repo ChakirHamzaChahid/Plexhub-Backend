@@ -70,6 +70,11 @@ tmdb_match_total = Counter(
     labelnames=("media_type", "result"),  # result: matched | nomatch | ambiguous
 )
 
+head_transport_fallback_total = Counter(
+    "plexhub_head_transport_fallback_total",
+    "Stream probes falling back to Range GET after a HEAD transport error.",
+)
+
 streams_alive_ratio = Gauge(
     "plexhub_streams_alive_ratio",
     "Ratio (0-1) of non-broken streams per account, computed at health check end.",

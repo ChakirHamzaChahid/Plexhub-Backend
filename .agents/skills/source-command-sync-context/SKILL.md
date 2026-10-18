@@ -1,0 +1,37 @@
+---
+name: "source-command-sync-context"
+description: "MAJ LÉGÈRE de la fraîcheur de AGENTS.md — recale le bandeau (date+HEAD), ajoute un delta daté des commits depuis le dernier repère, et flag/MAJ les sections impactées. Alternative cheap à /refresh-context."
+---
+
+# source-command-sync-context
+
+Use this skill when the user asks to run the migrated source command `sync-context`.
+
+## Command Template
+
+> 🟢 **PlexHub Backend — FastAPI/Python 3.13.** Branche de travail `develop` (pas de branche par tâche ; `main` = release only). Objectif : que AGENTS.md ne dérive plus. **Léger et fréquent** (≠ `/refresh-context` qui régénère intégralement via `a0-cartographer`). À lancer **après chaque lot de commits structurels** (ou quand le détecteur SessionStart signale la péremption). Validation = `pytest -v` + boot `uvicorn app.main:app` + `GET /api/health` 200.
+
+# /sync-context — recaler la fraîcheur de AGENTS.md
+
+> ⚠️ **Depuis le 2026-09-24, `AGENTS.md` est un noyau** : le détail du §5 vit dans `docs/architecture/flux-cles.md` (même numérotation §5.x), l'état de la dette (§10) dans `docs/context/etat-reel.md`, et les bandeaux des lots précédents dans `docs/context/journal.md` (le plus récent en tête). Mets à jour la section concernée **là-bas** ; dans `AGENTS.md`, seulement l'index §5, la stack du §10 et **un seul** bandeau courant.
+
+## Étapes
+1. **Repères** : `git rev-parse --short HEAD` (= `NEW`) + date du jour. Lis le bandeau « À JOUR AU : … (HEAD `OLD`) » en tête de `AGENTS.md`.
+2. **Si `NEW == OLD`** : rien à faire, annonce « déjà à jour » et stop.
+3. **Delta** : `git log --oneline OLD..NEW` + `git diff --name-only OLD..NEW`. Résume les changements de fond (pas le cosmétique).
+4. **Flag des sections impactées** (heuristique chemin → section de AGENTS.md) — pour CHAQUE zone modifiée, vérifie/MAJ la section correspondante (prouve par `fichier:ligne`, ne recopie pas l'ancien) :
+   | Chemin modifié | Section AGENTS.md à vérifier |
+   |---|---|
+   | `app/db/**`, `db/migrations.py`, entités `models/database.py` | §2 (modules) + §9 (migrations idempotentes, schéma SQLite courant) |
+   | `app/services/**`, `app/workers/**` | §5 (flux : sync §5.1, enrichment §5.2, validation §5.3, génération Plex §5.4, recos IA §5.5) |
+   | `app/api/**`, `api/deps.py` | §5 (flux endpoints) + conventions d'API §3 (Pydantic v2, `X-API-Key`, 503 IA, OpenAPI) |
+   | `requirements.txt`, `requirements-dev.txt` | §10 (état réel / stack & versions) + §4 (build/run/test) |
+   | `.Codex/**`, `docs/31-board.md`, `docs/80-audit.md` | §7/§7bis (agents & skills), §11 (workflows) |
+4bis. **Rétro-spec** (`docs/retro-spec/`) — `python tools/retro-spec/impact.py OLD` liste les fiches `CAP-*` et volets techniques dont une preuve pointe vers un fichier modifié, avec les FR concernées. Pour chaque FR listée : rouvre la preuve, recale `fichier:ligne`, corrige le statut (implémenté/partiel/mort/absent) si le comportement a changé ; une capacité nouvelle → `/retro-spec capacite`. Puis `python tools/retro-spec/check.py` doit sortir en 0 et `python tools/retro-spec/inventaire.py` régénère la base factuelle. Fiches touchées ajoutées au commit de l'étape 7.
+5. **Réécris le bandeau** en tête : `> 🕒 **À JOUR AU : <date> (HEAD `NEW`).**` + une ligne de delta concise (« depuis `OLD` : <résumé> »). **Supprime les avertissements obsolètes** une fois le contenu réellement reflété. Garde la règle de maintenance + le pointeur workflows.
+6. **Honnêteté** : ce que tu n'as pas pu vérifier en profondeur, marque-le « à confirmer ». Si les changements sont **massifs/structurels** (refonte de modules, schéma SQLite sauté de plusieurs migrations), **recommande `/refresh-context`** (re-cartographie complète) au lieu de bricoler le bandeau.
+7. **Commit** : `docs: sync-context @ HEAD <NEW>` (AGENTS.md + ARCHITECTURE.md si touché + fiches `docs/retro-spec/` recalées en 4bis).
+
+## Limites (vs /refresh-context)
+- `/sync-context` = recalage **incrémental** ciblé (bandeau + sections impactées par le delta). Rapide, à faire souvent.
+- `/refresh-context` = **régénération complète** par `a0-cartographer` (lecture seule de tout le code). À faire après une grosse campagne ou quand la dérive est trop large.

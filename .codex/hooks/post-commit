@@ -1,0 +1,11 @@
+#!/bin/sh
+# PlexHub Backend — rappel anti-dérive : commit structurel sans MAJ de CLAUDE.md ?
+# Installer : cp .claude/hooks/post-commit .git/hooks/post-commit && chmod +x .git/hooks/post-commit
+changed=$(git diff-tree --no-commit-id --name-only -r HEAD 2>/dev/null)
+echo "$changed" | grep -q "CLAUDE.md" && exit 0
+echo "$changed" | grep -qE "^(app/|tests/|requirements|pyproject\.toml|Dockerfile|docker-compose)" || exit 0
+echo ""
+echo "⚠️  [PlexHub Backend] commit structurel SANS mise à jour de CLAUDE.md."
+echo "    → pense à /sync-context (recale bandeau + sections) pour éviter la dérive."
+echo "    fichiers : $(echo "$changed" | tr '\n' ' ')"
+exit 0

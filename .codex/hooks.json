@@ -1,0 +1,48 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node 'c:\\Users\\chakir\\Plexhub Backend\\.codex\\hooks\\subagent-model-guard.js'",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/tools/lot-state.py save",
+            "timeout": 60
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node 'c:\\Users\\chakir\\Plexhub Backend\\.codex\\hooks\\session-start.js'"
+          }
+        ]
+      },
+      {
+        "matcher": "startup|resume|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/tools/lot-state.py inject",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}

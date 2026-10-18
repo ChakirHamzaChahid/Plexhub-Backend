@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import random
+from contextvars import ContextVar
 
 import httpx
 from sqlalchemy import select, update, or_, text, func
@@ -153,7 +154,7 @@ def _account_concurrency(account) -> int:
 
 
 # Diagnostic counters (reset each run)
-_diag_reasons: dict[str, int] = {}
+_probe_reasons: ContextVar[dict[str, int] | None] = ContextVar("probe_reasons", default=None)
 
 
 def _parse_positive_int(raw: str | None) -> int | None:
@@ -194,7 +195,17 @@ async def _check_one(client: httpx.AsyncClient, item, account, semaphore):
     async with semaphore:
         try:
             # Step 1: HEAD request — fast, checks if the resource exists
-            head_resp = await client.head(url, follow_redirects=True)
+            try:
+                head_resp = await client.head(url, follow_redirects=True)
+            except httpx.TransportError:
+                # Some playable providers reset HEAD instead of returning 405.
+                # Only the Range GET can decide whether the stream is broken.
+                head_resp = None
+                reasons = _probe_reasons.get()
+                if reasons is not None:
+                    reasons["head_transport_fallback"] = reasons.get("head_transport_fallback", 0) + 1
+                from app.utils.metrics import head_transport_fallback_total
+                head_transport_fallback_total.inc()
 
             # 405 Method Not Allowed means THIS PROVIDER doesn't implement
             # HEAD at all — a protocol mismatch, not a statement about the
@@ -207,7 +218,7 @@ async def _check_one(client: httpx.AsyncClient, item, account, semaphore):
             # it broken outright — unlike head_404/head_403 (CR-T05), which
             # DO mean the resource itself is gone/forbidden.
             head_size = None
-            if head_resp.status_code == 405:
+            if head_resp is None or head_resp.status_code == 405:
                 ct = ""
                 content_length = None
             elif head_resp.status_code >= 400:
@@ -281,7 +292,7 @@ async def _check_one(client: httpx.AsyncClient, item, account, semaphore):
                             return item, False, "get_magic_ok", get_size
                         return item, True, f"get_magic_fail:{len(content)}b", None
                     return item, True, "get_empty", None
-                elif resp.status_code == 416:
+                elif resp.status_code == 416 and head_resp is not None:
                     # Range not satisfiable but HEAD was OK — probably valid
                     return item, False, "get_416_head_ok", head_size
                 else:
@@ -433,6 +444,7 @@ async def _server_ids_with_active_downloads(db) -> set[str]:
 
 async def _run_health_check_batch():
     """Check a batch of stream URLs for availability (cron job, random sample)."""
+    reasons: dict[str, int] = {}
     batch_size = settings.HEALTH_CHECK_BATCH_SIZE
     timeout = float(settings.STREAM_VALIDATION_TIMEOUT)
     concurrency = settings.STREAM_VALIDATION_CONCURRENCY
@@ -493,7 +505,11 @@ async def _run_health_check_batch():
             )
 
         # Run all health checks concurrently
-        results = await asyncio.gather(*tasks)
+        token = _probe_reasons.set(reasons)
+        try:
+            results = await asyncio.gather(*tasks)
+        finally:
+            _probe_reasons.reset(token)
 
     # --- Apply results in a FRESH session (ADR 0004 Decision 4) ---
     # Everything this batch needed to read (sampled items, the account
@@ -508,7 +524,6 @@ async def _run_health_check_batch():
     # already-loaded column values read (never mutated) off ORM instances
     # that are simply allowed to go out of scope here -- no pending ORM state
     # needs to survive into the fresh session.
-    reasons: dict[str, int] = {}
     checked = 0
     broken_count = 0
     pending_updates: list[tuple[str, str, dict]] = []
@@ -783,10 +798,14 @@ async def _run_pipeline_validation_impl():
 
             # Build tasks for this account
             tasks = []
-            for item in account_items:
-                tasks.append(asyncio.ensure_future(
-                    _check_one(client, item, account, semaphore)
-                ))
+            token = _probe_reasons.set(diag_reasons)
+            try:
+                for item in account_items:
+                    tasks.append(asyncio.ensure_future(
+                        _check_one(client, item, account, semaphore)
+                    ))
+            finally:
+                _probe_reasons.reset(token)
 
             pending_updates = 0
             for coro in asyncio.as_completed(tasks):

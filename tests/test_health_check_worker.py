@@ -610,7 +610,8 @@ async def test_check_one_range_get_garbage_bytes_is_definitive_broken(xtream_moc
 
 @pytest.mark.asyncio
 async def test_check_one_timeout_is_transient_not_definitive(xtream_mock):
-    xtream_mock.head(STREAM_URL).mock(side_effect=httpx.ConnectTimeout("timed out"))
+    xtream_mock.head(STREAM_URL).respond(405)
+    xtream_mock.get(STREAM_URL).mock(side_effect=httpx.ConnectTimeout("timed out"))
 
     async with httpx.AsyncClient() as client:
         _, is_broken, reason, _size = await hc._check_one(
@@ -624,7 +625,8 @@ async def test_check_one_timeout_is_transient_not_definitive(xtream_mock):
 
 @pytest.mark.asyncio
 async def test_check_one_connect_error_is_transient_not_definitive(xtream_mock):
-    xtream_mock.head(STREAM_URL).mock(side_effect=httpx.ConnectError("refused"))
+    xtream_mock.head(STREAM_URL).respond(405)
+    xtream_mock.get(STREAM_URL).mock(side_effect=httpx.ConnectError("refused"))
 
     async with httpx.AsyncClient() as client:
         _, is_broken, reason, _size = await hc._check_one(
@@ -712,7 +714,8 @@ async def test_check_one_broken_stream_has_no_size(xtream_mock):
 
 @pytest.mark.asyncio
 async def test_check_one_timeout_has_no_size(xtream_mock):
-    xtream_mock.head(STREAM_URL).mock(side_effect=httpx.ConnectTimeout("timed out"))
+    xtream_mock.head(STREAM_URL).respond(405)
+    xtream_mock.get(STREAM_URL).mock(side_effect=httpx.ConnectTimeout("timed out"))
 
     async with httpx.AsyncClient() as client:
         _, is_broken, reason, size_bytes = await hc._check_one(
@@ -822,3 +825,48 @@ async def test_pipeline_validation_persists_captured_file_size(monkeypatch, db_f
     rows = {r.rating_key: r for r in await _rows_for(db_factory, "xtream_aaaaaaaa")}
     assert rows["vod_xtream_aaaaaaaa_0.mp4"].file_size == 2_000_000_000
     assert rows["vod_xtream_aaaaaaaa_1.mp4"].file_size is None
+
+
+@pytest.mark.parametrize("error_type", [httpx.ReadError, httpx.RemoteProtocolError, httpx.ReadTimeout, httpx.ConnectError])
+async def test_head_transport_fallback_video(xtream_mock, error_type):
+    from app.utils.metrics import head_transport_fallback_total
+
+    xtream_mock.head(STREAM_URL).mock(side_effect=error_type("HEAD unavailable"))
+    get = xtream_mock.get(STREAM_URL, headers={"Range": "bytes=0-8191"}).respond(
+        206, headers={"content-type": "video/mp4", "content-range": "bytes 0-8191/2000000000"}
+    )
+    reasons = {}
+    token = hc._probe_reasons.set(reasons)
+    before = head_transport_fallback_total._value.get()
+    try:
+        async with httpx.AsyncClient() as client:
+            _, broken, reason, size = await hc._check_one(
+                client, _movie_item(), _fake_account(), asyncio.Semaphore(1)
+            )
+    finally:
+        hc._probe_reasons.reset(token)
+    assert (broken, reason, size) == (False, "get_ct_video", 2_000_000_000)
+    assert get.call_count == 1
+    assert reasons == {"head_transport_fallback": 1}
+    assert head_transport_fallback_total._value.get() == before + 1
+
+
+@pytest.mark.parametrize("get_error,expected", [
+    (503, "get_503"), (404, "get_404"), (403, "get_403"), (416, "get_416"),
+    (httpx.ReadError("reset"), "exception:ReadError"),
+    (httpx.ReadTimeout("timeout"), "timeout"),
+    (httpx.ConnectError("refused"), "connect_error"),
+])
+async def test_head_transport_fallback_dead_get(xtream_mock, get_error, expected):
+    xtream_mock.head(STREAM_URL).mock(side_effect=httpx.ReadError("HEAD reset"))
+    get = xtream_mock.get(STREAM_URL)
+    if isinstance(get_error, int):
+        get.respond(get_error)
+    else:
+        get.mock(side_effect=get_error)
+    async with httpx.AsyncClient() as client:
+        _, broken, reason, size = await hc._check_one(
+            client, _movie_item(), _fake_account(), asyncio.Semaphore(1)
+        )
+    assert (broken, reason, size) == (True, expected, None)
+    assert get.call_count == 1

@@ -538,10 +538,14 @@ def map_show(raw: dict, *, language: str) -> dict:
 
 # --- Season and episodes ----------------------------------------------------
 
-def _map_episode(raw: dict) -> dict | None:
+def _map_episode(raw: dict, parent_season: int | None = None) -> dict | None:
+    """An episode without `season_number` takes its parent season's (B1-09
+    review: the season route asked for that season, so it is the right one)."""
     tmdb_id = _int(raw.get("id"))
     number = _int(raw.get("episode_number"))
     season = _int(raw.get("season_number"))
+    if season is None:
+        season = parent_season
     if tmdb_id is None or number is None or number < 1 or season is None:
         return None
     return {
@@ -571,7 +575,7 @@ def map_season(raw: dict, *, show_tmdb_id: int, language: str) -> dict:
 
     by_number: dict[int, dict] = {}
     for entry in _dicts(raw.get("episodes")):
-        episode = _map_episode(entry)
+        episode = _map_episode(entry, season_number)
         if episode is not None and episode["episodeNumber"] not in by_number:
             by_number[episode["episodeNumber"]] = episode
     episodes = [by_number[n] for n in sorted(by_number)][:MAX_EPISODES]

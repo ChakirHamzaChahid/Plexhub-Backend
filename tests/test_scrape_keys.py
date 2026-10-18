@@ -278,7 +278,11 @@ class TestConstructors:
         assert find_key("tvdb", "007").to_text() == "1|-|find|tvdb|7"
         assert find_key("tvdb", "000081189").key == "find|tvdb|81189"
 
-    @pytest.mark.parametrize("bad", ["", "abc", "0", "00", "-3", "1234567890123"])
+    @pytest.mark.parametrize("bad", [
+        "", "abc", "0", "00", "-3", "1234567890123",
+        # Revue B1-07 : `int()` accepte espaces, signe, `_` et chiffres non ASCII.
+        " 7", "7 ", "+7", "1_000", "٣", "７", "7\n", True, False, 7, None,
+    ])
     def test_bad_tvdb_ids_are_rejected(self, bad):
         with pytest.raises(InvalidCacheKey):
             find_key("tvdb", bad)

@@ -45,6 +45,7 @@ _TMDB_ID_RE = re.compile(r"[1-9][0-9]{0,8}")  # 1..999 999 999 (FR-015b)
 _SEASON_RE = re.compile(r"0|[1-9][0-9]{0,2}")  # 0..999
 _IMDB_ID_RE = re.compile(r"tt[0-9]{7,10}")
 _TVDB_ID_RE = re.compile(r"[1-9][0-9]{0,11}")
+_TVDB_RAW_RE = re.compile(r"[0-9]{1,12}")  # client form, leading zeros allowed (X19)
 _YEAR_RE = re.compile(r"[1-9][0-9]{0,3}")
 
 
@@ -191,10 +192,11 @@ def omdb_key(imdb_id: str) -> CacheKey:
 def find_key(source: str, external_id: str) -> CacheKey:
     """`find` key; a tvdb id is normalised to an integer ("007" -> "7", X19)."""
     if source == "tvdb":
-        try:
-            external_id = str(int(external_id))
-        except (TypeError, ValueError):
-            raise InvalidCacheKey("tvdb id must be numeric") from None
+        # Full ASCII match BEFORE `int()` (B1-07 review): `int()` would accept
+        # " 7", "+7", "1_000", non-ASCII digits and a bool.
+        if not isinstance(external_id, str) or _TVDB_RAW_RE.fullmatch(external_id) is None:
+            raise InvalidCacheKey("tvdb id must be 1 to 12 ASCII digits")
+        external_id = str(int(external_id))
     return CacheKey("find", KEY_VERSION, NO_LANGUAGE, f"find|{source}|{external_id}")
 
 

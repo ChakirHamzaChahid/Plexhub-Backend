@@ -772,3 +772,15 @@ def test_full_500_episode_season_response_stays_under_4_mib():
     assert size < 4 * 1024 * 1024, f"{size} bytes"
     # The stored (cache) payload is the same dict, serialised sorted.
     assert len(json.dumps(details, sort_keys=True, ensure_ascii=False).encode("utf-8")) < 4 * 1024 * 1024
+
+
+def test_map_season_episode_without_season_number_takes_the_parent_one():
+    """Revue B1-09 : un épisode sans `season_number` prend celui de la saison."""
+    raw = load("season_1396_1_fr.json")
+    for ep in raw["episodes"]:
+        ep.pop("season_number", None)
+    raw["episodes"][1]["season_number"] = None
+    out = M.map_season(raw, show_tmdb_id=1396, language="fr-FR")
+    assert len(out["episodes"]) == 7
+    assert {e["seasonNumber"] for e in out["episodes"]} == {1}
+    S.SeasonDetails.model_validate(out)

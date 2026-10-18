@@ -38,7 +38,7 @@ ALL_MODELS = [
     S.Rating, S.CastMember, S.CrewMember, S.Candidate, S.Images, S.ExternalIds,
     S.SeasonExternalIds, S.Collection, S.Trailer, S.SeasonSummary, S.MovieDetails,
     S.ShowDetails, S.EpisodeDetails, S.SeasonDetails, S.FindMatch, S.MatchResponse,
-    S.SearchResponse, S.MovieResponse, S.ShowResponse, S.SeasonResponse, S.FindResponse,
+    S.ScrapeSearchResponse, S.MovieResponse, S.ShowResponse, S.SeasonResponse, S.FindResponse,
     S.FamilyStats, S.TtlInfo, S.SinceStart, S.CacheStatsResponse, S.InvalidateRequest,
     S.InvalidateResponse, S.PurgeRequest, S.PurgeResponse, S.ErrorDetail, S.ErrorResponse,
 ]
@@ -188,7 +188,7 @@ def test_match_response_result_and_confidence_are_closed():
 
 
 def test_search_response_has_null_cache_key():
-    resp = S.SearchResponse.model_validate({
+    resp = S.ScrapeSearchResponse.model_validate({
         **ENVELOPE, "cacheKey": None, "expiresAt": ENVELOPE["fetchedAt"], "cache": "miss",
         "result": "not_found", "candidates": []})
     assert resp.cache_key is None
@@ -268,11 +268,13 @@ def test_invalidate_request_fields_are_all_optional_at_model_level():
 
 def test_invalidate_request_bounds():
     S.InvalidateRequest.model_validate({"keys": ["k"] * 500})
-    for bad in ({"keys": []}, {"keys": ["k"] * 501}, {"family": "omdb"},
+    for bad in ({"keys": []}, {"keys": ["k"] * 501},
                 {"family": "movie", "tmdbId": 0}, {"family": "movie", "tmdbId": 1_000_000_000}):
         with pytest.raises(ValidationError):
             S.InvalidateRequest.model_validate(bad)
     S.InvalidateRequest.model_validate({"family": "show", "tmdbId": 999_999_999})
+    # An unknown family is NOT a validation error (FR-015b: 400 from the route).
+    assert S.InvalidateRequest.model_validate({"family": "omdb"}).family == "omdb"
 
 
 def test_purge_request_limit_bounds_and_default():
@@ -333,16 +335,16 @@ def _app() -> FastAPI:
 
     @app.post("/invalidate", response_model=S.InvalidateResponse, response_model_by_alias=True,
               responses={400: {"model": S.ErrorResponse}, 429: {"model": S.ErrorResponse}})
-    def invalidate(body: S.InvalidateRequest):
-        return S.InvalidateResponse(deleted=len(body.keys or []))
+    def invalidate(body: S.InvalidateBody):
+        return S.InvalidateResponse(deleted=len(body.root.keys or []))
 
     @app.post("/purge", response_model=S.PurgeResponse, response_model_by_alias=True)
     def purge(body: S.PurgeRequest | None = None):
         return S.PurgeResponse(deleted=(body or S.PurgeRequest()).limit, remaining=0)
 
-    @app.get("/search", response_model=S.SearchResponse, response_model_by_alias=True)
+    @app.get("/search", response_model=S.ScrapeSearchResponse, response_model_by_alias=True)
     def search():
-        return S.SearchResponse.model_validate({
+        return S.ScrapeSearchResponse.model_validate({
             **ENVELOPE, "cacheKey": None, "result": "not_found", "candidates": []})
 
     return app
@@ -373,3 +375,26 @@ def test_routes_serialise_by_alias_and_validate_request_bounds():
     assert client.post("/purge").json() == {"deleted": 10_000, "remaining": 0}
     assert client.post("/invalidate", json={"keys": []}).status_code == 422
     assert client.post("/invalidate", json={"keys": ["a", "b"]}).json() == {"deleted": 2}
+
+
+def test_invalidate_request_as_a_body_emits_no_pydantic_warning():
+    """Revue B1-09 : `X | None = Field(...)` faisait émettre 9
+    `UnsupportedFieldAttributeWarning` quand FastAPI construisait le corps."""
+    import warnings
+
+    from fastapi import FastAPI
+
+    app = FastAPI()
+
+    @app.post("/inv")
+    def inv(body: S.InvalidateBody) -> S.InvalidateResponse:
+        return S.InvalidateResponse(deleted=len(body.root.keys or []))
+
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.simplefilter("always")
+        app.openapi()
+        client = TestClient(app)
+        assert client.post("/inv", json={"keys": ["a"]}).json() == {"deleted": 1}
+        assert client.post("/inv", json={"keys": []}).status_code == 422
+        assert client.post("/inv", json={"unexpected": 1}).status_code == 422
+    assert [w for w in seen if "UnsupportedFieldAttribute" in type(w.message).__name__] == []

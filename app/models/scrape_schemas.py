@@ -19,9 +19,9 @@ has composed the response.
 """
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, RootModel, model_validator
 from pydantic.alias_generators import to_camel
 
 
@@ -249,7 +249,12 @@ class MatchResponse(_Envelope):
     details: MovieDetails | ShowDetails | None = None
 
 
-class SearchResponse(_Envelope):
+class ScrapeSearchResponse(_Envelope):
+    """`GET /search` (contract 5.3). Named `Scrape…` because `app/api/ai.py`
+    already publishes a `SearchResponse` component: two classes of the same
+    name make FastAPI rename BOTH OpenAPI components to
+    `app__api__ai__SearchResponse` / `app__models__…`, which would change the
+    existing AI contract (B1-11)."""
     result: FoundResult
     candidates: list[Candidate] = Field(default_factory=list, max_length=10)
 
@@ -321,10 +326,35 @@ class CacheStatsResponse(_ScrapeModel):
 class InvalidateRequest(_ScrapeModel):
     """Contract 5.9. EITHER `keys` (1..500) OR `family` + `tmdbId`; the
     exclusivity is a 400 `invalid_parameter` raised by the service (not a
-    Pydantic validation error), hence every field is optional here."""
-    keys: list[str] | None = Field(default=None, min_length=1, max_length=500)
-    family: Literal["movie", "show", "season"] | None = None
-    tmdb_id: int | None = Field(default=None, ge=1, le=999_999_999)
+    Pydantic validation error), hence every field is optional here.
+
+    `family` is a plain string on purpose: a family other than
+    movie|show|season is a 400 `invalid_parameter` (PRD FR-015b), not a 422.
+    The bounds of `keys` and `tmdbId` stay native 422s.
+
+    `Annotated[X | None, Field(...)] = None` (not `X | None = Field(...)`):
+    the latter makes pydantic attach the field metadata to one member of the
+    union inside FastAPI's body model (UnsupportedFieldAttributeWarning)."""
+    keys: Annotated[list[str] | None, Field(min_length=1, max_length=500)] = None
+    family: Annotated[
+        str | None, Field(description="movie | show | season (other value: 400)")
+    ] = None
+    tmdb_id: Annotated[int | None, Field(ge=1, le=999_999_999)] = None
+
+
+class InvalidateBody(RootModel[InvalidateRequest]):
+    """Request body of `POST /cache/invalidate` (same JSON as
+    `InvalidateRequest`, which it wraps).
+
+    Why a wrapper: for a single non-embedded body model, FastAPI 0.115
+    (pinned < 0.116, CLAUDE.md section 10) builds one `TypeAdapter` per field
+    of that model with `Annotated[annotation, field_info]`; on an optional
+    (`X | None`) field carrying an alias, pydantic >= 2.12 then emits an
+    `UnsupportedFieldAttributeWarning` (9 of them for the 3 fields here, B1-09
+    review). The `Annotated[...] = None` form above does not avoid it (the
+    warning comes from FastAPI's re-wrapping, not from the declaration); a
+    root model has a single, non-optional, alias-less `root` field, so
+    nothing is re-wrapped."""
 
 
 class InvalidateResponse(_ScrapeModel):

@@ -13,6 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.models.database import Base
 
+# Scrape gateway fixtures (B1-11): gw_db, gw_settings, gw_providers, gw_http,
+# gw_client, gw_no_sleep, gw_logs, gw_flights_cleanup.
+pytest_plugins = ["tests._scrape_v1_support"]
+
 
 # ─── Async DB ────────────────────────────────────────────────────────────
 
@@ -61,10 +65,12 @@ def _reset_rate_limiters():
     rl.tv_auth_start_rate_limiter.reset()
     rl.tv_auth_start_pending_ip_limiter.reset()
     rl.tv_auth_approve_page_limiter.reset()
+    rl.scrape_gateway_rate_limiter.reset()
     yield
     rl.tv_auth_start_rate_limiter.reset()
     rl.tv_auth_start_pending_ip_limiter.reset()
     rl.tv_auth_approve_page_limiter.reset()
+    rl.scrape_gateway_rate_limiter.reset()
 
 
 # ─── Provider outage mask (M025) ─────────────────────────────────────────

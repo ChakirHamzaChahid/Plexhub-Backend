@@ -29,6 +29,7 @@ from app.api import (
     media,
     plex,
     plex_downloads,
+    scrape_v1,
     stream,
     sync,
     tv_auth,
@@ -737,6 +738,12 @@ app.include_router(api_keys.router)
 app.include_router(downloads.router)
 app.include_router(plex_downloads.router)
 app.include_router(enrichment.router)
+#   - `scrape_v1.router` (lot B1, scrape gateway for plexhubTMM) — its own
+#     /api/scrape/v1 prefix and, deliberately, NO router-level dependency:
+#     each route declares its guard (verify_scrape_scope on the 7 read
+#     routes, verify_scrape_admin_scope ALONE on /cache/invalidate|purge,
+#     ADR 0008 D2.4) followed by the per-key rate limit.
+app.include_router(scrape_v1.router)
 # `dav.router` (WebDAV virtual filesystem for Plex, ticket DAV-2) — its own
 # /dav prefix + module-level verify_dav_basic_auth. Deliberately OUTSIDE
 # /api: rclone (the only client this endpoint targets) speaks HTTP Basic

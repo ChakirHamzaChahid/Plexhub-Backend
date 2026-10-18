@@ -1,20 +1,14 @@
-"""Shared fixtures/helpers of the metadata API tests (lot B2).
-
-Import the fixtures into a test module (`from tests._metadata_support import wire, keys, client`)
-and keep `wire` autouse there. Keys are factice test keys only.
-"""
+"""Shared helpers of the metadata API tests (lot B2). The fixtures live in
+`tests/metadata_api/conftest.py`. Keys are factice test keys only."""
 from __future__ import annotations
 
 import itertools
 import uuid
 from typing import Any
 
-import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
-from app.db import database as db_module
 from app.models.database import ApiKey, Media
 from app.services import api_key_service
 from app.utils.time import now_ms
@@ -38,37 +32,6 @@ async def make_key(db_factory, *, scopes: str = "", revoked: bool = False, expir
         ))
         await db.commit()
     return plaintext
-
-
-@pytest_asyncio.fixture
-async def wire(monkeypatch, db_factory):
-    from app.api import deps  # noqa: F401  (import for monkeypatch side effects)
-
-    monkeypatch.setattr(db_module, "async_session_factory", db_factory)
-    monkeypatch.setattr(api_key_service, "async_session_factory", db_factory)
-    monkeypatch.setattr(settings, "AI_API_KEY", MASTER)
-    return db_factory
-
-
-@pytest_asyncio.fixture
-async def keys(wire):
-    db_factory = wire
-    return {
-        "master": MASTER,
-        "read": await make_key(db_factory, scopes="media.read"),
-        "write": await make_key(db_factory, scopes="media.write"),
-        "rw": await make_key(db_factory, scopes="media.read media.write"),
-        "scrape_read": await make_key(db_factory, scopes="media.read scrape"),
-        "scrape": await make_key(db_factory, scopes="scrape"),
-        "none": await make_key(db_factory),
-        "revoked": await make_key(db_factory, scopes="media.read media.write", revoked=True),
-        "expired": await make_key(db_factory, scopes="media.read media.write", expired=True),
-    }
-
-
-@pytest_asyncio.fixture
-async def client(api_client, wire):
-    return api_client
 
 
 def h(key: str | None, **extra: str) -> dict[str, str]:

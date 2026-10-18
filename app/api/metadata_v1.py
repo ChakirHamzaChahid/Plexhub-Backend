@@ -28,7 +28,7 @@ import time
 from collections.abc import Awaitable
 from typing import Any, Literal
 
-from fastapi import APIRouter, Body, Depends, Header, HTTPException, Path, Query, Request, Response, status
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Path, Query, Request, Response
 
 from app.api.deps import Principal, verify_media_read_scope, verify_media_write_scope
 from app.db import database as db_module

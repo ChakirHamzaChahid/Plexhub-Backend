@@ -1470,4 +1470,11 @@ async def _migration_030_api_key_scopes(engine: AsyncEngine) -> None:
             ))
             logger.info("Migration 030: scopes column added")
         except Exception as e:
-            logger.warning("Migration 030: scopes may already exist: %s", e)
+            # Only a concurrent init_db() that added the column first is benign.
+            # Any other failure (lock past busy_timeout, disk error, missing
+            # table) must stop the boot: without `scopes`, every ORM read of
+            # ApiKey fails and api_key_service.resolve() turns that into a
+            # silent 401 for every per-user key.
+            if "duplicate column" not in str(e).lower():
+                raise
+            logger.warning("Migration 030: scopes added concurrently: %s", e)

@@ -142,3 +142,22 @@ async def test_run_migrations_full_chain_on_fresh_db_no_warning(tmp_path, caplog
         and ("duplicate column" in r.getMessage().lower() or "Migration 030" in r.getMessage())
     ]
     assert not noisy, noisy
+
+
+async def test_migration_030_does_not_swallow_a_real_failure(tmp_path):
+    """Revue perf B1-01 : seule l'erreur « duplicate column » est tolérée.
+
+    Toute autre erreur (verrou au-delà du busy_timeout, disque, table absente)
+    doit faire échouer le démarrage : une colonne `scopes` absente casserait en
+    silence toute lecture ORM de `ApiKey` (chaque clé utilisateur en 401).
+    Ici, `api_keys` n'existe pas : l'ALTER lève « no such table ».
+    """
+    import pytest
+    from sqlalchemy.exc import OperationalError
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'empty.db'}", future=True)
+    try:
+        with pytest.raises(OperationalError):
+            await _migration_030_api_key_scopes(engine)
+    finally:
+        await engine.dispose()

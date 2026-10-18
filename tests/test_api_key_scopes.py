@@ -132,7 +132,10 @@ def test_parse_scopes_ignores_unknown_and_logs_once(caplog):
             assert api_key_service.parse_scopes("zz-unknown-scope") == frozenset()
     finally:
         svc_logger.removeHandler(caplog.handler)
-    hits = [r for r in caplog.records if "zz-unknown-scope" in r.getMessage()]
+    # Selon la config de logging, le même enregistrement peut atteindre caplog par
+    # deux handlers (le nôtre et celui de la racine) : on compte les enregistrements
+    # distincts, pas les captures.
+    hits = list({id(r): r for r in caplog.records if "zz-unknown-scope" in r.getMessage()}.values())
     assert len(hits) == 1
 
 

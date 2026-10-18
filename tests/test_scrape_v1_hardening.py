@@ -417,16 +417,22 @@ async def test_each_waiter_raises_its_own_context_free_exception(gw_db, gw_provi
 
 
 async def test_the_flight_returns_its_error_instead_of_raising(gw_db, gw_providers, gw_http):
+    # Le fournisseur ne répond qu'une fois le vol observé : sans ce verrou, un
+    # runner rapide termine le vol (500 non repris) avant que le test le voie.
+    release = asyncio.Event()
+
     async def _boom(request):
+        await release.wait()
         return httpx.Response(500)
 
     gw_http.get(f"{TMDB}/movie/603").mock(side_effect=_boom)
     task = asyncio.create_task(gateway.details("movie", 603, None, False))
-    for _ in range(200):
+    for _ in range(400):
         if gateway._in_flight:
             break
         await asyncio.sleep(0.005)
     (flight,) = gateway._in_flight.values()
+    release.set()
     outcome = await flight                                # does not raise
     assert flight.exception() is None
     assert isinstance(outcome.error, gateway.GatewayError) and outcome.error.status == 502

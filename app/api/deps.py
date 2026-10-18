@@ -197,6 +197,25 @@ async def verify_scrape_admin_scope(
     await _require_scope("scrape.admin", x_api_key, request)
 
 
+async def verify_media_read_scope(
+    request: Request,
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+) -> None:
+    """Metadata API read routes AND every simulation (`…/preview`): master secret
+    or a key carrying `media.read` (ADR 0010). A simulation writes nothing, so it
+    is served under the read scope by a distinct route, never by a query flag."""
+    await _require_scope("media.read", x_api_key, request)
+
+
+async def verify_media_write_scope(
+    request: Request,
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+) -> None:
+    """Metadata API routes that validate a write: master secret or a key carrying
+    `media.write` (independent of `media.read`; the write key carries both)."""
+    await _require_scope("media.write", x_api_key, request)
+
+
 async def verify_master_key(
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
 ) -> None:

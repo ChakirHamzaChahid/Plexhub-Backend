@@ -30,7 +30,9 @@ _LAST_USED_THROTTLE_MS = 60_000   # only bump last_used at most once/min per key
 
 # Closed set of scope names (ADR 0008 § D2.1). The ONLY definition in the repo:
 # the API `Literal`, the admin form and the guards all derive from it.
-KNOWN_SCOPES: frozenset[str] = frozenset({"scrape", "scrape.admin"})
+KNOWN_SCOPES: frozenset[str] = frozenset(
+    {"scrape", "scrape.admin", "media.read", "media.write"}  # media.*: ADR 0010 (lot B2)
+)
 
 # Unknown values already reported by parse_scopes (log once per value).
 _LOGGED_UNKNOWN_SCOPES: set[str] = set()

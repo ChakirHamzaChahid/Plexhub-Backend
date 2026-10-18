@@ -38,9 +38,23 @@ async def test_form_offers_both_scope_checkboxes(api_client):
     resp = await api_client.get("/admin/keys", auth=ADMIN_AUTH)
     assert resp.status_code == 200
     html = resp.text
-    for value in ("scrape", "scrape.admin"):
+    for value in ("scrape", "scrape.admin", "media.read", "media.write"):
         assert f'type="checkbox" name="scopes" value="{value}"' in html
     assert "Scopes" in html
+
+
+async def test_create_the_two_plexhubtmm_keys(api_client, db_factory):
+    """B2-02 : clé de lecture `scrape media.read`, clé d'écriture `media.read media.write`."""
+    for label, scopes in (
+        ("plexhubTMM lecture", ["scrape", "media.read"]),
+        ("plexhubTMM écriture", ["media.write", "media.read"]),
+    ):
+        resp = await api_client.post(
+            "/admin/keys", data={"label": label, "scopes": scopes}, auth=ADMIN_AUTH
+        )
+        assert resp.status_code == 200, resp.text
+    rows = await _keys(db_factory)
+    assert sorted(r.scopes for r in rows) == ["media.read media.write", "media.read scrape"]
 
 
 async def test_create_with_both_scopes(api_client, db_factory):

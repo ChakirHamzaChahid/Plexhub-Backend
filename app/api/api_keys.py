@@ -36,7 +36,9 @@ class ApiKeyCreate(BaseModel):
     # First barrier only: api_key_service.create_key re-validates (ADR 0008
     # § D2.1). Keep in sync with api_key_service.KNOWN_SCOPES (asserted by
     # tests/test_api_key_scopes.py). Duplicates are deduplicated by the service.
-    scopes: list[Literal["scrape", "scrape.admin"]] = Field(default_factory=list)
+    scopes: list[Literal["scrape", "scrape.admin", "media.read", "media.write"]] = Field(
+        default_factory=list
+    )
 
 
 class ApiKeyOut(BaseModel):

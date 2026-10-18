@@ -292,6 +292,11 @@ fiche TMDB modifiée.
 | X23 | Bande-annonce (§ 6.1) | « même règle de choix qu'aujourd'hui » | règle actuelle reprise telle quelle : français puis anglais, **quelle que soit** la `language` demandée (les images, elles, suivent la langue) | Une requête `en-US` peut recevoir une bande-annonce française. |
 | X24 | `matches` de `/find` (§ 5.7) | `showTmdbId`/`seasonNumber`/`episodeNumber` « en plus » pour un épisode | toujours présents, `null` pour un film ou une série (règle « absent ⇒ `null` » du § 6) | Lire ces champs comme nullables. |
 | X25 | Filtrage des listes (§ 6.3, § 6.6) | non précisé | candidat sans titre ni titre original écarté ; un seul épisode par numéro (le premier gagne) ; saisons d'une série plafonnées à 1 000 | Aucun en pratique. |
+| X26 | Noms OpenAPI (contrat machine M2-02) | non fixés | réponse de `/search` = `ScrapeSearchResponse` (le nom `SearchResponse` existe déjà pour `/api/ai` : FastAPI aurait renommé les deux composants) ; corps de `/cache/invalidate` = `InvalidateBody` (enveloppe de `InvalidateRequest`) | JSON échangé inchangé ; seul `/schema-sync` voit ces noms. |
+| X27 | `/match` : 404 TMDB sur les détails d'un `matched` | non traité | 502 `upstream_error`, rien mis en cache | Réessayer plus tard (borné). |
+| X28 | `/match` : `confidence` d'un `nomatch` | « toujours » présent | toujours `null` pour un `nomatch` (hit ou miss : l'entrée négative n'a pas de payload) | Lire `confidence` comme nullable. |
+| X29 | 503 `upstream_unavailable` | `retryAfterSeconds` dans l'exemple | toujours `retryAfterSeconds: 30` + en-tête `Retry-After: 30` | Aucun. |
+| X30 | `refresh` (§ 4.4) | décrit en général | accepté par `match`, `movie`, `tv`, `season` seulement (pas `find` ni `search`, conforme § 5.3 et § 5.7) | Ne pas envoyer `refresh` à `/find`. |
 | X21 | `Retry-After` TMDB long | non traité | si le `Retry-After` dépasse le temps restant avant l'échéance, 429 `rate_limited` immédiat (jamais 504) | Aucun : c'est le comportement attendu par § 4.6. |
 
 Restent tels quels : préfixe `/api/scrape/v1`, chemins et paramètres des 9 routes, scopes `scrape`/`scrape.admin`,

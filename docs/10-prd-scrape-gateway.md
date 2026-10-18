@@ -288,6 +288,10 @@ fiche TMDB modifiée.
 | X18 | Défauts SQL de `scrape_cache` (§ 7) | défauts au niveau SQL (leçon de la migration 027) | **aucune** colonne n'a de défaut : toutes les valeurs sont fournies par la passerelle à chaque écriture | Aucun (le cache local de plexhubTMM peut garder ses défauts). |
 | X19 | `tvdbId` de `/find` (§ 5.7) | chaîne de 1 à 12 chiffres | normalisé en entier (zéros de tête retirés) avant de former la clé : `007` et `7` donnent `1\|-\|find\|tvdb\|7` | Normaliser de la même façon dans la clé locale. |
 | X20 | `/find`, résultats rendus (§ 5.7) | films, séries, épisodes | identique ; les résultats de saison et de personne de TMDB sont ignorés | Aucun. |
+| X22 | Doublons du casting (§ 6.5) | « même personne, même `job` » | casting : dédoublonné sur (`tmdbPersonId`, `character`) — un acteur n'a pas de `job` ; deux rôles distincts sont gardés. Équipe : (`tmdbPersonId`, `job`) comme le contrat | Aucun. |
+| X23 | Bande-annonce (§ 6.1) | « même règle de choix qu'aujourd'hui » | règle actuelle reprise telle quelle : français puis anglais, **quelle que soit** la `language` demandée (les images, elles, suivent la langue) | Une requête `en-US` peut recevoir une bande-annonce française. |
+| X24 | `matches` de `/find` (§ 5.7) | `showTmdbId`/`seasonNumber`/`episodeNumber` « en plus » pour un épisode | toujours présents, `null` pour un film ou une série (règle « absent ⇒ `null` » du § 6) | Lire ces champs comme nullables. |
+| X25 | Filtrage des listes (§ 6.3, § 6.6) | non précisé | candidat sans titre ni titre original écarté ; un seul épisode par numéro (le premier gagne) ; saisons d'une série plafonnées à 1 000 | Aucun en pratique. |
 | X21 | `Retry-After` TMDB long | non traité | si le `Retry-After` dépasse le temps restant avant l'échéance, 429 `rate_limited` immédiat (jamais 504) | Aucun : c'est le comportement attendu par § 4.6. |
 
 Restent tels quels : préfixe `/api/scrape/v1`, chemins et paramètres des 9 routes, scopes `scrape`/`scrape.admin`,

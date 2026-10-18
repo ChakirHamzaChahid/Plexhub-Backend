@@ -1,0 +1,138 @@
+[
+  {
+    "mediaType": "movie",
+    "title": "  Le   Parrain  ",
+    "year": 1972,
+    "language": "fr-FR",
+    "normalized": "le parrain",
+    "cacheKey": "1|fr-FR|movie|le parrain|1972"
+  },
+  {
+    "mediaType": "movie",
+    "title": "!!!",
+    "year": 1999,
+    "language": "fr-FR",
+    "normalized": "",
+    "cacheKey": null
+  },
+  {
+    "mediaType": "movie",
+    "title": "1917",
+    "year": 2019,
+    "language": "fr-FR",
+    "normalized": "1917",
+    "cacheKey": "1|fr-FR|movie|1917|2019"
+  },
+  {
+    "mediaType": "movie",
+    "title": "603",
+    "year": null,
+    "language": "fr-FR",
+    "normalized": "603",
+    "cacheKey": "1|fr-FR|movie|603|"
+  },
+  {
+    "mediaType": "movie",
+    "title": "Amélie Poulain",
+    "year": 2001,
+    "language": "fr-FR",
+    "normalized": "amelie poulain",
+    "cacheKey": "1|fr-FR|movie|amelie poulain|2001"
+  },
+  {
+    "mediaType": "movie",
+    "title": "L'Armée des ombres",
+    "year": 1969,
+    "language": "fr-FR",
+    "normalized": "armee des ombres",
+    "cacheKey": "1|fr-FR|movie|armee des ombres|1969"
+  },
+  {
+    "mediaType": "movie",
+    "title": "Les Misérables",
+    "year": 2012,
+    "language": "fr-FR",
+    "normalized": "miserables",
+    "cacheKey": "1|fr-FR|movie|miserables|2012"
+  },
+  {
+    "mediaType": "movie",
+    "title": "Léon",
+    "year": 1994,
+    "language": "fr-FR",
+    "normalized": "leon",
+    "cacheKey": "1|fr-FR|movie|leon|1994"
+  },
+  {
+    "mediaType": "movie",
+    "title": "Mission：Impossible｜Fallout",
+    "year": 2018,
+    "language": "fr-FR",
+    "normalized": "mission impossible fallout",
+    "cacheKey": "1|fr-FR|movie|mission impossible fallout|2018"
+  },
+  {
+    "mediaType": "movie",
+    "title": "Ocean's Eleven",
+    "year": 2001,
+    "language": "en-US",
+    "normalized": "ocean s eleven",
+    "cacheKey": "1|en-US|movie|ocean s eleven|2001"
+  },
+  {
+    "mediaType": "movie",
+    "title": "Ocean’s Eleven",
+    "year": 2001,
+    "language": "en-US",
+    "normalized": "ocean s eleven",
+    "cacheKey": "1|en-US|movie|ocean s eleven|2001"
+  },
+  {
+    "mediaType": "movie",
+    "title": "Se7en",
+    "year": null,
+    "language": "fr-FR",
+    "normalized": "se7en",
+    "cacheKey": "1|fr-FR|movie|se7en|"
+  },
+  {
+    "mediaType": "movie",
+    "title": "Terminator (VF)",
+    "year": 1984,
+    "language": "fr-FR",
+    "normalized": "terminator vf",
+    "cacheKey": "1|fr-FR|movie|terminator vf|1984"
+  },
+  {
+    "mediaType": "movie",
+    "title": "The Matrix",
+    "year": 1999,
+    "language": "fr-FR",
+    "normalized": "matrix",
+    "cacheKey": "1|fr-FR|movie|matrix|1999"
+  },
+  {
+    "mediaType": "show",
+    "title": "...",
+    "year": null,
+    "language": "fr-FR",
+    "normalized": "",
+    "cacheKey": null
+  },
+  {
+    "mediaType": "show",
+    "title": "24",
+    "year": 2001,
+    "language": "en-US",
+    "normalized": "24",
+    "cacheKey": "1|en-US|show|24|2001"
+  },
+  {
+    "mediaType": "show",
+    "title": "Breaking Bad",
+    "year": null,
+    "language": "en-US",
+    "normalized": "breaking bad",
+    "cacheKey": "1|en-US|show|breaking bad|"
+  }
+]

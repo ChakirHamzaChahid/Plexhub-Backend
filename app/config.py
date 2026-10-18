@@ -183,6 +183,10 @@ class Settings:
 
     # DB backups (online sqlite .backup snapshots)
     BACKUP_ENABLED: bool = os.getenv("BACKUP_ENABLED", "true").lower() in ("true", "1", "yes")
+    # Lot B2 (ADR 0012 D2.4): "false" = throwaway TEST instance — no master election
+    # (no `fcntl`, so it also boots on Windows), no scheduler, no boot pipeline, no
+    # download worker, no Plex reap. Default "true": production is unchanged.
+    BACKGROUND_JOBS_ENABLED: bool = os.getenv("BACKGROUND_JOBS_ENABLED", "true").lower() in ("true", "1", "yes")
     BACKUP_DIR: Path = Path(os.getenv("BACKUP_DIR", "./data/backups"))
     BACKUP_RETENTION_DAYS: int = _safe_int("BACKUP_RETENTION_DAYS", 7)
     BACKUP_HOUR: int = _safe_int("BACKUP_HOUR", 4)  # daily cron hour

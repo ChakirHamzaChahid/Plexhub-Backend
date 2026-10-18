@@ -277,8 +277,6 @@ async def _cleanup_stale_epg():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Master Worker election via file lock (fcntl.flock)."""
-    import fcntl
-
     lock_file = settings.DATA_DIR / "server_start.lock"
     is_master = False
     scheduler = None
@@ -304,19 +302,32 @@ async def lifespan(app: FastAPI):
             f"tmdb={'configured' if settings.TMDB_API_KEY else 'unset'}"
         )
 
-        # Master election — atomic via fcntl.flock (no race condition)
-        try:
-            lock_fd = open(lock_file, "w")
-            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            lock_fd.write(str(os.getpid()))
-            lock_fd.flush()
-            is_master = True
-        except OSError:
-            # Another process holds the lock
-            if lock_fd:
-                lock_fd.close()
-                lock_fd = None
-            is_master = False
+        if not settings.BACKGROUND_JOBS_ENABLED:
+            # Lot B2 (ADR 0012 D2.4): throwaway TEST instance (plexhubTMM). No
+            # election at all — hence no `import fcntl`, which does not exist on
+            # Windows — so no scheduler, no boot pipeline, no download worker, no
+            # Plex reap; `is_master` stays False. `POST /api/accounts` still starts
+            # its own account sync (independent of this lifespan). Default `true`.
+            logger.warning(
+                "BACKGROUND_JOBS_ENABLED=false — test instance: no master election, "
+                "scheduler or background workers"
+            )
+        else:
+            import fcntl
+
+            # Master election — atomic via fcntl.flock (no race condition)
+            try:
+                lock_fd = open(lock_file, "w")
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                lock_fd.write(str(os.getpid()))
+                lock_fd.flush()
+                is_master = True
+            except OSError:
+                # Another process holds the lock
+                if lock_fd:
+                    lock_fd.close()
+                    lock_fd = None
+                is_master = False
 
         # S5.1 (AUDIT-P8-005): publish the REAL election result verbatim —
         # `plexhub_is_master` must reflect a slave/OSError fallback exactly,
@@ -569,7 +580,7 @@ async def lifespan(app: FastAPI):
 
             from app.utils.tasks import create_background_task
             create_background_task(initial_sync_then_enrich(), name="initial_sync")
-        else:
+        elif settings.BACKGROUND_JOBS_ENABLED:
             logger.info(f"[Worker {os.getpid()}] Slave — Passive mode")
 
         yield

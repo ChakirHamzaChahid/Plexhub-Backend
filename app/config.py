@@ -477,6 +477,13 @@ class Settings:
         "SCRAPE_ALLOWED_LANGUAGES", ",".join(DEFAULT_SCRAPE_ALLOWED_LANGUAGES),
     )
 
+    # Metadata API (lot B2, ADR 0010 D2.4 / ADR 0011 D2.4). The config only READS
+    # the raw values; the clamping (timeout 5..28 s, rate <= 0 disables) lives in
+    # app/services/metadata_limits.py, same split as the scrape gateway.
+    METADATA_RATE_LIMIT_PER_MINUTE: int = _safe_int("METADATA_RATE_LIMIT_PER_MINUTE", 300)
+    METADATA_WRITE_RATE_LIMIT_PER_MINUTE: int = _safe_int("METADATA_WRITE_RATE_LIMIT_PER_MINUTE", 90)
+    METADATA_REQUEST_TIMEOUT_SECONDS: int = _safe_int("METADATA_REQUEST_TIMEOUT_SECONDS", 15)
+
     @property
     def has_xtream_env(self) -> bool:
         return bool(self.XTREAM_BASE_URL and self.XTREAM_USERNAME and self.XTREAM_PASSWORD)

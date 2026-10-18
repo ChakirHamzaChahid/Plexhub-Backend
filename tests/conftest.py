@@ -66,11 +66,15 @@ def _reset_rate_limiters():
     rl.tv_auth_start_pending_ip_limiter.reset()
     rl.tv_auth_approve_page_limiter.reset()
     rl.scrape_gateway_rate_limiter.reset()
+    rl.metadata_rate_limiter.reset()
+    rl.metadata_write_rate_limiter.reset()
     yield
     rl.tv_auth_start_rate_limiter.reset()
     rl.tv_auth_start_pending_ip_limiter.reset()
     rl.tv_auth_approve_page_limiter.reset()
     rl.scrape_gateway_rate_limiter.reset()
+    rl.metadata_rate_limiter.reset()
+    rl.metadata_write_rate_limiter.reset()
 
 
 # ─── Provider outage mask (M025) ─────────────────────────────────────────

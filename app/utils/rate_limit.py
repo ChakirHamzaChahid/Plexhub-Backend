@@ -254,3 +254,11 @@ tv_auth_approve_page_limiter = SlidingWindowLimiter()
 # exclusively by `app/api/scrape_v1.py::enforce_scrape_rate_limit` (window
 # 60 s, `SCRAPE_RATE_LIMIT_PER_MINUTE`, `<= 0` disables it).
 scrape_gateway_rate_limiter = SlidingWindowLimiter()
+
+# Lot B2 (ADR 0010 D2.4): two more independent instances for the metadata API
+# `/api/metadata/v1`, both keyed by `Principal.key_id` ("master" for the master
+# secret), NEVER by IP. `metadata_rate_limiter` counts every authenticated
+# request (reads, simulations and writes); `metadata_write_rate_limiter` only
+# the routes that validate a write. Consumed by app/api/metadata_v1.py.
+metadata_rate_limiter = SlidingWindowLimiter()
+metadata_write_rate_limiter = SlidingWindowLimiter()

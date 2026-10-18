@@ -1,0 +1,68 @@
+{
+  "_id": "52571e2d19c295667a000111",
+  "air_date": "2008-01-20",
+  "episodes": [
+    {
+      "air_date": "2008-01-20", "episode_number": 1, "episode_type": "standard", "id": 62085, "name": "Pilote",
+      "overview": "Walter White, professeur de chimie, apprend qu'il est atteint d'un cancer du poumon.",
+      "production_code": "", "runtime": 58, "season_number": 1, "show_id": 1396,
+      "still_path": "/ydlY3iPfeOAvu8gVqrxPoMvzNCn.jpg", "vote_average": 8.3, "vote_count": 300,
+      "crew": [
+        {"department": "Directing", "job": "Director", "credit_id": "e1", "adult": false, "gender": 2, "id": 66633, "known_for_department": "Writing", "name": "Vince Gilligan", "profile_path": "/z3E0DhBg1V1PZVEtS9vfFPzOWYB.jpg"},
+        {"department": "Writing", "job": "Writer", "credit_id": "e2", "adult": false, "gender": 2, "id": 66633, "known_for_department": "Writing", "name": "Vince Gilligan", "profile_path": "/z3E0DhBg1V1PZVEtS9vfFPzOWYB.jpg"},
+        {"department": "Editing", "job": "Editor", "credit_id": "e3", "adult": false, "gender": 2, "id": 77777, "known_for_department": "Editing", "name": "Lynne Willingham", "profile_path": null},
+        {"department": "Writing", "job": "Writer", "credit_id": "e4", "adult": false, "gender": 2, "id": 66633, "known_for_department": "Writing", "name": "Vince Gilligan", "profile_path": null}
+      ],
+      "guest_stars": [
+        {"character": "Emilio Koyama", "credit_id": "g1", "order": 500, "adult": false, "gender": 2, "id": 1111, "known_for_department": "Acting", "name": "John Koyama", "profile_path": null},
+        {"character": "Carmen Molina", "credit_id": "g2", "order": 501, "adult": false, "gender": 1, "id": 2222, "known_for_department": "Acting", "name": "Carmen Serano", "profile_path": "/g2.jpg"}
+      ]
+    },
+    {
+      "air_date": "2008-01-27", "episode_number": 2, "episode_type": "standard", "id": 62086, "name": "Le Chat est dans le sac",
+      "overview": "Walt et Jesse tentent de se débarrasser des corps.", "production_code": "", "runtime": 48,
+      "season_number": 1, "show_id": 1396, "still_path": "/tjDNvbokT5kS1d5lWqoUbVU0bnn.jpg",
+      "vote_average": 8.2, "vote_count": 250, "crew": [], "guest_stars": []
+    },
+    {
+      "air_date": "2008-02-10", "episode_number": 3, "episode_type": "standard", "id": 62087, "name": "...Et le sac est dans la rivière",
+      "overview": "", "production_code": "", "runtime": 0, "season_number": 1, "show_id": 1396,
+      "still_path": null, "vote_average": 0.0, "vote_count": 0, "crew": [], "guest_stars": []
+    },
+    {
+      "air_date": "", "episode_number": 4, "episode_type": "standard", "id": 62088, "name": "Le Cancer, ça craint",
+      "overview": "Walt s'efforce de cacher ses activités.", "production_code": "", "runtime": 47,
+      "season_number": 1, "show_id": 1396, "still_path": "", "vote_average": 8.0, "vote_count": 12, "crew": [], "guest_stars": []
+    },
+    {
+      "air_date": "2008-02-24", "episode_number": 5, "episode_type": "standard", "id": 62089, "name": "Gray Matter",
+      "overview": "Walt refuse l'aide de ses amis.", "production_code": "", "runtime": 48, "season_number": 1, "show_id": 1396,
+      "still_path": "/e5.jpg", "vote_average": 8.0, "vote_count": 20, "crew": [], "guest_stars": []
+    },
+    {
+      "air_date": "2008-03-02", "episode_number": 6, "episode_type": "standard", "id": 62090, "name": "Crazy Handful of Nothin'",
+      "overview": "Walt prend des risques.", "production_code": "", "runtime": 47, "season_number": 1, "show_id": 1396,
+      "still_path": "/e6.jpg", "vote_average": 8.4, "vote_count": 30, "crew": [], "guest_stars": []
+    },
+    {
+      "air_date": "2008-03-09", "episode_number": 7, "episode_type": "finale", "id": 62091, "name": "Un sale boulot",
+      "overview": "Le premier trafic tourne mal.", "production_code": "", "runtime": 48, "season_number": 1, "show_id": 1396,
+      "still_path": "/e7.jpg", "vote_average": 8.5, "vote_count": 40, "crew": [], "guest_stars": []
+    }
+  ],
+  "name": "Saison 1",
+  "network": "AMC",
+  "overview": "",
+  "id": 3572,
+  "poster_path": "/1BP4xYv9ZG4ZVHkL7ocOziBMby4.jpg",
+  "season_number": 1,
+  "vote_average": 8.3,
+  "external_ids": {"freebase_mid": "/m/02xgp51", "freebase_id": null, "tvdb_id": 30272, "tvrage_id": null, "wikidata_id": null},
+  "images": {
+    "posters": [
+      {"iso_639_1": "en", "file_path": "/s1_en.jpg"},
+      {"iso_639_1": "fr", "file_path": "/s1_fr.jpg"},
+      {"iso_639_1": null, "file_path": "/s1_null.jpg"}
+    ]
+  }
+}

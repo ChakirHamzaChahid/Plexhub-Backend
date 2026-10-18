@@ -116,6 +116,9 @@ async def _candidates_page(db, after: tuple[str, str] | None, limit: int) -> lis
         # Only movies and shows — episodes inherit from the parent; skipping
         # them avoids unnecessary TMDb calls and keeps the run short.
         Media.type.in_(("movie", "show")),
+        # Lot B2 (ADR 0012): a locked row's certification (or its deliberate
+        # absence) is the operator's.
+        Media.match_locked == False,  # noqa: E712
     ]
     if after is not None:
         conditions.append(tuple_(Media.rating_key, Media.server_id) > tuple_(after[0], after[1]))
@@ -142,6 +145,7 @@ async def _count_candidates(db) -> int:
                     Media.content_rating == "+",
                 ),
                 Media.type.in_(("movie", "show")),
+                Media.match_locked == False,  # noqa: E712
             )
         )
     )
@@ -211,6 +215,7 @@ async def run(*, dry_run: bool = False, limit: int | None = None) -> _Stats:
                         .where(
                             Media.rating_key == row.rating_key,
                             Media.server_id == row.server_id,
+                            Media.match_locked == False,  # noqa: E712 - re-checked at write time
                         )
                         .values(content_rating=cert)
                     )

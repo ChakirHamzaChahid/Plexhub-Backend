@@ -41,6 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.database import Media, XtreamAccount
 from app.plex_generator.mapping import MappingStore
 from app.plex_generator.naming import series_nfo_path
+from app.services.metadata_columns import METADATA_WRITABLE_COLUMNS
 from app.utils.server_id import build_server_id
 from app.utils.time import now_ms
 from app.utils.rating_blend import blend_rating
@@ -509,6 +510,12 @@ def _compute_updates(row: Media, parsed: NfoEntry, overwrite: bool) -> dict:
         new_val = getattr(parsed, attr)
         if new_val is None:
             continue
+        # Lot B2 (ADR 0012): a locked row is the operator's for EVERY column the
+        # metadata API can write, in fill-missing mode too (an id or field cleared
+        # on purpose reads as "missing" and must not be refilled). Only the poster
+        # columns (fill-only, below) and the provider-origin ratings stay open.
+        if is_locked and col in METADATA_WRITABLE_COLUMNS:
+            continue
         current = getattr(row, col, None)
         effective_overwrite = overwrite and not (is_locked and col in _LOCKED_FILL_ONLY_COLS)
         if not effective_overwrite and not is_missing(current):
@@ -523,7 +530,7 @@ def _compute_updates(row: Media, parsed: NfoEntry, overwrite: bool) -> dict:
     # into separate "[title_]" / "[imdb]" folders. Recompute from the post-update
     # values so the row regroups with its twins. (Only fires when we already write
     # something — an unchanged id can't change the unification.)
-    if updates:
+    if updates and not is_locked:
         new_imdb = updates.get("imdb_id", row.imdb_id)
         new_tmdb = updates.get("tmdb_id", row.tmdb_id)
         new_year = updates.get("year", row.year)

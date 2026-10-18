@@ -71,6 +71,8 @@ async def _run_recompute_unification(dry_run: bool) -> tuple[int, int]:
                 Media.imdb_id, Media.tmdb_id, Media.unification_id,
             )
             .where(Media.type.in_(("movie", "show")))
+            # Lot B2 (ADR 0012): a locked row's grouping key is protected.
+            .where(Media.match_locked == False)  # noqa: E712
             .distinct()
         )
         pending = 0
@@ -84,7 +86,7 @@ async def _run_recompute_unification(dry_run: bool) -> tuple[int, int]:
                 continue
             await db.execute(
                 update(Media)
-                .where(Media.rating_key == rk, Media.server_id == sid)
+                .where(Media.rating_key == rk, Media.server_id == sid, Media.match_locked == False)  # noqa: E712
                 .values(
                     unification_id=new_unif,
                     history_group_key=calculate_history_group_key(new_unif, rk, sid),

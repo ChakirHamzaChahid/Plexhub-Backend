@@ -9,6 +9,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_upsert
 
 from app.db.database import async_session_factory
 from app.models.database import Media, XtreamAccount, EnrichmentQueue, LiveChannel
+from app.services.metadata_columns import METADATA_WRITABLE_COLUMNS
 from app.services.xtream_service import xtream_service
 from app.utils.string_normalizer import (
     clean_title,
@@ -772,10 +773,14 @@ async def upsert_media_batch(db, rows: list[dict], current_rating_keys: set[str]
         # manual scraper) keeps its scraper-written rich metadata across a
         # provider content_hash flip — the provider's summary/genres/poster
         # for a mislabeled item are exactly what the operator corrected.
-        # `display_rating` is intentionally NOT protected here: it is healed
-        # by `recompute_display_rating_stmt()` at the end of every
-        # enrichment run, same as for unlocked rows.
-        for col in ("resolved_thumb_url", "resolved_art_url", "summary", "genres", "year"):
+        # Lot B2 (ADR 0012 D2.1/D2.2): the protection now covers EVERY column the
+        # metadata API can write (`METADATA_WRITABLE_COLUMNS`: title, duration,
+        # content_rating, youtube_trailer, display_rating… on top of the former
+        # summary/genres/year), so an edit made through the API survives a
+        # provider content change. A column the provider did not send is simply not
+        # in `set_` (the keys vary by media type). `tmdb_id` / `unification_id` /
+        # `history_group_key` have their own, stricter CASE blocks above.
+        for col in sorted(_LOCK_PROTECTED_SYNC_COLUMNS):
             if col in set_:
                 set_[col] = case(
                     (Media.match_locked == True, getattr(Media, col)),  # noqa: E712
@@ -788,6 +793,31 @@ async def upsert_media_batch(db, rows: list[dict], current_rating_keys: set[str]
             where=Media.content_hash != stmt.excluded.content_hash,
         )
         await db.execute(stmt)
+
+
+# Columns held by the row lock on a provider content change: the whole metadata-API
+# set plus the poster columns of the manual scraper, minus the three identity columns
+# that carry their own CASE expression in `upsert_media_batch`.
+_LOCK_PROTECTED_SYNC_COLUMNS = (
+    (METADATA_WRITABLE_COLUMNS | {"resolved_thumb_url", "resolved_art_url"})
+    - {"tmdb_id", "unification_id", "history_group_key"}
+)
+
+
+async def apply_series_trailers(db, server_id: str, updates: list[tuple[str, str]]) -> None:
+    """Persist the trailer captured from `get_series_info` on each show. A locked show
+    keeps its `youtube_trailer` (set — or deliberately cleared — through the metadata
+    API or the manual scraper); only non-empty provider values are ever passed in."""
+    for series_rating_key, trailer in updates:
+        await db.execute(
+            update(Media)
+            .where(
+                Media.rating_key == series_rating_key,
+                Media.server_id == server_id,
+                Media.match_locked == False,  # noqa: E712
+            )
+            .values(youtube_trailer=trailer)
+        )
 
 
 async def enqueue_for_enrichment(db, rows: list[dict]):
@@ -1627,15 +1657,7 @@ async def sync_account(account_id: str, job_id: str | None = None):
                                 episodes_removed += await differential_cleanup_episodes(
                                     db, server_id, grandparent_rating_key, live_keys
                                 )
-                            for series_rating_key, trailer in series_trailer_updates:
-                                await db.execute(
-                                    update(Media)
-                                    .where(
-                                        Media.rating_key == series_rating_key,
-                                        Media.server_id == server_id,
-                                    )
-                                    .values(youtube_trailer=trailer)
-                                )
+                            await apply_series_trailers(db, server_id, series_trailer_updates)
                         # Same-session coupling -- see module-level note (ADR
                         # 0004 D4): this loop's own next batch, and the Live
                         # phase after it, read/write the SAME `db`. Left

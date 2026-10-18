@@ -61,7 +61,8 @@ maître). Pas de purge automatique.
 doit encore valoir la valeur « après » (sinon 409 `revert_conflict` + `fields`, aucune annulation partielle). Verrou
 restitué seulement si le verrou courant vaut `lockAfter` **et** aucune édition plus récente non annulée sur l'élément
 (sinon 409 `fields:["lock"]`). Valeurs « avant » par variante ; dérivés `unification_id`/`history_group_key`/
-`title_sortable` **restitués**, `display_rating` recalculé ; contrôle de regroupement ; `reverted_by` posé dans la même
+`title_sortable` **et `display_rating` restitués depuis l'enregistrement** (précision D2.8 : écart X17 — une
+restitution enregistrée est plus fidèle qu'un recalcul quand `display_rating` ne valait pas le mélange) ; contrôle de regroupement ; `reverted_by` posé dans la même
 transaction ; une annulation est une édition (`kind:"revert"`, `reverts`) annulable. `lock` : `locked:true` ⇒ verrou
 `plexhubtmm` si libre ; `locked:false` ⇒ `match_locked=0, match_source=NULL` ; même état ⇒ no-op.
 
@@ -70,6 +71,23 @@ transaction ; une annulation est une édition (`kind:"revert"`, `reverts`) annul
 durationImplausible = duration < IMPLAUSIBLE_DURATION_MS`. `variants.items` ≤ 50, canonique (plus petit
 `(filter, sort_order)` en octets) en tête. `lookup` ≤ 50 + `truncated`, `items` paginé par curseur opaque keyset sur
 `(server_id, rating_key)`, `episodes` ≤ 2 000. Lignes cachées et adultes comprises.
+
+### D2.8 Précisions retenues à l'implémentation (2026-10-18)
+- **Règle du verrou à l'annulation** : elle ne s'applique que si l'édition annulée a *changé* le verrou
+  (`lockBefore ≠ lockAfter`) ; une édition faite sur une ligne déjà verrouillée n'a rien à restituer côté verrou et
+  n'est donc pas bloquée par une édition plus récente (les conflits de champs, eux, restent contrôlés).
+- **Règle de compensation** : parmi les « éditions plus récentes non annulées », on ne compte ni une édition déjà
+  annulée, ni une annulation dont la cible est elle-même plus récente que l'édition visée (la paire s'annule). Sans
+  cela, annuler `E2` empêcherait ensuite d'annuler `E1` (la pile ne se déferait jamais).
+- **`display_rating` à l'annulation** : restitué depuis l'enregistrement, pas recalculé (X17).
+- **Variante disparue** : une variante de l'édition qui n'existe plus est ignorée ; si aucune n'existe encore,
+  409 `revert_conflict` avec `fields: ["variants"]`.
+- **`update` d'une variante sans changement de champ** : `updated_at` et le verrou sont quand même posés sur
+  *toutes* les variantes d'une écriture réelle.
+- **Sélection des lignes** : l'API voit tout (catégories masquées, adultes, masque de panne fournisseur compris) ; ce
+  n'est pas une lecture « app ».
+- **Corps d'idempotence** : empreinte de `{méthode chemin, fields tels qu'envoyés, allowRegroup, reason}` — les
+  valeurs par défaut explicites ou absentes donnent la même empreinte.
 
 ## D3 — Alternatives écartées
 - Révision stockée (compteur) : exige que tous les écrivains l'incrémentent.

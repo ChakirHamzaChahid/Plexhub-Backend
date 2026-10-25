@@ -96,6 +96,7 @@ def item_summary(variants: Sequence[VariantState], ctx: ItemContext, revision: s
         "revision": revision,
         "lock": lock_view(c.lock),
         "isAdult": c.is_adult,
+        "isHidden": ctx.is_hidden,
         "season": ctx.season,
         "episode": ctx.episode,
         "showRatingKey": ctx.show_rating_key,

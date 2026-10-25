@@ -1033,6 +1033,10 @@
             "title": "Isadult",
             "type": "boolean"
           },
+          "isHidden": {
+            "title": "Ishidden",
+            "type": "boolean"
+          },
           "lock": {
             "$ref": "#/components/schemas/LockState"
           },
@@ -1117,6 +1121,7 @@
           "revision",
           "lock",
           "isAdult",
+          "isHidden",
           "season",
           "episode",
           "showRatingKey"
@@ -2816,7 +2821,7 @@
     },
     "/api/metadata/v1/items": {
       "get": {
-        "description": "Items to complete, e.g. those with no external id at all.",
+        "description": "Items to complete, e.g. those with no external id at all.\n\n`visibility=visible` keeps only items whose canonical variant is in an allowed category\n(`isHidden == false`); the default `all` lists everything (lot B3).",
         "operationId": "list_items_api_metadata_v1_items_get",
         "parameters": [
           {
@@ -2868,6 +2873,20 @@
                 }
               ],
               "title": "Serverid"
+            }
+          },
+          {
+            "in": "query",
+            "name": "visibility",
+            "required": false,
+            "schema": {
+              "default": "all",
+              "enum": [
+                "visible",
+                "all"
+              ],
+              "title": "Visibility",
+              "type": "string"
             }
           },
           {

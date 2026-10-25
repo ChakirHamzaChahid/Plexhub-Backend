@@ -95,8 +95,10 @@ async def test_lookup_returns_every_match_sorted_hidden_and_adult_included(clien
     first = body["items"][0]
     assert set(first) == {
         "serverId", "ratingKey", "type", "title", "year", "ids", "unificationId", "revision",
-        "lock", "isAdult", "season", "episode", "showRatingKey",
+        "lock", "isAdult", "isHidden", "season", "episode", "showRatingKey",
     }
+    assert first["isHidden"] is True
+    assert by_key["vod_2.mkv"]["isHidden"] is False
     assert first["ids"] == {"imdb": None, "tmdb": "603", "tvdb": None, "wikidata": None}
     assert first["lock"] == {"locked": False, "source": None}
 
@@ -167,6 +169,92 @@ async def test_items_parameter_bounds_are_422(client, keys, params):
 async def test_items_invalid_cursor_is_400(client, keys):
     resp = await client.get(f"{BASE}/items", params={"type": "movie", "cursor": "%%%"}, headers=h(keys["read"]))
     assert resp.status_code == 400 and resp.json()["detail"]["code"] == "invalid_parameter"
+
+
+# ─── items : visibilité (lot B3, résout l'écart X22) ─────────────────────────
+
+
+async def _listed(client, keys, **params):
+    resp = await client.get(f"{BASE}/items", params={"type": "movie", **params}, headers=h(keys["read"]))
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+async def _seed_visibility(wire):
+    await seed(wire, rating_key="a_visible.mkv")
+    await seed(wire, rating_key="b_hidden.mkv", is_in_allowed_categories=False)
+    await seed(wire, rating_key="c_visible.mkv")
+
+
+async def test_items_without_visibility_is_unchanged_and_lists_hidden(client, keys, wire):
+    await _seed_visibility(wire)
+    default = await _listed(client, keys)
+    assert [i["ratingKey"] for i in default["items"]] == ["a_visible.mkv", "b_hidden.mkv", "c_visible.mkv"]
+    assert default == await _listed(client, keys, visibility="all")
+
+
+async def test_items_visibility_visible_excludes_hidden_and_keeps_visible(client, keys, wire):
+    await _seed_visibility(wire)
+    body = await _listed(client, keys, visibility="visible")
+    assert [i["ratingKey"] for i in body["items"]] == ["a_visible.mkv", "c_visible.mkv"]
+    assert all(i["isHidden"] is False for i in body["items"])
+
+
+async def test_items_summary_exposes_is_hidden(client, keys, wire):
+    await _seed_visibility(wire)
+    body = await _listed(client, keys)
+    assert {i["ratingKey"]: i["isHidden"] for i in body["items"]} == {
+        "a_visible.mkv": False, "b_hidden.mkv": True, "c_visible.mkv": False,
+    }
+    view = (await client.get(f"{BASE}/items/{SERVER}/b_hidden.mkv", headers=h(keys["read"]))).json()
+    assert view["context"]["isHidden"] is True
+
+
+async def test_items_visibility_pagination_is_stable(client, keys, wire):
+    for n in range(7):
+        await seed(wire, rating_key=f"vod_{n}.mkv", is_in_allowed_categories=(n % 2 == 0))
+    seen: list[str] = []
+    cursor = None
+    while True:
+        params = {"visibility": "visible", "limit": 2}
+        if cursor:
+            params["cursor"] = cursor
+        body = await _listed(client, keys, **params)
+        seen += [i["ratingKey"] for i in body["items"]]
+        cursor = body["nextCursor"]
+        if cursor is None:
+            break
+    assert seen == ["vod_0.mkv", "vod_2.mkv", "vod_4.mkv", "vod_6.mkv"]
+
+
+async def test_items_visibility_combines_with_missing_ids_and_server_id(client, keys, wire):
+    await seed(wire, rating_key="a.mkv")
+    await seed(wire, rating_key="b.mkv", is_in_allowed_categories=False)
+    await seed(wire, rating_key="c.mkv", imdb_id="tt0133093")
+    await seed(wire, rating_key="d.mkv", server_id="xtream_other")
+    got = await _listed(client, keys, visibility="visible", missingIds="imdb")
+    assert [i["ratingKey"] for i in got["items"]] == ["a.mkv", "d.mkv"]
+    got = await _listed(client, keys, visibility="visible", missingIds="imdb", serverId="xtream_other")
+    assert [i["ratingKey"] for i in got["items"]] == ["d.mkv"]
+
+
+async def test_items_visibility_invalid_value_is_422(client, keys):
+    resp = await client.get(f"{BASE}/items", params={"type": "movie", "visibility": "bogus"}, headers=h(keys["read"]))
+    assert resp.status_code == 422
+
+
+async def test_items_visibility_mixed_variants_follow_the_canonical_variant(client, keys, wire):
+    # canonical = smallest (filter, sort_order): ("all", "a")
+    await seed(wire, rating_key="canon_visible.mkv", variants=(("all", "a"),))
+    await seed(wire, rating_key="canon_visible.mkv", variants=(("all", "b"),), is_in_allowed_categories=False)
+    await seed(wire, rating_key="canon_hidden.mkv", variants=(("all", "a"),), is_in_allowed_categories=False)
+    await seed(wire, rating_key="canon_hidden.mkv", variants=(("all", "b"),))
+    everything = await _listed(client, keys)
+    assert {i["ratingKey"]: i["isHidden"] for i in everything["items"]} == {
+        "canon_hidden.mkv": True, "canon_visible.mkv": False,
+    }
+    visible = await _listed(client, keys, visibility="visible")
+    assert [i["ratingKey"] for i in visible["items"]] == ["canon_visible.mkv"]
 
 
 # ─── item view ──────────────────────────────────────────────────────────────

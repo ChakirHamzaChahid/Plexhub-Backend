@@ -261,14 +261,20 @@ async def list_items(
     type: Literal["movie", "show"] = Query(),
     missing_ids: Literal["any", "imdb", "tmdb"] | None = Query(default=None, alias="missingIds"),
     server_id: str | None = Query(default=None, alias="serverId", max_length=300),
+    visibility: Literal["visible", "all"] = Query(default="all"),
     limit: int = Query(default=100, ge=1, le=500),
     cursor: str | None = Query(default=None, max_length=1024),
 ):
-    """Items to complete, e.g. those with no external id at all."""
+    """Items to complete, e.g. those with no external id at all.
+
+    `visibility=visible` keeps only items whose canonical variant is in an allowed category
+    (`isHidden == false`); the default `all` lists everything (lot B3)."""
 
     async def _run():
         async with db_module.async_session_factory() as session:
-            items, next_cursor = await svc.list_items(session, type, missing_ids, server_id, limit, cursor)
+            items, next_cursor = await svc.list_items(
+                session, type, missing_ids, server_id, limit, cursor, visibility
+            )
         return {
             "schemaVersion": S.SCHEMA_VERSION,
             "items": [item_summary(i.variants, i.ctx, i.revision) for i in items],

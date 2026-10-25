@@ -20,8 +20,9 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import and_, func, or_, select, tuple_, update
+from sqlalchemy import and_, exists, func, or_, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.db.immediate_tx import DatabaseBusy, immediate_write_session
 from app.models.database import Media, MetadataEdit
@@ -239,6 +240,7 @@ async def list_items(
     server_id: str | None,
     limit: int,
     cursor: str | None,
+    visibility: str = "all",
 ) -> tuple[list[Item], str | None]:
     conditions = [Media.type == type_]
     no_imdb = or_(Media.imdb_id.is_(None), Media.imdb_id == "")
@@ -251,6 +253,16 @@ async def list_items(
         conditions.append(and_(no_imdb, no_tmdb))
     if server_id:
         conditions.append(Media.server_id == server_id)
+    if visibility == "visible":
+        # Visible <=> the CANONICAL variant (smallest filter, sort_order) is visible: the
+        # same row `context.isHidden` is read from. The outer row must be that variant.
+        sibling = aliased(Media)
+        conditions.append(Media.is_in_allowed_categories.is_(True))
+        conditions.append(~exists().where(
+            sibling.server_id == Media.server_id,
+            sibling.rating_key == Media.rating_key,
+            tuple_(sibling.filter, sibling.sort_order) < tuple_(Media.filter, Media.sort_order),
+        ))
     if cursor:
         after_server, after_key = _decode_cursor(cursor, 2)
         if not isinstance(after_server, str) or not isinstance(after_key, str):

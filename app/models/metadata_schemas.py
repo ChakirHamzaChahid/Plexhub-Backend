@@ -207,6 +207,7 @@ class ItemSummary(_Out):
     revision: str
     lock: LockState
     is_adult: bool
+    is_hidden: bool  # additive (lot B3): same value as `context.isHidden`
     season: int | None
     episode: int | None
     show_rating_key: str | None

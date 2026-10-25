@@ -83,7 +83,7 @@ Une clé **sans scope** est refusée (403) sur `/api/metadata/v1` ; une clé à 
 | X19 | Bornes et types (§ 4.7) | 400 pour les bornes, 422 pour les types | une valeur hors borne d'un champ connu est **400 `invalid_field`** (nom du champ) ; un mauvais **type** (`"7"` pour une note, `1` pour un booléen) est le **422** FastAPI ; `reason` (0..200 caractères, sans caractère de contrôle ni point de code invalide) hors bornes est un **400 `invalid_field`** (`field: "reason"`) | Les corps sont **stricts** (aucune coercition) | Envoyer des types exacts. |
 | X20 | `If-Match` (§ 4.4) | forme forte | `"rev"` ou `rev` nu accepté ; `W/…`, `*`, valeur mal formée → **400 `invalid_parameter`** ; absent → 428 | Aucun | Envoyer `"<revision>"`. |
 | X21 | Idempotence (§ 4.5) | rejeu rend la réponse enregistrée | rendue **avant** le contrôle `If-Match` (même si la révision a changé), `replayed: true` ; la clé est unique par couple (clé d'API, `Idempotency-Key`) ; une requête refusée (4xx/503) n'est pas enregistrée ; un **no-op n'est pas enregistré** (son rejeu est réévalué) | Un 503 se rejoue avec la même clé | Réutiliser la même `Idempotency-Key` après un 503/réseau. |
-| X22 | `GET /items` (§ 5.2 bis) | `limit` 1..500, `cursor` opaque | identique ; aucun filtre de visibilité (cachés, adultes, masque de panne fournisseur **inclus** : `context.isHidden`, `isAdult` exposés) | Voit tout | Filtrer côté client si besoin. |
+| X22 | `GET /items` (§ 5.2 bis) | `limit` 1..500, `cursor` opaque | identique ; **résolu par le lot B3 (2026-10-25)** : paramètre `visibility=visible\|all` (défaut `all` = comportement B2 inchangé) et champ `isHidden` dans chaque `ItemSummary`. Sans `visibility`, cachés, adultes et masque de panne fournisseur restent **inclus** | Voit tout par défaut | Passer `visibility=visible` pour n'importer que les médias visibles (voir § 5 bis). |
 | X23 | `history` d'un élément inconnu (§ 5.8) | 404 si inconnu **et** sans édition | identique ; un élément supprimé par la synchronisation garde son historique lisible | Aucun | Rien à faire. |
 | X24 | `lookup` : `type` (§ 5.2) | `movie` ou `show` | identique ; `episode` ou autre → **422** natif | Aucun | Rien à faire. |
 | X25 | Variante disparue à l'annulation | non traité | une variante de l'édition qui n'existe plus est ignorée ; si aucune n'existe plus → 409 `revert_conflict` avec `fields: ["variants"]` | Un cas de plus dans `fields` | Gérer `variants` comme valeur de `fields`. |
@@ -114,6 +114,13 @@ Une clé **sans scope** est refusée (403) sur `/api/metadata/v1` ; une clé à 
    `POST /api/accounts` vers un faux fournisseur Xtream sur `127.0.0.1` ; sous-ensemble Xtream minimal et exemple de
    réponses : runbook § 8.
 6. Respecter les limites : 1 écriture/s (le serveur tolère 90/min), corps ≤ 256 Kio, réponses ≤ 4 Mio.
+
+## 5 bis. Lot B3 (2026-10-25) — médias visibles seulement
+
+- `GET /items` accepte `visibility` : `visible` | `all`, **défaut `all`** (identique à B2). Valeur autre ⇒ 422.
+- `visible` ne garde que les items dont la **variante canonique** (plus petit `(filter, sortOrder)`, celle dont est lu `context.isHidden`) est dans une catégorie active. Règle des variantes mixtes : l'état de la variante canonique décide ; une variante secondaire cachée n'exclut pas l'item, une variante secondaire visible ne sauve pas un item dont la canonique est cachée.
+- Chaque `ItemSummary` (`/items`, `/lookup`, `/items/{s}/{r}/episodes`) porte `isHidden: bool`, égal à `context.isHidden` de l'`ItemView`. Champ additif : `SCHEMA_VERSION` inchangé, les clients existants l'ignorent.
+- Se combine avec `missingIds`, `serverId`, `limit` ; le curseur `(serverId, ratingKey)` reste stable. Les autres routes ne filtrent rien.
 
 ## 6. Réponses aux 8 questions du contrat (§ 11)
 

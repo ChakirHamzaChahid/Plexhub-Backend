@@ -64,6 +64,7 @@ async def run_migrations(engine: AsyncEngine) -> None:
     await _migration_029_scrape_cache(engine)
     await _migration_030_api_key_scopes(engine)
     await _migration_031_metadata_edits(engine)
+    await _migration_032_media_scrape_fields(engine)
 
     logger.info("All migrations completed successfully")
 
@@ -1537,3 +1538,45 @@ async def _migration_031_metadata_edits(engine: AsyncEngine) -> None:
             "CREATE UNIQUE INDEX IF NOT EXISTS ux_metadata_edits_idempotency "
             "ON metadata_edits (key_id, idempotency_key)"
         ))
+
+
+async def _migration_032_media_scrape_fields(engine: AsyncEngine) -> None:
+    """Add the lot-B4 scrape columns to `media` (ADR 0013).
+
+    Twelve nullable columns written only through the metadata API: the user-entered
+    poster/fanart URLs, the two gallery and the trailer lists (JSON text), the
+    directors/writers/spoken-languages CSVs and the Metacritic / Rotten Tomatoes
+    ratings (0..10). No `NOT NULL`, no `DEFAULT`, no backfill: NULL is the correct
+    state of every existing row (so no row is rewritten and the migration stays cheap
+    on the ~126 000-row table).
+
+    Idempotent: each column is probed (PRAGMA table_info) before ADD COLUMN, so a
+    fresh DB (already created by `Base.metadata.create_all`, CR-C05) is a silent
+    no-op; the try/except is a safety net for a race with another init_db().
+    """
+    logger.info("Migration 032: Adding scrape columns to media")
+
+    columns = (
+        ("poster_url", "TEXT"),
+        ("fanart_url", "TEXT"),
+        ("poster_gallery_json", "TEXT"),
+        ("fanart_gallery_json", "TEXT"),
+        ("available_trailers_json", "TEXT"),
+        ("directors", "TEXT"),
+        ("writers", "TEXT"),
+        ("spoken_languages", "TEXT"),
+        ("metacritic_rating", "REAL"),
+        ("metacritic_votes", "INTEGER"),
+        ("rt_rating", "REAL"),
+        ("rt_votes", "INTEGER"),
+    )
+    async with engine.begin() as conn:
+        for name, ddl in columns:
+            if await _column_exists(conn, "media", name):
+                logger.debug("Migration 032: %s already present, skipping ADD COLUMN", name)
+                continue
+            try:
+                await conn.execute(text(f"ALTER TABLE media ADD COLUMN {name} {ddl}"))
+                logger.info("Migration 032: %s column added", name)
+            except Exception as e:
+                logger.warning("Migration 032: %s may already exist: %s", name, e)

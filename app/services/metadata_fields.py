@@ -39,6 +39,7 @@ _ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}", re.ASCII)
 _MAX_VOTES = 2**31 - 1  # an INTEGER column; larger values overflow SQLite at write time
 
 _FLOAT_TOLERANCE = 1e-9
+_RATING_NAMES = ("ratings.imdb", "ratings.tmdb", "ratings.metacritic", "ratings.rottenTomatoes")
 _CAST_KEYS = ("name", "role", "thumb", "profile", "tvdbId")
 
 
@@ -109,6 +110,32 @@ def _read_cast(cast_csv: Any, cast_json: Any) -> list[dict[str, Any]]:
     ]
 
 
+def _gallery_item(raw: Any) -> str | None:
+    return _s(raw) if isinstance(raw, str) else None
+
+
+def _trailer_item(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, Mapping):
+        return None
+    name, url = _s(raw.get("name")), _s(raw.get("url"))
+    if not name or not url:
+        return None
+    return {"name": name, "url": url, "isPrimary": raw.get("isPrimary") is True}
+
+
+def _read_json_list(stored: Any, item: Any) -> list[Any]:
+    """A JSON-list column (galleries, trailers). Tolerant: invalid JSON / wrong shape reads as `[]`."""
+    if not stored:
+        return []
+    try:
+        parsed = json.loads(stored)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [e for e in (item(x) for x in parsed) if e is not None]
+
+
 def columns_to_flat(cols: Mapping[str, Any], type_: str) -> dict[str, Any]:
     """Every field of `type_` (a missing value reads as None / [])."""
     full: dict[str, Any] = {
@@ -132,6 +159,16 @@ def columns_to_flat(cols: Mapping[str, Any], type_: str) -> dict[str, Any]:
         "ratings.tmdb": _rating(cols.get("tmdb_rating"), cols.get("tmdb_votes")),
         "cast": _read_cast(cols.get("cast"), cols.get("cast_json")),
         "youtubeTrailer": _s(cols.get("youtube_trailer")),
+        "posterUrl": _s(cols.get("poster_url")),
+        "fanartUrl": _s(cols.get("fanart_url")),
+        "posterGallery": _read_json_list(cols.get("poster_gallery_json"), _gallery_item),
+        "fanartGallery": _read_json_list(cols.get("fanart_gallery_json"), _gallery_item),
+        "directors": _csv(cols.get("directors")),
+        "writers": _csv(cols.get("writers")),
+        "spokenLanguages": _csv(cols.get("spoken_languages")),
+        "availableTrailers": _read_json_list(cols.get("available_trailers_json"), _trailer_item),
+        "ratings.metacritic": _rating(cols.get("metacritic_rating"), cols.get("metacritic_votes")),
+        "ratings.rottenTomatoes": _rating(cols.get("rt_rating"), cols.get("rt_votes")),
     }
     return {name: full[name] for name in FIELDS_BY_TYPE[type_]}
 
@@ -155,7 +192,12 @@ def flat_to_nested(flat: Mapping[str, Any], *, pad: bool = True) -> dict[str, An
             {k: ids.get(k) for k in ("imdb", "tmdb", "tvdb", "wikidata")} if pad else ids
         )
     if ratings:
-        nested["ratings"] = {k: ratings.get(k) for k in ("imdb", "tmdb")} if pad else ratings
+        if pad:
+            # metacritic / rottenTomatoes (B4) exist for movie/show only: padded only when present.
+            keys = ("imdb", "tmdb", *(k for k in ("metacritic", "rottenTomatoes") if k in ratings))
+            nested["ratings"] = {k: ratings.get(k) for k in keys}
+        else:
+            nested["ratings"] = ratings
     return nested
 
 
@@ -267,6 +309,49 @@ def _https_url(name: str, value: Any, hi: int) -> str | None:
     return value
 
 
+def _url_list(name: str, value: Any) -> list[str]:
+    limits = LIMITS[name]
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise FieldError(name, "must be a list")
+    if len(value) > limits["maxItems"]:  # type: ignore[operator]
+        raise FieldError(name, f"at most {limits['maxItems']} items")
+    out: dict[str, None] = {}
+    for raw in value:
+        if raw is None:
+            raise FieldError(name, "an item must not be null")
+        out.setdefault(_https_url(name, raw, limits["urlMax"]), None)  # type: ignore[arg-type]
+    return list(out)
+
+
+def _trailers(name: str, value: Any) -> list[dict[str, Any]]:
+    limits = LIMITS[name]
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise FieldError(name, "must be a list")
+    if len(value) > limits["maxItems"]:  # type: ignore[operator]
+        raise FieldError(name, f"at most {limits['maxItems']} items")
+    out: list[dict[str, Any]] = []
+    for raw in value:
+        if not isinstance(raw, Mapping) or set(raw) - {"name", "url", "isPrimary"}:
+            raise FieldError(name, "an entry must be {name, url, isPrimary}")
+        if not isinstance(raw.get("isPrimary", False), bool):
+            raise FieldError(name, "isPrimary must be a boolean")
+        url = _https_url(name, raw.get("url"), limits["urlMax"])  # type: ignore[arg-type]
+        if url is None:
+            raise FieldError(name, "url is required")
+        out.append({
+            "name": _text(name, raw.get("name"), nullable=False, lo=limits["nameMin"], hi=limits["nameMax"]),  # type: ignore[arg-type]
+            "url": url,
+            "isPrimary": bool(raw.get("isPrimary", False)),
+        })
+    if sum(1 for e in out if e["isPrimary"]) > limits["maxPrimary"]:  # type: ignore[operator]
+        raise FieldError(name, "at most one entry may be primary")
+    return out
+
+
 def _cast(name: str, value: Any) -> list[dict[str, Any]]:
     limits = LIMITS["cast"]
     if value is None:
@@ -325,12 +410,20 @@ def _validate(name: str, value: Any) -> Any:
         return _pattern(name, value, _TVDB_RE)
     if name == "ids.wikidata":
         return _pattern(name, value, _WIKIDATA_RE)
-    if name in ("ratings.imdb", "ratings.tmdb"):
+    if name in _RATING_NAMES:
         return _rating_value(name, value)
     if name == "cast":
         return _cast(name, value)
     if name == "youtubeTrailer":
         return _pattern(name, value, _YOUTUBE_RE)
+    if name in ("posterUrl", "fanartUrl"):
+        return _https_url(name, value, lim["urlMax"])  # type: ignore[arg-type]
+    if name in ("posterGallery", "fanartGallery"):
+        return _url_list(name, value)
+    if name in ("directors", "writers", "spokenLanguages"):
+        return _list(name, value)
+    if name == "availableTrailers":
+        return _trailers(name, value)
     raise FieldError(name, "unknown field")  # pragma: no cover - guarded by caller
 
 
@@ -411,10 +504,13 @@ def field_columns(name: str, flat: Mapping[str, Any]) -> dict[str, Any]:
     value = flat[name]
     if name == "title":
         return {"title": value, "title_sortable": normalize_for_sorting(value).lower()}
-    if name in ("genres", "studios", "countries"):
+    if name in ("genres", "studios", "countries", "directors", "writers", "spokenLanguages"):
         column = FIELD_COLUMNS[name][0]
         return {column: ", ".join(value) if value else None}
-    if name in ("ratings.imdb", "ratings.tmdb"):
+    if name in ("posterGallery", "fanartGallery", "availableTrailers"):
+        column = FIELD_COLUMNS[name][0]
+        return {column: json.dumps(value, ensure_ascii=False) if value else None}
+    if name in _RATING_NAMES:
         value_col, votes_col = FIELD_COLUMNS[name]
         if value is None:
             return {value_col: None, votes_col: None}

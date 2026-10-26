@@ -39,6 +39,17 @@ FIELD_COLUMNS: dict[str, tuple[str, ...]] = {
     "title": ("title", "title_sortable"),
     "year": ("year",),
     "youtubeTrailer": ("youtube_trailer",),
+    # Lot B4 (contract plexhubTMM 17 § 4, ADR 0013): movie/show only.
+    "availableTrailers": ("available_trailers_json",),
+    "directors": ("directors",),
+    "fanartGallery": ("fanart_gallery_json",),
+    "fanartUrl": ("fanart_url",),
+    "posterGallery": ("poster_gallery_json",),
+    "posterUrl": ("poster_url",),
+    "ratings.metacritic": ("metacritic_rating", "metacritic_votes"),
+    "ratings.rottenTomatoes": ("rt_rating", "rt_votes"),
+    "spokenLanguages": ("spoken_languages",),
+    "writers": ("writers",),
 }
 
 _MOVIE_FIELDS = tuple(sorted(n for n in FIELD_COLUMNS if n != "status"))
@@ -89,5 +100,16 @@ LIMITS: dict[str, dict[str, object]] = {
         "urlMax": 2048, "urlScheme": "https", "tvdbIdPattern": r"^\d{1,12}$",
     },
     "youtubeTrailer": {"pattern": r"^[A-Za-z0-9_-]{11}$"},
+    "posterUrl": {"urlMax": 2048, "urlScheme": "https"},
+    "fanartUrl": {"urlMax": 2048, "urlScheme": "https"},
+    "posterGallery": {"maxItems": 30, "urlMax": 2048, "urlScheme": "https"},
+    "fanartGallery": {"maxItems": 30, "urlMax": 2048, "urlScheme": "https"},
+    "directors": {"maxItems": 20, "itemMin": 1, "itemMax": 200, "noComma": True},
+    "writers": {"maxItems": 20, "itemMin": 1, "itemMax": 200, "noComma": True},
+    "spokenLanguages": {"maxItems": 20, "itemMin": 1, "itemMax": 64, "noComma": True},
+    "availableTrailers": {
+        "maxItems": 20, "nameMin": 1, "nameMax": 200, "urlMax": 2048, "urlScheme": "https",
+        "maxPrimary": 1,
+    },
     "reason": {"min": 0, "max": 200},
 }

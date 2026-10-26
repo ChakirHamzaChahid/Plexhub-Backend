@@ -32,7 +32,7 @@ from app.utils.rating_blend import blend_rating
 from app.utils.unification import calculate_history_group_key, calculate_unification_id
 
 LOCK_SOURCE = "plexhubtmm"
-REVISION_FORM = 1  # bump ONLY when the set of fields entering the hash changes on purpose
+REVISION_FORM = 2  # bump ONLY when the set of fields entering the hash changes on purpose
 
 _DERIVED_BY_COLUMN = {
     "unification_id": "unificationId",

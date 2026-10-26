@@ -65,6 +65,9 @@ _ROW_COLUMNS: tuple[str, ...] = (
     "tvdb_id", "wikidata_id", "imdb_rating", "imdb_votes", "tmdb_rating", "tmdb_votes",
     "cast", "cast_json", "youtube_trailer", "unification_id", "history_group_key",
     "display_rating", "match_locked", "match_source",
+    "poster_url", "fanart_url", "poster_gallery_json", "fanart_gallery_json",
+    "available_trailers_json", "directors", "writers", "spoken_languages", "metacritic_rating",
+    "metacritic_votes", "rt_rating", "rt_votes", "resolved_thumb_url", "resolved_art_url",
 )
 
 

@@ -95,7 +95,7 @@ async def test_lookup_returns_every_match_sorted_hidden_and_adult_included(clien
     first = body["items"][0]
     assert set(first) == {
         "serverId", "ratingKey", "type", "title", "year", "ids", "unificationId", "revision",
-        "lock", "isAdult", "isHidden", "season", "episode", "showRatingKey",
+        "lock", "isAdult", "isHidden", "season", "episode", "showRatingKey", "thumbUrl", "artUrl",
     }
     assert first["isHidden"] is True
     assert by_key["vod_2.mkv"]["isHidden"] is False
@@ -270,12 +270,15 @@ async def test_item_view_has_every_field_present_and_null(client, keys, wire):
     assert set(body["fields"]) == {
         "title", "originalTitle", "summary", "tagline", "genres", "studios", "countries",
         "contentRating", "year", "premiered", "durationMs", "ids", "ratings",
-        "cast", "youtubeTrailer",
+        "cast", "youtubeTrailer", "posterUrl", "fanartUrl", "posterGallery", "fanartGallery",
+        "directors", "writers", "spokenLanguages", "availableTrailers",
     }
     f = body["fields"]
     assert f["title"] == "The Matrix" and f["genres"] == ["Action"] and f["studios"] == []
     assert f["tagline"] is None and f["ids"] == {"imdb": None, "tmdb": None, "tvdb": None, "wikidata": None}
-    assert f["ratings"] == {"imdb": None, "tmdb": None} and f["cast"] == []
+    assert f["ratings"] == {
+        "imdb": None, "tmdb": None, "metacritic": None, "rottenTomatoes": None,
+    } and f["cast"] == []
     assert body["derived"] == {
         "unificationId": "title_the_matrix_1999", "historyGroupKey": "title_the_matrix_1999",
         "titleSortable": "the matrix", "displayRating": 6.0,

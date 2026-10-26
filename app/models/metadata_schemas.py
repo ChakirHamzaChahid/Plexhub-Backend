@@ -57,6 +57,14 @@ class RatingIn(_In):
 class RatingsPatch(_In):
     imdb: RatingIn | None = None
     tmdb: RatingIn | None = None
+    metacritic: RatingIn | None = None
+    rotten_tomatoes: RatingIn | None = None
+
+
+class AvailableTrailerIn(_In):
+    name: str
+    url: str
+    is_primary: bool = False
 
 
 class CastIn(_In):
@@ -86,6 +94,14 @@ class PatchFields(_In):
     ratings: RatingsPatch | None = None
     cast: list[CastIn] | None = None
     youtube_trailer: str | None = None
+    poster_url: str | None = None
+    fanart_url: str | None = None
+    poster_gallery: list[str] | None = None
+    fanart_gallery: list[str] | None = None
+    directors: list[str] | None = None
+    writers: list[str] | None = None
+    spoken_languages: list[str] | None = None
+    available_trailers: list[AvailableTrailerIn] | None = None
 
 
 # `reason` (0..200 characters) is NOT bounded here: a pydantic length error is a 422 that echoes
@@ -138,6 +154,14 @@ class IdsOut(_Out):
 class RatingsOut(_Out):
     imdb: RatingOut | None = None
     tmdb: RatingOut | None = None
+    metacritic: RatingOut | None = None  # additive (lot B4), movie/show only
+    rotten_tomatoes: RatingOut | None = None  # additive (lot B4), movie/show only
+
+
+class AvailableTrailerOut(_Out):
+    name: str
+    url: str
+    is_primary: bool
 
 
 class EditableFields(_Out):
@@ -157,6 +181,15 @@ class EditableFields(_Out):
     ratings: RatingsOut | None = None
     cast: list[CastEntry] | None = None
     youtube_trailer: str | None = None
+    # Additive (lot B4), movie/show only: the STORED value, no fallback (contract 17 § 3).
+    poster_url: str | None = None
+    fanart_url: str | None = None
+    poster_gallery: list[str] | None = None
+    fanart_gallery: list[str] | None = None
+    directors: list[str] | None = None
+    writers: list[str] | None = None
+    spoken_languages: list[str] | None = None
+    available_trailers: list[AvailableTrailerOut] | None = None
 
 
 class Derived(_Out):
@@ -188,6 +221,8 @@ class Context(_Out):
     show_title: str | None
     updated_at: int
     duration_implausible: bool  # additive (écart X11): duration < 5 min, to be read as absent
+    thumb_url: str | None = None  # additive (lot B4): same value as `ItemSummary.thumbUrl`
+    art_url: str | None = None  # additive (lot B4)
 
 
 class ItemRef(_Out):
@@ -211,6 +246,8 @@ class ItemSummary(_Out):
     season: int | None
     episode: int | None
     show_rating_key: str | None
+    thumb_url: str | None = None  # additive (lot B4): poster_url > resolved_thumb_url, https only
+    art_url: str | None = None  # additive (lot B4): fanart_url > resolved_art_url, https only
 
 
 # ─── Responses ───────────────────────────────────────────────────────────────

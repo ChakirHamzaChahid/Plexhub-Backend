@@ -24,11 +24,14 @@ from app.services.metadata_fields import (
     normalize_patch,
 )
 
-MOVIE_FIELDS = [
+MOVIE_FIELDS = sorted([
     "cast", "contentRating", "countries", "durationMs", "genres", "ids.imdb", "ids.tmdb",
     "ids.tvdb", "ids.wikidata", "originalTitle", "premiered", "ratings.imdb", "ratings.tmdb",
     "studios", "summary", "tagline", "title", "year", "youtubeTrailer",
-]
+    # lot B4
+    "availableTrailers", "directors", "fanartGallery", "fanartUrl", "posterGallery", "posterUrl",
+    "ratings.metacritic", "ratings.rottenTomatoes", "spokenLanguages", "writers",
+])
 
 
 # ─── Tableau des champs par type (§ 6.3) ────────────────────────────────────

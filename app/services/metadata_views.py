@@ -10,11 +10,37 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit
 
 from app.models.metadata_schemas import SCHEMA_VERSION
 from app.services.aggregation_service import IMPLAUSIBLE_DURATION_MS
 from app.services.metadata_fields import changed_field_names, flat_to_nested
 from app.services.metadata_plan import Lock, Plan, VariantState, sort_variants, variant_images
+
+
+_SECRET_QUERY_KEYS = frozenset({"token", "x-plex-token", "api_key", "apikey", "password", "username"})
+
+
+def safe_image_url(value: Any) -> str | None:
+    """An image URL fit to be handed to a client (lot B4, contract 17 § 3), else None.
+
+    Only an absolute `https` URL, with a host, without credentials (`user:pass@`) and
+    without an authentication query parameter (`token`, `X-Plex-Token`, `api_key`,
+    `apikey`, `password`, `username`, case-insensitive). A relative path is never
+    rendered. Quiet: a malformed value is None, never an exception (this runs on every
+    row of `GET /items`).
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parts = urlsplit(value)
+        if parts.scheme != "https" or not parts.hostname or "@" in parts.netloc:
+            return None
+        if any(k.lower() in _SECRET_QUERY_KEYS for k, _ in parse_qsl(parts.query, keep_blank_values=True)):
+            return None
+    except ValueError:
+        return None
+    return value
 
 
 @dataclass(frozen=True)
@@ -28,6 +54,8 @@ class ItemContext:
     show_title: str | None
     updated_at: int
     duration_ms: int | None
+    thumb_url: str | None = None
+    art_url: str | None = None
 
 
 def context_from_rows(rows: Sequence[Mapping[str, Any]]) -> ItemContext:
@@ -41,6 +69,10 @@ def context_from_rows(rows: Sequence[Mapping[str, Any]]) -> ItemContext:
         show_title=canonical.get("grandparent_title") if is_episode else None,
         updated_at=max(int(r.get("updated_at") or 0) for r in rows),
         duration_ms=canonical.get("duration"),
+        # The user's entry wins over TMDB; the raw provider `thumb_url`/`art_url` are never a
+        # fallback. The chosen value is filtered: an unsafe one reads null (no fall-through).
+        thumb_url=safe_image_url(canonical.get("poster_url") or canonical.get("resolved_thumb_url")),
+        art_url=safe_image_url(canonical.get("fanart_url") or canonical.get("resolved_art_url")),
     )
 
 
@@ -100,6 +132,8 @@ def item_summary(variants: Sequence[VariantState], ctx: ItemContext, revision: s
         "season": ctx.season,
         "episode": ctx.episode,
         "showRatingKey": ctx.show_rating_key,
+        "thumbUrl": ctx.thumb_url,
+        "artUrl": ctx.art_url,
     }
 
 
@@ -122,6 +156,8 @@ def item_view(variants: Sequence[VariantState], ctx: ItemContext, revision: str)
             "episode": ctx.episode,
             "showRatingKey": ctx.show_rating_key,
             "showTitle": ctx.show_title,
+            "thumbUrl": ctx.thumb_url,
+            "artUrl": ctx.art_url,
             "updatedAt": ctx.updated_at,
             "durationImplausible": (
                 ctx.duration_ms is not None and ctx.duration_ms < IMPLAUSIBLE_DURATION_MS

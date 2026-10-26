@@ -29,6 +29,13 @@ ORIGINAL = {
     "cast": "Original Actor", "cast_json": '[{"name": "Original Actor"}]',
     "youtube_trailer": "aaaaaaaaaaa", "unification_id": "imdb://tt1111111",
     "history_group_key": "imdb://tt1111111", "display_rating": 6.5,
+    # lot B4
+    "poster_url": "https://orig.example/p.jpg", "fanart_url": "https://orig.example/f.jpg",
+    "poster_gallery_json": '["https://orig.example/p1.jpg"]',
+    "fanart_gallery_json": '["https://orig.example/f1.jpg"]',
+    "available_trailers_json": '[{"name": "O", "url": "https://orig.example/t", "isPrimary": true}]',
+    "directors": "Original Director", "writers": "Original Writer", "spoken_languages": "en",
+    "metacritic_rating": 7.1, "metacritic_votes": 71, "rt_rating": 8.1, "rt_votes": 81,
 }
 # What a provider / script would try to write instead.
 INCOMING = {
@@ -41,6 +48,13 @@ INCOMING = {
     "cast": "Provider Actor", "cast_json": '[{"name": "Provider Actor"}]',
     "youtube_trailer": "bbbbbbbbbbb", "unification_id": "imdb://tt9999999",
     "history_group_key": "imdb://tt9999999", "display_rating": 3.3,
+    # lot B4
+    "poster_url": "https://prov.example/p.jpg", "fanart_url": "https://prov.example/f.jpg",
+    "poster_gallery_json": '["https://prov.example/p1.jpg"]',
+    "fanart_gallery_json": '["https://prov.example/f1.jpg"]',
+    "available_trailers_json": '[{"name": "P", "url": "https://prov.example/t", "isPrimary": false}]',
+    "directors": "Provider Director", "writers": "Provider Writer", "spoken_languages": "fr",
+    "metacritic_rating": 1.1, "metacritic_votes": 11, "rt_rating": 2.1, "rt_votes": 21,
 }
 
 

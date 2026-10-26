@@ -118,6 +118,23 @@ class Media(Base):
     match_locked = Column(Boolean, nullable=False, default=False, server_default=text("0"))
     match_source = Column(Text)  # 'manual' | 'batch_auto' | 'batch_pair' | NULL
 
+    # Lot B4 (migration 032, ADR 0013): scrape fields written ONLY through the metadata API
+    # (`/api/metadata/v1`). All nullable, https URLs or JSON text; no automatic writer touches them.
+    # Do not confuse `poster_url`/`fanart_url` (user input) with `resolved_thumb_url`/`resolved_art_url`
+    # (TMDB, written by sync/enrichment/NFO).
+    poster_url = Column(Text)
+    fanart_url = Column(Text)
+    poster_gallery_json = Column(Text)        # JSON [url, ...]
+    fanart_gallery_json = Column(Text)        # JSON [url, ...]
+    available_trailers_json = Column(Text)    # JSON [{name, url, isPrimary}, ...]
+    directors = Column(Text)                  # CSV ", "
+    writers = Column(Text)                    # CSV ", "
+    spoken_languages = Column(Text)           # CSV ", "
+    metacritic_rating = Column(Float)         # 0..10
+    metacritic_votes = Column(Integer)
+    rt_rating = Column(Float)                 # 0..10 (Rotten Tomatoes)
+    rt_votes = Column(Integer)
+
     __table_args__ = (
         Index("uix_media_pagination", "server_id", "library_section_id", "filter", "sort_order", "page_offset", unique=True),
         Index("ix_media_guid", "guid"),

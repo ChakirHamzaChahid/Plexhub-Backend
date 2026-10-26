@@ -1,6 +1,54 @@
 {
   "components": {
     "schemas": {
+      "AvailableTrailerIn": {
+        "additionalProperties": false,
+        "properties": {
+          "isPrimary": {
+            "default": false,
+            "title": "Isprimary",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "url"
+        ],
+        "title": "AvailableTrailerIn",
+        "type": "object"
+      },
+      "AvailableTrailerOut": {
+        "additionalProperties": false,
+        "properties": {
+          "isPrimary": {
+            "title": "Isprimary",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "url",
+          "isPrimary"
+        ],
+        "title": "AvailableTrailerOut",
+        "type": "object"
+      },
       "BackupStatusResponse": {
         "additionalProperties": false,
         "properties": {
@@ -267,6 +315,17 @@
       "Context": {
         "additionalProperties": false,
         "properties": {
+          "artUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Arturl"
+          },
           "durationImplausible": {
             "title": "Durationimplausible",
             "type": "boolean"
@@ -322,6 +381,17 @@
               }
             ],
             "title": "Showtitle"
+          },
+          "thumbUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thumburl"
           },
           "updatedAt": {
             "title": "Updatedat",
@@ -549,6 +619,20 @@
       "EditableFields": {
         "additionalProperties": false,
         "properties": {
+          "availableTrailers": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/AvailableTrailerOut"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Availabletrailers"
+          },
           "cast": {
             "anyOf": [
               {
@@ -588,6 +672,20 @@
             ],
             "title": "Countries"
           },
+          "directors": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Directors"
+          },
           "durationMs": {
             "anyOf": [
               {
@@ -598,6 +696,31 @@
               }
             ],
             "title": "Durationms"
+          },
+          "fanartGallery": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fanartgallery"
+          },
+          "fanartUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fanarturl"
           },
           "genres": {
             "anyOf": [
@@ -634,6 +757,31 @@
             ],
             "title": "Originaltitle"
           },
+          "posterGallery": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Postergallery"
+          },
+          "posterUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Posterurl"
+          },
           "premiered": {
             "anyOf": [
               {
@@ -654,6 +802,20 @@
                 "type": "null"
               }
             ]
+          },
+          "spokenLanguages": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spokenlanguages"
           },
           "status": {
             "anyOf": [
@@ -712,6 +874,20 @@
               }
             ],
             "title": "Title"
+          },
+          "writers": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Writers"
           },
           "year": {
             "anyOf": [
@@ -1015,6 +1191,17 @@
       "ItemSummary": {
         "additionalProperties": false,
         "properties": {
+          "artUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Arturl"
+          },
           "episode": {
             "anyOf": [
               {
@@ -1073,6 +1260,17 @@
               }
             ],
             "title": "Showratingkey"
+          },
+          "thumbUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thumburl"
           },
           "title": {
             "anyOf": [
@@ -1446,6 +1644,20 @@
         "additionalProperties": false,
         "description": "Partial `EditableFields`: an ABSENT key is unchanged, `null` clears.",
         "properties": {
+          "availableTrailers": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/AvailableTrailerIn"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Availabletrailers"
+          },
           "cast": {
             "anyOf": [
               {
@@ -1485,6 +1697,20 @@
             ],
             "title": "Countries"
           },
+          "directors": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Directors"
+          },
           "durationMs": {
             "anyOf": [
               {
@@ -1495,6 +1721,31 @@
               }
             ],
             "title": "Durationms"
+          },
+          "fanartGallery": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fanartgallery"
+          },
+          "fanartUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fanarturl"
           },
           "genres": {
             "anyOf": [
@@ -1531,6 +1782,31 @@
             ],
             "title": "Originaltitle"
           },
+          "posterGallery": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Postergallery"
+          },
+          "posterUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Posterurl"
+          },
           "premiered": {
             "anyOf": [
               {
@@ -1551,6 +1827,20 @@
                 "type": "null"
               }
             ]
+          },
+          "spokenLanguages": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spokenlanguages"
           },
           "status": {
             "anyOf": [
@@ -1609,6 +1899,20 @@
               }
             ],
             "title": "Title"
+          },
+          "writers": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Writers"
           },
           "year": {
             "anyOf": [
@@ -1813,6 +2117,26 @@
               }
             ]
           },
+          "metacritic": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RatingOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "rottenTomatoes": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RatingOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "tmdb": {
             "anyOf": [
               {
@@ -1831,6 +2155,26 @@
         "additionalProperties": false,
         "properties": {
           "imdb": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RatingIn"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "metacritic": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RatingIn"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "rottenTomatoes": {
             "anyOf": [
               {
                 "$ref": "#/components/schemas/RatingIn"
@@ -4601,6 +4945,6 @@
       }
     }
   },
-  "x-revision-form": 1,
+  "x-revision-form": 2,
   "x-schema-version": 1
 }

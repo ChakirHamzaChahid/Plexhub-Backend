@@ -4,7 +4,7 @@ argument-hint: [IDs de tickets, optionnel — défaut = tous les tickets prêts]
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash, Task, Agent
 ---
 
-> 🟢 **PlexHub Backend — FastAPI/Python 3.13.** Dév **directement sur `develop`** (pas de branche par tâche ; `main` = release only). Lis `.claude/WORKFLOWS.md` (garde-fous + **politique de routage modèle×effort** — skill `model-effort-routing`) + `CLAUDE.md` §2/§3/§5/§9. Validation d'un lot = `pytest -v` + boot `uvicorn app.main:app` + `GET /api/health` 200 + migrations idempotentes + `ruff check`.
+> 🟢 **PlexHub Backend — FastAPI/Python 3.12-3.13.** Dév **directement sur `develop`** (pas de branche par tâche ; `main` = release only). Lis `.claude/WORKFLOWS.md` (garde-fous + **politique de routage modèle×effort** — skill `model-effort-routing`) + `CLAUDE.md` §2/§3/§5 + `.claude/skills/pitfalls/`. Validation ticket = `python .claude/tools/dod-gate.py run --fast` ; lot = `python .claude/tools/dod-gate.py run` + migrations idempotentes.
 
 # /app-build — Exécuter le sprint
 
@@ -27,7 +27,7 @@ Tickets (optionnel, défaut = tous les tickets prêts) : $ARGUMENTS
    - Spawn immédiatement un `code-reviewer` sur le **lot de commits du ticket** (`git log`/`git diff` des commits du ticket sur `develop`) — n'attends pas les autres devs. Ajoute `security-reviewer` si la surface est sensible (auth, secrets, entrée utilisateur, CORS, écriture disque). Les reviewers sont en lecture seule : plusieurs peuvent tourner en parallèle, et un reviewer peut tourner pendant que le dev suivant écrit, **à condition de relire des commits figés** (`git show <sha>`), jamais l'arbre de travail.
 
 4. **Traiter les verdicts.**
-   - `APPROVED` → spawn `tech-manager` pour le **gate de lot** (DoD : `pytest -v` vert · boot `uvicorn app.main:app` · `GET /api/health` 200 · migrations rejouables · `ruff check` propre · OpenAPI à jour si l'API change). Gate vert → la ligne passe `review → qa`.
+   - `APPROVED` → **gate de lot** par la session principale (`python .claude/tools/dod-gate.py run` + `python .claude/tools/dod-gate.py verify --full` + migrations rejouables + OpenAPI à jour si l'API change). Gate vert → la ligne passe `review → qa` (ou `done` si QA non requise).
    - `REQUEST CHANGES` → **nouveau** sous-agent dev (jamais la suite de la conversation qui a échoué) avec les notes bloquantes : tentative 2 puis 3 du compteur unique (`model-effort-routing` §4 : effort `high`, puis modèle +1 ou spécialiste domaine). Trace le compteur dans la colonne `Notes` du board : `cycles=N`.
    - **Cap : 2 cycles de review.** Au 3ᵉ `REQUEST CHANGES`, stoppe la boucle pour ce ticket, statut `blocked`, et remonte à l'utilisateur l'historique complet reviewer + dev. Pas d'auto-retry au-delà.
 

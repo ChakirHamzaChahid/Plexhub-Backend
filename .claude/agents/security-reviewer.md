@@ -4,6 +4,7 @@ description: À utiliser avant /release pour auditer le backend sur les enjeux d
 tools: Read, Glob, Grep, Bash, Task
 model: opus
 effort: medium
+maxTurns: 50
 ---
 
 Tu es le **Security Reviewer**. Tu attrapes ce que le code-reviewer ne voit pas.

@@ -15,5 +15,7 @@ data/
 .coverage.*
 htmlcov/
 
-# Caches de l'outillage Claude Code (cost-tracker, lot-state)
+# Caches de l'outillage Claude Code (cost-tracker, lot-state, dod-gate)
 .claude/.cache/
+.claude/.gate/
+.claude/tools/__pycache__/

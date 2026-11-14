@@ -10,6 +10,7 @@ Usage :
   python .claude/tools/cost-tracker.py hook            # hook Stop (stdin JSON)
   python .claude/tools/cost-tracker.py scan <t.jsonl>  # rejoue un transcript, affiche la ligne
   python .claude/tools/cost-tracker.py report [--weeks N] [--session ID]
+  python .claude/tools/cost-tracker.py lot [--session ID]   # ligne pour le journal (/lot)
 
 Sortie : .claude/.cache/costs.jsonl — UNE ligne par session (réécrite à chaque
 Stop, valeurs cumulées). Le hook n'échoue jamais (exit 0, silencieux).
@@ -193,10 +194,19 @@ def _fmt(n):
     return "{:,}".format(n).replace(",", " ")
 
 
+CACHE_ALERT = 80  # %, seuil de la doc Anthropic
+
+
+def _hit(a):
+    """Taux de lecture de cache : cr / (in + cw + cr), en %."""
+    den = a["in"] + a["cw"] + a["cr"]
+    return 100.0 * a["cr"] / den if den else 0.0
+
+
 def _line(label, a, width=34):
-    return "  %-*s in %10s  out %9s  cw %11s  cr %13s  msg %5s" % (
+    return "  %-*s in %10s  out %9s  cw %11s  cr %13s  msg %5s  cache %5.1f %%" % (
         width, label[:width], _fmt(a["in"]), _fmt(a["out"]), _fmt(a["cw"]),
-        _fmt(a["cr"]), _fmt(a["n"]))
+        _fmt(a["cr"]), _fmt(a["n"]), _hit(a))
 
 
 def cmd_report(argv):
@@ -238,12 +248,56 @@ def cmd_report(argv):
             for k, v in sorted(d.items(), key=lambda kv: -(kv[1]["out"] + kv[1]["in"] + kv[1]["cw"])):
                 print(_line(k, v))
         print()
-    print("in = input non caché, out = output, cw = écriture cache, cr = lecture cache.")
+    print("in = input non caché, out = output, cw = écriture cache, cr = lecture cache, "
+          "cache = cr / (in + cw + cr).")
+    return 0
+
+
+def _ctx(a):
+    return (a["in"] + a["cw"] + a["cr"]) / max(a["n"], 1) / 1000
+
+
+def cmd_lot(argv):
+    """Ligne Markdown des couts d'une session, a coller dans le journal (/lot).
+
+    Par defaut : la session mise a jour le plus recemment (celle qui tourne).
+    Les valeurs sont cumulees sur la session : une session par lot.
+    """
+    only = argv[argv.index("--session") + 1] if "--session" in argv else None
+    try:
+        with open(_out_path(), encoding="utf-8") as fh:
+            rows = [json.loads(x) for x in fh if x.strip()]
+    except OSError:
+        print("Aucune donnee : %s absent." % _out_path())
+        return 1
+    if only:
+        rows = [r for r in rows if r["session_id"].startswith(only)]
+    if not rows:
+        print("Aucune session trouvee.")
+        return 1
+    r = max(rows, key=lambda x: x.get("ts", ""))
+    m, s = r["totals"]["main"], r["totals"]["sub"]
+    def tot(a):
+        return (a["in"] + a["cw"] + a["cr"]) / 1e6
+    parts = []
+    for k, v in sorted(r["subagents"].items(), key=lambda kv: -tot(kv[1])):
+        agent, model = (k.split("|", 1) + ["?"])[:2]
+        parts.append("`%s` %s %d tours ~%.0fk/tour" % (agent, model.replace("claude-", ""), v["n"], _ctx(v)))
+    models = "/".join(k.replace("claude-", "") for k in sorted(r.get("main", {})) if not k.startswith("<")) or "?"
+    # Seuil Anthropic (doc « Optimizing for cost and intelligence ») : sous ~80 % de lecture, le cache est casse.
+    low = [lbl for lbl, a in (("principale", m), ("sous-agents", s)) if a["n"] and _hit(a) < CACHE_ALERT]
+    print("- **Couts** (cost-tracker, session `%s`, cumul) : principale %s %d tours ~%.0fk/tour (%.1f M, cache %.0f %%) ; "
+          "sous-agents %d tours, %.1f M (cache %.0f %%)%s%s" % (
+              r["session_id"][:8], models, m["n"], _ctx(m), tot(m), _hit(m), s["n"], tot(s), _hit(s),
+              (" — " + " ; ".join(parts)) if parts else "",
+              (" — ⚠️ cache < %d %% (%s) : chercher ce qui casse le cache" % (CACHE_ALERT, ", ".join(low))) if low else ""))
     return 0
 
 
 def main(argv):
     cmd = argv[0] if argv else "report"
+    if cmd == "lot":
+        return cmd_lot(argv[1:])
     if cmd == "hook":
         return cmd_hook()
     if cmd == "scan":

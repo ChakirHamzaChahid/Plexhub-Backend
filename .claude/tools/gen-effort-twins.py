@@ -1,25 +1,16 @@
 #!/usr/bin/env python3
 """gen-effort-twins — jumeaux d'effort des sous-agents Claude Code.
 
-POURQUOI (décision de Chakir, 2026-09-23) : chaque tâche est évaluée pour choisir
-son modèle (haiku/sonnet/opus) ET son effort (medium/high). Le modèle se choisit
-à l'appel (paramètre `model:` de l'outil Agent), mais l'effort NE PEUT PAS l'être :
-il est figé dans le frontmatter de l'agent (doc Claude Code « sub-agents »).
-D'où deux fiches par agent :
+Chaque agent existe en :
   - `<agent>.md`       = SOURCE, `effort: medium` (seule fiche à éditer)
-  - `<agent>-high.md`  = GÉNÉRÉE par ce script, identique à `effort: high` près
-Choisir l'effort d'une tâche = choisir la fiche ; choisir le modèle = `model:`.
+  - `<agent>-high.md`  = GÉNÉRÉE par ce script (`effort: high`)
+  - `<agent>-low.md`   = GÉNÉRÉE, `effort: low`, pour les agents de LOW_AGENTS seulement
+                         (pilote : tickets vérifiables, cf. model-effort-routing)
 
 Usage :
   python .claude/tools/gen-effort-twins.py           # (re)génère tous les jumeaux
-  python .claude/tools/gen-effort-twins.py --check   # échoue si un jumeau manque,
-                                                      # est périmé ou orphelin, ou si
-                                                      # une fiche de base n'est pas en medium
-  python .claude/tools/gen-effort-twins.py --init    # pose `effort: medium` sur les
-                                                      # fiches de base, puis génère
-
-Le script ne SUPPRIME jamais de fichier : un jumeau orphelin est signalé, à toi de
-le retirer.
+  python .claude/tools/gen-effort-twins.py --check   # échoue si un jumeau manque, périmé ou orphelin
+  python .claude/tools/gen-effort-twins.py --init    # pose `effort: medium` sur les fiches de base
 """
 from __future__ import annotations
 
@@ -32,6 +23,16 @@ AGENTS = ROOT / ".claude" / "agents"
 SUFFIX = "-high"
 BASE_EFFORT = "medium"
 TWIN_EFFORT = "high"
+LOW_AGENTS = {"backend-developer"}
+VARIANTS = [
+    ("-high", "high", None, "Variante EFFORT HIGH de `{name}` (invoquer seulement si la grille model-effort-routing le décide) — "),
+    ("-low", "low", LOW_AGENTS, "Variante EFFORT LOW de `{name}` (pilote : ticket vérifiable seulement, C2 ≤ 1, C3 = 0, C4 = 0 ; cf. model-effort-routing) — "),
+]
+LOW_NOTE = (
+    "\n> **Effort low (pilote).** Avant de rendre la main, lance réellement "
+    "`python .claude/tools/dod-gate.py run --fast` et lis son verdict : une relecture ou un contrôle "
+    "de syntaxe ne remplace pas la DoD. DoD rouge → corrige ou signale-le dans ton rapport.\n"
+)
 MARK = (
     "<!-- GÉNÉRÉ par .claude/tools/gen-effort-twins.py depuis {src} — NE PAS ÉDITER : "
     "modifie la fiche de base puis relance le script. -->"
@@ -68,23 +69,30 @@ def read(p: Path) -> tuple[str, str]:
 
 
 def bases() -> list[Path]:
-    return sorted(p for p in AGENTS.glob("*.md") if not p.stem.endswith(SUFFIX))
+    return sorted(p for p in AGENTS.glob("*.md")
+                  if not any(p.stem.endswith(s) for s, _, _, _ in VARIANTS))
 
 
-def render_twin(base: Path) -> tuple[str, str]:
+def variants_for(base: Path):
+    return [v for v in VARIANTS if v[2] is None or base.stem in v[2]]
+
+
+def render_twin(base: Path, variant=None) -> tuple[str, str]:
+    suffix, effort, _, label = variant or VARIANTS[0]
     text, nl = read(base)
     fm, body = split(text)
     name = get_field(fm, "name") or base.stem
     desc = get_field(fm, "description") or ""
-    prefix = f"Variante EFFORT HIGH de `{name}` (invoquer seulement si la grille model-effort-routing le décide) — "
+    prefix = label.format(name=name)
     if desc[:1] in ("'", '"'):
         new_desc = desc[0] + prefix + desc[1:]
     else:
         new_desc = prefix + desc
-    fm2 = set_field(fm, "name", name + SUFFIX)
-    fm2 = set_field(fm2, "effort", TWIN_EFFORT)
+    fm2 = set_field(fm, "name", name + suffix)
+    fm2 = set_field(fm2, "effort", effort)
     fm2 = set_field(fm2, "description", new_desc)
-    out = f"---\n{fm2}\n---\n{MARK.format(src=base.name)}\n{body}"
+    note = LOW_NOTE if suffix == "-low" else ""
+    out = f"---\n{fm2}\n---\n{MARK.format(src=base.name)}\n{note}{body}"
     return out, nl
 
 
@@ -104,13 +112,14 @@ def init_bases() -> None:
 def generate() -> int:
     n = 0
     for b in bases():
-        twin = b.with_name(b.stem + SUFFIX + ".md")
-        text, nl = render_twin(b)
-        current = read(twin)[0] if twin.exists() else None
-        if current != text:
-            write(twin, text, nl)
-            print(f"jumeau: {twin.name} {'mis à jour' if current else 'créé'}")
-            n += 1
+        for v in variants_for(b):
+            twin = b.with_name(b.stem + v[0] + ".md")
+            text, nl = render_twin(b, v)
+            current = read(twin)[0] if twin.exists() else None
+            if current != text:
+                write(twin, text, nl)
+                print(f"jumeau: {twin.name} {'mis à jour' if current else 'créé'}")
+                n += 1
     for o in orphans():
         print(f"ORPHELIN (à supprimer à la main) : {o.name}")
     print(f"{len(bases())} fiches de base, {n} jumeau(x) écrit(s).")
@@ -119,7 +128,13 @@ def generate() -> int:
 
 def orphans() -> list[Path]:
     names = {b.stem for b in bases()}
-    return [t for t in sorted(AGENTS.glob(f"*{SUFFIX}.md")) if t.stem[: -len(SUFFIX)] not in names]
+    out = []
+    for s, _, allowed, _ in VARIANTS:
+        for t in sorted(AGENTS.glob(f"*{s}.md")):
+            base = t.stem[: -len(s)]
+            if base not in names or (allowed is not None and base not in allowed):
+                out.append(t)
+    return out
 
 
 def check() -> int:
@@ -128,11 +143,12 @@ def check() -> int:
         fm, _ = split(read(b)[0])
         if get_field(fm, "effort") != BASE_EFFORT:
             errors.append(f"{b.name} : effort de base != {BASE_EFFORT}")
-        twin = b.with_name(b.stem + SUFFIX + ".md")
-        if not twin.exists():
-            errors.append(f"{twin.name} : jumeau absent")
-        elif read(twin)[0] != render_twin(b)[0]:
-            errors.append(f"{twin.name} : jumeau périmé (relance le script)")
+        for v in variants_for(b):
+            twin = b.with_name(b.stem + v[0] + ".md")
+            if not twin.exists():
+                errors.append(f"{twin.name} : jumeau absent")
+            elif read(twin)[0] != render_twin(b, v)[0]:
+                errors.append(f"{twin.name} : jumeau périmé (relance le script)")
     errors += [f"{o.name} : jumeau orphelin" for o in orphans()]
     if errors:
         print("gen-effort-twins --check : ÉCHEC")

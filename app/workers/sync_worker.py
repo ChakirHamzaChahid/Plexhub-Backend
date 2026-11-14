@@ -4,13 +4,14 @@ import json
 import logging
 from types import SimpleNamespace
 
+import httpx
 from sqlalchemy import select, delete, update, func, case
 from sqlalchemy.dialects.sqlite import insert as sqlite_upsert
 
 from app.db.database import async_session_factory
 from app.models.database import Media, XtreamAccount, EnrichmentQueue, LiveChannel
 from app.services.metadata_columns import METADATA_WRITABLE_COLUMNS
-from app.services.xtream_service import xtream_service
+from app.services.xtream_service import safe_xtream_error, xtream_service
 from app.utils.string_normalizer import (
     clean_title,
     normalize_for_sorting,
@@ -1123,7 +1124,7 @@ async def _fetch_streams_by_categories(
                 return await fetch_fn(account, category_id=cat_id)
         except Exception as e:
             failed_ids.add(str(cat_id))
-            logger.warning(f"Failed to fetch {content_type} category {cat_id}: {e}")
+            logger.warning(f"Failed to fetch {content_type} category {cat_id}: {safe_xtream_error(e)}")
             return []
 
     tasks = [_fetch_one(cat_id) for cat_id in category_ids]
@@ -1157,7 +1158,7 @@ async def _refresh_categories(db, account, account_id: str):
         series_cats = await xtream_service.get_series_categories(account)
         live_cats = await xtream_service.get_live_categories(account)
     except Exception as e:
-        logger.warning(f"Failed to fetch categories for account {account_id}: {e}")
+        logger.warning(f"Failed to fetch categories for account {account_id}: {safe_xtream_error(e)}")
         return
 
     now = now_ms()
@@ -1307,7 +1308,7 @@ async def sync_account(account_id: str, job_id: str | None = None):
                     else:
                         vod_streams = await xtream_service.get_vod_streams(account_snapshot)
                 except Exception as e:
-                    logger.error(f"Failed to fetch VOD streams: {e}")
+                    logger.error(f"Failed to fetch VOD streams: {safe_xtream_error(e)}")
                     vod_streams = []
                     vod_failed_cats = set()  # whole-type failure: empty keys -> no cleanup
 
@@ -1357,7 +1358,7 @@ async def sync_account(account_id: str, job_id: str | None = None):
                             try:
                                 vod_info = await xtream_service.get_vod_info(account_snapshot, vod_id=dto["stream_id"])
                             except Exception as e:
-                                logger.warning(f"Failed to fetch vod_info for stream {dto.get('stream_id')}: {e}")
+                                logger.warning(f"Failed to fetch vod_info for stream {dto.get('stream_id')}: {safe_xtream_error(e)}")
                         # Mapping happens outside semaphore — frees a slot sooner
                         row = map_vod_to_media(dto, account_id, index, vod_info)
                         row["dto_hash"] = dto_hash
@@ -1430,7 +1431,7 @@ async def sync_account(account_id: str, job_id: str | None = None):
                     else:
                         series_list = await xtream_service.get_series(account_snapshot)
                 except Exception as e:
-                    logger.error(f"Failed to fetch series: {e}")
+                    logger.error(f"Failed to fetch series: {safe_xtream_error(e)}")
                     series_list = []
                     series_failed_cats = set()
 
@@ -1562,7 +1563,7 @@ async def sync_account(account_id: str, job_id: str | None = None):
                             )
                     except Exception as e:
                         logger.warning(
-                            f"Failed to fetch series_info for series {series_dto.get('series_id')}: {e}"
+                            f"Failed to fetch series_info for series {series_dto.get('series_id')}: {safe_xtream_error(e)}"
                         )
                         return False, [], None
 
@@ -1685,7 +1686,7 @@ async def sync_account(account_id: str, job_id: str | None = None):
                     else:
                         live_streams = await xtream_service.get_live_streams(account_snapshot)
                 except Exception as e:
-                    logger.error(f"Failed to fetch live streams: {e}")
+                    logger.error(f"Failed to fetch live streams: {safe_xtream_error(e)}")
                     live_streams = []
                     live_failed_cats = set()
 
@@ -1811,9 +1812,13 @@ async def sync_account(account_id: str, job_id: str | None = None):
                 sync_result = "success"
 
         except Exception as e:
-            logger.error(f"Sync failed for account {account_id}: {e}", exc_info=True)
+            err_msg = safe_xtream_error(e) if isinstance(e, httpx.HTTPError) else str(e)
+            logger.error(
+                f"Sync failed for account {account_id}: {err_msg}",
+                exc_info=not isinstance(e, httpx.HTTPError),
+            )
             job_registry.update_job(
-                job_id, status="failed", progress={"error": str(e)}, error=str(e),
+                job_id, status="failed", progress={"error": err_msg}, error=err_msg,
             )
             sync_result = "error"
         finally:

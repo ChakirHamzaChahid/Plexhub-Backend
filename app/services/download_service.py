@@ -460,6 +460,7 @@ async def download_to_disk(
             # 3xx is a permanent failure" behaviour.
             redirects_left = settings.DOWNLOAD_MAX_REDIRECTS
             while True:
+                await _assert_public_redirect_host(httpx.URL(url).host)
                 async with client.stream("GET", url, headers=headers) as resp:
                     if resp.status_code in (301, 302, 303, 307, 308):
                         location = resp.headers.get("location")
@@ -533,12 +534,19 @@ async def download_to_disk(
                     bytes_total = _parse_bytes_total(resp.headers, resume_from)
                     bytes_done = resume_from
 
-                    f = open(part, mode)
+                    f = await asyncio.to_thread(open, part, mode)
+
+                    def _flush_and_close(fh) -> None:
+                        try:
+                            fh.flush()
+                        finally:
+                            fh.close()
+
                     try:
                         async for chunk in resp.aiter_bytes(chunk_bytes):
                             if not chunk:
                                 continue
-                            f.write(chunk)
+                            await asyncio.to_thread(f.write, chunk)
                             bytes_done += len(chunk)
                             # S5.2 (AUDIT-P8-002/F-103): count REAL bytes
                             # transferred over the wire this call, not the
@@ -554,8 +562,7 @@ async def download_to_disk(
                             if cancel_check is not None and await cancel_check():
                                 raise DownloadCanceled("canceled")
                     finally:
-                        f.flush()
-                        f.close()
+                        await asyncio.to_thread(_flush_and_close, f)
 
                     await asyncio.to_thread(os.replace, part, dest)
                     return DownloadResult(

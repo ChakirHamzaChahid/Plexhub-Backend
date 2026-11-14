@@ -14,6 +14,7 @@ from app.models.schemas import (
 )
 from app.services import account_service
 from app.utils.db_retry import commit_with_retry, write_with_retry
+from app.utils.ssrf import SsrfBlockedError
 from app.utils.tasks import create_background_task
 
 logger = logging.getLogger("plexhub.api.accounts")
@@ -34,7 +35,7 @@ async def create_account(
         account = await account_service.create_account(db, body)
     except account_service.AccountAlreadyExistsError:
         raise HTTPException(409, "Account already exists")
-    except account_service.AccountAuthenticationError as e:
+    except (account_service.AccountAuthenticationError, SsrfBlockedError) as e:
         raise HTTPException(400, f"Authentication failed: {e}")
 
     # AUDIT-P1-001 (S3.3) — deliberately NOT converted to write_with_retry.
@@ -82,6 +83,8 @@ async def update_account(
         updated = await write_with_retry(_work, op="accounts.update_account")
     except account_service.AccountNotFoundError:
         raise HTTPException(404, "Account not found")
+    except SsrfBlockedError as e:
+        raise HTTPException(400, str(e))
     return updated
 
 

@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import logging
 
+import httpx
 from sqlalchemy import select, delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,8 +26,9 @@ from app.models.database import (
 )
 from app.models.schemas import AccountCreate, AccountUpdate
 from app.services.xtream_credentials import XtreamCredentials
-from app.services.xtream_service import xtream_service
+from app.services.xtream_service import safe_xtream_error, xtream_service
 from app.utils.server_id import build_server_id
+from app.utils.ssrf import assert_public_host
 from app.utils.time import now_ms
 
 logger = logging.getLogger("plexhub.services.account")
@@ -64,6 +66,8 @@ async def create_account(db: AsyncSession, body: AccountCreate) -> XtreamAccount
     if existing.scalars().first():
         raise AccountAlreadyExistsError(account_id)
 
+    await assert_public_host(httpx.URL(body.base_url).host)
+
     credentials = XtreamCredentials(
         base_url=body.base_url,
         port=body.port,
@@ -74,6 +78,8 @@ async def create_account(db: AsyncSession, body: AccountCreate) -> XtreamAccount
         auth_data = await xtream_service.authenticate(credentials)
         user_info = auth_data.get("user_info", {})
         server_info = auth_data.get("server_info", {})
+    except httpx.HTTPError as e:
+        raise AccountAuthenticationError(safe_xtream_error(e)) from e
     except Exception as e:
         raise AccountAuthenticationError(str(e)) from e
 
@@ -118,6 +124,8 @@ async def update_account(
         raise AccountNotFoundError(account_id)
 
     update_data = body.model_dump(exclude_unset=True)
+    if "base_url" in update_data and update_data["base_url"] is not None:
+        await assert_public_host(httpx.URL(update_data["base_url"]).host)
     if update_data:
         await db.execute(
             update(XtreamAccount)
@@ -182,6 +190,6 @@ async def test_account_connection(db: AsyncSession, account_id: str) -> dict:
     try:
         auth_data = await xtream_service.authenticate(account)
     except Exception as e:
-        raise AccountAuthenticationError(str(e)) from e
+        raise AccountAuthenticationError(safe_xtream_error(e)) from e
 
     return auth_data.get("user_info", {})

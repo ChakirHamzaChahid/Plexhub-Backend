@@ -234,3 +234,27 @@ def trailer_dir(tmp_path, monkeypatch):
     d.mkdir()
     monkeypatch.setattr(settings, "TRAILER_CACHE_DIR", str(d))
     return d
+
+
+@pytest.fixture(autouse=True)
+def _stub_example_dns(monkeypatch):
+    """Resolve synthetic RFC-2606 `.example` hosts to a public IP in offline
+    tests so the SSRF guard (`app.utils.ssrf`) lets mocked `respx` calls
+    through, while private IPs (`127.0.0.1`, `169.254.169.254`, ...) still
+    hit real `socket.getaddrinfo` and are rejected. Tests that explicitly
+    monkeypatch `socket.getaddrinfo` (e.g. `tests/test_ssrf.py`) override
+    this cleanly."""
+    import socket
+    from app.utils import ssrf
+
+    ssrf.clear_cache()
+    real_getaddrinfo = socket.getaddrinfo
+
+    def _getaddrinfo(host, port, *args, **kwargs):
+        if isinstance(host, str) and host.lower().endswith(".example"):
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
+        return real_getaddrinfo(host, port, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", _getaddrinfo)
+    yield
+    ssrf.clear_cache()

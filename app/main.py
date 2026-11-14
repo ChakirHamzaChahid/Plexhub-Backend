@@ -192,7 +192,7 @@ async def _auto_provision_xtream_account():
     from app.db.database import async_session_factory
     from app.models.database import XtreamAccount
     from app.services.xtream_credentials import XtreamCredentials
-    from app.services.xtream_service import xtream_service
+    from app.services.xtream_service import safe_xtream_error, xtream_service
 
     account_id = hashlib.md5(
         f"{settings.XTREAM_BASE_URL}{settings.XTREAM_USERNAME}".encode()
@@ -220,7 +220,7 @@ async def _auto_provision_xtream_account():
             user_info = auth_data.get("user_info", {})
             server_info = auth_data.get("server_info", {})
         except Exception as e:
-            logger.error(f"Xtream auto-provision auth failed: {e}")
+            logger.error(f"Xtream auto-provision auth failed: {safe_xtream_error(e)}")
             return
 
         account = XtreamAccount(

@@ -68,3 +68,39 @@ async def test_request_id_echoed_in_response_header(api_client, db_factory, monk
     monkeypatch.setattr(db_module, "async_session_factory", db_factory)
     resp = await api_client.get("/api/health", headers={"X-Request-ID": "abc-123"})
     assert resp.headers.get("X-Request-ID") == "abc-123"
+
+
+async def test_health_uses_ttl_cache_and_graceful_fallback(api_client, db_factory, monkeypatch):
+    """CR-O01: repeated /api/health calls within TTL hit the in-memory cache
+    without querying SQLite, and DB errors fall back gracefully to 200."""
+    from app.api import health as health_module
+
+    health_module._stats_cache.clear()
+    monkeypatch.setattr(db_module, "async_session_factory", db_factory)
+
+    calls = {"n": 0}
+    real_fetch = health_module._fetch_health_stats
+
+    async def _counting_fetch():
+        calls["n"] += 1
+        return await real_fetch()
+
+    monkeypatch.setattr(health_module, "_fetch_health_stats", _counting_fetch)
+
+    r1 = await api_client.get("/api/health")
+    r2 = await api_client.get("/api/health")
+    assert r1.status_code == 200
+    assert r2.status_code == 200
+    assert calls["n"] == 1  # second call served from TTL cache
+
+    # Simulate DB failure on cold cache -> must still return 200 with zeros.
+    health_module._stats_cache.clear()
+
+    async def _boom():
+        raise RuntimeError("pool exhausted")
+
+    monkeypatch.setattr(health_module, "_fetch_health_stats", _boom)
+    r3 = await api_client.get("/api/health")
+    assert r3.status_code == 200
+    assert r3.json()["status"] == "ok"
+    assert r3.json()["accounts"] == 0

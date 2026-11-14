@@ -51,8 +51,12 @@ def generate_account_id(base_url: str, username: str) -> str:
     return hashlib.md5(raw.encode()).hexdigest()[:8]
 
 
-async def create_account(db: AsyncSession, body: AccountCreate) -> XtreamAccount:
-    """Authenticate against Xtream and stage a new account row.
+async def prepare_account_create(db: AsyncSession, body: AccountCreate) -> dict:
+    """Validate, check duplicates/SSRF, and authenticate against Xtream.
+
+    Returns a plain dict of ``XtreamAccount`` column values so persistence
+    can run inside ``write_with_retry`` on a fresh session without replaying
+    the external Xtream authentication call on lock retries.
 
     Raises:
         AccountAlreadyExistsError: an account with this (base_url, username) exists.
@@ -83,27 +87,37 @@ async def create_account(db: AsyncSession, body: AccountCreate) -> XtreamAccount
     except Exception as e:
         raise AccountAuthenticationError(str(e)) from e
 
-    account = XtreamAccount(
-        id=account_id,
-        label=body.label,
-        base_url=body.base_url,
-        port=body.port,
-        username=body.username,
-        password=body.password,
-        status=user_info.get("status", "Unknown"),
-        expiration_date=int(user_info["exp_date"]) * 1000
+    return {
+        "id": account_id,
+        "label": body.label,
+        "base_url": body.base_url,
+        "port": body.port,
+        "username": body.username,
+        "password": body.password,
+        "status": user_info.get("status", "Unknown"),
+        "expiration_date": int(user_info["exp_date"]) * 1000
         if user_info.get("exp_date")
         else None,
-        max_connections=int(user_info.get("max_connections", 1)),
-        allowed_formats=",".join(user_info.get("allowed_output_formats", [])),
-        server_url=server_info.get("url"),
-        https_port=int(server_info["https_port"])
+        "max_connections": int(user_info.get("max_connections", 1)),
+        "allowed_formats": ",".join(user_info.get("allowed_output_formats", [])),
+        "server_url": server_info.get("url"),
+        "https_port": int(server_info["https_port"])
         if server_info.get("https_port")
         else None,
-        is_active=True,
-        created_at=now_ms(),
-    )
+        "is_active": True,
+        "created_at": now_ms(),
+    }
 
+
+async def create_account(db: AsyncSession, body: AccountCreate) -> XtreamAccount:
+    """Authenticate against Xtream and stage a new account row.
+
+    Raises:
+        AccountAlreadyExistsError: an account with this (base_url, username) exists.
+        AccountAuthenticationError: Xtream authentication failed.
+    """
+    values = await prepare_account_create(db, body)
+    account = XtreamAccount(**values)
     db.add(account)
     return account
 

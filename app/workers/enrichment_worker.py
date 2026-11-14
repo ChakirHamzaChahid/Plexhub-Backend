@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import httpx
 from rapidfuzz import fuzz
@@ -9,7 +9,7 @@ from rapidfuzz import fuzz
 from sqlalchemy import func, select, update
 
 from app.config import settings
-from app.db.database import async_session_factory
+from app.db.database import worker_session_factory
 from app.models.database import Media, EnrichmentQueue, XtreamAccount
 from app.services import scrape_cache_service as scrape_cache
 from app.services import omdb_scrape_cache_service as omdb_scrape_cache
@@ -18,7 +18,7 @@ from app.services.omdb_service import OMDbData, omdb_service
 from app.services.tmdb_service import TMDBEnrichmentData, TMDBSearchOutcome, tmdb_service
 from app.utils.string_normalizer import normalize_for_sorting
 from app.utils.time import now_ms
-from app.utils.db_retry import commit_with_retry, write_with_retry
+from app.utils.db_retry import session_factory_for, write_with_retry
 from app.utils.rating_blend import recompute_display_rating_stmt
 from app.utils.unification import calculate_unification_id
 
@@ -187,7 +187,7 @@ async def _resolve_tmdb(item, media_type: str, get_details) -> FetchResult:
 
     # Scenario 4: both absent — persistent cache first, then search.
     cache_key = scrape_cache.make_key(media_type, item.title, item.year)
-    async with async_session_factory() as cdb:
+    async with worker_session_factory() as cdb:
         hit = await scrape_cache.get(cdb, cache_key, now_ms())
     if hit is not None:
         return FetchResult(item, hit.data, hit.confidence, hit.result, 0, None, from_cache=True)
@@ -209,12 +209,12 @@ async def _fetch_omdb_by_id(imdb_id: str) -> tuple[OMDbData | None, tuple[str, s
 
     Thin wrapper (ADR 0005 D3) over `omdb_scrape_cache_service.get_or_fetch`
     — name/signature kept identical (module-level `omdb_service`/
-    `async_session_factory` are still looked up here, at call time, so a
+    `worker_session_factory` are still looked up here, at call time, so a
     test's `monkeypatch.setattr(enrichment_worker, "omdb_service", fake)`
     stays effective). Behaviour is unchanged: see `get_or_fetch`'s
     docstring."""
     return await omdb_scrape_cache.get_or_fetch(
-        imdb_id, session_factory=async_session_factory, client=omdb_service,
+        imdb_id, session_factory=worker_session_factory, client=omdb_service,
     )
 
 
@@ -593,6 +593,39 @@ async def _apply_enrichment_results(db, results: list[FetchResult]):
     return batch_used
 
 
+async def _apply_enrichment_batch_tx(
+    db,
+    results: list[FetchResult],
+    *,
+    op: str,
+) -> None:
+    """Persist one enrichment batch via ``write_with_retry`` on fresh sessions."""
+    item_ids = [fr.item.id for fr in results]
+
+    async def _work(session):
+        if item_ids:
+            q_rows = (
+                await session.execute(
+                    select(EnrichmentQueue).where(EnrichmentQueue.id.in_(item_ids))
+                )
+            ).scalars().all()
+            by_id = {row.id: row for row in q_rows}
+            fresh_results = [
+                replace(fr, item=by_id[fr.item.id]) if fr.item.id in by_id else fr
+                for fr in results
+            ]
+        else:
+            fresh_results = results
+        await _apply_enrichment_results(session, fresh_results)
+        await session.commit()
+
+    await write_with_retry(
+        _work,
+        session_factory=session_factory_for(db) or worker_session_factory,
+        op=op,
+    )
+
+
 async def run():
     """Run enrichment batch with parallel TMDB + OMDb fetching."""
     daily_limit = settings.ENRICHMENT_DAILY_LIMIT
@@ -616,7 +649,7 @@ async def run():
 
     logger.info(f"Starting enrichment batch (daily limit: {daily_limit}, concurrency: {CONCURRENCY})")
 
-    async with async_session_factory() as db:
+    async with worker_session_factory() as db:
         # Phase 1: VOD movies (pending + retryable skipped items)
         from sqlalchemy import or_
         result = await db.execute(
@@ -652,24 +685,9 @@ async def run():
             results = await asyncio.gather(*tasks)
 
             before = used()
-            await _apply_enrichment_results(db, results)
-            # AUDIT-P1-001 / ADR 0004 Decision 4 -- INTENTIONALLY left on
-            # `commit_with_retry` (now honest, not a same-session retry
-            # primitive -- see that function's docstring), not converted to
-            # `write_with_retry`: `_apply_enrichment_results` mutates ORM
-            # attributes (`item.status`, `item.attempts`, `item.processed_at`)
-            # on `EnrichmentQueue` instances that are ATTACHED TO THIS SAME
-            # `db` session (`pending_vod`, loaded via `db.execute(...)` above).
-            # `write_with_retry` opens a FRESH session per attempt; those
-            # instances aren't attached to it, so their pending mutations
-            # could not be flushed/committed through it without first
-            # re-loading each item by primary key into the new session --
-            # a deeper restructuring of `_apply_enrichment_results` that is
-            # out of scope for this call-site migration (this function's
-            # single-session-for-hours shape is flagged separately as
-            # AUDIT-P1-005 and explicitly out of scope for Vague 3, S3.1 --
-            # see the plan). Left honest-not-retrying.
-            await commit_with_retry(db)
+            await _apply_enrichment_batch_tx(
+                db, results, op="enrichment_worker.vod_batch"
+            )
 
             logger.info(f"Enrichment VOD {batch_end}/{len(pending_vod)} "
                        f"({used() - before} real TMDB calls this batch, {used()} total)")
@@ -705,12 +723,9 @@ async def run():
                 results = await asyncio.gather(*tasks)
 
                 before = used()
-                await _apply_enrichment_results(db, results)
-                # Same reasoning as the VOD phase's commit above (ADR 0004
-                # D4 / AUDIT-P1-005) -- `pending_series` items are ORM
-                # objects attached to this SAME `db` session; left
-                # honest-not-retrying.
-                await commit_with_retry(db)
+                await _apply_enrichment_batch_tx(
+                    db, results, op="enrichment_worker.series_batch"
+                )
 
                 logger.info(f"Enrichment Series {batch_end}/{len(pending_series)} "
                            f"({used() - before} real TMDB calls this batch, {used()} total)")
@@ -738,7 +753,7 @@ async def run():
 
         await write_with_retry(
             _recompute_display_rating,
-            session_factory=async_session_factory,
+            session_factory=worker_session_factory,
             op="enrichment.recompute_display_rating",
         )
     except Exception as e:
@@ -750,7 +765,7 @@ async def run():
     # Update queue-size gauges so Prometheus reflects post-batch state.
     from app.utils.metrics import enrichment_queue_size
     from sqlalchemy import func as _sql_func
-    async with async_session_factory() as db:
+    async with worker_session_factory() as db:
         rows = await db.execute(
             select(EnrichmentQueue.status, _sql_func.count())
             .group_by(EnrichmentQueue.status)

@@ -13,7 +13,7 @@ from app.models.schemas import (
     AccountTestResponse,
 )
 from app.services import account_service
-from app.utils.db_retry import commit_with_retry, write_with_retry
+from app.utils.db_retry import session_factory_for, write_with_retry
 from app.utils.ssrf import SsrfBlockedError
 from app.utils.tasks import create_background_task
 
@@ -32,27 +32,31 @@ async def create_account(
     body: AccountCreate, db: AsyncSession = Depends(get_db),
 ):
     try:
-        account = await account_service.create_account(db, body)
+        account_values = await account_service.prepare_account_create(db, body)
     except account_service.AccountAlreadyExistsError:
         raise HTTPException(409, "Account already exists")
     except (account_service.AccountAuthenticationError, SsrfBlockedError) as e:
         raise HTTPException(400, f"Authentication failed: {e}")
 
-    # AUDIT-P1-001 (S3.3) — deliberately NOT converted to write_with_retry.
-    # account_service.create_account mixes a real network call
-    # (xtream_service.authenticate against the operator-supplied provider)
-    # with the staged `db.add(account)` in one function; write_with_retry's
-    # contract requires `work` to be fully replayable, so wrapping the whole
-    # call would re-authenticate against the Xtream provider on every lock
-    # retry (up to 4x) — an external side effect, and one that can burn a
-    # connection slot on `max_connections`-limited accounts. Splitting
-    # "authenticate" from "stage+commit" would require restructuring
-    # app/services/account_service.py, which is out of this zone (S3.2).
-    # commit_with_retry (now honest per ADR 0004) stays: on a real lock it
-    # raises the true OperationalError instead of retrying — acceptable here
-    # since account creation is a rare, operator-driven action, not a
-    # concurrent-writer hot path.
-    await commit_with_retry(db)
+    async def _work(session: AsyncSession) -> XtreamAccount:
+        existing = await session.execute(
+            select(XtreamAccount).where(XtreamAccount.id == account_values["id"])
+        )
+        if existing.scalars().first():
+            raise account_service.AccountAlreadyExistsError(account_values["id"])
+        row = XtreamAccount(**account_values)
+        session.add(row)
+        await session.commit()
+        return row
+
+    try:
+        account = await write_with_retry(
+            _work,
+            session_factory=session_factory_for(db),
+            op="accounts.create_account",
+        )
+    except account_service.AccountAlreadyExistsError:
+        raise HTTPException(409, "Account already exists")
 
     # Trigger initial sync in background (after commit so the task can find the account)
     from app.workers.sync_worker import sync_account

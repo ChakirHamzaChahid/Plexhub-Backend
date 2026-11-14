@@ -488,22 +488,20 @@ async def test_expire_path_commits_via_retry_helper(tv_client, tv_factory, monke
     assert calls["n"] > before  # the expire-and-scrub write went through write_with_retry
 
 
-async def test_get_status_claim_still_uses_commit_with_retry(tv_client, monkeypatch):
-    """AUDIT-P1-001 (S3.3) — deliberately NOT converted: the CR-F07 atomic
-    one-shot delivery claim in get_status() stays on commit_with_retry (see
-    the comment at that call site). This guards against an accidental
-    future conversion regressing the atomicity test
-    (test_status_concurrent_polls_deliver_payload_exactly_once)."""
+async def test_get_status_claim_uses_write_with_retry(tv_client, monkeypatch):
+    """CR-D01: the CR-F07 atomic one-shot delivery claim in get_status()
+    uses write_with_retry with session_factory_for(db) so it survives real
+    SQLite locks while preserving per-engine isolation."""
     import app.api.tv_auth as tv_auth_module
 
     calls = {"n": 0}
-    real_commit_with_retry = tv_auth_module.commit_with_retry
+    real_write_with_retry = tv_auth_module.write_with_retry
 
-    async def _spy(db, **kwargs):
+    async def _spy(work, **kwargs):
         calls["n"] += 1
-        return await real_commit_with_retry(db, **kwargs)
+        return await real_write_with_retry(work, **kwargs)
 
-    monkeypatch.setattr(tv_auth_module, "commit_with_retry", _spy)
+    monkeypatch.setattr(tv_auth_module, "write_with_retry", _spy)
 
     started = await _start(tv_client)
     await tv_client.post(

@@ -133,7 +133,7 @@ class TestSeriesTrailerCapture:
         from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
         factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
-        monkeypatch.setattr(sync_worker_module, "async_session_factory", factory)
+        monkeypatch.setattr(sync_worker_module, "worker_session_factory", factory)
 
         async def _empty(*a, **kw):
             return []
@@ -171,7 +171,7 @@ class TestSeriesTrailerCapture:
         from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
         factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
-        monkeypatch.setattr(sync_worker_module, "async_session_factory", factory)
+        monkeypatch.setattr(sync_worker_module, "worker_session_factory", factory)
 
         async def _empty(*a, **kw):
             return []
@@ -213,7 +213,7 @@ class TestSeriesTrailerCapture:
         from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
         factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
-        monkeypatch.setattr(sync_worker_module, "async_session_factory", factory)
+        monkeypatch.setattr(sync_worker_module, "worker_session_factory", factory)
 
         async def _empty(*a, **kw):
             return []
@@ -261,7 +261,7 @@ class TestSeriesTrailerCapture:
         from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
         factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
-        monkeypatch.setattr(sync_worker_module, "async_session_factory", factory)
+        monkeypatch.setattr(sync_worker_module, "worker_session_factory", factory)
 
         async def _empty(*a, **kw):
             return []

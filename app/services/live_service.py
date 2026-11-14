@@ -58,21 +58,13 @@ def _try_base64_decode(value: str) -> str:
         return value  # not base64, use as-is
 
 
-async def ingest_short_epg(
+async def fetch_short_epg_rows(
     db: AsyncSession,
     server_id: str,
     stream_id: int,
     fetched_at: int,
-) -> list[EpgEntry]:
-    """Fetch the short EPG for a channel from Xtream and upsert its EpgEntry rows.
-
-    ``fetched_at`` is passed in (not computed here) so it matches the exact
-    timestamp the router used for its DB-cache freshness check — same value,
-    same semantics as before the extraction.
-
-    On a provider fetch failure, logs a warning and returns ``[]`` — mirrors
-    the previous inline behavior of degrading to an empty EPG list instead of
-    surfacing a 500.
+) -> list[dict]:
+    """Fetch and parse short EPG rows from Xtream without writing to the DB.
 
     Raises:
         InvalidServerIdError: server_id isn't 'xtream_{account_id}'.
@@ -102,16 +94,12 @@ async def ingest_short_epg(
         return []
 
     listings = epg_data.get("epg_listings") or []
-    # One row per start_time: a payload that repeats a start_time keeps the
-    # last occurrence (the upsert would converge on it anyway; collapsing here
-    # keeps the multi-row INSERT free of self-conflicts).
     rows_by_start: dict[int, dict] = {}
 
     for listing in listings:
         if not isinstance(listing, dict):
             continue
 
-        # Parse start/end times (Xtream returns epoch seconds or datetime strings)
         start = listing.get("start_timestamp") or listing.get("start")
         end = listing.get("stop_timestamp") or listing.get("end")
 
@@ -127,12 +115,8 @@ async def ingest_short_epg(
         if not start_ms:
             continue
 
-        title = listing.get("title") or "Unknown"
-        # Some providers base64 encode the title/description
-        title = _try_base64_decode(title)
-
-        description = listing.get("description") or ""
-        description = _try_base64_decode(description)
+        title = _try_base64_decode(listing.get("title") or "Unknown")
+        description = _try_base64_decode(listing.get("description") or "")
 
         rows_by_start[start_ms] = {
             "server_id": server_id,
@@ -146,10 +130,18 @@ async def ingest_short_epg(
             "fetched_at": fetched_at,
         }
 
-    if not rows_by_start:
+    return list(rows_by_start.values())
+
+
+async def upsert_short_epg_rows(
+    db: AsyncSession,
+    rows: list[dict],
+) -> list[EpgEntry]:
+    """Upsert parsed short EPG rows on ``db`` without committing."""
+    if not rows:
         return []
 
-    stmt = sqlite_insert(EpgEntry).values(list(rows_by_start.values()))
+    stmt = sqlite_insert(EpgEntry).values(rows)
     stmt = stmt.on_conflict_do_update(
         index_elements=["server_id", "stream_id", "start_time"],
         set_={
@@ -160,7 +152,21 @@ async def ingest_short_epg(
             )
         },
     ).returning(EpgEntry)
-    # populate_existing: if a conflicting row is already in this session's
-    # identity map, RETURNING must refresh it rather than hand back stale values.
     result = await db.execute(stmt, execution_options={"populate_existing": True})
     return sorted(result.scalars().all(), key=lambda e: e.start_time)
+
+
+async def ingest_short_epg(
+    db: AsyncSession,
+    server_id: str,
+    stream_id: int,
+    fetched_at: int,
+) -> list[EpgEntry]:
+    """Fetch the short EPG for a channel from Xtream and upsert its EpgEntry rows.
+
+    Raises:
+        InvalidServerIdError: server_id isn't 'xtream_{account_id}'.
+        AccountNotFoundError: no XtreamAccount for the parsed account_id.
+    """
+    rows = await fetch_short_epg_rows(db, server_id, stream_id, fetched_at)
+    return await upsert_short_epg_rows(db, rows)

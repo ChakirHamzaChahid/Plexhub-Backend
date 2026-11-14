@@ -133,7 +133,7 @@ async def test_sync_account_finalize_survives_real_lock(tmp_path, monkeypatch):
 
     engine = _make_short_timeout_engine(db_path)
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    monkeypatch.setattr(sync_worker_module, "async_session_factory", factory)
+    monkeypatch.setattr(sync_worker_module, "worker_session_factory", factory)
 
     account_id = "wr_lock_sync"
     async with factory() as s:
@@ -191,7 +191,7 @@ async def test_enrichment_recompute_display_rating_survives_real_lock(tmp_path, 
 
     engine = _make_short_timeout_engine(db_path)
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    monkeypatch.setattr(ew, "async_session_factory", factory)
+    monkeypatch.setattr(ew, "worker_session_factory", factory)
 
     # A row whose display_rating is stale relative to imdb/tmdb -- the
     # recompute's UPDATE must actually change it (and thus genuinely need
@@ -342,7 +342,7 @@ async def test_enrichment_backfill_recompute_survives_real_lock(tmp_path, monkey
 
     engine = _make_short_timeout_engine(db_path)
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    monkeypatch.setattr(backfill, "async_session_factory", factory)
+    monkeypatch.setattr(backfill, "worker_session_factory", factory)
 
     async with factory() as s:
         s.add(Media(

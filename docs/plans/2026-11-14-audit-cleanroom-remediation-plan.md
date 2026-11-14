@@ -10,7 +10,7 @@
 | Lot | Thème | Priorité | Findings couverts | Statut |
 |---|---|---|---|---|
 | **Lot 1** | Sécurité & I/O critique (Credentials Xtream, SSRF, I/O download) | P0-A | `CR-S01`, `CR-S02`, `CR-S03`, `CR-S04`, `CR-A03` | ✅ Fait |
-| **Lot 2** | Contention SQLite & Stabilité Boot/Health | P0-B | `CR-D01`, `CR-D02`, `CR-D03`, `CR-D04`, `CR-O01` | ⏳ À faire |
+| **Lot 2** | Contention SQLite & Stabilité Boot/Health | P0-B | `CR-D01`, `CR-D02`, `CR-D03`, `CR-D04`, `CR-O01` | ✅ Fait |
 | **Lot 3** | Performance DB & I/O Services | P1-A | `CR-P01`, `CR-P02`, `CR-P05`, `CR-P06`, `CR-A04` | ⏳ À faire |
 | **Lot 4** | Observabilité, Docker, Tests critiques & Durcissement | P1-B | `CR-O04`, `CR-T02`, `CR-T03`, `CR-O02`, `CR-O03`, `CR-S05`..`S11` | ⏳ À faire |
 | **Lot 5** | Découpage Routers/Services & Effets de bord | P2-A | `CR-A01`, `CR-A02`, `CR-A06`, `CR-C01`, `CR-T04`, `CR-O05`, `CR-O06`, `CR-P04` | ⏳ À faire |

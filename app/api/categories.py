@@ -15,10 +15,11 @@ from app.models.schemas import (
 from app.services.category_service import (
     get_categories,
     bulk_update_categories,
-    refresh_categories_from_provider,
+    fetch_categories_from_provider,
+    upsert_categories_batch,
     AccountNotFoundError,
 )
-from app.utils.db_retry import commit_with_retry
+from app.utils.db_retry import session_factory_for, write_with_retry
 
 logger = logging.getLogger("plexhub.api.categories")
 router = APIRouter(prefix="/accounts", tags=["categories"])
@@ -98,20 +99,22 @@ async def refresh_categories(
         CategoryRefreshResponse (camelCase on the wire: vodCount/seriesCount)
     """
     try:
-        vod_count, series_count = await refresh_categories_from_provider(db, account_id)
+        vod_categories, series_categories, new_allowed = await fetch_categories_from_provider(
+            db, account_id
+        )
 
-        # AUDIT-P1-001 (S3.3) — deliberately NOT converted to write_with_retry.
-        # refresh_categories_from_provider mixes real network calls
-        # (xtream_service.get_vod_categories/get_series_categories) with the
-        # upsert writes on the SAME `db` session (ADR 0004, Decision 4:
-        # `work` must be fully replayable). Wrapping the whole call would
-        # re-fetch from the Xtream provider on every lock retry (up to 4x) —
-        # an external side effect this zone (S3.3, routers only) cannot
-        # remove without restructuring app/services/category_service.py
-        # (owned by S3.2). commit_with_retry (now honest per ADR 0004) is
-        # kept: a real, sustained lock surfaces the true OperationalError
-        # instead of silently retrying a provider refetch.
-        await commit_with_retry(db)
+        async def _work(session: AsyncSession) -> tuple[int, int]:
+            counts = await upsert_categories_batch(
+                session, account_id, vod_categories, series_categories, new_allowed
+            )
+            await session.commit()
+            return counts
+
+        vod_count, series_count = await write_with_retry(
+            _work,
+            session_factory=session_factory_for(db),
+            op="categories.refresh",
+        )
 
         total_count = vod_count + series_count
         logger.info(f"Refreshed {total_count} categories for account {account_id}")

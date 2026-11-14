@@ -56,7 +56,7 @@ from app.config import settings
 from app.db.database import get_db
 from app.models.database import TvAuthSession
 from app.utils import rate_limit
-from app.utils.db_retry import commit_with_retry, write_with_retry
+from app.utils.db_retry import session_factory_for, write_with_retry
 from app.utils.payload_crypto import (
     PayloadDecryptError,
     decrypt_payload,
@@ -599,39 +599,27 @@ async def get_status(
         # payload. `decrypt_payload` above is pure (no side effect), so
         # computing it twice under contention is harmless; only the DELIVERY
         # is guarded.
-        # AUDIT-P1-001 (S3.3) — deliberately NOT converted to write_with_retry.
-        # This is the CR-F07 atomic one-shot delivery claim: correctness
-        # depends only on `rowcount` from THIS execute() being read before
-        # commit, which holds regardless of which session/connection issues
-        # the UPDATE. The blocker is test/production identity, not
-        # correctness: write_with_retry's fresh session is resolved from a
-        # single process-wide default (app.db.database.async_session_factory)
-        # unless a `session_factory` bound to the SAME engine as `db` is
-        # explicitly derived and threaded through — and the existing
-        # regression test for this exact race
-        # (tests/test_tv_auth.py::test_status_concurrent_polls_deliver_payload_exactly_once)
-        # deliberately drives `get_status` with a hand-built, per-thread
-        # session/engine pointing at a test-only file, specifically to prove
-        # the claim survives real cross-connection contention — swapping in
-        # a different, globally-resolved engine here would silently stop
-        # exercising (or even miswire) that exact scenario. Given the
-        # explicit warning that a fresh session in the wrong place would ruin
-        # this atomicity, the safer choice is zero structural change:
-        # `commit_with_retry` (now honest per ADR 0004) still protects the
-        # common case where SQLite's own busy_timeout resolves the
-        # contention before commit() ever raises; a real, sustained lock now
-        # surfaces the true OperationalError instead of a misleading one.
-        claim_result = await db.execute(
-            update(TvAuthSession)
-            .where(
-                TvAuthSession.id == session.id,
-                TvAuthSession.payload_delivered.is_(False),
+        # Derive a session_factory bound to the same engine as `db` so both
+        # production and per-thread/per-test engines survive real locks.
+        async def _claim(s: AsyncSession) -> int:
+            res = await s.execute(
+                update(TvAuthSession)
+                .where(
+                    TvAuthSession.id == session.id,
+                    TvAuthSession.payload_delivered.is_(False),
+                )
+                .values(payload_delivered=True)
             )
-            .values(payload_delivered=True)
-        )
-        await commit_with_retry(db)
+            await s.commit()
+            return res.rowcount
 
-        if claim_result.rowcount == 1:
+        claimed_rows = await write_with_retry(
+            _claim,
+            session_factory=session_factory_for(db),
+            op="tv_auth.claim_payload",
+        )
+
+        if claimed_rows == 1:
             session.payload_delivered = True  # keep the ORM object in sync
             logger.info("tv-auth session %s payload delivered", session.id)
             return StatusResponse(

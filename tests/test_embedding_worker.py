@@ -79,7 +79,7 @@ def test_register_job_in_place_update():
 async def test_rebuild_processes_pending_rows(monkeypatch, ai_sessionmaker, ai_db_session):
     """Insert 120 pending rows, run rebuild, assert all embedded_at populated."""
     # Wire async_session_factory to the test ai_sessionmaker
-    monkeypatch.setattr("app.workers.embedding_worker.async_session_factory", ai_sessionmaker)
+    monkeypatch.setattr("app.workers.embedding_worker.worker_session_factory", ai_sessionmaker)
 
     async def fake_embed(texts):
         return [_unit_vec(i) for i, _ in enumerate(texts)]
@@ -112,7 +112,7 @@ async def test_rebuild_processes_pending_rows(monkeypatch, ai_sessionmaker, ai_d
 
 async def test_rebuild_no_offset_in_queries(monkeypatch, ai_sessionmaker, ai_db_session):
     """Verify pagination uses cursor (tmdb_id > :cursor), not OFFSET."""
-    monkeypatch.setattr("app.workers.embedding_worker.async_session_factory", ai_sessionmaker)
+    monkeypatch.setattr("app.workers.embedding_worker.worker_session_factory", ai_sessionmaker)
 
     captured: list[str] = []
 
@@ -139,7 +139,7 @@ async def test_rebuild_no_offset_in_queries(monkeypatch, ai_sessionmaker, ai_db_
 
 
 async def test_rebuild_aborts_on_embedding_unavailable(monkeypatch, ai_sessionmaker, ai_db_session):
-    monkeypatch.setattr("app.workers.embedding_worker.async_session_factory", ai_sessionmaker)
+    monkeypatch.setattr("app.workers.embedding_worker.worker_session_factory", ai_sessionmaker)
 
     async def bomb(texts):
         raise EmbeddingUnavailableError("offline")

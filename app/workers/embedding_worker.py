@@ -13,7 +13,7 @@ from typing import Any
 
 from sqlalchemy import text
 
-from app.db.database import async_session_factory
+from app.db.database import worker_session_factory
 from app.services.embedding_service import EmbeddingUnavailableError, embed_passages
 from app.services.recommendation_service import serialize_vec
 
@@ -72,7 +72,7 @@ async def run_embedding_rebuild(job_id: str) -> None:
     try:
         while True:
             # Read a page using a fresh session, then close before embedding
-            async with async_session_factory() as session:
+            async with worker_session_factory() as session:
                 rows = (await session.execute(
                     text(
                         "SELECT tmdb_id, media_type, overview, genres "
@@ -108,7 +108,7 @@ async def run_embedding_rebuild(job_id: str) -> None:
                     logger.warning("embed failed tmdb_id=%s: %s", tmdb_id, exc)
                     continue
                 now = _now_ms()
-                async with async_session_factory() as session:
+                async with worker_session_factory() as session:
                     # DELETE-then-INSERT on ai_embeddings (vec0 forbids UPSERT)
                     await session.execute(
                         text("DELETE FROM ai_embeddings WHERE tmdb_id = :t"),

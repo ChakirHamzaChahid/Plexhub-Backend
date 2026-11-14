@@ -66,7 +66,7 @@ class TestGeneratePlexLibraryWiring:
             await s.commit()
 
         import app.plex_generator.source as source_mod
-        monkeypatch.setattr(source_mod, "async_session_factory", factory)
+        monkeypatch.setattr(source_mod, "worker_session_factory", factory)
         return factory
 
     async def test_writes_expected_strm_and_reports_created(self, seeded_factory, tmp_path):
@@ -110,7 +110,7 @@ class TestGeneratePlexLibraryWiring:
             await s.commit()
 
         import app.plex_generator.source as source_mod
-        monkeypatch.setattr(source_mod, "async_session_factory", factory)
+        monkeypatch.setattr(source_mod, "worker_session_factory", factory)
 
         from app.services.plex_generation_service import generate_plex_library
 
@@ -146,7 +146,7 @@ class TestGeneratePlexLibraryAutoGating:
             await s.commit()
 
         import app.db.database as database_mod
-        monkeypatch.setattr(database_mod, "async_session_factory", factory)
+        monkeypatch.setattr(database_mod, "worker_session_factory", factory)
         monkeypatch.setattr(settings, "PLEX_LIBRARY_DIR", str(tmp_path))
 
         from app.services.plex_generation_service import generate_plex_library_auto
@@ -169,8 +169,8 @@ class TestGeneratePlexLibraryAutoGating:
 
         import app.db.database as database_mod
         import app.plex_generator.source as source_mod
-        monkeypatch.setattr(database_mod, "async_session_factory", factory)
-        monkeypatch.setattr(source_mod, "async_session_factory", factory)
+        monkeypatch.setattr(database_mod, "worker_session_factory", factory)
+        monkeypatch.setattr(source_mod, "worker_session_factory", factory)
         monkeypatch.setattr(settings, "PLEX_LIBRARY_DIR", str(tmp_path))
 
         from app.services.plex_generation_service import generate_plex_library_auto
@@ -189,7 +189,7 @@ class TestGeneratePlexLibraryAutoGating:
             await s.commit()
 
         import app.db.database as database_mod
-        monkeypatch.setattr(database_mod, "async_session_factory", factory)
+        monkeypatch.setattr(database_mod, "worker_session_factory", factory)
         monkeypatch.setattr(settings, "PLEX_LIBRARY_DIR", str(tmp_path))
 
         import app.services.plex_generation_service as service_mod

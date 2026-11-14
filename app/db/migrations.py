@@ -319,14 +319,25 @@ async def _migration_008_ai_embeddings(conn) -> None:
     Idempotent: every DDL uses IF NOT EXISTS.
     """
     logger.info("Migration 008: Creating AI embeddings tables")
+    from app.db.database import _VEC_LOADED
 
-    statements = [
-        """
-        CREATE VIRTUAL TABLE IF NOT EXISTS ai_embeddings USING vec0(
-            tmdb_id INTEGER PRIMARY KEY,
-            embedding FLOAT[384]
+    statements: list[str] = []
+    if _VEC_LOADED.get("ok"):
+        statements.append(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS ai_embeddings USING vec0(
+                tmdb_id INTEGER PRIMARY KEY,
+                embedding FLOAT[384]
+            )
+            """
         )
-        """,
+    else:
+        logger.warning(
+            "Migration 008: sqlite-vec not loaded (%s) — skipping virtual table ai_embeddings",
+            _VEC_LOADED.get("error") or "unavailable",
+        )
+
+    statements.extend([
         """
         CREATE TABLE IF NOT EXISTS ai_tmdb_cache (
             tmdb_id INTEGER PRIMARY KEY,
@@ -341,7 +352,7 @@ async def _migration_008_ai_embeddings(conn) -> None:
         """,
         "CREATE INDEX IF NOT EXISTS ix_ai_tmdb_cache_imdb_id ON ai_tmdb_cache(imdb_id)",
         "CREATE INDEX IF NOT EXISTS ix_ai_tmdb_cache_embedded_at ON ai_tmdb_cache(embedded_at)",
-    ]
+    ])
 
     for stmt in statements:
         await conn.execute(text(stmt))

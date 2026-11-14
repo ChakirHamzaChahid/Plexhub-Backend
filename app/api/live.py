@@ -17,7 +17,7 @@ from app.models.schemas import (
 )
 from app.services import live_service
 from app.services.xtream_service import xtream_service
-from app.utils.db_retry import commit_with_retry
+from app.utils.db_retry import session_factory_for, write_with_retry
 from app.utils.server_id import parse_server_id
 
 logger = logging.getLogger("plexhub.live")
@@ -168,9 +168,10 @@ async def get_channel_epg(
             total=len(entries),
         )
 
-    # Fetch from Xtream API + stage new EpgEntry rows (live_service.ingest_short_epg)
+    # Fetch from Xtream API first (outside write_with_retry so lock retries
+    # never replay the upstream Xtream HTTP request).
     try:
-        new_entries = await live_service.ingest_short_epg(
+        rows = await live_service.fetch_short_epg_rows(
             db, server_id, stream_id, fetched_at=now_ms,
         )
     except live_service.InvalidServerIdError:
@@ -178,19 +179,18 @@ async def get_channel_epg(
     except live_service.AccountNotFoundError:
         raise HTTPException(404, "Account not found")
 
-    if new_entries:
-        # AUDIT-P1-001 (S3.3) — deliberately NOT converted to write_with_retry.
-        # live_service.ingest_short_epg mixes a real network call (Xtream
-        # short-EPG fetch) with the staged EpgEntry writes on the SAME `db`
-        # session (ADR 0004, Decision 4: `work` must be fully replayable).
-        # Wrapping the whole call would re-fetch from the Xtream provider on
-        # every lock retry (up to 4x) — an external side effect this zone
-        # (S3.3, routers only) cannot remove without restructuring
-        # app/services/live_service.py (owned by S3.2). commit_with_retry
-        # (now honest per ADR 0004) is kept: a real, sustained lock surfaces
-        # the true OperationalError instead of silently retrying a provider
-        # refetch.
-        await commit_with_retry(db)  # Persist EPG entries
+    new_entries = []
+    if rows:
+        async def _work(session: AsyncSession):
+            entries = await live_service.upsert_short_epg_rows(session, rows)
+            await session.commit()
+            return entries
+
+        new_entries = await write_with_retry(
+            _work,
+            session_factory=session_factory_for(db),
+            op="live.ingest_short_epg",
+        )
 
     return EpgListResponse(
         items=[EpgEntryResponse.model_validate(e) for e in new_entries],

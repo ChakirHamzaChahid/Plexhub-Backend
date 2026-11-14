@@ -130,7 +130,7 @@ class TestWrapperDelegation:
 
         fake = _FakeOmdbSvc(_data("tt0000777"))
         monkeypatch.setattr(worker, "omdb_service", fake)
-        monkeypatch.setattr(worker, "async_session_factory", db_factory)
+        monkeypatch.setattr(worker, "worker_session_factory", db_factory)
         data, put = await worker._fetch_omdb_by_id("tt0000777")
         assert data is not None
         assert put == ("tt0000777", "found")

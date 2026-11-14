@@ -223,7 +223,7 @@ async def test_sync_account_outer_except_redacts_httpx_error(
     from app.workers import sync_worker
 
     factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
-    monkeypatch.setattr(sync_worker, "async_session_factory", factory)
+    monkeypatch.setattr(sync_worker, "worker_session_factory", factory)
 
     async with factory() as s:
         s.add(

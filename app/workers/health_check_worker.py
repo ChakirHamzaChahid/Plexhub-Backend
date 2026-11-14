@@ -5,6 +5,7 @@ from contextvars import ContextVar
 
 import httpx
 from sqlalchemy import select, update, or_, text, func
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.db.database import worker_session_factory
@@ -12,7 +13,7 @@ from app.models.database import DownloadJob, Media, XtreamAccount
 from app.services import account_outage_service
 from app.services.stream_service import build_stream_url
 from app.utils.time import now_ms
-from app.utils.db_retry import commit_with_retry, write_with_retry
+from app.utils.db_retry import session_factory_for, write_with_retry
 from app.utils.ssrf import SsrfBlockedError, vet_request
 
 logger = logging.getLogger("plexhub.health_check")
@@ -651,6 +652,39 @@ async def run_pipeline_validation():
         await _run_pipeline_validation_impl()
 
 
+async def _apply_pipeline_batch_tx(
+    session: AsyncSession,
+    snapshot: list[tuple[str, str, dict]],
+) -> None:
+    for rating_key, server_id, values in snapshot:
+        await session.execute(
+            update(Media)
+            .where(
+                Media.rating_key == rating_key,
+                Media.server_id == server_id,
+            )
+            .values(**values)
+        )
+    await session.commit()
+
+
+async def _flush_pipeline_batch(
+    db: AsyncSession,
+    batch: list[tuple[str, str, dict]],
+) -> None:
+    """Persist a batch of stream-health updates via ``write_with_retry``."""
+    snapshot = list(batch)
+
+    async def _work(session: AsyncSession) -> None:
+        await _apply_pipeline_batch_tx(session, snapshot)
+
+    await write_with_retry(
+        _work,
+        session_factory=session_factory_for(db) or worker_session_factory,
+        op="health_check_worker.pipeline_batch",
+    )
+
+
 async def _run_pipeline_validation_impl():
     if not settings.STREAM_VALIDATION_ENABLED:
         logger.info("Stream validation disabled (STREAM_VALIDATION_ENABLED=false)")
@@ -807,7 +841,7 @@ async def _run_pipeline_validation_impl():
             finally:
                 _probe_reasons.reset(token)
 
-            pending_updates = 0
+            pending_batch: list[tuple[str, str, dict]] = []
             for coro in asyncio.as_completed(tasks):
                 item, is_broken, reason, size_bytes = await coro
                 if is_broken is None:
@@ -831,9 +865,7 @@ async def _run_pipeline_validation_impl():
                             f"streams. No streams will be marked as broken."
                         )
                         account_tripped = True
-                        # Rollback uncommitted changes for this account
-                        await db.rollback()
-                        pending_updates = 0
+                        pending_batch.clear()
                         # Remember this outage across runs. MUST go through
                         # `account_outage_service` (fresh session via
                         # write_with_retry): `db` has just been rolled back
@@ -873,20 +905,12 @@ async def _run_pipeline_validation_impl():
                 if size_bytes is not None:
                     values["file_size"] = size_bytes
 
-                await db.execute(
-                    update(Media)
-                    .where(
-                        Media.rating_key == item.rating_key,
-                        Media.server_id == item.server_id,
-                    )
-                    .values(**values)
-                )
+                pending_batch.append((item.rating_key, item.server_id, values))
                 total_checked += 1
                 if mark_broken:
                     total_broken += 1
                 if is_broken:
                     account_broken += 1
-                pending_updates += 1
 
                 # Log progress frequently
                 if total_checked % log_interval == 0:
@@ -896,34 +920,17 @@ async def _run_pipeline_validation_impl():
                         f"reasons: {diag_reasons}"
                     )
 
-                # AUDIT-P1-001 / ADR 0004 Decision 4 -- INTENTIONALLY left on
-                # `commit_with_retry`, not converted to `write_with_retry`:
-                # this function holds ONE `db` session across many accounts,
-                # with periodic partial COMMITS (here) interleaved with a
-                # circuit breaker that does a partial ROLLBACK of the
-                # CURRENT account's not-yet-committed updates
-                # (`db.rollback()` a few lines below) while later accounts
-                # keep streaming rows through the SAME session
-                # (`db.stream(...)`, `db.expunge_all()`). Moving this commit
-                # to a fresh connection would decouple it from that
-                # rollback/expunge choreography — a real semantic change,
-                # not a mechanical one — so it stays honest-not-retrying
-                # here. See `_run_health_check_batch` above for the sibling
-                # cron entrypoint, which has no such coupling and WAS
-                # converted.
-                if pending_updates >= commit_interval:
-                    await commit_with_retry(db)
-                    pending_updates = 0
+                if len(pending_batch) >= commit_interval:
+                    await _flush_pipeline_batch(db, pending_batch)
+                    pending_batch.clear()
 
             if account_tripped:
                 circuit_tripped = True
                 continue
 
-            # Commit remaining for this account -- same coupling as the
-            # periodic commit above (ADR 0004 D4); left honest-not-retrying.
-            if pending_updates > 0:
-                await commit_with_retry(db)
-                pending_updates = 0
+            if pending_batch:
+                await _flush_pipeline_batch(db, pending_batch)
+                pending_batch.clear()
 
             logger.info(
                 f"Account {account_id}: {account_checked} checked, "

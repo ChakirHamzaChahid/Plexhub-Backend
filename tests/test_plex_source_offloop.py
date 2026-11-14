@@ -118,7 +118,7 @@ async def synthetic_movies_factory(db_engine, monkeypatch):
         await s.commit()
 
     import app.plex_generator.source as source_mod
-    monkeypatch.setattr(source_mod, "async_session_factory", factory)
+    monkeypatch.setattr(source_mod, "worker_session_factory", factory)
     return factory
 
 
@@ -153,7 +153,7 @@ async def synthetic_series_factory(db_engine, monkeypatch):
         await s.commit()
 
     import app.plex_generator.source as source_mod
-    monkeypatch.setattr(source_mod, "async_session_factory", factory)
+    monkeypatch.setattr(source_mod, "worker_session_factory", factory)
     return factory
 
 

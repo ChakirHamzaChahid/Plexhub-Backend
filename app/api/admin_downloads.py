@@ -170,6 +170,7 @@ async def admin_downloads_index(
     ctx = {
         "items": cards,
         "total": total,
+        "catalogue_total": total,
         "offset": offset,
         "page": page,
         "page_size": page_size,
@@ -197,7 +198,7 @@ async def admin_downloads_list_fragment(
         request,
         "admin/_downloads_list.html",
         {
-            "items": cards, "total": total, "offset": offset,
+            "items": cards, "total": total, "catalogue_total": total, "offset": offset,
             "page": page, "page_size": page_size,
             "type": media_type, "search": search or "",
         },

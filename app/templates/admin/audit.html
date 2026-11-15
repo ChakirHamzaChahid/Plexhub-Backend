@@ -1,0 +1,126 @@
+{% extends "admin/base.html" %}
+
+{% block title %}PlexHub Admin — Audit{% endblock %}
+
+{% block content %}
+<section class="mb-6 flex flex-wrap items-center justify-between gap-4">
+  <div>
+    <h2 class="text-xl font-semibold mb-1">Audit — Métadonnées &amp; Cache</h2>
+    <p class="text-sm text-slate-500">
+      Vue en lecture seule des dernières modifications de métadonnées (<code>metadata_edits</code>)
+      et de l'état du cache de scraping (<code>scrape_cache</code>). Aucun secret n'est affiché.
+    </p>
+  </div>
+  <span class="text-xs px-2.5 py-1 rounded border bg-slate-100 text-slate-600 border-slate-200">
+    Lecture seule
+  </span>
+</section>
+
+<section class="mb-8">
+  <h3 class="text-sm font-semibold text-slate-600 uppercase mb-3">Statistiques <code>scrape_cache</code></h3>
+  <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
+    <div class="bg-white border border-slate-200 rounded p-4 shadow-sm">
+      <div class="text-xs text-slate-500 uppercase">Total d'entrées</div>
+      <div class="text-2xl font-semibold mt-1" id="cache-total">{{ cache_total }}</div>
+    </div>
+    <div class="bg-white border border-slate-200 rounded p-4 shadow-sm">
+      <div class="text-xs text-slate-500 uppercase">Actives</div>
+      <div class="text-2xl font-semibold text-emerald-700 mt-1" id="cache-active">{{ cache_active }}</div>
+    </div>
+    <div class="bg-white border border-slate-200 rounded p-4 shadow-sm">
+      <div class="text-xs text-slate-500 uppercase">Expirées</div>
+      <div class="text-2xl font-semibold text-amber-700 mt-1" id="cache-expired">{{ cache_expired }}</div>
+    </div>
+  </div>
+
+  <div class="overflow-x-auto">
+    <table class="min-w-full bg-white rounded shadow-sm border border-slate-200 text-xs">
+      <thead class="bg-slate-100 text-slate-600 uppercase">
+        <tr>
+          <th class="text-left px-3 py-2">Famille / Provider</th>
+          <th class="text-left px-3 py-2">Version clé</th>
+          <th class="text-right px-3 py-2">Total</th>
+          <th class="text-right px-3 py-2">Actives</th>
+          <th class="text-right px-3 py-2">Expirées</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-slate-100">
+        {% for row in cache_families %}
+        <tr>
+          <td class="px-3 py-2 font-medium">{{ row.family }}</td>
+          <td class="px-3 py-2 text-slate-500">v{{ row.key_version }}</td>
+          <td class="px-3 py-2 text-right font-mono">{{ row.total }}</td>
+          <td class="px-3 py-2 text-right font-mono text-emerald-700">{{ row.active }}</td>
+          <td class="px-3 py-2 text-right font-mono text-amber-700">{{ row.expired }}</td>
+        </tr>
+        {% else %}
+        <tr>
+          <td colspan="5" class="px-3 py-6 text-center text-slate-400 italic">
+            Aucune entrée dans <code>scrape_cache</code>.
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h3 class="text-sm font-semibold text-slate-600 uppercase mb-3">
+    Dernières modifications de métadonnées (50 max)
+  </h3>
+  <div class="overflow-x-auto">
+    <table class="min-w-full bg-white rounded shadow-sm border border-slate-200 text-xs">
+      <thead class="bg-slate-100 text-slate-600 uppercase">
+        <tr>
+          <th class="text-left px-3 py-2">Date</th>
+          <th class="text-left px-3 py-2">Cible</th>
+          <th class="text-left px-3 py-2">Action &amp; Champs</th>
+          <th class="text-left px-3 py-2">Statut</th>
+          <th class="text-left px-3 py-2">Clé / Acteur</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-slate-100">
+        {% for edit in edits %}
+        <tr>
+          <td class="px-3 py-2 whitespace-nowrap text-slate-600">{{ edit.at_ms | ms }}</td>
+          <td class="px-3 py-2">
+            <span class="inline-block px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 mr-1">{{ edit.item_type }}</span>
+            <span class="font-mono text-slate-800">{{ edit.server_id }}/{{ edit.rating_key }}</span>
+          </td>
+          <td class="px-3 py-2">
+            <span class="inline-block px-1.5 py-0.5 rounded bg-sky-50 text-sky-800 font-medium mr-1">{{ edit.kind }}</span>
+            <span class="text-slate-700">{{ edit.fields_summary }}</span>
+            {% if edit.reason %}
+            <div class="text-slate-400 mt-0.5">{{ edit.reason }}</div>
+            {% endif %}
+          </td>
+          <td class="px-3 py-2 whitespace-nowrap">
+            {% if edit.reverted_by %}
+            <span class="inline-block px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">
+              Annulée ({{ edit.reverted_by }})
+            </span>
+            {% elif edit.reverts %}
+            <span class="inline-block px-2 py-0.5 rounded-full bg-purple-100 text-purple-800">
+              Annule {{ edit.reverts }}
+            </span>
+            {% else %}
+            <span class="inline-block px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700">
+              Active
+            </span>
+            {% endif %}
+          </td>
+          <td class="px-3 py-2 font-mono text-slate-600">{{ edit.key_id }}</td>
+        </tr>
+        {% else %}
+        <tr>
+          <td colspan="5" class="px-3 py-6 text-center text-slate-400 italic">
+            Aucune modification enregistrée dans <code>metadata_edits</code>.
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

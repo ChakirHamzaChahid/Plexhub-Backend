@@ -5,6 +5,7 @@ HTML fragments rather than JSON; they call the same `media_service` functions
 the API uses, so business logic isn't duplicated.
 """
 import asyncio
+import json
 import logging
 import re
 import uuid
@@ -14,7 +15,7 @@ from typing import Any, Awaitable, Callable, Optional
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select
+from sqlalchemy import case, func, select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,7 +24,7 @@ logger = logging.getLogger("plexhub.api.admin")
 
 from app.config import settings
 from app.db.database import async_session_factory, get_db
-from app.models.database import XtreamAccount, XtreamCategory
+from app.models.database import MetadataEdit, ScrapeCacheEntry, XtreamAccount, XtreamCategory
 from app.models.schemas import AccountCreate, MediaUpdate
 from app.services.media_service import media_service
 from app.services import (
@@ -1632,6 +1633,122 @@ async def admin_jobs_run(job_name: str, request: Request):
         "admin/_jobs_panel.html",
         _jobs_ctx(flash_message=f"Job « {spec['label']} » démarré."),
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Vue audit lecture seule : metadata_edits + stats scrape_cache (T9.3)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _extract_edit_fields(before_raw: str | None, after_raw: str | None) -> str:
+    """Return a comma-separated summary of touched field names without secrets."""
+    try:
+        after_doc = json.loads(after_raw or "{}")
+        before_doc = json.loads(before_raw or "{}")
+    except (ValueError, TypeError):
+        return "—"
+    if not isinstance(after_doc, dict):
+        return "—"
+
+    changed: list[str] = []
+    after_variants = after_doc.get("variants")
+    before_variants = before_doc.get("variants") if isinstance(before_doc, dict) else None
+    if isinstance(after_variants, list) and after_variants:
+        for idx, av in enumerate(after_variants):
+            if not isinstance(av, dict):
+                continue
+            af = av.get("fields") if isinstance(av.get("fields"), dict) else {}
+            bf = (
+                before_variants[idx].get("fields")
+                if isinstance(before_variants, list)
+                and idx < len(before_variants)
+                and isinstance(before_variants[idx], dict)
+                and isinstance(before_variants[idx].get("fields"), dict)
+                else {}
+            )
+            for k, val in af.items():
+                if (not bf or bf.get(k) != val) and k not in changed:
+                    changed.append(str(k))
+            if av.get("lock") != (
+                before_variants[idx].get("lock")
+                if isinstance(before_variants, list)
+                and idx < len(before_variants)
+                and isinstance(before_variants[idx], dict)
+                else None
+            ) and "lock" not in changed:
+                changed.append("lock")
+    else:
+        for k in after_doc:
+            if k not in ("variants", "derived") and k not in changed:
+                changed.append(str(k))
+    return ", ".join(changed) if changed else "—"
+
+
+async def _audit_ctx(db: AsyncSession) -> dict[str, Any]:
+    """Read-only audit context: last 50 metadata_edits + scrape_cache breakdown."""
+    edits_stmt = (
+        select(MetadataEdit)
+        .order_by(MetadataEdit.at_ms.desc(), MetadataEdit.edit_id.desc())
+        .limit(50)
+    )
+    edit_rows = (await db.execute(edits_stmt)).scalars().all()
+    edits = [
+        {
+            "edit_id": e.edit_id,
+            "at_ms": e.at_ms,
+            "kind": e.kind,
+            "item_type": e.item_type,
+            "server_id": e.server_id,
+            "rating_key": e.rating_key,
+            "key_id": e.key_id,
+            "reason": e.reason,
+            "reverts": e.reverts,
+            "reverted_by": e.reverted_by,
+            "fields_summary": _extract_edit_fields(e.before_json, e.after_json),
+        }
+        for e in edit_rows
+    ]
+
+    current = now_ms()
+    cache_stmt = (
+        select(
+            ScrapeCacheEntry.family,
+            ScrapeCacheEntry.key_version,
+            func.count().label("total"),
+            func.coalesce(
+                func.sum(case((ScrapeCacheEntry.expires_at > current, 1), else_=0)), 0
+            ).label("active"),
+            func.coalesce(
+                func.sum(case((ScrapeCacheEntry.expires_at <= current, 1), else_=0)), 0
+            ).label("expired"),
+        )
+        .group_by(ScrapeCacheEntry.family, ScrapeCacheEntry.key_version)
+        .order_by(ScrapeCacheEntry.family, ScrapeCacheEntry.key_version)
+    )
+    cache_rows = (await db.execute(cache_stmt)).all()
+    cache_families = [
+        {
+            "family": r.family,
+            "key_version": r.key_version,
+            "total": int(r.total),
+            "active": int(r.active),
+            "expired": int(r.expired),
+        }
+        for r in cache_rows
+    ]
+    return {
+        "edits": edits,
+        "cache_families": cache_families,
+        "cache_total": sum(r["total"] for r in cache_families),
+        "cache_active": sum(r["active"] for r in cache_families),
+        "cache_expired": sum(r["expired"] for r in cache_families),
+    }
+
+
+@router.get("/audit", response_class=HTMLResponse)
+async def admin_audit_index(request: Request, db: AsyncSession = Depends(get_db)):
+    """Strictly read-only audit page for metadata edits and scrape_cache stats."""
+    return templates.TemplateResponse(request, "admin/audit.html", await _audit_ctx(db))
 
 
 __all__ = ["router"]

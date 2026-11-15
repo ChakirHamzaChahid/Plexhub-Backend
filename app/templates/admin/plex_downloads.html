@@ -2,6 +2,7 @@
 {% block title %}Télécharger Plex — PlexHub Admin{% endblock %}
 
 {% block content %}
+{% with active_tab='plex' %}{% include "admin/_downloads_subtabs.html" %}{% endwith %}
 <section class="mb-6">
   <h2 class="text-xl font-semibold mb-1">Télécharger depuis Plex</h2>
   <p class="text-sm text-slate-500">

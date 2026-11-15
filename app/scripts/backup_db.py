@@ -301,13 +301,14 @@ def prune_old_backups(backup_dir: Path, retention_days: int) -> list[Path]:
 def _notify_backup_failure(reason: str, error_detail: str) -> None:
     """Dispatch a fail-safe notification on backup failure or corrupt integrity_check.
 
-    Safe in both sync CLI / thread pool execution (via asyncio.run) and running event loops.
-    Never raises an exception or disrupts caller error handling.
+    Safe in both sync CLI / thread pool execution (via asyncio.run with ephemeral client)
+    and running event loops (via notify_fire_and_forget).
+    Never touches the global shared AsyncClient or disrupts caller error handling.
     """
     try:
         import asyncio
         from app.services.notification_service import (
-            close_client,
+            create_client,
             notify_fire_and_forget,
             send_notification,
         )
@@ -338,8 +339,8 @@ def _notify_backup_failure(reason: str, error_detail: str) -> None:
                 details=details,
             )
         else:
-            async def _send_and_close() -> None:
-                try:
+            async def _send_with_ephemeral() -> None:
+                async with create_client() as ephemeral_client:
                     await send_notification(
                         event="backup",
                         title=title,
@@ -347,11 +348,10 @@ def _notify_backup_failure(reason: str, error_detail: str) -> None:
                         severity="error",
                         key="backup_failure",
                         details=details,
+                        client=ephemeral_client,
                     )
-                finally:
-                    await close_client()
 
-            asyncio.run(_send_and_close())
+            asyncio.run(_send_with_ephemeral())
     except Exception as exc:
         logger.debug("Failed to dispatch backup failure notification: %s", exc)
 

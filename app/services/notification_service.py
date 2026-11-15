@@ -46,15 +46,23 @@ _cooldown_cache: dict[tuple[str, str], float] = {}
 _client: httpx.AsyncClient | None = None
 
 
+def create_client(
+    timeout: float = _DEFAULT_TIMEOUT,
+    connect_timeout: float = _CONNECT_TIMEOUT,
+) -> httpx.AsyncClient:
+    """Return a standalone AsyncClient with SSRF guard and redirects disabled."""
+    return httpx.AsyncClient(
+        timeout=httpx.Timeout(timeout, connect=connect_timeout),
+        follow_redirects=False,
+        event_hooks={"request": [vet_request]},
+    )
+
+
 def _get_client() -> httpx.AsyncClient:
     """Return a pooled, keep-alive AsyncClient with SSRF guard and redirect disabled."""
     global _client
     if _client is None or _client.is_closed:
-        _client = httpx.AsyncClient(
-            timeout=httpx.Timeout(_DEFAULT_TIMEOUT, connect=_CONNECT_TIMEOUT),
-            follow_redirects=False,
-            event_hooks={"request": [vet_request]},
-        )
+        _client = create_client()
     return _client
 
 
@@ -82,17 +90,24 @@ def mask_webhook_url(url: str | None) -> str:
             else:
                 netloc = f"***@{host_part}"
 
-        # 2. Mask Discord path: /api/webhooks/<id>/<token>
+        # 2. Mask sensitive path segments (Discord, Slack, Notifiarr, generic tokens)
         path = parsed.path
-        parts = path.split("/")
-        if len(parts) >= 5 and parts[1] == "api" and parts[2] == "webhooks":
-            parts[4] = "***"
-            path = "/".join(parts[:5])
+        if path and path != "/":
+            segments = [s for s in path.split("/") if s]
+            if len(segments) >= 4 and segments[0] == "api" and segments[1] == "webhooks":
+                # Discord: /api/webhooks/<id>/<token> -> /api/webhooks/<id>/***
+                path = f"/api/webhooks/{segments[2]}/***"
+            elif len(segments) > 1:
+                # Multi-segment webhook (Slack /services/T/B/token, Notifiarr, etc.)
+                path = f"/{segments[0]}/.../***"
+            else:
+                path = f"/{segments[0]}"
 
         # 3. Mask query params if any
         query = "***" if parsed.query else ""
+        fragment = "***" if parsed.fragment else ""
 
-        return urlunparse((parsed.scheme, netloc, path, parsed.params, query, parsed.fragment))
+        return urlunparse((parsed.scheme, netloc, path, parsed.params, query, fragment))
     except Exception:
         return "***"
 
@@ -138,6 +153,31 @@ def _is_in_cooldown(event: str, key: str | None, cooldown_seconds: int) -> bool:
     return False
 
 
+def _reserve_cooldown(event: str, key: str | None, cooldown_seconds: int) -> tuple[bool, float | None]:
+    """Check and optimistically reserve cooldown before async suspension points.
+
+    Returns (can_send, prev_ts). If can_send is False, notification is throttled.
+    """
+    if cooldown_seconds <= 0:
+        return True, None
+    dedup_key = (event.strip().lower(), (key or "").strip())
+    now = time.monotonic()
+    last_sent = _cooldown_cache.get(dedup_key)
+    if last_sent is not None and (now - last_sent) < cooldown_seconds:
+        return False, last_sent
+    _record_sent(event, key)
+    return True, last_sent
+
+
+def _rollback_cooldown(event: str, key: str | None, prev_ts: float | None) -> None:
+    """Revert optimistic cooldown reservation on failure or rejection."""
+    dedup_key = (event.strip().lower(), (key or "").strip())
+    if prev_ts is None:
+        _cooldown_cache.pop(dedup_key, None)
+    else:
+        _cooldown_cache[dedup_key] = prev_ts
+
+
 def _record_sent(event: str, key: str | None) -> None:
     global _cooldown_cache
     now = time.monotonic()
@@ -165,9 +205,10 @@ def build_discord_payload(
     """Format payload according to Discord webhook Embed specification."""
     color = _DISCORD_COLORS.get(severity.lower(), _DISCORD_COLORS["info"])
     now_iso = datetime.now(timezone.utc).isoformat()
+    raw_title = f"[{event.upper()}] {title}"
     embed: dict[str, Any] = {
-        "title": f"[{event.upper()}] {title}",
-        "description": message,
+        "title": raw_title[:256],
+        "description": str(message)[:4096],
         "color": color,
         "timestamp": now_iso,
     }
@@ -212,11 +253,12 @@ async def send_notification(
     severity: str = "info",
     key: str | None = None,
     details: dict[str, Any] | None = None,
+    client: httpx.AsyncClient | None = None,
 ) -> bool:
     """Send an async notification to the configured webhook (Discord or generic).
 
     Never raises an exception; returns True on HTTP success (2xx), False otherwise.
-    Safe against SSRF, credential leakage, and notification storms.
+    Safe against SSRF, credential leakage, cross-loop AsyncClient, and notification storms.
     """
     if not settings.NOTIFY_ENABLED:
         return False
@@ -230,7 +272,8 @@ async def send_notification(
         return False
 
     cooldown = settings.NOTIFY_COOLDOWN_SECONDS
-    if _is_in_cooldown(event, key, cooldown):
+    can_send, prev_ts = _reserve_cooldown(event, key, cooldown)
+    if not can_send:
         logger.debug("Notification for (%r, %r) throttled by cooldown (%ds)", event, key, cooldown)
         return False
 
@@ -238,13 +281,16 @@ async def send_notification(
     try:
         parsed = urlparse(url)
         if parsed.scheme not in ("http", "https"):
+            _rollback_cooldown(event, key, prev_ts)
             logger.warning("Notification rejected: unsupported scheme %r", parsed.scheme)
             return False
         host = parsed.hostname
         if not host:
+            _rollback_cooldown(event, key, prev_ts)
             logger.warning("Notification rejected: missing host in webhook URL")
             return False
     except Exception as exc:
+        _rollback_cooldown(event, key, prev_ts)
         logger.warning("Notification rejected: invalid webhook URL (%s)", type(exc).__name__)
         return False
 
@@ -252,33 +298,40 @@ async def send_notification(
     try:
         await assert_public_host(host)
     except SsrfBlockedError:
+        _rollback_cooldown(event, key, prev_ts)
         logger.warning("Notification blocked by SSRF guard: unsafe host %r", host)
         return False
     except Exception as exc:
+        _rollback_cooldown(event, key, prev_ts)
         logger.warning("Notification SSRF resolution failed for host %r: %s", host, type(exc).__name__)
         return False
 
-    # 3. Payload preparation
-    if is_discord_webhook(url):
-        payload = build_discord_payload(
-            event, title, message, severity=severity, details=details
-        )
-    else:
-        payload = build_generic_payload(
-            event, title, message, severity=severity, details=details
-        )
+    # 3. Payload preparation (fail-safe inside try/except)
+    try:
+        if is_discord_webhook(url):
+            payload = build_discord_payload(
+                event, title, message, severity=severity, details=details
+            )
+        else:
+            payload = build_generic_payload(
+                event, title, message, severity=severity, details=details
+            )
+    except Exception as exc:
+        _rollback_cooldown(event, key, prev_ts)
+        logger.warning("Failed to build notification payload for [%s]: %s", event, type(exc).__name__)
+        return False
 
     masked_url = mask_webhook_url(url)
-    client = _get_client()
+    http_client = client if client is not None else _get_client()
 
     # 4. Outbound HTTP dispatch
     try:
-        resp = await client.post(url, json=payload)
+        resp = await http_client.post(url, json=payload)
         if 200 <= resp.status_code < 300:
-            _record_sent(event, key)
             logger.info("Notification sent [%s] (%s): %s", event, severity, title)
             return True
         else:
+            _rollback_cooldown(event, key, prev_ts)
             logger.warning(
                 "Notification webhook returned HTTP %d for [%s] to %s",
                 resp.status_code,
@@ -288,10 +341,12 @@ async def send_notification(
             return False
     except SsrfBlockedError:
         # Caught if vet_request hook triggers during connect/redirect
+        _rollback_cooldown(event, key, prev_ts)
         logger.warning("Notification blocked by SSRF hook: %s", masked_url)
         return False
     except Exception as exc:
         # Strip raw exception message if it contains the unmasked url
+        _rollback_cooldown(event, key, prev_ts)
         err_name = type(exc).__name__
         logger.warning("Failed to send notification [%s] to %s: %s", event, masked_url, err_name)
         return False

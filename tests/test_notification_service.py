@@ -344,3 +344,135 @@ async def test_notify_fire_and_forget(respx_mock, monkeypatch, mock_public_dns):
     result = await task
     assert result is True
     assert route.call_count == 1
+
+
+# ─── 9. Code Review & Security Hardening Tests (Review Findings Fixes) ───────
+
+
+def test_mask_webhook_url_slack_and_multi_segment():
+    """Slack, Notifiarr, and multi-segment webhook paths mask sensitive tokens."""
+    slack_raw = "https://hooks.slack.com/services/T00000000/B00000000/SECRET_TOKEN_XYZ"
+    slack_masked = notification_service.mask_webhook_url(slack_raw)
+    assert slack_masked == "https://hooks.slack.com/services/.../***"
+    assert "SECRET_TOKEN_XYZ" not in slack_masked
+
+    notifiarr_raw = "https://notifiarr.com/api/v1/notification/passthrough/API_KEY_12345"
+    notifiarr_masked = notification_service.mask_webhook_url(notifiarr_raw)
+    assert notifiarr_masked == "https://notifiarr.com/api/.../***"
+    assert "API_KEY_12345" not in notifiarr_masked
+
+    generic_multi = "https://example.com/custom/webhook/secret_token_abc"
+    generic_masked = notification_service.mask_webhook_url(generic_multi)
+    assert generic_masked == "https://example.com/custom/.../***"
+    assert "secret_token_abc" not in generic_masked
+
+
+def test_discord_payload_truncation():
+    """Discord title is capped at 256 chars and description at 4096 chars."""
+    huge_title = "A" * 500
+    huge_message = "B" * 6000
+    payload = notification_service.build_discord_payload(
+        "test",
+        huge_title,
+        huge_message,
+        severity="error",
+    )
+    embed = payload["embeds"][0]
+    assert len(embed["title"]) == 256
+    assert len(embed["description"]) == 4096
+    assert embed["title"].startswith("[TEST] A")
+    assert embed["description"].startswith("BBBB")
+
+
+async def test_concurrent_cooldown_race_condition(respx_mock, monkeypatch, mock_public_dns):
+    """Concurrent dispatch of identical (event, key) only fires a single HTTP request."""
+    webhook_url = "https://hooks.example.com/concurrency"
+    monkeypatch.setattr(settings, "NOTIFY_ENABLED", True)
+    monkeypatch.setattr(settings, "NOTIFY_WEBHOOK_URL", webhook_url)
+    monkeypatch.setattr(settings, "NOTIFY_EVENTS", "*")
+    monkeypatch.setattr(settings, "NOTIFY_COOLDOWN_SECONDS", 60)
+
+    route = respx_mock.post(webhook_url).respond(200)
+
+    # 5 concurrent calls with the exact same key
+    coros = [
+        notification_service.send_notification("download", "Title", "Msg", key="same_batch")
+        for _ in range(5)
+    ]
+    results = await asyncio.gather(*coros)
+
+    # Exactly one succeeded; the other four were throttled by the race-safe cooldown
+    assert results.count(True) == 1
+    assert results.count(False) == 4
+    assert route.call_count == 1
+
+
+async def test_ephemeral_client_does_not_touch_global_singleton(respx_mock, monkeypatch, mock_public_dns):
+    """Supplying client=... uses the custom client and does not mutate global _client."""
+    webhook_url = "https://hooks.example.com/ephemeral"
+    monkeypatch.setattr(settings, "NOTIFY_ENABLED", True)
+    monkeypatch.setattr(settings, "NOTIFY_WEBHOOK_URL", webhook_url)
+    monkeypatch.setattr(settings, "NOTIFY_EVENTS", "*")
+
+    route = respx_mock.post(webhook_url).respond(200)
+
+    # Global client is untouched (None initially)
+    assert notification_service._client is None
+
+    async with notification_service.create_client() as local_client:
+        success = await notification_service.send_notification(
+            "backup", "Title", "Msg", client=local_client
+        )
+        assert success is True
+
+    # Global client remains None
+    assert notification_service._client is None
+    assert route.call_count == 1
+
+
+async def test_cross_loop_worker_thread_ephemeral_client(respx_mock, monkeypatch, mock_public_dns):
+    """A worker thread calling asyncio.run with an ephemeral client never impacts the main loop's client."""
+    webhook_url = "https://hooks.example.com/thread-backup"
+    monkeypatch.setattr(settings, "NOTIFY_ENABLED", True)
+    monkeypatch.setattr(settings, "NOTIFY_WEBHOOK_URL", webhook_url)
+    monkeypatch.setattr(settings, "NOTIFY_EVENTS", "*")
+
+    respx_mock.post(webhook_url).respond(200)
+
+    # 1. Initialize global singleton on the current (main) event loop
+    main_client = notification_service._get_client()
+    assert not main_client.is_closed
+
+    # 2. Worker thread runs a separate event loop via asyncio.run (like backup_db CLI / to_thread)
+    def _worker_thread_job() -> bool:
+        async def _run_in_new_loop():
+            async with notification_service.create_client() as thread_client:
+                return await notification_service.send_notification(
+                    "backup",
+                    "Thread Backup Failure",
+                    "Error in worker thread",
+                    client=thread_client,
+                )
+        return asyncio.run(_run_in_new_loop())
+
+    worker_result = await asyncio.to_thread(_worker_thread_job)
+    assert worker_result is True
+
+    # 3. Verify main event loop's client is still open and valid
+    assert notification_service._client is main_client
+    assert not main_client.is_closed
+
+
+async def test_payload_construction_error_fail_safe(monkeypatch, mock_public_dns):
+    """Exceptions during payload construction are caught and return False without raising."""
+    monkeypatch.setattr(settings, "NOTIFY_ENABLED", True)
+    monkeypatch.setattr(settings, "NOTIFY_WEBHOOK_URL", "https://hooks.example.com/fail-payload")
+    monkeypatch.setattr(settings, "NOTIFY_EVENTS", "*")
+
+    def _broken_payload(*args, **kwargs):
+        raise TypeError("Simulated formatting crash")
+
+    monkeypatch.setattr(notification_service, "build_generic_payload", _broken_payload)
+
+    success = await notification_service.send_notification("outage", "Crash", "Payload")
+    assert success is False

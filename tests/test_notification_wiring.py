@@ -85,7 +85,7 @@ async def test_outage_trip_notifies_only_at_threshold(db_factory, monkeypatch, n
 
     captured_notifications: list[dict] = []
 
-    async def _capture_send(event, title, message, *, severity="info", key=None, details=None):
+    async def _capture_send(event, title, message, *, severity="info", key=None, details=None, client=None, **kwargs):
         captured_notifications.append({
             "event": event,
             "title": title,
@@ -138,7 +138,7 @@ async def test_outage_clear_notifies_only_when_previously_in_outage(db_factory, 
 
     captured_notifications: list[dict] = []
 
-    async def _capture_send(event, title, message, *, severity="info", key=None, details=None):
+    async def _capture_send(event, title, message, *, severity="info", key=None, details=None, client=None, **kwargs):
         captured_notifications.append({
             "event": event,
             "title": title,
@@ -265,7 +265,7 @@ async def test_download_batch_completed_notification(db_factory, monkeypatch, no
 
     captured_notifications: list[dict] = []
 
-    async def _capture_send(event, title, message, *, severity="info", key=None, details=None):
+    async def _capture_send(event, title, message, *, severity="info", key=None, details=None, client=None, **kwargs):
         captured_notifications.append({
             "event": event,
             "title": title,
@@ -339,7 +339,7 @@ async def test_download_batch_failed_notification(db_factory, monkeypatch, notif
 
     captured_notifications: list[dict] = []
 
-    async def _capture_send(event, title, message, *, severity="info", key=None, details=None):
+    async def _capture_send(event, title, message, *, severity="info", key=None, details=None, client=None, **kwargs):
         captured_notifications.append({
             "event": event,
             "title": title,
@@ -409,7 +409,7 @@ async def test_download_batch_partial_notification(db_factory, monkeypatch, noti
 
     captured_notifications: list[dict] = []
 
-    async def _capture_send(event, title, message, *, severity="info", key=None, details=None):
+    async def _capture_send(event, title, message, *, severity="info", key=None, details=None, client=None, **kwargs):
         captured_notifications.append({
             "event": event,
             "title": title,
@@ -436,6 +436,77 @@ async def test_download_batch_partial_notification(db_factory, monkeypatch, noti
     assert notif["details"]["failed"] == 1
 
 
+async def test_download_batch_canceled_notification(db_factory, monkeypatch, notify_config):
+    """A batch where all jobs are canceled triggers severity='info' and title='Téléchargement annulé'."""
+    batch_id = "batch_canceled_1"
+    async with db_factory() as session:
+        batch = DownloadBatch(
+            id=batch_id,
+            media_type="show",
+            title="Severance",
+            server_id="srv_1",
+            rating_key="rk_sev",
+            scope="series_all",
+            total_jobs=2,
+            created_at=now_ms(),
+        )
+        j1 = DownloadJob(
+            id="job_c1",
+            batch_id=batch_id,
+            state="canceled",
+            media_type="episode",
+            dest_path="Shows/Severance/S01E01.mkv",
+            server_id="srv_1",
+            rating_key="rk_c1",
+            title="S01E01",
+            created_at=now_ms(),
+            updated_at=now_ms(),
+        )
+        j2 = DownloadJob(
+            id="job_c2",
+            batch_id=batch_id,
+            state="canceled",
+            media_type="episode",
+            dest_path="Shows/Severance/S01E02.mkv",
+            server_id="srv_1",
+            rating_key="rk_c2",
+            title="S01E02",
+            created_at=now_ms(),
+            updated_at=now_ms(),
+        )
+        session.add_all([batch, j1, j2])
+        await session.commit()
+
+    captured_notifications: list[dict] = []
+
+    async def _capture_send(event, title, message, *, severity="info", key=None, details=None, client=None, **kwargs):
+        captured_notifications.append({
+            "event": event,
+            "title": title,
+            "message": message,
+            "severity": severity,
+            "key": key,
+            "details": details,
+        })
+        return True
+
+    monkeypatch.setattr(notification_service, "send_notification", _capture_send)
+
+    await download_worker._check_and_notify_batch_completion(db_factory, batch_id)
+    await asyncio.sleep(0.01)
+
+    assert len(captured_notifications) == 1
+    notif = captured_notifications[0]
+    assert notif["event"] == "download"
+    assert notif["severity"] == "info"
+    assert "annulé" in notif["title"]
+    assert "Severance" in notif["title"]
+    assert notif["details"]["status"] == "canceled"
+    assert notif["details"]["completed"] == 0
+    assert notif["details"]["failed"] == 0
+    assert notif["details"]["canceled"] == 2
+
+
 # ─── 3. Backup Failure Notifications ──────────────────────────────────────────
 
 
@@ -448,7 +519,7 @@ def test_backup_failure_notifies_on_missing_db(tmp_path, monkeypatch, notify_con
 
     captured_notifications: list[dict] = []
 
-    async def _capture_send(event, title, message, *, severity="info", key=None, details=None):
+    async def _capture_send(event, title, message, *, severity="info", key=None, details=None, client=None, **kwargs):
         captured_notifications.append({
             "event": event,
             "title": title,
@@ -481,7 +552,7 @@ def test_backup_failure_notifies_on_integrity_error(tmp_path, monkeypatch, notif
 
     captured_notifications: list[dict] = []
 
-    async def _capture_send(event, title, message, *, severity="info", key=None, details=None):
+    async def _capture_send(event, title, message, *, severity="info", key=None, details=None, client=None, **kwargs):
         captured_notifications.append({
             "event": event,
             "title": title,
@@ -520,7 +591,7 @@ def test_backup_verify_latest_notifies_on_corruption(tmp_path, monkeypatch, noti
 
     captured_notifications: list[dict] = []
 
-    async def _capture_send(event, title, message, *, severity="info", key=None, details=None):
+    async def _capture_send(event, title, message, *, severity="info", key=None, details=None, client=None, **kwargs):
         captured_notifications.append({
             "event": event,
             "title": title,
@@ -563,7 +634,7 @@ def test_backup_success_does_not_notify(tmp_path, monkeypatch, notify_config):
 
     captured_notifications: list[dict] = []
 
-    async def _capture_send(event, title, message, *, severity="info", key=None, details=None):
+    async def _capture_send(event, title, message, *, severity="info", key=None, details=None, client=None, **kwargs):
         captured_notifications.append({"event": event})
         return True
 
@@ -578,7 +649,7 @@ async def test_download_standalone_job_no_batch_notification(db_factory, monkeyp
     """A standalone job without batch_id does not dispatch any batch notifications."""
     captured_notifications: list[dict] = []
 
-    async def _capture_send(event, title, message, *, severity="info", key=None, details=None):
+    async def _capture_send(event, title, message, *, severity="info", key=None, details=None, client=None, **kwargs):
         captured_notifications.append({"event": event})
         return True
 

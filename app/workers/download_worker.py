@@ -529,16 +529,23 @@ async def _check_and_notify_batch_completion(session_factory, batch_id: str | No
         status = "partial"
         severity = "warning"
         title = f"Téléchargement partiel : {batch_title}"
+    elif failed == 0 and canceled > 0:
+        status = "canceled"
+        severity = "info"
+        title = f"Téléchargement annulé : {batch_title}"
     else:
         status = "failed"
         severity = "error"
         title = f"Téléchargement échoué : {batch_title}"
 
-    msg = f"Batch {batch_id} ({status}) : {completed}/{total} terminé(s) avec succès"
-    if failed:
-        msg += f", {failed} échec(s)"
-    if canceled:
-        msg += f", {canceled} annulé(s)"
+    if status == "canceled":
+        msg = f"Batch {batch_id} (canceled) : {canceled}/{total} annulé(s)"
+    else:
+        msg = f"Batch {batch_id} ({status}) : {completed}/{total} terminé(s) avec succès"
+        if failed:
+            msg += f", {failed} échec(s)"
+        if canceled:
+            msg += f", {canceled} annulé(s)"
 
     try:
         from app.services.notification_service import notify_fire_and_forget

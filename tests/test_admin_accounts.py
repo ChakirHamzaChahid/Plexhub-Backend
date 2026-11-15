@@ -283,6 +283,32 @@ class TestAdminAccountsCreate:
         assert "authentification" in resp.text.lower()
         assert "bad_password" not in resp.text
 
+    async def test_create_account_validation_error_returns_422(
+        self, api_client, monkeypatch
+    ):
+        from pydantic import ValidationError
+        from app.api import admin as admin_module
+
+        def _raise_val(*args, **kwargs):
+            raise ValidationError.from_exception_data("AccountCreate", [])
+
+        monkeypatch.setattr(admin_module, "AccountCreate", _raise_val)
+
+        resp = await api_client.post(
+            "/admin/accounts",
+            data={
+                "label": "Bad Account",
+                "base_url": "http://prov.example",
+                "port": 8080,
+                "username": "bad_user",
+                "password": "secret_password",
+            },
+            auth=ADMIN_AUTH,
+            headers=CSRF_HEADERS,
+        )
+        assert resp.status_code == 422
+        assert "Paramètres invalides" in resp.text
+
 
 # ─── 5. Test de connexion Xtream ──────────────────────────────────────────────
 
@@ -549,3 +575,86 @@ class TestAdminCategoriesEditor:
             cats = {c.category_id: c.is_allowed for c in res.scalars().all()}
             assert cats["100"] is True  # Non adulte reste autorisé
             assert cats["101"] is False  # Adulte est bloqué
+
+    async def test_categories_mode_unknown_account_404(self, api_client):
+        resp = await api_client.post(
+            "/admin/accounts/unknown_acc_id/categories/mode",
+            data={"filter_mode": "whitelist"},
+            auth=ADMIN_AUTH,
+            headers=CSRF_HEADERS,
+        )
+        assert resp.status_code == 404
+        assert "Compte introuvable" in resp.text
+
+    async def test_refresh_categories_success(
+        self, api_client, xtream_mock, db_factory
+    ):
+        acc_id = "refresh_ok_acc"
+        async with db_factory() as session:
+            session.add(
+                XtreamAccount(
+                    id=acc_id,
+                    label="Refresh OK Test",
+                    base_url="http://prov.example",
+                    port=8080,
+                    username="user_ref",
+                    password="pwd",
+                    category_filter_mode="all",
+                )
+            )
+            await session.commit()
+
+        xtream_mock.get(
+            "http://prov.example:8080/player_api.php?username=user_ref&password=pwd&action=get_vod_categories"
+        ).respond(200, json=[{"category_id": "1", "category_name": "Action"}])
+        xtream_mock.get(
+            "http://prov.example:8080/player_api.php?username=user_ref&password=pwd&action=get_series_categories"
+        ).respond(200, json=[{"category_id": "2", "category_name": "Drama"}])
+
+        resp = await api_client.post(
+            f"/admin/accounts/{acc_id}/categories/refresh",
+            auth=ADMIN_AUTH,
+            headers=CSRF_HEADERS,
+        )
+        assert resp.status_code == 200
+        assert "Catégories synchronisées : 1 VOD, 1 séries." in resp.text
+
+        async with db_factory() as session:
+            res = await session.execute(
+                select(XtreamCategory).where(XtreamCategory.account_id == acc_id)
+            )
+            cats = res.scalars().all()
+            assert len(cats) == 2
+
+    async def test_refresh_categories_httpx_error_never_leaks_credentials(
+        self, api_client, xtream_mock, db_factory
+    ):
+        acc_id = "refresh_fail_acc"
+        secret_pass = "CONFIDENTIAL_REFRESH_PASSWORD_999"
+        secret_user = "secret_xtream_user"
+        async with db_factory() as session:
+            session.add(
+                XtreamAccount(
+                    id=acc_id,
+                    label="Refresh Leak Test",
+                    base_url="http://prov.example",
+                    port=8080,
+                    username=secret_user,
+                    password=secret_pass,
+                    category_filter_mode="all",
+                )
+            )
+            await session.commit()
+
+        # Provider returns 500 (HTTPStatusError embeds URL with query params)
+        xtream_mock.get("http://prov.example:8080/player_api.php").respond(500)
+
+        resp = await api_client.post(
+            f"/admin/accounts/{acc_id}/categories/refresh",
+            auth=ADMIN_AUTH,
+            headers=CSRF_HEADERS,
+        )
+        assert resp.status_code == 200
+        assert "Erreur lors du rafraîchissement" in resp.text
+        assert secret_pass not in resp.text
+        assert secret_user not in resp.text

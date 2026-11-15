@@ -115,6 +115,27 @@ class TestAdminJobsRendering:
         assert "tok123" not in resp.text
         assert "Erreur" in resp.text
 
+    async def test_jobs_panel_sanitizes_xtream_path_credentials(self, api_client):
+        job_registry.set_job(
+            "sync_path_secret_leak",
+            {
+                "status": "failed",
+                "phase": "sync",
+                "started_at": 1_700_000_000_000,
+                "finished_at": 1_700_000_005_000,
+                "error": "Stream error http://prov.example:8080/movie/secret_user/secret_pass123/1234.mp4 and /series/user_b/pass_b/567.mkv",
+                "progress": {},
+            },
+        )
+        resp = await api_client.get("/admin/jobs/panel", auth=ADMIN_AUTH)
+        assert resp.status_code == 200
+        assert "secret_user" not in resp.text
+        assert "secret_pass123" not in resp.text
+        assert "user_b" not in resp.text
+        assert "pass_b" not in resp.text
+        assert "/movie/***/***/1234.mp4" in resp.text
+        assert "/series/***/***/567.mkv" in resp.text
+
     async def test_jobs_panel_shows_job_health_last_success(self, api_client):
         job_health.mark_job_success("epg_sync")
         resp = await api_client.get("/admin/jobs/panel", auth=ADMIN_AUTH)

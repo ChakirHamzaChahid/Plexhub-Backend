@@ -107,7 +107,7 @@ async def test_create_account_auth_failure_raises(monkeypatch, db_session):
         label="X", base_url="http://unreachable.example", port=80,
         username="u", password="p",
     )
-    with pytest.raises(account_service.AccountAuthenticationError, match="connection refused"):
+    with pytest.raises(account_service.AccountAuthenticationError, match="RuntimeError"):
         await account_service.create_account(db_session, body)
 
 

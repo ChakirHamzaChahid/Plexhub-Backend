@@ -82,10 +82,8 @@ async def prepare_account_create(db: AsyncSession, body: AccountCreate) -> dict:
         auth_data = await xtream_service.authenticate(credentials)
         user_info = auth_data.get("user_info", {})
         server_info = auth_data.get("server_info", {})
-    except httpx.HTTPError as e:
-        raise AccountAuthenticationError(safe_xtream_error(e)) from e
     except Exception as e:
-        raise AccountAuthenticationError(str(e)) from e
+        raise AccountAuthenticationError(safe_xtream_error(e)) from e
 
     return {
         "id": account_id,

@@ -15,6 +15,7 @@ from typing import Any, Awaitable, Callable, Optional
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
+from pydantic import ValidationError
 from sqlalchemy import case, func, select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,6 +39,7 @@ from app.services import (
     nfo_import_service,
     poster_match_service,
 )
+from app.services.xtream_service import safe_xtream_error
 from app.utils import job_health, tasks as app_tasks
 from app.utils.db_retry import session_factory_for, write_with_retry
 from app.utils.ssrf import SsrfBlockedError
@@ -127,12 +129,13 @@ async def _catalogue_ctx(
 
 async def _stats_ctx(db: AsyncSession) -> dict:
     stats = await manual_scrape_service.catalogue_stats(db)
+    backup_status = await asyncio.to_thread(backup_status_service.compute_status, now_ms())
     return {
         "stats": stats,
         "movie_stats": stats["movie"],
         "show_stats": stats["show"],
         "outages": await account_outage_service.list_outages(db),
-        "backup_status": backup_status_service.compute_status(now_ms()),
+        "backup_status": backup_status,
     }
 
 
@@ -1030,14 +1033,14 @@ async def admin_accounts_create(
             status_code=422,
         )
 
-    body = AccountCreate(
-        label=label,
-        base_url=base_url,
-        port=port,
-        username=username,
-        password=password,
-    )
     try:
+        body = AccountCreate(
+            label=label,
+            base_url=base_url,
+            port=port,
+            username=username,
+            password=password,
+        )
         account_values = await account_service.prepare_account_create(db, body)
     except account_service.AccountAlreadyExistsError:
         return templates.TemplateResponse(
@@ -1046,7 +1049,14 @@ async def admin_accounts_create(
             {"error": "Un compte avec cette URL et cet identifiant existe déjà."},
             status_code=409,
         )
-    except (account_service.AccountAuthenticationError, SsrfBlockedError, ValueError) as exc:
+    except (ValueError, ValidationError) as exc:
+        return templates.TemplateResponse(
+            request,
+            "admin/_account_created.html",
+            {"error": f"Paramètres invalides : {exc}"},
+            status_code=422,
+        )
+    except (account_service.AccountAuthenticationError, SsrfBlockedError) as exc:
         return templates.TemplateResponse(
             request,
             "admin/_account_created.html",
@@ -1232,6 +1242,12 @@ async def admin_accounts_categories_mode(
     if filter_mode not in ("all", "whitelist", "blacklist"):
         raise HTTPException(400, "Mode de filtrage invalide")
 
+    account = (
+        await db.execute(select(XtreamAccount).where(XtreamAccount.id == account_id))
+    ).scalar_one_or_none()
+    if not account:
+        raise HTTPException(404, "Compte introuvable")
+
     async def _work_mode(session: AsyncSession):
         await category_service.update_filter_mode(session, account_id, filter_mode)
         await session.commit()
@@ -1310,15 +1326,33 @@ async def admin_accounts_categories_refresh(
     db: AsyncSession = Depends(get_db),
 ):
     try:
-        vod_count, series_count = await category_service.refresh_categories_from_provider(
-            db, account_id
+        vod_categories, series_categories, new_allowed = (
+            await category_service.fetch_categories_from_provider(db, account_id)
         )
-        await db.commit()
+
+        async def _work_upsert(session: AsyncSession) -> tuple[int, int]:
+            counts = await category_service.upsert_categories_batch(
+                session,
+                account_id,
+                vod_categories,
+                series_categories,
+                new_allowed,
+            )
+            await session.commit()
+            return counts
+
+        vod_count, series_count = await write_with_retry(
+            _work_upsert,
+            session_factory=session_factory_for(db),
+            op="admin.refresh_categories",
+        )
     except category_service.AccountNotFoundError:
         raise HTTPException(404, "Compte introuvable")
     except Exception as exc:
+        await db.rollback()
+        safe_msg = safe_xtream_error(exc)
         ctx = await _categories_ctx(
-            db, account_id, message=f"Erreur lors du rafraîchissement : {exc}"
+            db, account_id, message=f"Erreur lors du rafraîchissement : {safe_msg}"
         )
         return templates.TemplateResponse(request, "admin/_categories_editor.html", ctx)
 
@@ -1365,6 +1399,10 @@ async def admin_accounts_categories_block_adult(
 # ──────────────────────────────────────────────────────────────────────────────
 
 _SECRET_URL_CREDS_RE = re.compile(r"://[^:/\s@]+:[^@/\s]+@")
+_SECRET_XTREAM_PATH_RE = re.compile(
+    r"/(?P<type>movie|series|live)/[^/\s?#]+/[^/\s?#]+(?=/|$|\s)",
+    re.IGNORECASE,
+)
 _SECRET_KV_RE = re.compile(
     r"(?i)(password|passwd|token|api_key|apikey|secret|authorization|x-api-key)\s*[:=]\s*\S+"
 )
@@ -1376,6 +1414,7 @@ def _sanitize_job_message(raw: object, max_len: int = 160) -> str:
     if not text:
         return ""
     text = _SECRET_URL_CREDS_RE.sub("://***:***@", text)
+    text = _SECRET_XTREAM_PATH_RE.sub(r"/\g<type>/***/***", text)
     text = _SECRET_KV_RE.sub(lambda m: f"{m.group(1)}=***", text)
     text = " ".join(text.split())
     if len(text) > max_len:
@@ -1565,13 +1604,15 @@ def _build_job_views(backup_status: dict[str, Any]) -> list[dict[str, Any]]:
     return views
 
 
-def _jobs_ctx(
+async def _jobs_ctx(
     *,
     flash_message: str | None = None,
     flash_error: str | None = None,
 ) -> dict[str, Any]:
     current_ms = now_ms()
-    backup_status = backup_status_service.compute_status(current_ms)
+    backup_status = await asyncio.to_thread(
+        backup_status_service.compute_status, current_ms
+    )
     return {
         "jobs": _build_job_views(backup_status),
         "backup_status": backup_status,
@@ -1584,12 +1625,12 @@ def _jobs_ctx(
 
 @router.get("/jobs", response_class=HTMLResponse)
 async def admin_jobs_index(request: Request):
-    return templates.TemplateResponse(request, "admin/jobs.html", _jobs_ctx())
+    return templates.TemplateResponse(request, "admin/jobs.html", await _jobs_ctx())
 
 
 @router.get("/jobs/panel", response_class=HTMLResponse)
 async def admin_jobs_panel(request: Request):
-    return templates.TemplateResponse(request, "admin/_jobs_panel.html", _jobs_ctx())
+    return templates.TemplateResponse(request, "admin/_jobs_panel.html", await _jobs_ctx())
 
 
 @router.post("/jobs/{job_name}/run", response_class=HTMLResponse)
@@ -1602,7 +1643,7 @@ async def admin_jobs_run(job_name: str, request: Request):
         return templates.TemplateResponse(
             request,
             "admin/_jobs_panel.html",
-            _jobs_ctx(
+            await _jobs_ctx(
                 flash_error=f"Le job « {spec['label']} » est déjà en cours."
             ),
             status_code=409,
@@ -1631,7 +1672,7 @@ async def admin_jobs_run(job_name: str, request: Request):
     return templates.TemplateResponse(
         request,
         "admin/_jobs_panel.html",
-        _jobs_ctx(flash_message=f"Job « {spec['label']} » démarré."),
+        await _jobs_ctx(flash_message=f"Job « {spec['label']} » démarré."),
     )
 
 

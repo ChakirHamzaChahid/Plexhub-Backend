@@ -1,0 +1,28 @@
+{% if success %}
+<div class="mt-2 p-2 bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs rounded">
+  <div class="font-semibold flex items-center gap-1.5">
+    <span class="inline-block w-2 h-2 rounded-full bg-emerald-500"></span>
+    Connexion établie avec succès
+  </div>
+  <div class="mt-1 text-slate-600 flex flex-wrap gap-x-4 gap-y-1">
+    <span>Statut : <strong class="text-slate-800">{{ status }}</strong></span>
+    {% if expiration_date %}
+    <span>Expire le : <strong class="text-slate-800">{{ expiration_date | ms }}</strong></span>
+    {% else %}
+    <span>Expiration : <strong class="text-slate-800">Illimitée</strong></span>
+    {% endif %}
+    <span>Connexions max : <strong class="text-slate-800">{{ max_connections }}</strong></span>
+    {% if allowed_formats %}
+    <span>Formats : <strong class="font-mono text-slate-800">{{ allowed_formats }}</strong></span>
+    {% endif %}
+  </div>
+</div>
+{% else %}
+<div class="mt-2 p-2 bg-red-50 border border-red-200 text-red-700 text-xs rounded">
+  <div class="font-semibold flex items-center gap-1.5">
+    <span class="inline-block w-2 h-2 rounded-full bg-red-500"></span>
+    Échec du test de connexion
+  </div>
+  <div class="mt-0.5 text-red-600">{{ error }}</div>
+</div>
+{% endif %}

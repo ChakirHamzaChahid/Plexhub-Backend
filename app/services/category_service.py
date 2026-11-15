@@ -31,6 +31,13 @@ def _is_adult_category_name(name: Optional[str]) -> bool:
     return any(kw in lowered for kw in settings.ADULT_CATEGORY_KEYWORDS)
 
 
+def is_adult_category(category_name: Optional[str], category_id: str) -> bool:
+    """True when category matches adult keywords or is in ADULT_CATEGORY_IDS."""
+    if category_id in settings.ADULT_CATEGORY_IDS:
+        return True
+    return _is_adult_category_name(category_name)
+
+
 async def get_categories(
     db: AsyncSession,
     account_id: str,
@@ -640,3 +647,41 @@ async def refresh_categories_from_provider(
     return await upsert_categories_batch(
         db, account_id, vod_categories, series_categories, new_allowed
     )
+
+
+async def toggle_category_allowed(
+    db: AsyncSession,
+    account_id: str,
+    category_id: str,
+    category_type: str,
+) -> bool:
+    """Toggle is_allowed for a category and return new allowed state."""
+    stmt = select(XtreamCategory).where(
+        XtreamCategory.account_id == account_id,
+        XtreamCategory.category_id == category_id,
+        XtreamCategory.category_type == category_type,
+    )
+    result = await db.execute(stmt)
+    cat = result.scalar_one_or_none()
+    if not cat:
+        raise ValueError(f"Category {category_id} ({category_type}) not found")
+    new_allowed = not cat.is_allowed
+    cat.is_allowed = new_allowed
+    return new_allowed
+
+
+async def block_adult_categories_for_account(
+    db: AsyncSession,
+    account_id: str,
+) -> int:
+    """Set is_allowed=False for all adult categories belonging to account_id."""
+    stmt = select(XtreamCategory).where(XtreamCategory.account_id == account_id)
+    result = await db.execute(stmt)
+    categories = result.scalars().all()
+    count = 0
+    for cat in categories:
+        if is_adult_category(cat.category_name, cat.category_id) and cat.is_allowed:
+            cat.is_allowed = False
+            count += 1
+    return count
+

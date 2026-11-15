@@ -12,6 +12,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
+from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,16 +21,22 @@ logger = logging.getLogger("plexhub.api.admin")
 
 from app.config import settings
 from app.db.database import async_session_factory, get_db
-from app.models.schemas import MediaUpdate
+from app.models.database import XtreamAccount, XtreamCategory
+from app.models.schemas import AccountCreate, MediaUpdate
 from app.services.media_service import media_service
 from app.services import (
     account_outage_service,
+    account_service,
     api_key_service,
+    category_service,
     manual_scrape_service,
     nfo_import_service,
     poster_match_service,
 )
+from app.utils.db_retry import session_factory_for, write_with_retry
+from app.utils.ssrf import SsrfBlockedError
 from app.utils.string_normalizer import clean_title
+from app.utils.tasks import create_background_task
 from app.utils.time import now_ms
 from app.workers import manual_scrape_batch_worker
 
@@ -940,6 +947,410 @@ async def admin_keys_revoke(
     return templates.TemplateResponse(
         request, "admin/_keys_table.html", await _keys_ctx(db)
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Comptes Xtream & éditeur de catégories (T9.1)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+async def _accounts_ctx(db: AsyncSession) -> dict:
+    result = await db.execute(
+        select(XtreamAccount).order_by(XtreamAccount.created_at.desc())
+    )
+    accounts = result.scalars().all()
+    threshold = settings.ACCOUNT_OUTAGE_STRIKES
+    account_rows = [
+        {
+            "id": a.id,
+            "label": a.label,
+            "base_url": a.base_url,
+            "port": a.port,
+            "username": a.username,
+            "status": a.status,
+            "is_active": a.is_active,
+            "created_at": a.created_at,
+            "last_synced_at": a.last_synced_at,
+            "expiration_date": a.expiration_date,
+            "max_connections": a.max_connections,
+            "allowed_formats": a.allowed_formats,
+            "category_filter_mode": a.category_filter_mode,
+            "outage_strikes": int(a.outage_strikes or 0),
+            "outage_since": a.outage_since,
+            "is_outage": bool(
+                a.outage_strikes
+                and a.outage_strikes >= threshold
+                and settings.ACCOUNT_OUTAGE_MASK_ENABLED
+            ),
+        }
+        for a in accounts
+    ]
+    return {"accounts": account_rows}
+
+
+@router.get("/accounts", response_class=HTMLResponse)
+async def admin_accounts(request: Request, db: AsyncSession = Depends(get_db)):
+    return templates.TemplateResponse(
+        request, "admin/accounts.html", await _accounts_ctx(db)
+    )
+
+
+@router.get("/accounts/table", response_class=HTMLResponse)
+async def admin_accounts_table(request: Request, db: AsyncSession = Depends(get_db)):
+    return templates.TemplateResponse(
+        request, "admin/_accounts_table.html", await _accounts_ctx(db)
+    )
+
+
+@router.post("/accounts", response_class=HTMLResponse)
+async def admin_accounts_create(
+    request: Request,
+    label: str = Form(...),
+    base_url: str = Form(...),
+    port: int = Form(80),
+    username: str = Form(...),
+    password: str = Form(...),
+    db: AsyncSession = Depends(get_db),
+):
+    label = (label or "").strip()
+    base_url = (base_url or "").strip()
+    username = (username or "").strip()
+    if not label or not base_url or not username or not password:
+        return templates.TemplateResponse(
+            request,
+            "admin/_account_created.html",
+            {"error": "Tous les champs (libellé, URL, identifiant, mot de passe) sont obligatoires."},
+            status_code=422,
+        )
+
+    body = AccountCreate(
+        label=label,
+        base_url=base_url,
+        port=port,
+        username=username,
+        password=password,
+    )
+    try:
+        account_values = await account_service.prepare_account_create(db, body)
+    except account_service.AccountAlreadyExistsError:
+        return templates.TemplateResponse(
+            request,
+            "admin/_account_created.html",
+            {"error": "Un compte avec cette URL et cet identifiant existe déjà."},
+            status_code=409,
+        )
+    except (account_service.AccountAuthenticationError, SsrfBlockedError, ValueError) as exc:
+        return templates.TemplateResponse(
+            request,
+            "admin/_account_created.html",
+            {"error": f"Échec d'authentification : {exc}"},
+            status_code=422,
+        )
+
+    async def _work_create(session: AsyncSession) -> XtreamAccount:
+        existing = await session.execute(
+            select(XtreamAccount).where(XtreamAccount.id == account_values["id"])
+        )
+        if existing.scalars().first():
+            raise account_service.AccountAlreadyExistsError(account_values["id"])
+        row = XtreamAccount(**account_values)
+        session.add(row)
+        await session.commit()
+        return row
+
+    try:
+        account = await write_with_retry(
+            _work_create,
+            session_factory=session_factory_for(db),
+            op="admin.create_account",
+        )
+    except account_service.AccountAlreadyExistsError:
+        return templates.TemplateResponse(
+            request,
+            "admin/_account_created.html",
+            {"error": "Un compte avec cette URL et cet identifiant existe déjà."},
+            status_code=409,
+        )
+
+    from app.workers.sync_worker import sync_account
+    create_background_task(sync_account(account.id), name=f"sync_{account.id}")
+
+    return templates.TemplateResponse(
+        request,
+        "admin/_account_created.html",
+        {
+            "error": None,
+            "label": account.label,
+            "account_id": account.id,
+        },
+        headers={"HX-Trigger": "refresh-accounts"},
+    )
+
+
+@router.post("/accounts/{account_id}/test", response_class=HTMLResponse)
+async def admin_accounts_test(
+    account_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        user_info = await account_service.test_account_connection(db, account_id)
+        exp_date_raw = user_info.get("exp_date")
+        exp_date_ms = int(exp_date_raw) * 1000 if exp_date_raw else None
+        return templates.TemplateResponse(
+            request,
+            "admin/_account_test_result.html",
+            {
+                "success": True,
+                "status": user_info.get("status", "Unknown"),
+                "expiration_date": exp_date_ms,
+                "max_connections": int(user_info.get("max_connections", 1)),
+                "allowed_formats": ",".join(user_info.get("allowed_output_formats", [])),
+                "error": None,
+            },
+        )
+    except account_service.AccountNotFoundError:
+        return templates.TemplateResponse(
+            request,
+            "admin/_account_test_result.html",
+            {"success": False, "error": "Compte introuvable."},
+            status_code=404,
+        )
+    except (account_service.AccountAuthenticationError, Exception) as exc:
+        return templates.TemplateResponse(
+            request,
+            "admin/_account_test_result.html",
+            {"success": False, "error": str(exc)},
+            status_code=200,
+        )
+
+
+@router.post("/accounts/{account_id}/toggle", response_class=HTMLResponse)
+async def admin_accounts_toggle(
+    account_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    async def _work_toggle(session: AsyncSession):
+        updated = await account_service.toggle_account_active(session, account_id)
+        await session.commit()
+        return updated
+
+    try:
+        await write_with_retry(
+            _work_toggle,
+            session_factory=session_factory_for(db),
+            op="admin.toggle_account_active",
+        )
+    except account_service.AccountNotFoundError:
+        raise HTTPException(404, "Compte introuvable")
+
+    return templates.TemplateResponse(
+        request, "admin/_accounts_table.html", await _accounts_ctx(db)
+    )
+
+
+async def _categories_ctx(
+    db: AsyncSession, account_id: str, message: str | None = None
+) -> dict:
+    result = await db.execute(
+        select(XtreamAccount).where(XtreamAccount.id == account_id)
+    )
+    account = result.scalars().first()
+    if not account:
+        raise HTTPException(404, "Compte introuvable")
+
+    categories, filter_mode = await category_service.get_categories(db, account_id)
+
+    cat_rows = []
+    allowed_count = 0
+    blocked_count = 0
+    adult_count = 0
+
+    for cat in categories:
+        is_adult = category_service.is_adult_category(cat.category_name, cat.category_id)
+        if cat.is_allowed:
+            allowed_count += 1
+        else:
+            blocked_count += 1
+        if is_adult:
+            adult_count += 1
+        cat_rows.append(
+            {
+                "id": cat.id,
+                "account_id": cat.account_id,
+                "category_id": cat.category_id,
+                "category_type": cat.category_type,
+                "category_name": cat.category_name,
+                "is_allowed": cat.is_allowed,
+                "is_adult": is_adult,
+            }
+        )
+
+    account_dict = {
+        "id": account.id,
+        "label": account.label,
+        "category_filter_mode": filter_mode,
+    }
+
+    return {
+        "account": account_dict,
+        "categories": cat_rows,
+        "stats": {
+            "allowed_count": allowed_count,
+            "blocked_count": blocked_count,
+            "adult_count": adult_count,
+        },
+        "message": message,
+    }
+
+
+@router.get("/accounts/{account_id}/categories", response_class=HTMLResponse)
+async def admin_accounts_categories(
+    account_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    ctx = await _categories_ctx(db, account_id)
+    return templates.TemplateResponse(request, "admin/_categories_editor.html", ctx)
+
+
+@router.post("/accounts/{account_id}/categories/mode", response_class=HTMLResponse)
+async def admin_accounts_categories_mode(
+    account_id: str,
+    request: Request,
+    filter_mode: str = Form(...),
+    db: AsyncSession = Depends(get_db),
+):
+    if filter_mode not in ("all", "whitelist", "blacklist"):
+        raise HTTPException(400, "Mode de filtrage invalide")
+
+    async def _work_mode(session: AsyncSession):
+        await category_service.update_filter_mode(session, account_id, filter_mode)
+        await session.commit()
+
+    await write_with_retry(
+        _work_mode,
+        session_factory=session_factory_for(db),
+        op="admin.update_category_filter_mode",
+    )
+    await category_service.update_media_category_visibility(db, account_id)
+
+    ctx = await _categories_ctx(
+        db, account_id, message=f"Mode de filtrage mis à jour : {filter_mode.upper()}."
+    )
+    return templates.TemplateResponse(request, "admin/_categories_editor.html", ctx)
+
+
+@router.post(
+    "/accounts/{account_id}/categories/{category_id}/toggle",
+    response_class=HTMLResponse,
+)
+async def admin_accounts_category_toggle(
+    account_id: str,
+    category_id: str,
+    request: Request,
+    category_type: str = Form(...),
+    db: AsyncSession = Depends(get_db),
+):
+    async def _work_toggle(session: AsyncSession) -> bool:
+        new_status = await category_service.toggle_category_allowed(
+            session, account_id, category_id, category_type
+        )
+        await session.commit()
+        return new_status
+
+    try:
+        new_allowed = await write_with_retry(
+            _work_toggle,
+            session_factory=session_factory_for(db),
+            op="admin.toggle_category_allowed",
+        )
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+
+    await category_service.update_media_category_visibility(db, account_id)
+
+    stmt = select(XtreamCategory).where(
+        XtreamCategory.account_id == account_id,
+        XtreamCategory.category_id == category_id,
+        XtreamCategory.category_type == category_type,
+    )
+    result = await db.execute(stmt)
+    cat = result.scalar_one_or_none()
+    if not cat:
+        raise HTTPException(404, "Catégorie introuvable")
+
+    is_adult = category_service.is_adult_category(cat.category_name, cat.category_id)
+    cat_dict = {
+        "id": cat.id,
+        "account_id": cat.account_id,
+        "category_id": cat.category_id,
+        "category_type": cat.category_type,
+        "category_name": cat.category_name,
+        "is_allowed": new_allowed,
+        "is_adult": is_adult,
+    }
+    return templates.TemplateResponse(
+        request, "admin/_category_row.html", {"cat": cat_dict}
+    )
+
+
+@router.post("/accounts/{account_id}/categories/refresh", response_class=HTMLResponse)
+async def admin_accounts_categories_refresh(
+    account_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        vod_count, series_count = await category_service.refresh_categories_from_provider(
+            db, account_id
+        )
+        await db.commit()
+    except category_service.AccountNotFoundError:
+        raise HTTPException(404, "Compte introuvable")
+    except Exception as exc:
+        ctx = await _categories_ctx(
+            db, account_id, message=f"Erreur lors du rafraîchissement : {exc}"
+        )
+        return templates.TemplateResponse(request, "admin/_categories_editor.html", ctx)
+
+    ctx = await _categories_ctx(
+        db,
+        account_id,
+        message=f"Catégories synchronisées : {vod_count} VOD, {series_count} séries.",
+    )
+    return templates.TemplateResponse(request, "admin/_categories_editor.html", ctx)
+
+
+@router.post("/accounts/{account_id}/categories/block-adult", response_class=HTMLResponse)
+async def admin_accounts_categories_block_adult(
+    account_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    async def _work_block(session: AsyncSession) -> int:
+        count = await category_service.block_adult_categories_for_account(
+            session, account_id
+        )
+        await session.commit()
+        return count
+
+    count = await write_with_retry(
+        _work_block,
+        session_factory=session_factory_for(db),
+        op="admin.block_adult_categories",
+    )
+    await category_service.update_media_category_visibility(db, account_id)
+    await category_service.update_media_adult_flags(db, account_id)
+
+    ctx = await _categories_ctx(
+        db,
+        account_id,
+        message=f"{count} catégorie(s) adulte(s) bloquée(s) et catalogue mis à jour.",
+    )
+    return templates.TemplateResponse(request, "admin/_categories_editor.html", ctx)
+
 
 
 __all__ = ["router"]

@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import AsyncIterator
 
 import httpx
 
 from app.config import settings
+from app.utils.metrics import ollama_request_duration_seconds, ollama_requests_total
 
 logger = logging.getLogger("plexhub.ollama")
 
@@ -47,53 +49,82 @@ async def close_client() -> None:
 async def generate(prompt: str) -> str:
     """Send a prompt to Ollama /api/generate and return the full response."""
     payload = {"model": settings.OLLAMA_MODEL, "prompt": prompt, "stream": False}
-    client = _get_client()
-    r = await client.post(
-        f"{settings.OLLAMA_URL}/api/generate",
-        json=payload,
-        timeout=_GENERATE_TIMEOUT,
-    )
-    r.raise_for_status()
-    return r.json()["response"]
+    t0 = time.monotonic()
+    result = "error"
+    try:
+        client = _get_client()
+        r = await client.post(
+            f"{settings.OLLAMA_URL}/api/generate",
+            json=payload,
+            timeout=_GENERATE_TIMEOUT,
+        )
+        r.raise_for_status()
+        result = "ok"
+        return r.json()["response"]
+    finally:
+        ollama_requests_total.labels(endpoint="generate", result=result).inc()
+        ollama_request_duration_seconds.labels(endpoint="generate").observe(
+            max(0.0, time.monotonic() - t0)
+        )
 
 
 async def chat(messages: list[dict[str, str]]) -> str:
     """Send a messages list to Ollama /api/chat and return the assistant reply."""
     payload = {"model": settings.OLLAMA_MODEL, "messages": messages, "stream": False}
-    client = _get_client()
-    r = await client.post(
-        f"{settings.OLLAMA_URL}/api/chat",
-        json=payload,
-        timeout=_GENERATE_TIMEOUT,
-    )
-    r.raise_for_status()
-    return r.json()["message"]["content"]
+    t0 = time.monotonic()
+    result = "error"
+    try:
+        client = _get_client()
+        r = await client.post(
+            f"{settings.OLLAMA_URL}/api/chat",
+            json=payload,
+            timeout=_GENERATE_TIMEOUT,
+        )
+        r.raise_for_status()
+        result = "ok"
+        return r.json()["message"]["content"]
+    finally:
+        ollama_requests_total.labels(endpoint="chat", result=result).inc()
+        ollama_request_duration_seconds.labels(endpoint="chat").observe(
+            max(0.0, time.monotonic() - t0)
+        )
 
 
 async def stream_generate(prompt: str) -> AsyncIterator[str]:
     """Streaming version of generate — yields text chunks as they arrive."""
     payload = {"model": settings.OLLAMA_MODEL, "prompt": prompt, "stream": True}
-    client = _get_client()
-    async with client.stream(
-        "POST",
-        f"{settings.OLLAMA_URL}/api/generate",
-        json=payload,
-        timeout=_GENERATE_TIMEOUT,
-    ) as r:
-        r.raise_for_status()
-        async for line in r.aiter_lines():
-            if not line:
-                continue
-            chunk = json.loads(line)
-            text = chunk.get("response", "")
-            if text:
-                yield text
-            if chunk.get("done"):
-                break
+    t0 = time.monotonic()
+    result = "error"
+    try:
+        client = _get_client()
+        async with client.stream(
+            "POST",
+            f"{settings.OLLAMA_URL}/api/generate",
+            json=payload,
+            timeout=_GENERATE_TIMEOUT,
+        ) as r:
+            r.raise_for_status()
+            async for line in r.aiter_lines():
+                if not line:
+                    continue
+                chunk = json.loads(line)
+                text = chunk.get("response", "")
+                if text:
+                    yield text
+                if chunk.get("done"):
+                    break
+        result = "ok"
+    finally:
+        ollama_requests_total.labels(endpoint="stream_generate", result=result).inc()
+        ollama_request_duration_seconds.labels(endpoint="stream_generate").observe(
+            max(0.0, time.monotonic() - t0)
+        )
 
 
 async def is_healthy() -> tuple[bool, str]:
     """Return (ok, detail) — checks that Ollama is up and the model is available."""
+    t0 = time.monotonic()
+    result = "error"
     try:
         client = _get_client()
         r = await client.get(
@@ -104,6 +135,12 @@ async def is_healthy() -> tuple[bool, str]:
         models = [m["name"] for m in r.json().get("models", [])]
         ok = settings.OLLAMA_MODEL in models
         detail = "ok" if ok else f"model {settings.OLLAMA_MODEL!r} not found in {models}"
+        result = "ok" if ok else "error"
         return ok, detail
     except Exception as exc:  # noqa: BLE001
         return False, str(exc)
+    finally:
+        ollama_requests_total.labels(endpoint="tags", result=result).inc()
+        ollama_request_duration_seconds.labels(endpoint="tags").observe(
+            max(0.0, time.monotonic() - t0)
+        )

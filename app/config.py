@@ -234,8 +234,20 @@ class Settings:
     # Wall-clock ceiling for ONE XMLTV download attempt (seconds).
     EPG_SYNC_DOWNLOAD_TIMEOUT_SECONDS: int = _safe_int("EPG_SYNC_DOWNLOAD_TIMEOUT_SECONDS", 600)
     CORS_ORIGINS: list[str] = [
-        o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",") if o.strip()
+        o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()
     ]
+    # Trusted reverse-proxy / tunnel peer IPs allowed to supply
+    # CF-Connecting-IP / X-Forwarded-For (CR-S08). Untrusted peers cannot spoof.
+    TRUSTED_PROXY_IPS: set[str] = {
+        ip.strip()
+        for ip in os.getenv("TRUSTED_PROXY_IPS", "127.0.0.1,::1,testclient").split(",")
+        if ip.strip()
+    }
+    BASIC_AUTH_FAIL_RATE_LIMIT_MAX: int = _safe_int("BASIC_AUTH_FAIL_RATE_LIMIT_MAX", 10)
+    BASIC_AUTH_FAIL_RATE_LIMIT_WINDOW_SECONDS: int = _safe_int("BASIC_AUTH_FAIL_RATE_LIMIT_WINDOW_SECONDS", 60)
+    TV_AUTH_STATUS_RATE_LIMIT_MAX: int = _safe_int("TV_AUTH_STATUS_RATE_LIMIT_MAX", 120)
+    TV_AUTH_APPROVE_RATE_LIMIT_MAX: int = _safe_int("TV_AUTH_APPROVE_RATE_LIMIT_MAX", 30)
+    TV_AUTH_COMPLETE_RATE_LIMIT_MAX: int = _safe_int("TV_AUTH_COMPLETE_RATE_LIMIT_MAX", 30)
     TMDB_LANGUAGE: str = os.getenv("TMDB_LANGUAGE", "fr-FR")
 
     # Ollama LLM (gemma4 via khoj-ollama)

@@ -40,6 +40,9 @@ GUARDED_PREFIX = "/api/scrape/v1/"
 MAX_BODY_BYTES = 65_536
 METADATA_PREFIX = "/api/metadata/v1/"
 METADATA_MAX_BODY_BYTES = 262_144
+DEFAULT_API_PREFIX = "/api/"
+DEFAULT_API_MAX_BODY_BYTES = 4_194_304  # 4 MiB ceiling on general mutating /api/* routes (CR-S06)
+_MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 _BODY = json.dumps(
     {"detail": {"code": "invalid_parameter", "message": "Request body too large"}},
@@ -62,27 +65,39 @@ class ScrapeBodyLimitMiddleware:
         max_bytes: int = MAX_BODY_BYTES,
         prefix: str = GUARDED_PREFIX,
         extra_limits: Mapping[str, int] | None = None,
+        default_api_limit: int | None = None,
     ) -> None:
         self.app = app
         self.max_bytes = max_bytes
         self.prefix = prefix
         self.limits: dict[str, int] = {prefix: max_bytes, **(extra_limits or {})}
+        self.default_api_limit = default_api_limit
 
-    def _limit_for(self, path: str) -> int | None:
+    def _limit_for(self, path: str, method: str = "POST") -> int | None:
         for prefix, limit in self.limits.items():
             if path.startswith(prefix):
                 return limit
+        if (
+            self.default_api_limit is not None
+            and path.startswith(DEFAULT_API_PREFIX)
+            and method in _MUTATING_METHODS
+        ):
+            return self.default_api_limit
         return None
 
     async def __call__(self, scope, receive, send) -> None:
-        limit = self._limit_for(scope.get("path", "")) if scope["type"] == "http" else None
+        limit = (
+            self._limit_for(scope.get("path", ""), scope.get("method", "GET"))
+            if scope["type"] == "http"
+            else None
+        )
         if limit is None:
             await self.app(scope, receive, send)
             return
 
         declared = _content_length(scope)
         if declared is not None and declared > limit:
-            logger.info("scrape gateway: body refused (Content-Length over the limit)")
+            logger.info("request body refused (Content-Length over the limit)")
             await _send_413(send)
             return
 
@@ -118,7 +133,7 @@ class ScrapeBodyLimitMiddleware:
             if not (state["exceeded"] and not state["started"]):
                 raise
         if state["exceeded"] and not state["started"]:
-            logger.info("scrape gateway: body refused (chunked body over the limit)")
+            logger.info("request body refused (chunked body over the limit)")
             state["started"] = True
             await _send_413(send)
 

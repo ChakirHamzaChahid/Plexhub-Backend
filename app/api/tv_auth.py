@@ -473,6 +473,23 @@ async def approve_page(request: Request) -> HTMLResponse:
 # POST /api/tv-auth/approve — mobile/web validates the user code
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _enforce_ip_limit(
+    request: Request | None,
+    limiter: rate_limit.SlidingWindowLimiter,
+    max_events: int,
+    window_seconds: int = 60,
+) -> None:
+    if request is None:
+        return
+    client_key = rate_limit.resolve_client_ip(request) or "unknown"
+    try:
+        limiter.hit(client_key, max_events=max_events, window_seconds=window_seconds)
+    except rate_limit.RateLimitExceeded as exc:
+        raise _too_many_requests(
+            exc.retry_after_seconds, "Too many requests, slow down"
+        ) from None
+
+
 @router.post(
     "/approve",
     response_model=ApproveResponse,
@@ -481,15 +498,20 @@ async def approve_page(request: Request) -> HTMLResponse:
 )
 async def approve(
     body: ApproveRequest,
+    request: Request = None,  # type: ignore[assignment]
     db: AsyncSession = Depends(get_db),
 ) -> ApproveResponse:
     """Attach the (encrypted) config payload to a pending session.
 
     Authenticated: requires an X-API-Key (backend shared secret or an active
     per-user key) — only a device that is already configured can hand its
-    config to a TV. Known gap: no per-IP limiter on this POST (the code space
-    is 31^8 and a valid key is required) — tracked as a follow-up.
+    config to a TV.
     """
+    _enforce_ip_limit(
+        request,
+        rate_limit.tv_auth_approve_limiter,
+        settings.TV_AUTH_APPROVE_RATE_LIMIT_MAX,
+    )
     _require_crypto_configured()
 
     if not body.payload:
@@ -555,9 +577,15 @@ async def get_status(
     device_code_legacy: str | None = Query(
         default=None, alias="device_code", min_length=16, max_length=128
     ),
+    request: Request = None,  # type: ignore[assignment]
     db: AsyncSession = Depends(get_db),
 ) -> StatusResponse:
     """Return the session status; deliver the decrypted payload exactly once."""
+    _enforce_ip_limit(
+        request,
+        rate_limit.tv_auth_status_limiter,
+        settings.TV_AUTH_STATUS_RATE_LIMIT_MAX,
+    )
     code = device_code or device_code_legacy
     if not code:
         raise HTTPException(
@@ -641,9 +669,15 @@ async def get_status(
 @router.post("/complete", response_model=CompleteResponse, response_model_by_alias=True)
 async def complete(
     body: CompleteRequest,
+    request: Request = None,  # type: ignore[assignment]
     db: AsyncSession = Depends(get_db),
 ) -> CompleteResponse:
     """Finalize an approved session: single-use, scrubs the encrypted payload."""
+    _enforce_ip_limit(
+        request,
+        rate_limit.tv_auth_complete_limiter,
+        settings.TV_AUTH_COMPLETE_RATE_LIMIT_MAX,
+    )
     result = await db.execute(
         select(TvAuthSession).where(TvAuthSession.device_code == body.device_code)
     )

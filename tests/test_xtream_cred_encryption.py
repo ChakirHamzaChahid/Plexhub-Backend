@@ -13,6 +13,7 @@ Covers:
 """
 from __future__ import annotations
 
+import pytest
 from cryptography.fernet import Fernet
 from sqlalchemy import select, text
 
@@ -72,18 +73,16 @@ async def test_password_reads_back_as_plaintext_via_orm(db_session, monkeypatch)
     assert reloaded.password == "another-secret"
 
 
-async def test_no_key_configured_falls_back_to_plaintext(db_session, db_engine, monkeypatch):
-    """Fail-open: with no key at all, the column stores/returns plaintext
-    rather than breaking account creation (see crypto_fields.py docstring)."""
+async def test_no_key_configured_raises_fail_closed(db_session, db_engine, monkeypatch):
+    """Fail-closed (CR-S05): with no key at all, writing an XtreamAccount
+    password refuses to store plaintext and raises RuntimeError."""
     monkeypatch.setattr(settings, "XTREAM_ENCRYPTION_KEY", "")
     monkeypatch.setattr(settings, "AI_API_KEY", "")
 
     db_session.add(_account("acc_nokey", "plaintext-when-unconfigured"))
-    await db_session.commit()
-
-    raw_password = await _raw_password(db_engine, "acc_nokey")
-    assert raw_password == "plaintext-when-unconfigured"
-    assert not looks_encrypted(raw_password)
+    with pytest.raises(Exception, match="XTREAM_ENCRYPTION_KEY"):
+        await db_session.commit()
+    await db_session.rollback()
 
 
 async def test_migration_016_encrypts_preexisting_plaintext_row(db_engine, monkeypatch):

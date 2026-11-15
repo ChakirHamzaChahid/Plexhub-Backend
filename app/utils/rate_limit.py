@@ -199,6 +199,22 @@ class SlidingWindowLimiter:
                 _MAX_TRACKED_KEYS,
             )
 
+    def count(self, key: str, *, window_seconds: int, now: float | None = None) -> int:
+        """Return active event count in the sliding window without recording a hit."""
+        if window_seconds <= 0:
+            return 0
+        t = time.monotonic() if now is None else now
+        dq = self._hits.get(key)
+        if not dq:
+            return 0
+        window_start = t - window_seconds
+        while dq and dq[0] <= window_start:
+            dq.popleft()
+        if not dq:
+            del self._hits[key]
+            return 0
+        return len(dq)
+
     def reset(self) -> None:
         """Test-only: clear all recorded state (also used by test fixtures
         to prevent cross-test state leakage — this is a module-level
@@ -208,19 +224,20 @@ class SlidingWindowLimiter:
 
 
 def resolve_client_ip(request: Request) -> str | None:
-    """Best-effort client IP behind the Cloudflare tunnel.
+    """Best-effort client IP behind trusted proxies (CR-S08).
 
-    Deliberately DUPLICATES `app.api.deps._client_ip`'s header precedence
-    rather than importing it: that helper is private to `deps`, and
-    reaching into it from an unrelated module would just relocate the
-    existing reach-in debt (CR-A06/A07) instead of avoiding it. See this
-    module's docstring for the honesty caveat about header spoofing when
-    this process is reachable outside the Cloudflare tunnel.
+    Only honors ``CF-Connecting-IP`` / ``X-Forwarded-For`` when the direct
+    transport peer (``request.client.host``) is in ``settings.TRUSTED_PROXY_IPS``.
+    Untrusted direct peers cannot spoof their IP via request headers.
     """
-    xff = request.headers.get("cf-connecting-ip") or request.headers.get("x-forwarded-for")
-    if xff:
-        return xff.split(",")[0].strip()
-    return request.client.host if request.client else None
+    from app.config import settings
+
+    peer = request.client.host if request.client else None
+    if peer is not None and peer in settings.TRUSTED_PROXY_IPS:
+        xff = request.headers.get("cf-connecting-ip") or request.headers.get("x-forwarded-for")
+        if xff:
+            return xff.split(",")[0].strip()
+    return peer
 
 
 def check_pending_cap(
@@ -262,3 +279,9 @@ scrape_gateway_rate_limiter = SlidingWindowLimiter()
 # the routes that validate a write. Consumed by app/api/metadata_v1.py.
 metadata_rate_limiter = SlidingWindowLimiter()
 metadata_write_rate_limiter = SlidingWindowLimiter()
+
+# Lot 4 (CR-S07, CR-S10): per-IP limiters for tv-auth endpoints and Basic Auth failures.
+tv_auth_approve_limiter = SlidingWindowLimiter()
+tv_auth_status_limiter = SlidingWindowLimiter()
+tv_auth_complete_limiter = SlidingWindowLimiter()
+basic_auth_fail_limiter = SlidingWindowLimiter()

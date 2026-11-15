@@ -45,16 +45,14 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from app.config import settings
 from app.db.database import _VEC_LOADED
 from app.services import api_key_service
+from app.utils.rate_limit import resolve_client_ip
 
 
 def _client_ip(request: Request | None) -> str | None:
-    """Best-effort real client IP (behind the Cloudflare tunnel)."""
+    """Best-effort real client IP, honouring proxy headers only from trusted proxies."""
     if request is None:
         return None
-    xff = request.headers.get("cf-connecting-ip") or request.headers.get("x-forwarded-for")
-    if xff:
-        return xff.split(",")[0].strip()
-    return request.client.host if request.client else None
+    return resolve_client_ip(request)
 
 
 def _is_master(x_api_key: str | None) -> bool:
@@ -236,7 +234,37 @@ async def verify_master_key(
 _admin_basic = HTTPBasic(auto_error=False)
 
 
+def _check_basic_auth_backoff(request: Request | None, realm: str) -> str:
+    """Enforce per-IP Basic Auth failure backoff (CR-S10); returns limiter key."""
+    from app.utils import rate_limit
+
+    ip = rate_limit.resolve_client_ip(request) if request is not None else None
+    key = f"{realm}:{ip or 'unknown'}"
+    max_fails = settings.BASIC_AUTH_FAIL_RATE_LIMIT_MAX
+    window = settings.BASIC_AUTH_FAIL_RATE_LIMIT_WINDOW_SECONDS
+    if max_fails > 0 and rate_limit.basic_auth_fail_limiter.count(key, window_seconds=window) >= max_fails:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed authentication attempts",
+            headers={"Retry-After": str(max(1, window))},
+        )
+    return key
+
+
+def _record_basic_auth_failure(key: str) -> None:
+    from app.utils import rate_limit
+
+    max_fails = settings.BASIC_AUTH_FAIL_RATE_LIMIT_MAX
+    if max_fails > 0:
+        rate_limit.basic_auth_fail_limiter.hit(
+            key,
+            max_events=max_fails + 1,
+            window_seconds=settings.BASIC_AUTH_FAIL_RATE_LIMIT_WINDOW_SECONDS,
+        )
+
+
 async def verify_admin_basic_auth(
+    request: Request,
     credentials: HTTPBasicCredentials | None = Depends(_admin_basic),
 ) -> None:
     """HTTP Basic Auth guard for the /admin browser UI (fail-closed).
@@ -251,6 +279,7 @@ async def verify_admin_basic_auth(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Admin UI not configured",
         )
+    fail_key = _check_basic_auth_backoff(request, "admin")
     unauthorized = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Invalid admin credentials",
@@ -268,6 +297,7 @@ async def verify_admin_basic_auth(
     )
     # Evaluate both before branching to avoid a username-timing oracle.
     if not (user_ok and pass_ok):
+        _record_basic_auth_failure(fail_key)
         raise unauthorized
 
 
@@ -275,6 +305,7 @@ _dav_basic = HTTPBasic(auto_error=False)
 
 
 async def verify_dav_basic_auth(
+    request: Request,
     credentials: HTTPBasicCredentials | None = Depends(_dav_basic),
 ) -> None:
     """HTTP Basic Auth guard for the read-only /dav WebDAV endpoint (fail-closed).
@@ -291,6 +322,7 @@ async def verify_dav_basic_auth(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="DAV not configured",
         )
+    fail_key = _check_basic_auth_backoff(request, "dav")
     unauthorized = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Invalid DAV credentials",
@@ -308,6 +340,7 @@ async def verify_dav_basic_auth(
     )
     # Evaluate both before branching to avoid a username-timing oracle.
     if not (user_ok and pass_ok):
+        _record_basic_auth_failure(fail_key)
         raise unauthorized
 
 
@@ -315,6 +348,7 @@ _metrics_basic = HTTPBasic(auto_error=False)
 
 
 async def verify_metrics_basic_auth(
+    request: Request,
     credentials: HTTPBasicCredentials | None = Depends(_metrics_basic),
 ) -> None:
     """HTTP Basic Auth guard for GET /metrics (AUDIT-P2-001 / CR-S02, ADR 0004
@@ -340,6 +374,7 @@ async def verify_metrics_basic_auth(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Metrics endpoint not configured",
         )
+    fail_key = _check_basic_auth_backoff(request, "metrics")
     unauthorized = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Invalid metrics credentials",
@@ -357,4 +392,5 @@ async def verify_metrics_basic_auth(
     )
     # Evaluate both before branching to avoid a username-timing oracle.
     if not (user_ok and pass_ok):
+        _record_basic_auth_failure(fail_key)
         raise unauthorized

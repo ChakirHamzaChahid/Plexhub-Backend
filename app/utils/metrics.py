@@ -292,6 +292,41 @@ scrape_gateway_requests_total = Counter(
 for _sg_route, _sg_outcome in itertools.product(SCRAPE_GATEWAY_ROUTES, SCRAPE_GATEWAY_OUTCOMES):
     scrape_gateway_requests_total.labels(route=_sg_route, outcome=_sg_outcome)
 
+# Lot 4 (CR-O04) — Metadata API v1 (`/api/metadata/v1`) & Ollama metrics.
+METADATA_EDIT_OPERATIONS = ("patch", "lock", "revert")
+METADATA_EDIT_RESULTS = ("ok", "conflict", "error")
+metadata_edits_total = Counter(
+    "plexhub_metadata_edits_total",
+    "Metadata API v1 write operations, partitioned by operation and outcome.",
+    labelnames=("operation", "result"),
+)
+for _op, _res in itertools.product(METADATA_EDIT_OPERATIONS, METADATA_EDIT_RESULTS):
+    metadata_edits_total.labels(operation=_op, result=_res)
+
+metadata_edit_duration_seconds = Histogram(
+    "plexhub_metadata_edit_duration_seconds",
+    "Wall time of Metadata API v1 write operations.",
+    labelnames=("operation",),
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0),
+)
+
+OLLAMA_ENDPOINTS = ("generate", "chat", "stream_generate", "tags")
+OLLAMA_RESULTS = ("ok", "error")
+ollama_requests_total = Counter(
+    "plexhub_ollama_requests_total",
+    "Ollama HTTP API requests, partitioned by endpoint and outcome.",
+    labelnames=("endpoint", "result"),
+)
+for _ep, _res in itertools.product(OLLAMA_ENDPOINTS, OLLAMA_RESULTS):
+    ollama_requests_total.labels(endpoint=_ep, result=_res)
+
+ollama_request_duration_seconds = Histogram(
+    "plexhub_ollama_request_duration_seconds",
+    "Wall time of Ollama HTTP API requests.",
+    labelnames=("endpoint",),
+    buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 15.0, 30.0, 60.0, 120.0),
+)
+
 
 def setup_instrumentator(app, *, dependencies: list | None = None) -> None:
     """Register the Prometheus instrumentator on the FastAPI app and expose /metrics.

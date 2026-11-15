@@ -65,6 +65,10 @@ def _reset_rate_limiters():
     rl.tv_auth_start_rate_limiter.reset()
     rl.tv_auth_start_pending_ip_limiter.reset()
     rl.tv_auth_approve_page_limiter.reset()
+    rl.tv_auth_approve_limiter.reset()
+    rl.tv_auth_status_limiter.reset()
+    rl.tv_auth_complete_limiter.reset()
+    rl.basic_auth_fail_limiter.reset()
     rl.scrape_gateway_rate_limiter.reset()
     rl.metadata_rate_limiter.reset()
     rl.metadata_write_rate_limiter.reset()
@@ -72,9 +76,25 @@ def _reset_rate_limiters():
     rl.tv_auth_start_rate_limiter.reset()
     rl.tv_auth_start_pending_ip_limiter.reset()
     rl.tv_auth_approve_page_limiter.reset()
+    rl.tv_auth_approve_limiter.reset()
+    rl.tv_auth_status_limiter.reset()
+    rl.tv_auth_complete_limiter.reset()
+    rl.basic_auth_fail_limiter.reset()
     rl.scrape_gateway_rate_limiter.reset()
     rl.metadata_rate_limiter.reset()
     rl.metadata_write_rate_limiter.reset()
+
+
+@pytest.fixture(autouse=True)
+def _default_test_xtream_encryption_key(monkeypatch):
+    """CR-S05 fail-closed: provide a test Fernet key by default when neither
+    XTREAM_ENCRYPTION_KEY nor AI_API_KEY is set, so unrelated DB tests that
+    insert XtreamAccount rows stay isolated without repeating key setup."""
+    from cryptography.fernet import Fernet
+    from app.config import settings
+
+    if not settings.XTREAM_ENCRYPTION_KEY and not settings.AI_API_KEY:
+        monkeypatch.setattr(settings, "XTREAM_ENCRYPTION_KEY", Fernet.generate_key().decode())
 
 
 # ─── Provider outage mask (M025) ─────────────────────────────────────────

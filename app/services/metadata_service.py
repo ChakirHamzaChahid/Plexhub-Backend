@@ -16,6 +16,7 @@ import binascii
 import hashlib
 import json
 import logging
+import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -494,59 +495,78 @@ async def write(
     `If-Match`, plan, regroup guard, no-op, `UPDATE` of every variant, journal row.
     The response is fully prepared before the COMMIT (no failure can follow it)."""
     wrote_type: str | None = None
-    async with immediate_write_session(session_factory, deadline_s=deadline_s) as tx:
-        session = tx.session
-        replay = await _find_replay(session, key_id, idempotency_key, sha)
-        if replay is not None:
-            return replay
-        item = await load_item(session, server_id, rating_key)
-        if item is None:
-            raise ItemNotFound
-        _check_if_match(item, if_match)
-        plan = await plan_fn(session, item)
-        members_before, members_after = await _guard_regroup(session, plan, item, allow_regroup)
+    op_kind = "revert" if reverts is not None else "patch"
+    t0 = time.monotonic()
+    outcome = "error"
+    try:
+        async with immediate_write_session(session_factory, deadline_s=deadline_s) as tx:
+            session = tx.session
+            replay = await _find_replay(session, key_id, idempotency_key, sha)
+            if replay is not None:
+                outcome = "ok"
+                return replay
+            item = await load_item(session, server_id, rating_key)
+            if item is None:
+                raise ItemNotFound
+            _check_if_match(item, if_match)
+            plan = await plan_fn(session, item)
+            if plan.kind in ("patch", "lock", "revert"):
+                op_kind = plan.kind
+            members_before, members_after = await _guard_regroup(session, plan, item, allow_regroup)
 
-        at = now_ms()
-        if plan.noop:
-            return patch_result(
-                plan, dry_run=False, replayed=False, edit_id=None, at_ms=at,
+            at = now_ms()
+            if plan.noop:
+                outcome = "ok"
+                return patch_result(
+                    plan, dry_run=False, replayed=False, edit_id=None, at_ms=at,
+                    members_before=members_before, members_after=members_after,
+                )
+            for change in plan.changes:
+                await session.execute(
+                    update(Media)
+                    .where(
+                        Media.server_id == server_id, Media.rating_key == rating_key,
+                        Media.filter == change.filter, Media.sort_order == change.sort_order,
+                    )
+                    .values(**change.updates, updated_at=at)
+                )
+            edit_id = new_ulid(at)
+            result = patch_result(
+                plan, dry_run=False, replayed=False, edit_id=edit_id, at_ms=at,
                 members_before=members_before, members_after=members_after,
             )
-        for change in plan.changes:
-            await session.execute(
-                update(Media)
-                .where(
-                    Media.server_id == server_id, Media.rating_key == rating_key,
-                    Media.filter == change.filter, Media.sort_order == change.sort_order,
+            before_json, after_json = journal_json(plan)
+            session.add(MetadataEdit(
+                edit_id=edit_id, kind=plan.kind, at_ms=at, server_id=server_id, rating_key=rating_key,
+                item_type=item.type, key_id=key_id, request_id=request_id,
+                idempotency_key=idempotency_key, body_sha256=sha, reason=reason,
+                revision_before=plan.revision_before, revision_after=plan.revision_after,
+                before_json=before_json, after_json=after_json,
+                response_json=json.dumps(result, ensure_ascii=False),
+                reverts=reverts, reverted_by=None,
+            ))
+            if reverts is not None:
+                await session.execute(
+                    update(MetadataEdit).where(MetadataEdit.edit_id == reverts).values(reverted_by=edit_id)
                 )
-                .values(**change.updates, updated_at=at)
-            )
-        edit_id = new_ulid(at)
-        result = patch_result(
-            plan, dry_run=False, replayed=False, edit_id=edit_id, at_ms=at,
-            members_before=members_before, members_after=members_after,
-        )
-        before_json, after_json = journal_json(plan)
-        session.add(MetadataEdit(
-            edit_id=edit_id, kind=plan.kind, at_ms=at, server_id=server_id, rating_key=rating_key,
-            item_type=item.type, key_id=key_id, request_id=request_id,
-            idempotency_key=idempotency_key, body_sha256=sha, reason=reason,
-            revision_before=plan.revision_before, revision_after=plan.revision_after,
-            before_json=before_json, after_json=after_json,
-            response_json=json.dumps(result, ensure_ascii=False),
-            reverts=reverts, reverted_by=None,
-        ))
-        if reverts is not None:
-            await session.execute(
-                update(MetadataEdit).where(MetadataEdit.edit_id == reverts).values(reverted_by=edit_id)
-            )
-        wrote_type = item.type
-    # Committed. Group snapshot rebuild is debounced and runs outside the transaction.
-    if wrote_type in ("movie", "show"):
-        from app.services import unified_group_service
+            wrote_type = item.type
+        outcome = "ok"
+        # Committed. Group snapshot rebuild is debounced and runs outside the transaction.
+        if wrote_type in ("movie", "show"):
+            from app.services import unified_group_service
 
-        unified_group_service.schedule_rebuild(wrote_type, session_factory=session_factory)
-    return result
+            unified_group_service.schedule_rebuild(wrote_type, session_factory=session_factory)
+        return result
+    except (RevisionMismatch, RegroupNotAllowed, RevertNotAllowed, RevertConflict, IdempotencyKeyReused):
+        outcome = "conflict"
+        raise
+    finally:
+        from app.utils.metrics import metadata_edit_duration_seconds, metadata_edits_total
+
+        metadata_edits_total.labels(operation=op_kind, result=outcome).inc()
+        metadata_edit_duration_seconds.labels(operation=op_kind).observe(
+            max(0.0, time.monotonic() - t0)
+        )
 
 
 # ─── History ─────────────────────────────────────────────────────────────────

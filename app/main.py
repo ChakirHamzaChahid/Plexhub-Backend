@@ -318,6 +318,17 @@ async def lifespan(app: FastAPI):
             # Master election — atomic via fcntl.flock (no race condition)
             try:
                 lock_fd = open(lock_file, "w")
+            except PermissionError as exc:
+                logger.error(
+                    "Cannot open master lock file %s (%s) — check host volume "
+                    "permissions (expected UID:GID 1000:1000 on DATA_DIR); "
+                    "refusing silent slave fallback",
+                    lock_file,
+                    exc,
+                )
+                raise
+
+            try:
                 fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 lock_fd.write(str(os.getpid()))
                 lock_fd.flush()
@@ -634,7 +645,7 @@ app = FastAPI(
 
 if settings.CORS_ORIGINS == ["*"]:
     logger.warning(
-        "CORS_ORIGINS is '*' (default) — restrict to explicit origins in production "
+        "CORS_ORIGINS is '*' (wildcard) — restrict to explicit origins in production "
         "deployments via the CORS_ORIGINS env var"
     )
 
@@ -652,13 +663,16 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 # Body size cap (64 KiB) for /api/scrape/v1/ ONLY — pure ASGI, see app/api/body_limit.py.
 # Inserted between GZip and RequestId so the relative order of the existing middlewares is unchanged.
 from app.api.body_limit import (  # noqa: E402
+    DEFAULT_API_MAX_BODY_BYTES,
     METADATA_MAX_BODY_BYTES,
     METADATA_PREFIX,
     ScrapeBodyLimitMiddleware,
 )
-# ONE instance, per-prefix caps (B2: /api/metadata/v1/ 256 KiB, ADR 0010 D2.4).
+# ONE instance, per-prefix caps (B2: /api/metadata/v1/ 256 KiB, Lot 4 CR-S06: /api/* mutations 4 MiB).
 app.add_middleware(
-    ScrapeBodyLimitMiddleware, extra_limits={METADATA_PREFIX: METADATA_MAX_BODY_BYTES},
+    ScrapeBodyLimitMiddleware,
+    extra_limits={METADATA_PREFIX: METADATA_MAX_BODY_BYTES},
+    default_api_limit=DEFAULT_API_MAX_BODY_BYTES,
 )
 # Added last so it wraps the others — request_id is set before any other middleware runs.
 app.add_middleware(RequestIdMiddleware)

@@ -702,38 +702,31 @@ async def _migration_016_encrypt_xtream_passwords(engine: AsyncEngine) -> None:
     """
     logger.info("Migration 016: Encrypting existing xtream_accounts.password rows")
 
-    fernet = get_xtream_fernet()
-    if fernet is None:
-        logger.warning(
-            "Migration 016: no XTREAM_ENCRYPTION_KEY/AI_API_KEY configured — "
-            "leaving existing Xtream passwords in plaintext (CR-S03 residual). "
-            "Set one of those env vars and restart to encrypt them (safe to re-run)."
-        )
-        return
-
     async with engine.begin() as conn:
         try:
-            result = await conn.execute(text("SELECT id, password FROM xtream_accounts"))
-            rows = result.fetchall()
-        except Exception as e:
-            logger.warning("Migration 016: could not read xtream_accounts: %s", e)
+            rows = (
+                await conn.execute(
+                    text("SELECT id, password FROM xtream_accounts WHERE password IS NOT NULL AND password != ''")
+                )
+            ).fetchall()
+        except Exception:  # noqa: BLE001 — table might not exist in partial test DBs
             return
 
-        encrypted_count = 0
-        for account_id, password in rows:
-            if not password or looks_encrypted(password):
-                continue
-            token = fernet.encrypt(password.encode("utf-8")).decode("ascii")
-            await conn.execute(
-                text("UPDATE xtream_accounts SET password = :token WHERE id = :account_id"),
-                {"token": token, "account_id": account_id},
-            )
-            encrypted_count += 1
+        to_encrypt = [(row[0], row[1]) for row in rows if not looks_encrypted(row[1])]
+        if not to_encrypt:
+            return
 
+        fernet = get_xtream_fernet()
+        for acc_id, raw_pwd in to_encrypt:
+            encrypted = fernet.encrypt(raw_pwd.encode("utf-8")).decode("ascii")
+            await conn.execute(
+                text("UPDATE xtream_accounts SET password = :pwd WHERE id = :id"),
+                {"pwd": encrypted, "id": acc_id},
+            )
         logger.info(
             "Migration 016: encrypted %d pre-existing plaintext password row(s) "
             "out of %d total (rest already encrypted, empty, or missing)",
-            encrypted_count, len(rows),
+            len(to_encrypt), len(rows),
         )
 
 

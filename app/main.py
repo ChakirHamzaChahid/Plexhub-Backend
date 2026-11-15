@@ -512,7 +512,7 @@ async def lifespan(app: FastAPI):
         from app.services.tmdb_service import tmdb_service
         from app.workers import health_check_worker
         from app.dav import relay as dav_relay
-        from app.services import poster_match_service, ollama_service
+        from app.services import poster_match_service, ollama_service, notification_service
 
         await xtream_service.close()
         await tmdb_service.close()
@@ -524,6 +524,7 @@ async def lifespan(app: FastAPI):
         # a no-op if no poster was ever compared (lazy client, stays `None`).
         await poster_match_service.close()
         await ollama_service.close_client()
+        await notification_service.close_client()
 
         # Shutdown image download thread pool
         from app.plex_generator.storage import shutdown_image_pool

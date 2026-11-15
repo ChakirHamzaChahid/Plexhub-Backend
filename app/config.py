@@ -233,6 +233,13 @@ class Settings:
     EPG_SYNC_BATCH_PAUSE_MS: int = _safe_int("EPG_SYNC_BATCH_PAUSE_MS", 0)
     # Wall-clock ceiling for ONE XMLTV download attempt (seconds).
     EPG_SYNC_DOWNLOAD_TIMEOUT_SECONDS: int = _safe_int("EPG_SYNC_DOWNLOAD_TIMEOUT_SECONDS", 600)
+
+    # Notifications (Webhook / Discord) — Lot 8 (T8.1)
+    NOTIFY_ENABLED: bool = os.getenv("NOTIFY_ENABLED", "false").lower() in ("true", "1", "yes")
+    NOTIFY_WEBHOOK_URL: str = os.getenv("NOTIFY_WEBHOOK_URL", "")
+    NOTIFY_EVENTS: str = os.getenv("NOTIFY_EVENTS", "outage,download,backup")
+    NOTIFY_COOLDOWN_SECONDS: int = _safe_int("NOTIFY_COOLDOWN_SECONDS", 300)
+
     CORS_ORIGINS: list[str] = [
         o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()
     ]
@@ -600,6 +607,16 @@ class Settings:
             )
         else:
             logger.info("DAV WebDAV: disabled (DAV_ENABLED=false)")
+
+        if self.NOTIFY_ENABLED:
+            logger.info(
+                "Notifications: enabled (events=%r, cooldown=%ds, url=%s)",
+                self.NOTIFY_EVENTS,
+                self.NOTIFY_COOLDOWN_SECONDS,
+                "configured" if self.NOTIFY_WEBHOOK_URL else "not set",
+            )
+        else:
+            logger.info("Notifications: disabled (NOTIFY_ENABLED=false)")
 
     def ensure_dirs(self) -> None:
         """Create runtime directories and persist client identifier (CR-C01).

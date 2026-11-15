@@ -501,6 +501,7 @@ class Settings:
     SCRAPE_ALLOWED_LANGUAGES: str = os.getenv(
         "SCRAPE_ALLOWED_LANGUAGES", ",".join(DEFAULT_SCRAPE_ALLOWED_LANGUAGES),
     )
+    SCRAPE_CACHE_MAX_ENTRIES: int = _safe_int("SCRAPE_CACHE_MAX_ENTRIES", 50000)
 
     # Metadata API (lot B2, ADR 0010 D2.4 / ADR 0011 D2.4). The config only READS
     # the raw values; the clamping (timeout 5..28 s, rate <= 0 disables) lives in
@@ -508,6 +509,7 @@ class Settings:
     METADATA_RATE_LIMIT_PER_MINUTE: int = _safe_int("METADATA_RATE_LIMIT_PER_MINUTE", 300)
     METADATA_WRITE_RATE_LIMIT_PER_MINUTE: int = _safe_int("METADATA_WRITE_RATE_LIMIT_PER_MINUTE", 90)
     METADATA_REQUEST_TIMEOUT_SECONDS: int = _safe_int("METADATA_REQUEST_TIMEOUT_SECONDS", 15)
+    METADATA_EDITS_RETENTION_DAYS: int = _safe_int("METADATA_EDITS_RETENTION_DAYS", 365)
 
     @property
     def has_xtream_env(self) -> bool:

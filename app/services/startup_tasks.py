@@ -103,3 +103,24 @@ async def cleanup_stale_epg() -> None:
 
     rowcount = await run_with_retry(_prune, op="epg_cleanup")
     logger.info(f"EPG cleanup: removed {rowcount} stale entries")
+
+
+async def cleanup_retention_caches() -> dict[str, int]:
+    """Nightly retention sweep for `scrape_cache` and `metadata_edits`."""
+    from app.services import metadata_service, scrape_gateway_cache
+
+    expired, evicted = await scrape_gateway_cache.purge_retention(
+        max_entries=settings.SCRAPE_CACHE_MAX_ENTRIES,
+        session_factory=database.async_session_factory,
+    )
+    edits_deleted = await metadata_service.purge_old_edits(
+        settings.METADATA_EDITS_RETENTION_DAYS,
+        session_factory=database.async_session_factory,
+    )
+    logger.info(
+        "Retention cleanup: scrape_cache expired=%d evicted=%d, metadata_edits=%d",
+        expired,
+        evicted,
+        edits_deleted,
+    )
+    return {"expired": expired, "evicted": evicted, "metadata_edits": edits_deleted}

@@ -460,3 +460,55 @@ async def purge(
         return deleted, int(remaining)
 
     return await write_with_retry(_work, session_factory=session_factory, op="scrape_cache.purge")
+
+
+async def purge_retention(
+    max_entries: int = 0,
+    *,
+    batch_size: int = 1000,
+    now: int | None = None,
+    session_factory: SessionFactory = async_session_factory,
+) -> tuple[int, int]:
+    """Nightly retention sweep: purge expired/obsolete rows, then trim oldest
+    entries by `fetched_at` if total count exceeds `max_entries` (> 0).
+
+    Returns `(expired_deleted, evicted_deleted)`.
+    """
+    expired_deleted = 0
+    while True:
+        deleted, remaining = await purge(batch_size, now=now, session_factory=session_factory)
+        expired_deleted += deleted
+        if deleted == 0 or remaining == 0:
+            break
+
+    evicted_deleted = 0
+    if max_entries > 0:
+        async def _evict_excess(session: AsyncSession) -> int:
+            total = int(
+                (await session.execute(text("SELECT COUNT(*) FROM scrape_cache"))).scalar_one()
+            )
+            excess = total - max_entries
+            if excess <= 0:
+                return 0
+            to_delete = min(excess, batch_size)
+            deleted = (
+                await session.execute(
+                    text(
+                        "DELETE FROM scrape_cache WHERE rowid IN ("
+                        "SELECT rowid FROM scrape_cache ORDER BY fetched_at ASC LIMIT :limit)"
+                    ),
+                    {"limit": to_delete},
+                )
+            ).rowcount or 0
+            await session.commit()
+            return deleted
+
+        while True:
+            step = await write_with_retry(
+                _evict_excess, session_factory=session_factory, op="scrape_cache.evict_excess"
+            )
+            evicted_deleted += step
+            if step == 0:
+                break
+
+    return expired_deleted, evicted_deleted

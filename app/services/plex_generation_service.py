@@ -36,6 +36,7 @@ caller:
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from pathlib import Path
 
 from app.config import settings
@@ -46,6 +47,24 @@ from app.plex_generator.storage import DryRunStorage, LocalStorage
 
 logger = logging.getLogger("plexhub.services.plex_generation")
 
+# Process-local set of media keys ((server_id, rating_key) or unification_id)
+# whose metadata/identity changed manually and whose NFO/images should be
+# refreshed on the next generation pass even when PLEX_FORCE_REFRESH_METADATA
+# is False.
+_dirty_media_keys: set[str | tuple[str, str]] = set()
+
+
+def mark_dirty_media(keys: Iterable[str | tuple[str, str]]) -> None:
+    """Queue media keys for targeted NFO/image refresh on the next generation."""
+    for key in keys:
+        if key:
+            _dirty_media_keys.add(key)
+
+
+def get_dirty_media() -> set[str | tuple[str, str]]:
+    """Return a snapshot of currently queued dirty media keys."""
+    return set(_dirty_media_keys)
+
 
 async def generate_plex_library(
     account_ids: list[str] | None = None,
@@ -53,6 +72,7 @@ async def generate_plex_library(
     strm_only: bool = False,
     dry_run: bool = False,
     force_refresh_metadata: bool = False,
+    force_refresh_keys: set[str | tuple[str, str]] | None = None,
 ) -> SyncReport:
     """Generate (or dry-run) the unified Plex/Jellyfin library tree.
 
@@ -81,6 +101,7 @@ async def generate_plex_library(
     generator = PlexLibraryGenerator(
         source, storage, resolved_output, strm_only,
         force_refresh_metadata=force_refresh_metadata,
+        force_refresh_keys=force_refresh_keys,
     )
     return await generator.generate()
 
@@ -118,13 +139,18 @@ async def generate_plex_library_auto() -> SyncReport | None:
     logger.info(
         f"Auto-generating unified Plex library across {len(account_ids)} account(s)"
     )
+    dirty_snapshot = set(_dirty_media_keys)
+    if dirty_snapshot:
+        _dirty_media_keys.difference_update(dirty_snapshot)
     try:
         # AUDIT-P6-006: honours the operator's env-level opt-in (defaults
         # False — the unattended boot/scheduled pipeline never force-refreshes
         # NFO files unless PLEX_FORCE_REFRESH_METADATA is explicitly set).
+        # Dirty keys from manual edits are always refreshed targetedly.
         report = await generate_plex_library(
             output_dir=output,
             force_refresh_metadata=settings.PLEX_FORCE_REFRESH_METADATA,
+            force_refresh_keys=dirty_snapshot or None,
         )
         logger.info(
             f"Plex generation: {report.created} created, {report.updated} updated, "
@@ -146,5 +172,7 @@ async def generate_plex_library_auto() -> SyncReport | None:
             dav_tree_cache.invalidate()
         return report
     except Exception as e:
+        if dirty_snapshot:
+            _dirty_media_keys.update(dirty_snapshot)
         logger.error(f"Plex generation failed: {e}", exc_info=True)
         return None

@@ -556,6 +556,18 @@ async def write(
             from app.services import unified_group_service
 
             unified_group_service.schedule_rebuild(wrote_type, session_factory=session_factory)
+        from app.services import plex_generation_service
+
+        dirty: list[str | tuple[str, str]] = [(item.server_id, item.rating_key)]
+        for v in item.variants:
+            unif = v.derived.get("unificationId")
+            if unif:
+                dirty.append(unif)
+        for change in plan.changes:
+            new_unif = change.updates.get("unification_id")
+            if new_unif:
+                dirty.append(new_unif)
+        plex_generation_service.mark_dirty_media(dirty)
         return result
     except (RevisionMismatch, RegroupNotAllowed, RevertNotAllowed, RevertConflict, IdempotencyKeyReused):
         outcome = "conflict"
@@ -622,10 +634,51 @@ async def get_edit(session: AsyncSession, edit_id: str) -> dict[str, Any]:
     return edit_view(_edit_record(await get_edit_row(session, edit_id)))
 
 
+async def purge_old_edits(
+    retention_days: int,
+    *,
+    batch_size: int = 1000,
+    now: int | None = None,
+    session_factory: Any = None,
+) -> int:
+    """Delete `metadata_edits` rows older than `retention_days` (<= 0 disables)."""
+    if retention_days <= 0:
+        return 0
+    from sqlalchemy import text
+    from app.db.database import async_session_factory
+    from app.utils.db_retry import write_with_retry
+
+    factory = session_factory or async_session_factory
+    cutoff_ms = (now_ms() if now is None else now) - retention_days * 86_400_000
+    total_deleted = 0
+
+    async def _delete_batch(session: AsyncSession) -> int:
+        deleted = (
+            await session.execute(
+                text(
+                    "DELETE FROM metadata_edits WHERE rowid IN ("
+                    "SELECT rowid FROM metadata_edits WHERE at_ms < :cutoff LIMIT :limit)"
+                ),
+                {"cutoff": cutoff_ms, "limit": batch_size},
+            )
+        ).rowcount or 0
+        await session.commit()
+        return deleted
+
+    while True:
+        step = await write_with_retry(
+            _delete_batch, session_factory=factory, op="metadata_edits.purge"
+        )
+        total_deleted += step
+        if step < batch_size:
+            break
+    return total_deleted
+
+
 __all__ = [
     "DatabaseBusy", "EditNotFound", "FieldError", "IdempotencyKeyReused", "InvalidParameter",
     "Item", "ItemNotFound", "MASTER_KEY_ID", "RegroupNotAllowed", "RevertNotAllowed",
     "RevisionMismatch", "body_sha256", "get_edit", "get_edit_row", "history", "list_episodes",
     "list_items", "load_item", "load_items", "lookup", "lock_plan_fn", "members_count",
-    "patch_dict", "patch_plan_fn", "preview", "revert_plan_fn", "write",
+    "patch_dict", "patch_plan_fn", "preview", "purge_old_edits", "revert_plan_fn", "write",
 ]

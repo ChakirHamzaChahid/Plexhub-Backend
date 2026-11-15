@@ -96,7 +96,9 @@ async def test_migration_029_ddl_identical_to_create_all(fresh_engine, legacy_en
     assert [i for i in fresh_idx if i[0] == INDEX_NAME] == [
         i for i in legacy_idx if i[0] == INDEX_NAME
     ]
-    assert {i[0] for i in fresh_idx} == {i[0] for i in legacy_idx}
+    assert {i[0] for i in fresh_idx} - {"ix_scrape_cache_v1_fetched_at"} == {
+        i[0] for i in legacy_idx
+    }
 
 
 async def test_migration_029_pk_is_the_four_column_composite(legacy_engine):

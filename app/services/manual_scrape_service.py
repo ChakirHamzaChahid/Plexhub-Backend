@@ -909,6 +909,13 @@ async def apply_candidate(
             .values(status="resolved", resolved_at=ts)
         )
 
+        dirty_keys: list[str | tuple[str, str]] = [(server_id, rating_key)]
+        if title_key:
+            dirty_keys.append(title_key)
+        new_unif = id_values.get("unification_id")
+        if new_unif:
+            dirty_keys.append(new_unif)
+
         propagated = 0
         if propagate:
             prop_id_values = _identity_values("fill")
@@ -934,10 +941,11 @@ async def apply_candidate(
                 await session.execute(
                     update(Media).where(*prop_where).values(**prop_values)
                 )
+                dirty_keys.extend((sid, rk) for sid, rk in prop_rows)
             propagated = len(prop_rows)
 
         await session.commit()
-        return propagated
+        return propagated, dirty_keys
 
     outcome = await write_with_retry(
         work, session_factory=session_factory, op="manual_scrape.apply",
@@ -952,10 +960,14 @@ async def apply_candidate(
             old_tmdb_id=old_tmdb_id, old_imdb_id=old_imdb_id,
             new_tmdb_id=final_tmdb, new_imdb_id=final_imdb,
         )
-    propagated = outcome
+    propagated, dirty_keys = outcome
 
     if schedule_rebuild:
         unified_group_service.schedule_rebuild(media_type, session_factory=session_factory)
+
+    from app.services import plex_generation_service
+
+    plex_generation_service.mark_dirty_media(dirty_keys)
 
     return ApplyOutcome(
         status="applied", server_id=server_id, rating_key=rating_key,

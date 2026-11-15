@@ -331,6 +331,19 @@ async def lifespan(app: FastAPI):
                 misfire_grace_time=3600,
             )
 
+            from app.services.startup_tasks import cleanup_retention_caches as _cleanup_retention_caches
+
+            scheduler.add_job(
+                track_job("retention_cleanup")(_cleanup_retention_caches),
+                "cron",
+                hour=3,
+                minute=30,
+                id="retention_cleanup",
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=3600,
+            )
+
             if settings.BACKUP_ENABLED:
                 from app.scripts.backup_db import run_backup as _run_backup
 

@@ -90,7 +90,7 @@ class LibraryStorage(ABC):
     def write_file(self, rel_path: str, content: str, *, force: bool = False) -> str: ...
 
     @abstractmethod
-    def download_image(self, rel_path: str, image_url: str) -> bool: ...
+    def download_image(self, rel_path: str, image_url: str, *, force: bool = False) -> bool: ...
 
     @abstractmethod
     def delete_file(self, rel_path: str) -> None: ...
@@ -128,8 +128,8 @@ class LocalStorage(LibraryStorage):
         created/updated/unchanged honestly instead of silently dropping NFO
         writes from the SyncReport (see plex_generator/generator.py).
 
-        Images are NEVER subject to this — see download_image below, which
-        has no ``force`` parameter at all by design.
+        Images are preserved by default (``force=False``) and only overwritten
+        when ``force=True`` for a targeted manual-edit refresh.
         """
         full = self._resolve(rel_path)
         existed = full.exists()
@@ -138,9 +138,9 @@ class LocalStorage(LibraryStorage):
         _atomic_write_text(full, content)
         return "updated" if existed else "created"
 
-    def download_image(self, rel_path: str, image_url: str) -> bool:
+    def download_image(self, rel_path: str, image_url: str, *, force: bool = False) -> bool:
         full = self._resolve(rel_path)
-        if full.exists():
+        if full.exists() and not force:
             return True  # Preserve existing image (e.g. enriched by Tiny Media Manager)
         full.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -164,11 +164,11 @@ class LocalStorage(LibraryStorage):
         resp.raise_for_status()
         _atomic_write_bytes(full, resp.content)
 
-    def submit_image_download(self, rel_path: str, image_url: str):
+    def submit_image_download(self, rel_path: str, image_url: str, *, force: bool = False):
         """Submit image download to thread pool (non-blocking). Returns Future."""
         full = self._resolve(rel_path)
         full.parent.mkdir(parents=True, exist_ok=True)
-        if full.exists():
+        if full.exists() and not force:
             return None  # Already exists (checked after mkdir to avoid race)
         return _image_pool.submit(self._download_sync, full, image_url)
 
@@ -230,8 +230,8 @@ class DryRunStorage(LibraryStorage):
         logger.info(f"[DRY-RUN] write_file: {rel_path} (force={force})")
         return "created"
 
-    def download_image(self, rel_path: str, image_url: str) -> bool:
-        logger.info(f"[DRY-RUN] download_image: {rel_path}")
+    def download_image(self, rel_path: str, image_url: str, *, force: bool = False) -> bool:
+        logger.info(f"[DRY-RUN] download_image: {rel_path} (force={force})")
         return True
 
     def delete_file(self, rel_path: str) -> None:

@@ -66,6 +66,7 @@ async def run_migrations(engine: AsyncEngine) -> None:
     await _migration_031_metadata_edits(engine)
     await _migration_032_media_scrape_fields(engine)
     await _migration_033_media_fts5(engine)
+    await _migration_034_retention_indexes(engine)
 
     logger.info("All migrations completed successfully")
 
@@ -1702,4 +1703,20 @@ async def _migration_033_media_fts5(engine: AsyncEngine) -> None:
                 "WHERE rating_key = OLD.rating_key AND server_id = OLD.server_id; "
                 "END"
             )
+        )
+
+
+async def _migration_034_retention_indexes(engine: AsyncEngine) -> None:
+    """Lot 7 (T7.4): standalone indexes for nightly retention sweeps.
+
+    `scrape_cache(fetched_at)` avoids full table scans + temp B-tree sorts when
+    evicting oldest entries above `SCRAPE_CACHE_MAX_ENTRIES`.
+    `metadata_edits(at_ms)` avoids full table scans during `purge_old_edits`.
+    """
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_scrape_cache_v1_fetched_at ON scrape_cache (fetched_at)")
+        )
+        await conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_metadata_edits_at_ms ON metadata_edits (at_ms)")
         )

@@ -192,19 +192,38 @@ class PlexLibraryGenerator:
         output_dir: Path,
         strm_only: bool = False,
         force_refresh_metadata: bool = False,
+        force_refresh_keys: set[str | tuple[str, str]] | None = None,
     ):
         self.source = source
         self.storage = storage
         self.output_dir = output_dir
         self.strm_only = strm_only
         # AUDIT-P6-006 (opt-in NFO refresh): when True, `.nfo` files are
-        # rewritten even if they already exist on disk. Never affects images
-        # (LocalStorage.download_image has no such flag at all) — posters
-        # hand-retouched with Tiny Media Manager are never touched by this.
+        # rewritten even if they already exist on disk (posters are preserved
+        # unless the item is explicitly in `force_refresh_keys`).
         # Defaults False so the historical "preserve existing file" contract
         # is unchanged unless an operator explicitly opts in (config/API/CLI).
         self.force_refresh_metadata = force_refresh_metadata
+        self.force_refresh_keys: set[str | tuple[str, str]] = set(force_refresh_keys or ())
         self.mapping = MappingStore(output_dir)
+
+    def _is_targeted_movie(self, movie: PlexMovie) -> bool:
+        if not self.force_refresh_keys:
+            return False
+        if movie.source_id in self.force_refresh_keys:
+            return True
+        return any((v.server_id, v.source_id) in self.force_refresh_keys for v in movie.versions)
+
+    def _is_targeted_series(self, series: PlexSeries) -> bool:
+        if not self.force_refresh_keys:
+            return False
+        if series.source_id in self.force_refresh_keys:
+            return True
+        return any(
+            (v.server_id, v.source_id) in self.force_refresh_keys
+            for ep in series.episodes
+            for v in ep.versions
+        )
 
     async def generate(self) -> SyncReport:
         from concurrent.futures import Future
@@ -366,7 +385,9 @@ class PlexLibraryGenerator:
         writes too — that's the whole point of AUDIT-P6-006: a refreshed file
         must show up as `updated`, not silently as `unchanged`.
         """
-        if not self.force_refresh_metadata:
+        if not self.force_refresh_metadata and not (
+            self.force_refresh_keys and status == "updated"
+        ):
             return
         if status == "created":
             report.created += 1
@@ -431,11 +452,13 @@ class PlexLibraryGenerator:
     def _write_movie_metadata(
         self, movie: PlexMovie, name: _NameResolution, report: SyncReport,
     ) -> None:
+        targeted = self._is_targeted_movie(movie)
+        force_nfo = self.force_refresh_metadata or targeted
         nfo = build_movie_nfo(movie)
         status = self.storage.write_file(
             movie_nfo_path(name.clean_title, name.year, name.suffix, name.fallback_id),
             nfo,
-            force=self.force_refresh_metadata,
+            force=force_nfo,
         )
         self._record_metadata_write(status, report)
 
@@ -444,20 +467,36 @@ class PlexLibraryGenerator:
                 name.clean_title, name.year, name.suffix, name.fallback_id,
             )
             if hasattr(self.storage, 'submit_image_download'):
-                f = self.storage.submit_image_download(poster_rel, movie.poster_url)
+                f = (
+                    self.storage.submit_image_download(poster_rel, movie.poster_url, force=True)
+                    if targeted
+                    else self.storage.submit_image_download(poster_rel, movie.poster_url)
+                )
                 if f is not None:
                     self._image_futures.append(f)
-            elif not self.storage.download_image(poster_rel, movie.poster_url):
+            elif not (
+                self.storage.download_image(poster_rel, movie.poster_url, force=True)
+                if targeted
+                else self.storage.download_image(poster_rel, movie.poster_url)
+            ):
                 report.image_failures += 1
         if movie.fanart_url:
             fanart_rel = movie_fanart_path(
                 name.clean_title, name.year, name.suffix, name.fallback_id,
             )
             if hasattr(self.storage, 'submit_image_download'):
-                f = self.storage.submit_image_download(fanart_rel, movie.fanart_url)
+                f = (
+                    self.storage.submit_image_download(fanart_rel, movie.fanart_url, force=True)
+                    if targeted
+                    else self.storage.submit_image_download(fanart_rel, movie.fanart_url)
+                )
                 if f is not None:
                     self._image_futures.append(f)
-            elif not self.storage.download_image(fanart_rel, movie.fanart_url):
+            elif not (
+                self.storage.download_image(fanart_rel, movie.fanart_url, force=True)
+                if targeted
+                else self.storage.download_image(fanart_rel, movie.fanart_url)
+            ):
                 report.image_failures += 1
 
     def _sync_series(
@@ -469,9 +508,12 @@ class PlexLibraryGenerator:
             self._write_series_metadata(series, name, report)
 
         # Sync each episode slot using the same name resolution as the series
+        series_targeted = self._is_targeted_series(series)
         for ep in series.episodes:
             try:
-                self._sync_episode(ep, name, report, seen_keys, seen_paths)
+                self._sync_episode(
+                    ep, name, report, seen_keys, seen_paths, series_targeted=series_targeted,
+                )
             except Exception as e:
                 msg = (
                     f"Error processing episode {ep.source_id} "
@@ -483,6 +525,7 @@ class PlexLibraryGenerator:
     def _sync_episode(
         self, ep, name: _NameResolution,
         report: SyncReport, seen_keys: set[str], seen_paths: set[str],
+        *, series_targeted: bool = False,
     ) -> None:
         # Plex merges several files sharing the same SxxEyy into one episode with
         # multiple versions; each version is a distinct file with a matching NFO.
@@ -504,19 +547,24 @@ class PlexLibraryGenerator:
             seen_paths.add(path)
             self._sync_strm(key, path, v.stream_url, report)
             if nfo is not None:
+                ep_targeted = series_targeted or (
+                    (v.server_id, v.source_id) in self.force_refresh_keys
+                )
                 status = self.storage.write_file(
-                    path[:-5] + ".nfo", nfo, force=self.force_refresh_metadata,
+                    path[:-5] + ".nfo", nfo, force=self.force_refresh_metadata or ep_targeted,
                 )
                 self._record_metadata_write(status, report)
 
     def _write_series_metadata(
         self, series: PlexSeries, name: _NameResolution, report: SyncReport,
     ) -> None:
+        targeted = self._is_targeted_series(series)
+        force_nfo = self.force_refresh_metadata or targeted
         nfo = build_tvshow_nfo(series)
         status = self.storage.write_file(
             series_nfo_path(name.clean_title, name.year, name.suffix, name.fallback_id),
             nfo,
-            force=self.force_refresh_metadata,
+            force=force_nfo,
         )
         self._record_metadata_write(status, report)
 
@@ -525,18 +573,34 @@ class PlexLibraryGenerator:
                 name.clean_title, name.year, name.suffix, name.fallback_id,
             )
             if hasattr(self.storage, 'submit_image_download'):
-                f = self.storage.submit_image_download(poster_rel, series.poster_url)
+                f = (
+                    self.storage.submit_image_download(poster_rel, series.poster_url, force=True)
+                    if targeted
+                    else self.storage.submit_image_download(poster_rel, series.poster_url)
+                )
                 if f is not None:
                     self._image_futures.append(f)
-            elif not self.storage.download_image(poster_rel, series.poster_url):
+            elif not (
+                self.storage.download_image(poster_rel, series.poster_url, force=True)
+                if targeted
+                else self.storage.download_image(poster_rel, series.poster_url)
+            ):
                 report.image_failures += 1
         if series.fanart_url:
             fanart_rel = series_fanart_path(
                 name.clean_title, name.year, name.suffix, name.fallback_id,
             )
             if hasattr(self.storage, 'submit_image_download'):
-                f = self.storage.submit_image_download(fanart_rel, series.fanart_url)
+                f = (
+                    self.storage.submit_image_download(fanart_rel, series.fanart_url, force=True)
+                    if targeted
+                    else self.storage.submit_image_download(fanart_rel, series.fanart_url)
+                )
                 if f is not None:
                     self._image_futures.append(f)
-            elif not self.storage.download_image(fanart_rel, series.fanart_url):
+            elif not (
+                self.storage.download_image(fanart_rel, series.fanart_url, force=True)
+                if targeted
+                else self.storage.download_image(fanart_rel, series.fanart_url)
+            ):
                 report.image_failures += 1

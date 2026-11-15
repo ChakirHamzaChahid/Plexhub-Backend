@@ -93,9 +93,9 @@ async def test_migration_031_ddl_identical_to_create_all(fresh_engine, legacy_en
     async with legacy_engine.begin() as conn:
         legacy_info, legacy_idx = await _table_info(conn), await _index_list(conn)
     assert fresh_info == legacy_info
-    assert {i[0] for i in fresh_idx if not i[0].startswith("sqlite_")} == {
-        i[0] for i in legacy_idx if not i[0].startswith("sqlite_")
-    }
+    assert {i[0] for i in fresh_idx if not i[0].startswith("sqlite_")} - {
+        "ix_metadata_edits_at_ms"
+    } == {i[0] for i in legacy_idx if not i[0].startswith("sqlite_")}
     unique = {i[0]: i[1] for i in legacy_idx}
     assert unique[IDEM_INDEX] == 1 and unique[ITEM_INDEX] == 0
 

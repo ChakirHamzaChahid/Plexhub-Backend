@@ -21,11 +21,11 @@ from __future__ import annotations
 import base64
 import logging
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.database import EpgEntry, XtreamAccount
+from app.models.database import EpgEntry, LiveChannel, XtreamAccount
 from app.services.xtream_service import xtream_service
 from app.utils.server_id import parse_server_id
 
@@ -38,6 +38,10 @@ class InvalidServerIdError(Exception):
 
 class AccountNotFoundError(Exception):
     """Raised when the parsed account_id has no matching XtreamAccount."""
+
+
+class ChannelNotFoundError(Exception):
+    """Raised when no LiveChannel matches `(server_id, stream_id)`."""
 
 
 def _try_base64_decode(value: str) -> str:
@@ -170,3 +174,120 @@ async def ingest_short_epg(
     """
     rows = await fetch_short_epg_rows(db, server_id, stream_id, fetched_at)
     return await upsert_short_epg_rows(db, rows)
+
+
+async def list_channels(
+    db: AsyncSession,
+    *,
+    limit: int,
+    offset: int,
+    sort: str,
+    server_id: str | None = None,
+    category_id: str | None = None,
+    search: str | None = None,
+) -> tuple[list[LiveChannel], int]:
+    """List live TV channels with pagination, filtering, and search."""
+    query = select(LiveChannel).where(
+        LiveChannel.is_in_allowed_categories == True,
+    )
+    if server_id:
+        query = query.where(LiveChannel.server_id == server_id)
+    if category_id:
+        query = query.where(LiveChannel.category_id == category_id)
+    if search:
+        safe_search = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        query = query.where(LiveChannel.name.ilike(f"%{safe_search}%", escape="\\"))
+
+    count_query = select(func.count()).select_from(LiveChannel)
+    if query.whereclause is not None:
+        count_query = count_query.where(query.whereclause)
+    total = (await db.execute(count_query)).scalar() or 0
+
+    if sort == "name_desc":
+        query = query.order_by(LiveChannel.name_sortable.desc())
+    elif sort == "added_desc":
+        query = query.order_by(LiveChannel.added_at.desc())
+    elif sort == "added_asc":
+        query = query.order_by(LiveChannel.added_at.asc())
+    else:
+        query = query.order_by(LiveChannel.name_sortable.asc())
+
+    query = query.offset(offset).limit(limit)
+    result = await db.execute(query)
+    return list(result.scalars().all()), total
+
+
+async def get_channel(
+    db: AsyncSession, stream_id: int, server_id: str,
+) -> LiveChannel:
+    """Return a single live channel or raise ChannelNotFoundError."""
+    result = await db.execute(
+        select(LiveChannel).where(
+            LiveChannel.stream_id == stream_id,
+            LiveChannel.server_id == server_id,
+        )
+    )
+    channel = result.scalars().first()
+    if not channel:
+        raise ChannelNotFoundError(stream_id)
+    return channel
+
+
+async def resolve_live_stream_url(
+    db: AsyncSession, stream_id: int, server_id: str,
+) -> str:
+    """Build the direct live stream URL for `(server_id, stream_id)`."""
+    account_id = parse_server_id(server_id)
+    if account_id is None:
+        raise InvalidServerIdError(server_id)
+
+    result = await db.execute(
+        select(XtreamAccount).where(XtreamAccount.id == account_id)
+    )
+    account = result.scalars().first()
+    if not account:
+        raise AccountNotFoundError(account_id)
+
+    channel = await get_channel(db, stream_id, server_id)
+    ext = channel.container_extension or "ts"
+    return xtream_service.build_live_url(
+        account.base_url, account.port,
+        account.username, account.password,
+        stream_id, ext,
+    )
+
+
+async def list_channel_epg_cached(
+    db: AsyncSession, stream_id: int, server_id: str, now_ms: int,
+) -> list[EpgEntry]:
+    """Return future/active EPG entries cached in DB for a channel."""
+    query = select(EpgEntry).where(
+        EpgEntry.stream_id == stream_id,
+        EpgEntry.server_id == server_id,
+        EpgEntry.end_time >= now_ms,
+    ).order_by(EpgEntry.start_time.asc())
+    result = await db.execute(query)
+    return list(result.scalars().all())
+
+
+async def list_epg_now(
+    db: AsyncSession, server_id: str, now_ms: int, *, limit: int, offset: int,
+) -> tuple[list[EpgEntry], int]:
+    """Return currently airing EPG entries across all channels for a server."""
+    where = (
+        EpgEntry.server_id == server_id,
+        EpgEntry.start_time <= now_ms,
+        EpgEntry.end_time >= now_ms,
+    )
+    total = (
+        await db.execute(select(func.count()).select_from(EpgEntry).where(*where))
+    ).scalar() or 0
+    query = (
+        select(EpgEntry)
+        .where(*where)
+        .order_by(EpgEntry.start_time.asc())
+        .offset(offset)
+        .limit(limit)
+    )
+    result = await db.execute(query)
+    return list(result.scalars().all()), total

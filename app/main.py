@@ -283,7 +283,17 @@ async def lifespan(app: FastAPI):
     lock_fd = None
 
     try:
-        settings.DATA_DIR.mkdir(parents=True, exist_ok=True)
+        settings.ensure_dirs()
+
+        # CR-O05 / CR-P04: intra-process locks, rate-limiters, and caches
+        # assume a single worker process (--workers 1). Refuse or warn loudly
+        # if WEB_CONCURRENCY > 1 is configured.
+        web_concurrency = int(os.getenv("WEB_CONCURRENCY", "1") or "1")
+        if web_concurrency > 1:
+            raise RuntimeError(
+                f"WEB_CONCURRENCY={web_concurrency} is unsupported: PlexHub requires "
+                "--workers 1 (single-process SQLite/in-memory state, CR-O05/CR-P04)"
+            )
 
         # Initialize database
         await init_db()
@@ -680,64 +690,54 @@ app.add_middleware(RequestIdMiddleware)
 from app.api.csrf import AdminCsrfMiddleware  # noqa: E402
 app.add_middleware(AdminCsrfMiddleware)
 
-# ─── Routes / auth-per-router (CR-A04) ───────────────────────────────────
-# Three mounting patterns coexist here by necessity (a public health check, a
-# browser-facing admin UI needing Basic Auth instead of a custom header, and
-# two routers that self-guard because they own a broader path prefix than
-# "/api"). They are grouped and labelled explicitly below so the guard for
-# every router is visible in this ONE place, without changing any path or
-# which guard applies to which router. The startup assertion once tracked
-# here as "not done" now runs at the end of this block (AUDIT-P4-001 /
-# CR-A04) — see app/api/route_audit.py.
+# ─── Routes / auth-per-router (CR-A02 / CR-A04) ──────────────────────────
+# Two canonical mounting conventions (verified at boot by route_audit.py):
+#   1. Mount-guarded routers (`_MOUNT_GUARDED_ROUTERS`): router carries no
+#      module-level auth; the guard dependency is attached here at mount time.
+#   2. Self- or route-guarded routers (`_SELF_OR_ROUTE_GUARDED_ROUTERS`):
+#      router defines its own prefix + module-level or per-route guard
+#      (or is explicitly allow-listed in `PUBLIC_API_ALLOWLIST`).
 from app.api.deps import (  # noqa: E402
     verify_admin_basic_auth,
     verify_backend_secret,
     verify_metrics_basic_auth,
 )
 
-# Shared X-API-Key guard for the JSON API (fail-closed, constant-time).
-_guard = [Depends(verify_backend_secret)]
+_MOUNT_GUARDED_ROUTERS = (
+    (accounts.router, "/api", verify_backend_secret),
+    (categories.router, "/api", verify_backend_secret),
+    (live.router, "/api", verify_backend_secret),
+    (media.router, "/api", verify_backend_secret),
+    (stream.router, "/api", verify_backend_secret),
+    (sync.router, "/api", verify_backend_secret),
+    (plex.router, "/api", verify_backend_secret),
+    (admin.router, "", verify_admin_basic_auth),
+    (admin_downloads.router, "", verify_admin_basic_auth),
+    (admin_plex_downloads.router, "", verify_admin_basic_auth),
+    (admin_unified_downloads.router, "", verify_admin_basic_auth),
+)
 
-app.include_router(health.router, prefix="/api")  # Pattern B — public: monitoring
+for _router, _prefix, _guard_fn in _MOUNT_GUARDED_ROUTERS:
+    app.include_router(_router, prefix=_prefix, dependencies=[Depends(_guard_fn)])
 
-# Pattern A — guard attached at the mount site via `dependencies=_guard`.
-app.include_router(accounts.router, prefix="/api", dependencies=_guard)
-app.include_router(categories.router, prefix="/api", dependencies=_guard)
-app.include_router(live.router, prefix="/api", dependencies=_guard)
-app.include_router(media.router, prefix="/api", dependencies=_guard)
-app.include_router(stream.router, prefix="/api", dependencies=_guard)
-app.include_router(sync.router, prefix="/api", dependencies=_guard)
-app.include_router(plex.router, prefix="/api", dependencies=_guard)
-# Pattern B — public at router level (the TV has no key yet); /approve
-# is individually protected inside tv_auth via verify_pairing_api_key.
-app.include_router(tv_auth.router, prefix="/api")
+_SELF_OR_ROUTE_GUARDED_ROUTERS = (
+    (health.router, "/api"),
+    (tv_auth.router, "/api"),
+    (ai.router, ""),
+    (api_keys.router, ""),
+    (downloads.router, ""),
+    (plex_downloads.router, ""),
+    (enrichment.router, ""),
+    (scrape_v1.router, ""),
+    (metadata_v1.router, ""),
+    (dav.router, ""),
+)
 
-# Admin web UI (HTML / HTMX) — no /api prefix. Browser-facing, so HTTP Basic
-# Auth instead of the X-API-Key header (a navigation can't carry custom
-# headers). Same mount-site-guard style as Pattern A, just a different
-# dependency and no "/api" prefix.
-app.include_router(admin.router, dependencies=[Depends(verify_admin_basic_auth)])
-# Admin "Télécharger" tab (PH-DL-06) — already self-prefixed "/admin/downloads"
-# by the router itself; same Basic Auth guard applied at the same mount site
-# as the rest of /admin (identical convention, separate router module per the
-# feature's disjoint-file-ownership rule, docs/20-impl-media-download.md §7.3).
-app.include_router(admin_downloads.router, dependencies=[Depends(verify_admin_basic_auth)])
-# Admin "Télécharger Plex" tab (ticket C6) — mirror of the block above, same
-# self-prefixed "/admin/plex-downloads" + same Basic Auth guard at the same
-# mount site; separate router module per the feature's disjoint-file-
-# ownership convention.
-app.include_router(admin_plex_downloads.router, dependencies=[Depends(verify_admin_basic_auth)])
-# Admin unified "Téléchargements" tab (Vague W3) — merges the Xtream + Plex
-# catalogues into one deduplicated browse screen; browse-only, delegates
-# per-source enqueue to the two routers above. Same self-prefixed
-# "/admin/unified-downloads" + Basic Auth guard convention.
-app.include_router(admin_unified_downloads.router, dependencies=[Depends(verify_admin_basic_auth)])
+for _router, _prefix in _SELF_OR_ROUTE_GUARDED_ROUTERS:
+    app.include_router(_router, prefix=_prefix)
 
 # Interactive API docs — kept off the public default URLs above (docs_url=None …)
-# and re-exposed here behind the SAME HTTP Basic Auth as /admin, so they're
-# reachable for debugging on the LAN but never advertised to the public tunnel.
-# The browser reuses the /admin Basic-Auth credentials for the Swagger UI's
-# same-origin fetch of /openapi.json.
+# and re-exposed here behind the SAME HTTP Basic Auth as /admin.
 from fastapi.openapi.docs import get_swagger_ui_html  # noqa: E402
 from fastapi.responses import JSONResponse  # noqa: E402
 
@@ -750,54 +750,6 @@ async def protected_swagger_ui():
 @app.get("/openapi.json", include_in_schema=False, dependencies=[Depends(verify_admin_basic_auth)])
 async def protected_openapi():
     return JSONResponse(app.openapi())
-
-# Pattern C — bare mount, self-prefixed + self-guarded: the router module
-# itself declares its full path prefix AND a module-level
-# `dependencies=[Depends(...)]`, so no dependency is passed at the mount site
-# (unlike Pattern A). All three already enforce their own auth on every route:
-#   - `ai.router` — its own /api/ai prefix + module-level verify_api_key.
-#   - `api_keys.router` — its own /api/admin/keys prefix + module-level
-#     verify_master_key (master secret only).
-#   - `downloads.router` (PH-DL-06) — its own /api/admin/downloads prefix +
-#     module-level verify_master_key (JSON read mirror of the download
-#     queue, master secret only — same convention as api_keys.router).
-#   - `plex_downloads.router` (feature "Télécharger Plex", ticket C7) — its
-#     own /api/admin/plex-downloads prefix + module-level verify_master_key
-#     (JSON read-only mirror of the Plex catalogue/servers, master secret
-#     only — same convention as downloads.router above).
-#   - `enrichment.router` (dual-provider enrichment refacto, Wave 3) — its
-#     own /api/admin/enrichment prefix + module-level verify_master_key
-#     (manual OMDb ratings backfill: spends the OMDb budget + mutates the
-#     whole catalog, master secret only — same convention as above). Not
-#     master-gated at the worker level (admin-triggered, not scheduler/cron —
-#     any process may run it, unlike the download workers).
-app.include_router(ai.router)
-app.include_router(api_keys.router)
-app.include_router(downloads.router)
-app.include_router(plex_downloads.router)
-app.include_router(enrichment.router)
-#   - `scrape_v1.router` (lot B1, scrape gateway for plexhubTMM) — its own
-#     /api/scrape/v1 prefix and, deliberately, NO router-level dependency:
-#     each route declares its guard (verify_scrape_scope on the 7 read
-#     routes, verify_scrape_admin_scope ALONE on /cache/invalidate|purge,
-#     ADR 0008 D2.4) followed by the per-key rate limit.
-app.include_router(scrape_v1.router)
-#   - `metadata_v1.router` (lot B2, metadata edit API for plexhubTMM) — same
-#     convention: /api/metadata/v1 prefix, NO router-level dependency, each route
-#     declares verify_media_read_scope (reads + simulations) or
-#     verify_media_write_scope (the 3 routes that validate a write), then the
-#     per-key rate limits (ADR 0010 D2.2/D2.4).
-app.include_router(metadata_v1.router)
-# `dav.router` (WebDAV virtual filesystem for Plex, ticket DAV-2) — its own
-# /dav prefix + module-level verify_dav_basic_auth. Deliberately OUTSIDE
-# /api: rclone (the only client this endpoint targets) speaks HTTP Basic
-# Auth, never a custom X-API-Key header, same rationale as the /admin block
-# above but with its own dedicated DAV_USERNAME/DAV_PASSWORD secret (not
-# ADMIN_*). Fail-closed at two layers: verify_dav_basic_auth 503s if
-# DAV_PASSWORD is unset, and the handler itself 503s if DAV_ENABLED=false.
-# Not part of the CR-A04 `/api/*` route-walk follow-up mentioned above (this
-# router never carries the /api prefix in the first place).
-app.include_router(dav.router)
 
 # Boot-time route-auth audit (AUDIT-P4-001 / CR-A04): fails startup if any
 # `/api/*` route above lacks a recognised auth dependency. All logic lives in

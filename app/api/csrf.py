@@ -76,42 +76,46 @@ from __future__ import annotations
 
 import logging
 
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 logger = logging.getLogger("plexhub.csrf")
 
 _UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 _GUARDED_PATH_PREFIX = "/admin"
 _BLOCKED_SEC_FETCH_SITE = "cross-site"
+_SEC_FETCH_SITE_BYTES = b"sec-fetch-site"
 
 
-class AdminCsrfMiddleware(BaseHTTPMiddleware):
-    """Rejects cross-site mutations against the browser-facing `/admin*` UI.
+class AdminCsrfMiddleware:
+    """Pure ASGI middleware rejecting cross-site mutations against `/admin*`."""
 
-    See this module's docstring for the full decision record (why
-    `Sec-Fetch-Site`, why an absent header is accepted, and the residual
-    limit that leaves).
-    """
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
 
-    async def dispatch(self, request: Request, call_next) -> Response:
-        if (
-            request.method in _UNSAFE_METHODS
-            and request.url.path.startswith(_GUARDED_PATH_PREFIX)
-        ):
-            sec_fetch_site = request.headers.get("sec-fetch-site")
-            if sec_fetch_site == _BLOCKED_SEC_FETCH_SITE:
-                logger.warning(
-                    "csrf: rejected cross-site %s %s (Sec-Fetch-Site: cross-site)",
-                    request.method,
-                    request.url.path,
-                )
-                return JSONResponse(
-                    {"detail": "Cross-site request rejected"},
-                    status_code=403,
-                )
-        return await call_next(request)
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http":
+            method = scope.get("method", "GET")
+            path = scope.get("path", "")
+            if method in _UNSAFE_METHODS and path.startswith(_GUARDED_PATH_PREFIX):
+                sec_fetch_site: str | None = None
+                for name, value in scope.get("headers", ()):
+                    if name.lower() == _SEC_FETCH_SITE_BYTES:
+                        sec_fetch_site = value.decode("latin-1")
+                        break
+                if sec_fetch_site == _BLOCKED_SEC_FETCH_SITE:
+                    logger.warning(
+                        "csrf: rejected cross-site %s %s (Sec-Fetch-Site: cross-site)",
+                        method,
+                        path,
+                    )
+                    response = JSONResponse(
+                        {"detail": "Cross-site request rejected"},
+                        status_code=403,
+                    )
+                    await response(scope, receive, send)
+                    return
+        await self.app(scope, receive, send)
 
 
 __all__ = ["AdminCsrfMiddleware"]

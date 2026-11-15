@@ -118,8 +118,8 @@ async def test_count_movies_missing_external_executes_single_query(tmp_path: Pat
 
 @pytest.mark.asyncio
 async def test_sqlite_pragmas_connect_listener_applies_to_connections(tmp_path: Path):
-    assert id(engine.sync_engine) in _PRAGMA_REGISTERED_ENGINES
-    assert id(worker_engine.sync_engine) in _PRAGMA_REGISTERED_ENGINES
+    assert engine.sync_engine in _PRAGMA_REGISTERED_ENGINES
+    assert worker_engine.sync_engine in _PRAGMA_REGISTERED_ENGINES
 
     db_path = tmp_path / "pragmas.db"
     eng = create_async_engine(f"sqlite+aiosqlite:///{db_path}")

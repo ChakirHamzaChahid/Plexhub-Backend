@@ -31,7 +31,9 @@ async def _run_generate(
     dry_run: bool,
     strm_only: bool,
 ) -> None:
+    from app.config import settings
     from app.db.database import init_db
+    settings.ensure_dirs()
     # CR-A02: generation wiring shared with app/api/plex.py and app/main.py
     # instead of being reconstructed inline here.
     from app.services.plex_generation_service import generate_plex_library

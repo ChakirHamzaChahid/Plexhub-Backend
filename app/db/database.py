@@ -1,3 +1,5 @@
+import weakref
+
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from app.config import settings
 
@@ -62,7 +64,7 @@ worker_session_factory = async_sessionmaker(
 # the most recent connect. Consumed by J3b's verify_api_key dependency to
 # short-circuit AI endpoints with HTTP 503 when the extension is unavailable.
 _VEC_LOADED: dict[str, object] = {"ok": False, "error": ""}
-_PRAGMA_REGISTERED_ENGINES: set[int] = set()
+_PRAGMA_REGISTERED_ENGINES: weakref.WeakSet = weakref.WeakSet()
 
 
 def register_sqlite_pragmas_listener(target_engine) -> None:
@@ -72,9 +74,9 @@ def register_sqlite_pragmas_listener(target_engine) -> None:
     from sqlalchemy import event
 
     sync_engine = getattr(target_engine, "sync_engine", target_engine)
-    if id(sync_engine) in _PRAGMA_REGISTERED_ENGINES:
+    if sync_engine in _PRAGMA_REGISTERED_ENGINES:
         return
-    _PRAGMA_REGISTERED_ENGINES.add(id(sync_engine))
+    _PRAGMA_REGISTERED_ENGINES.add(sync_engine)
 
     @event.listens_for(sync_engine, "connect")
     def _apply_sqlite_pragmas(dbapi_conn, _record):
@@ -142,7 +144,7 @@ async def get_db() -> AsyncSession:
             raise
 
 
-async def init_db():
+async def init_db(db_url: str | None = None):
     """Create all tables with optimized SQLite settings."""
     import logging
     from sqlalchemy import text
@@ -150,6 +152,9 @@ async def init_db():
     from app.db.migrations import run_migrations
 
     logger = logging.getLogger("plexhub.db")
+
+    if db_url is not None:
+        configure_engines(db_url)
 
     register_sqlite_vec_listener(engine)
 
@@ -164,3 +169,35 @@ async def init_db():
 
     # Run migrations after tables are created
     await run_migrations(engine)
+
+
+def configure_engines(db_url: str | None = None) -> tuple:
+    """Reconfigure module engines and session factories for a given DB URL (CR-T04)."""
+    global DATABASE_URL, engine, worker_engine
+    target_url = db_url or f"sqlite+aiosqlite:///{settings.DATA_DIR / 'plexhub.db'}"
+    DATABASE_URL = target_url
+    engine = create_async_engine(
+        target_url,
+        echo=False,
+        connect_args={"check_same_thread": False, "timeout": 60},
+        pool_size=20,
+        max_overflow=30,
+        pool_timeout=10,
+        pool_recycle=1800,
+        pool_pre_ping=True,
+    )
+    worker_engine = create_async_engine(
+        target_url,
+        echo=False,
+        connect_args={"check_same_thread": False, "timeout": 60},
+        pool_size=2,
+        max_overflow=2,
+        pool_timeout=30,
+        pool_recycle=1800,
+    )
+    register_sqlite_pragmas_listener(engine)
+    register_sqlite_pragmas_listener(worker_engine)
+    register_sqlite_vec_listener(engine)
+    async_session_factory.configure(bind=engine)
+    worker_session_factory.configure(bind=worker_engine)
+    return engine, worker_engine

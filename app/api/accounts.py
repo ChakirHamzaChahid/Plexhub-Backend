@@ -67,17 +67,11 @@ async def create_account(
 
 @router.put("/{account_id}", response_model=AccountResponse)
 async def update_account(
-    account_id: str, body: AccountUpdate, db: AsyncSession = Depends(get_db),
+    account_id: str, body: AccountUpdate,
 ):
     # AUDIT-P1-001 (S3.3): converted to write_with_retry — a fresh session per
     # attempt is the only pattern that actually survives a real SQLite lock
-    # (ADR 0004, Decision 4). account_service.update_account is a plain
-    # read-then-UPDATE-by-id with no external side effect, so replaying the
-    # whole call on a lock retry is safe and idempotent (same values
-    # re-applied). `db` (the request-scoped session from Depends(get_db))
-    # is left untouched here — no write, so get_db's own implicit commit at
-    # the end of the request is a harmless no-op, not a second write of the
-    # same row.
+    # (ADR 0004, Decision 4).
     async def _work(session: AsyncSession):
         updated = await account_service.update_account(session, account_id, body)
         await session.commit()
@@ -94,15 +88,9 @@ async def update_account(
 
 @router.delete("/{account_id}", status_code=204)
 async def delete_account(
-    account_id: str, db: AsyncSession = Depends(get_db),
+    account_id: str,
 ):
-    # AUDIT-P1-001 (S3.3): converted to write_with_retry. The cascade delete
-    # (account_service.delete_account_cascade) is a sequence of DELETE ...
-    # WHERE statements with no external side effect and no dependency on a
-    # prior read outside this call — replaying the whole cascade on a lock
-    # retry is idempotent (deleting an already-absent row is a no-op). `db`
-    # (request session) is left untouched, so get_db's own implicit commit
-    # at request end has nothing pending to flush.
+    # AUDIT-P1-001 (S3.3): converted to write_with_retry.
     async def _work(session: AsyncSession):
         await account_service.delete_account_cascade(session, account_id)
         await session.commit()

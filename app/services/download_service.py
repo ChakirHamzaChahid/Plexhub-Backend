@@ -22,9 +22,7 @@ import asyncio
 import json
 import logging
 import os
-import re
 import shutil
-import unicodedata
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -149,74 +147,23 @@ def classify_failure_reason(message: str) -> Optional[str]:
 
 # --- Path confinement (F-007, security-critical) -----------------------------
 
-_PATH_SEP_RE = re.compile(r"[\\/]+")
-_PARENT_DIR_RE = re.compile(r"\.\.+")
-# Characters that are legal on POSIX filesystems (ext4/NFS) but ILLEGAL on
-# NTFS. When a Linux-written file carrying one is exposed over SMB/Samba, the
-# share auto-generates a mangled 8.3 short name (e.g. `WISTO~1.MKV`) so Windows
-# clients can open it — the real name then reads as gibberish there. Normalize
-# them out of every segment so the same file reads correctly on both. `/` and
-# `\` are handled separately (path separators, `_PATH_SEP_RE`). `:` is remapped
-# to ` - ` (media-server convention for `Title: Subtitle`); the rest are dropped.
-_WIN_COLON_RE = re.compile(r"\s*:\s*")
-_WIN_ILLEGAL_RE = re.compile(r'[*?"<>|]')
-_MAX_SEGMENT_LEN = 180
-_DEFAULT_EXT = "ts"
-_RESERVED_WINDOWS_NAMES = frozenset(
-    {"con", "prn", "aux", "nul"}
-    | {f"com{i}" for i in range(1, 10)}
-    | {f"lpt{i}" for i in range(1, 10)}
+from app.utils.path_naming import (  # noqa: E402
+    MAX_SEGMENT_LEN as _MAX_SEGMENT_LEN,
+    remap_ntfs_illegal_chars,  # noqa: F401
+    sanitize_path_segment,
 )
 
-
-def _strip_unicode_control(text: str) -> str:
-    """Drop ASCII + Unicode control/format/surrogate characters (Cc/Cf/Cs) —
-    e.g. RTL override (U+202E), zero-width joiners, BOM — that could make a
-    sanitized segment render misleadingly or embed non-printing bytes."""
-    return "".join(ch for ch in text if unicodedata.category(ch) not in ("Cc", "Cf", "Cs"))
-
-
-def remap_ntfs_illegal_chars(text: str) -> str:
-    """Remap characters that are legal on POSIX (ext4/NFS) but ILLEGAL on NTFS,
-    so a Linux-written filename isn't Samba-mangled to an 8.3 short name on
-    Windows SMB clients: `:` -> ` - ` (readable for `Title: Subtitle`), and
-    `* ? " < > |` dropped. Does NOT touch `/`/`\\` (path separators — handled
-    by `_PATH_SEP_RE`). Public on purpose: the one-shot on-disk rename
-    migration (`app/scripts/rename_download_illegal_chars.py`) reuses it so a
-    renamed existing file matches exactly what a fresh download now produces."""
-    text = _WIN_COLON_RE.sub(" - ", text)
-    return _WIN_ILLEGAL_RE.sub("", text)
+_DEFAULT_EXT = "ts"
 
 
 def _sanitize_segment(name: str, *, fallback: str) -> str:
-    """Sanitize ONE path segment: NFC-normalize, strip separators/control
-    chars/parent-dir markers, remap NTFS-illegal characters (so the file
-    isn't Samba-mangled on Windows clients), trim trailing '.'/' ', cap length.
-
-    This is defense in depth — `resolve_confined` (realpath containment) is
-    what actually PROVES the resulting path stays under `DOWNLOAD_DIR`
-    (F-007); this function just keeps the segment sane and never lets a raw
-    `..`/`/`/`\\` survive into it.
-    """
-    text = unicodedata.normalize("NFC", name or "")
-    text = _strip_unicode_control(text)
-    text = _PATH_SEP_RE.sub(" ", text)
-    # NTFS-illegal but POSIX-legal chars (`:` -> ` - `, `* ? " < > |` dropped),
-    # remapped BEFORE the whitespace collapse below so the injected spaces are
-    # normalized. Single source of truth shared with the rename migration.
-    text = remap_ntfs_illegal_chars(text)
-    # Collapse any run of '..' (and longer) to a single '.' so no parent-dir
-    # marker survives; the trailing strip below then drops a lone '.'.
-    text = _PARENT_DIR_RE.sub(".", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    text = text.strip(". ")
-    text = text[:_MAX_SEGMENT_LEN]
-    text = text.strip(". ")
-    if not text:
-        return fallback
-    if text.lower() in _RESERVED_WINDOWS_NAMES:
-        text = f"{text}_"
-    return text
+    """Sanitize ONE path segment via shared `app.utils.path_naming` helper."""
+    return sanitize_path_segment(
+        name,
+        fallback=fallback,
+        ntfs_remap=True,
+        max_len=_MAX_SEGMENT_LEN,
+    )
 
 
 def compute_dest_path(

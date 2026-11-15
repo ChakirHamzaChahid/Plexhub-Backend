@@ -11,7 +11,7 @@
 |---|---|---|---|---|
 | **Lot 7** | Intégrité catalogue & Cycle de vie NFO/Rétention | P1-A | Nettoyage épisodes orphelins, règle unique `display_rating`, invalidation ciblée NFO, purge rétention | ✅ Fait |
 | **Lot 8** | Notifications proactives (Webhook / Discord / Notifiarr) | P1-B | Alertes panne fournisseur, fin batch téléchargement, échec backup, circuit-breaker | ✅ Fait |
-| **Lot 9** | Centre de contrôle Admin (`/admin`) | P1-C | Gestion comptes Xtream, éditeur catégories, pilotage/suivi jobs, audit `metadata_edits` & `scrape_cache`, fusion onglets download | ⏳ À faire |
+| **Lot 9** | Centre de contrôle Admin (`/admin`) | P1-C | Gestion comptes Xtream, éditeur catégories, pilotage/suivi jobs, audit `metadata_edits` & `scrape_cache`, fusion onglets download | ✅ Fait |
 | **Lot 10** | IA « Playable-first » & Nouveautés catalogue | P2-A | Filtrage disponibilité réelle sur `/api/ai/search` & `/rank`, filtres année/genre/note, endpoint `/api/media/recent` | ⏳ À faire |
 | **Lot 11** | Pipeline Téléchargements avancé (Sous-titres auto & Plex HLS) | P2-B | Sidecar `.fr.srt` auto via `subtitle_service`, fallback HLS + remux `ffmpeg` sur partages Plex transcode-only | ⏳ À faire |
 | **Lot 12** | Relais WebDAV `/dav` sans friction (Pré-cache & Observabilité) | P2-C | Cache header+tail intégré au relais `/dav`, métriques Prometheus DAV/downloads | ⏳ À faire |

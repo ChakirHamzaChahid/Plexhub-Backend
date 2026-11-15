@@ -114,7 +114,7 @@ def _wire_router_db(monkeypatch, db_factory):
     `enrichment_backfill_worker` (a local import, NOT `app.db.database`'s
     module attribute) — must be patched on that specific module, same
     gotcha noted in `tests/test_download_security.py`."""
-    monkeypatch.setattr(backfill, "async_session_factory", db_factory)
+    monkeypatch.setattr(backfill, "worker_session_factory", db_factory)
     monkeypatch.setattr(db_module, "async_session_factory", db_factory)
 
 

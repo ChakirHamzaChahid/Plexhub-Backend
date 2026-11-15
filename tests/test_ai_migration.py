@@ -50,3 +50,33 @@ async def test_m008_idempotent(ai_engine) -> None:
     """Re-running M008 on an engine where it already ran must not raise."""
     async with ai_engine.begin() as conn:
         await _migration_008_ai_embeddings(conn)
+
+
+async def test_m008_skips_vec0_when_sqlite_vec_unavailable(tmp_path, monkeypatch) -> None:
+    """CR-D03: when sqlite-vec is not loaded (_VEC_LOADED['ok'] is False),
+    M008 must skip CREATE VIRTUAL TABLE ... USING vec0 instead of crashing boot,
+    while still creating ai_tmdb_cache."""
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    monkeypatch.setitem(_VEC_LOADED, "ok", False)
+    monkeypatch.setitem(_VEC_LOADED, "error", "simulated missing extension")
+
+    db_path = tmp_path / "no_vec.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}", future=True)
+    try:
+        async with engine.begin() as conn:
+            await _migration_008_ai_embeddings(conn)
+
+        async with engine.connect() as conn:
+            tables = {
+                row[0]
+                for row in (
+                    await conn.execute(
+                        text("SELECT name FROM sqlite_master WHERE type='table'")
+                    )
+                ).fetchall()
+            }
+            assert "ai_tmdb_cache" in tables
+            assert "ai_embeddings" not in tables
+    finally:
+        await engine.dispose()

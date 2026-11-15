@@ -73,7 +73,7 @@ async def jobs_client(
     monkeypatch.setattr(db_module, "async_session_factory", ai_test_factory)
     # Patch the worker's reference too
     from app.workers import embedding_worker
-    monkeypatch.setattr(embedding_worker, "async_session_factory", ai_test_factory)
+    monkeypatch.setattr(embedding_worker, "worker_session_factory", ai_test_factory)
 
     # Stub embed_passages so background job completes offline & quickly
     async def fake_embed(texts):

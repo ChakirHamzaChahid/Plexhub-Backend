@@ -4,6 +4,7 @@ description: Variante EFFORT HIGH de `security-reviewer` (invoquer seulement si 
 tools: Read, Glob, Grep, Bash, Task
 model: opus
 effort: high
+maxTurns: 50
 ---
 <!-- GÉNÉRÉ par .claude/tools/gen-effort-twins.py depuis security-reviewer.md — NE PAS ÉDITER : modifie la fiche de base puis relance le script. -->
 

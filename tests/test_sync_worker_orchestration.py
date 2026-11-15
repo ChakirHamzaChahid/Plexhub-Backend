@@ -73,7 +73,7 @@ async def wired_sync_db(db_engine, monkeypatch):
     to "all" so no `XtreamCategory` row is required.
     """
     factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
-    monkeypatch.setattr(sync_worker_module, "async_session_factory", factory)
+    monkeypatch.setattr(sync_worker_module, "worker_session_factory", factory)
 
     async def _empty_list(*args, **kwargs):
         return []
@@ -240,7 +240,7 @@ class TestSyncAccountEndToEnd:
         # `commit_with_retry` is called (unguarded by any try/except) right
         # after `_refresh_categories` fetches categories -- the first genuine
         # commit point in `sync_account`'s flow.
-        monkeypatch.setattr(sync_worker_module, "commit_with_retry", _boom)
+        monkeypatch.setattr(sync_worker_module, "write_with_retry", _boom)
 
         job_id = await sync_worker_module.sync_account(account_id)
 

@@ -106,13 +106,13 @@ async def test_refresh_categories_commits_via_retry_helper(
     import app.api.categories as categories_module
 
     calls = {"n": 0}
-    real_commit_with_retry = categories_module.commit_with_retry
+    real_write_with_retry = categories_module.write_with_retry
 
-    async def _spy(db, **kwargs):
+    async def _spy(work, **kwargs):
         calls["n"] += 1
-        return await real_commit_with_retry(db, **kwargs)
+        return await real_write_with_retry(work, **kwargs)
 
-    monkeypatch.setattr(categories_module, "commit_with_retry", _spy)
+    monkeypatch.setattr(categories_module, "write_with_retry", _spy)
 
     resp = await api_client.post(
         "/api/accounts/a/categories/refresh", headers=API_HEADERS,

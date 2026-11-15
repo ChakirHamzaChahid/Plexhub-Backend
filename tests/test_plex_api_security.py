@@ -109,7 +109,7 @@ class TestGenerateOutputDirInsideBaseAccepted:
         by name at module scope, so it must be patched on that module, not on
         app.db.database)."""
         factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
-        monkeypatch.setattr(plex_source_module, "async_session_factory", factory)
+        monkeypatch.setattr(plex_source_module, "worker_session_factory", factory)
 
     @pytest.mark.parametrize(
         "build_ok",

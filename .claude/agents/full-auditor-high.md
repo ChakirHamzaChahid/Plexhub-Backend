@@ -4,6 +4,7 @@ description: Variante EFFORT HIGH de `full-auditor` (invoquer seulement si la gr
 tools: Read, Bash, Grep, Glob, Write, Skill
 model: opus
 effort: high
+maxTurns: 100
 ---
 <!-- GÉNÉRÉ par .claude/tools/gen-effort-twins.py depuis full-auditor.md — NE PAS ÉDITER : modifie la fiche de base puis relance le script. -->
 

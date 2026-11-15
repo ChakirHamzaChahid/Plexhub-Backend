@@ -4,7 +4,8 @@ argument-hint: <objectif de la feature, ex. "ajouter un endpoint /api/ai/similar
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash, Task, Agent
 ---
 
-> 🟢 **PlexHub Backend — FastAPI/Python 3.13.** Dév **directement sur `develop`** (pas de branche par tâche ; `main` = release only). Lis `.claude/WORKFLOWS.md` + `CLAUDE.md` §2/§3/§5/§9. Validation = `pytest -v` + boot `uvicorn app.main:app` + `GET /api/health` 200.
+> 🟢 **PlexHub Backend — FastAPI/Python 3.12-3.13.** Dév **directement sur `develop`** (pas de branche par tâche ; `main` = release only). Lis `.claude/WORKFLOWS.md` + `CLAUDE.md` §2/§3/§5 + `.claude/skills/pitfalls/`. Validation = `python .claude/tools/dod-gate.py run` (ruff + pytest + boot `/api/health` 200).
+> ⚠️ **Découpage en 2 sessions** : la session 1 s'arrête après le **gate archi** (`tech-lead` + validation Chakir) ; la session 2 démarre en **contexte neuf** (`/clear`) sur le PRD + board + `lot-state` pour exécuter `/app-build` (ou `/lot`).
 
 # /feature — livrer une fonctionnalité en multi-agents
 
@@ -25,9 +26,9 @@ Exemples : message d'erreur, champ d'un template admin, ligne de log, clé de co
 
 **Déroulé :**
 1. Annoncer `CHEMIN MINEUR` avec une ligne par critère d'éligibilité, puis l'objectif et 2-3 critères d'acceptation directement dans le message.
-2. Un seul `backend-developer` (couple noté par la grille) ; `pytest` ciblé + `ruff check`.
+2. Un seul `backend-developer` (couple noté par la grille + vérifié via `python .claude/tools/routage.py check`) ; `python .claude/tools/dod-gate.py run --fast`.
 3. Une revue `code-reviewer` du diff ; les déclencheurs de revues spécialisées s'appliquent quand même.
-4. `pytest -v` complet une fois + boot `uvicorn app.main:app` + `GET /api/health` 200 si le code servi change ; commit sur `develop`.
+4. `python .claude/tools/dod-gate.py run` complet une fois + commit sur `develop` + `python .claude/tools/cost-tracker.py lot` au journal.
 
 **Bascule obligatoire :** si un critère tombe en cours de route, on **s'arrête** et on repart sur le chemin complet.
 
@@ -57,8 +58,8 @@ Revue Gemini du 2026-09-23 : `security-reviewer` et `perf-benchmarker` ne parten
 
 Quand une revue spécialisée n'est pas lancée, le rapport de lot l'écrit : `security-reviewer : non requis — aucun déclencheur` (même chose pour `perf-benchmarker`).
 
-## DoD (chaque sous-issue)
-`pytest -v` vert · serveur boote (`uvicorn app.main:app`) · `GET /api/health` 200 · **migrations idempotentes** (rejouables sans erreur) · `ruff check` propre (si câblé) · **OpenAPI/contrat à jour** si l'API change. Boucle de correction max 5 essais ; cap 2 cycles review puis `blocked` (= tentatives 2 et 3 du compteur unique, sous-agent neuf à chaque fois).
+## DoD (chaque sous-issue / lot)
+Ticket : `python .claude/tools/dod-gate.py run --fast` (`ruff check .` + `pytest -q --no-cov`). Lot : `python .claude/tools/dod-gate.py run` (`ruff check .` + `pytest` avec couverture + boot `/api/health` 200) · **migrations idempotentes** (rejouables sans erreur) · **OpenAPI/contrat à jour** si l'API change. Boucle de correction max 5 essais techniques ; cap 2 cycles review puis `BLOCKED` (= tentatives 2 et 3 du compteur unique, sous-agent neuf à chaque fois).
 
 ## Sûreté
 Risky (migration de schéma, refacto large, secrets, release) = `needs-approval`. Éditions de contrats **additives** quand possible. Jamais d'auto-merge par-dessus un `REQUEST CHANGES`. `BLOCKED` remonté verbatim. Secrets jamais en clair (tokens, clés API, Fernet).

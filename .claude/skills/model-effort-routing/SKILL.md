@@ -1,6 +1,6 @@
 ---
 name: model-effort-routing
-description: Doctrine PlexHub Backend consultée par les orchestrateurs (Manager principal, tech-lead, cto, tech-manager, full-auditor) AVANT CHAQUE invocation d'un subagent via Agent/Task. Chaque tâche est notée sur une grille de 5 critères qui fixe son MODÈLE (haiku / sonnet / opus, passé en `model:` à l'appel) et son EFFORT (medium / high, choisi via la fiche `<agent>` ou son jumeau `<agent>-high`). Donne aussi l'escalade sur échec. Plage autorisée = haiku..opus × medium..high ; low, xhigh, max et fable sont hors routage.
+description: Doctrine PlexHub Backend consultée par les orchestrateurs (Manager principal, tech-lead, full-auditor) AVANT CHAQUE invocation d'un subagent via Agent/Task. Chaque tâche est notée sur une grille de 5 critères qui fixe son MODÈLE (haiku / sonnet / opus, passé en `model:` à l'appel) et son EFFORT (medium / high — `low` en pilote pour `backend-developer` —, choisi via la fiche `<agent>`, son jumeau `<agent>-high` ou `<agent>-low`). Donne aussi l'escalade sur échec. Plage autorisée = haiku..opus × medium..high ; low, xhigh, max et fable sont hors routage.
 allowed-tools: Read
 effort: high
 ---
@@ -13,8 +13,8 @@ effort: high
 
 | Axe | Valeurs autorisées | Hors routage |
 |---|---|---|
-| **Modèle** | `haiku` < `sonnet` < `opus` | `fable` (retiré le 2026-09-23 : plus cher qu'Opus 5.5 sans gain mesuré) |
-| **Effort** | `medium` < `high` | `low` (trop de régressions cachées ; sans effet sur Haiku 4.5, absent de la liste des modèles qui gèrent l'effort — à réévaluer fin octobre 2026 avec les données de `.claude/tools/cost-tracker.py report`), `xhigh` et `max` (coût nettement supérieur pour un gain faible, d'après Anthropic) |
+| **Modèle** | `haiku` < `sonnet` < `opus` | `fable` : jamais pour un sous-agent (refusé par le hook) ; seule exception : escalade manuelle après `BLOCKED`, en session principale, décidée par Chakir (§4) |
+| **Effort** | `medium` < `high` ; **`low` en pilote** pour `backend-developer` (§3, « Pilote effort `low` ») | `low` hors du pilote, `xhigh` et `max` (coût nettement supérieur pour un gain faible, d'après Anthropic) |
 
 `xhigh`/`max` ne peuvent être posés **que par Chakir**, à la main, pour une session (`CLAUDE_CODE_EFFORT_LEVEL`). Aucun agent, aucune matrice, aucune escalade automatique ne les choisit.
 
@@ -24,8 +24,8 @@ Vérifié dans la doc Claude Code (« sub-agents », 2026-09) : **le modèle se 
 
 | Axe | Levier |
 |---|---|
-| **Modèle** | paramètre `model:` de l'outil Agent/Task (`"haiku"`, `"sonnet"`, `"opus"`) — **toujours le passer explicitement**, ne jamais compter sur le défaut de la fiche |
-| **Effort** | choix de la fiche : `<agent>` = `medium`, `<agent>-high` = `high` |
+| **Modèle** | paramètre `model:` de l'outil Agent/Task (`"haiku"`, `"sonnet"`, `"opus"`) — **toujours le passer explicitement** : le hook `.claude/hooks/subagent-model-guard.js` refuse tout appel sans `model:` (sauf `fork`) |
+| **Effort** | choix de la fiche : `<agent>` = `medium`, `<agent>-high` = `high`, `<agent>-low` = `low` (pilote, `backend-developer` seulement) |
 
 Les jumeaux `<agent>-high.md` sont **générés** par `python .claude/tools/gen-effort-twins.py` depuis la fiche de base : on n'édite **que** la fiche de base, puis on relance le script (`--check` vérifie qu'aucun jumeau n'est absent, périmé ou orphelin).
 
@@ -52,28 +52,52 @@ Les jumeaux `<agent>-high.md` sont **générés** par `python .claude/tools/gen-
 
 ### Règle de décision — effort
 
-- **`high`** si **au moins une** : C3 ≥ 1 · C4 = 2 · C2 = 2 · C1 = 2.
-- Sinon **`medium`**.
+1. **`high`** si **au moins une** :
+   - C2 = 2 **et** C3 ≥ 1 (zone à risque avec choix ou ambiguïté — si C3 = 0, `opus · medium` suffit) ;
+   - C3 = 2 (cause inconnue, diagnostic, arbitrage) ;
+   - C3 = 1 **et** C4 = 2 (choix de conception sans contrôle automatique complet).
+2. Sinon **`medium`** (et **`low`** si éligible au pilote ci-dessous).
+
+### Agents en lecture seule (revues, audits)
+
+- **Jamais `haiku` en détection** : un lecteur (`code-reviewer`, `security-reviewer`, `full-auditor`) part au minimum en **`sonnet`**.
+- **`security-reviewer`** → **`opus`**, effort **`medium`** (`high` si C3 = 2).
+- **`code-reviewer` / `full-auditor`** → **`sonnet` · `medium`** (`high` si C2 = 2).
+
+### Pilote effort `low` (développeurs, tickets vérifiables)
+
+- Fiche `backend-developer-low`, **seulement si** C2 ≤ 1, C3 = 0 et C4 = 0 (la DoD ticket `dod-gate.py run --fast` tranche).
+- Deux variantes : `opus` · `low` pour une édition **mécanique sur plusieurs fichiers** (C5 = 0, C1 ≥ 1), `sonnet` · `low` sinon.
+- Échec → tentative 2 = la fiche de base (`medium`), puis l'escalade normale (§4).
+- **Jamais `low`** pour une revue, un audit, l'analyse d'une spec, un diagnostic, `Explore` ou une tâche C2 ≥ 2.
 
 ### Agents intégrés `Explore` et `Plan` (règle du 2026-09-25)
 
 Depuis Claude Code v2.1.198, `Explore` **hérite du modèle de la session principale** (donc Opus), et `Plan` aussi (doc « sub-agents », vérifié le 2026-09-25). Mesuré sur les transcripts des 14 jours précédents : 24 lancements d'`Explore` en Opus, 1 seul appel Haiku sur toute la période. D'où :
 
-- **Toujours passer `model:`** à l'appel (le paramètre d'appel prime sur tout le reste). **Exécutoire** : le hook `PreToolUse` `.claude/hooks/subagent-model-guard.js` refuse un appel à `Explore`/`Plan` sans `model:` (coupe-circuit `SUBAGENT_MODEL_GUARD=off`, à signaler à Chakir).
+- **Toujours passer `model:`** à l'appel (le paramètre d'appel prime sur tout le reste). **Exécutoire** : le hook `PreToolUse` `.claude/hooks/subagent-model-guard.js` refuse tout appel sans `model:` (sauf `fork`), un `Explore` en `opus`, un `Explore` en `sonnet` sans « very thorough » dans le prompt, et tout sous-agent en `fable` (coupe-circuit `SUBAGENT_MODEL_GUARD=off`, à signaler à Chakir).
 - `Explore` en `quick` ou `medium` → **`haiku`** ; en `very thorough` sur plusieurs modules → **`sonnet`** (règle 2bis).
 - `Plan` → noté par la grille comme une tâche de jugement (C5 = 2), en pratique `sonnet`, `opus` seulement si C2 = 2 ou C3 = 2.
 - Effort : pas de fiche jumelle pour un agent intégré → écrire `effort=session` dans la ligne `ROUTAGE`.
 - ⚠️ **Résultat vide = à contre-vérifier.** Test du 2026-09-25 : `Explore` sur Haiku a répondu « 0 fichier » pour `SyncWriteGate` (filtre `type: kt` invalide pour ripgrep, erreur avalée) alors que `git grep` en trouve 25. Avant de conclure qu'un symbole n'existe pas, contre-vérifier par `git grep`.
+
+### Ticket minuscule traité par la session principale (E4)
+
+Un ticket qui tient en quelques lignes ne part pas dans un sous-agent :
+- **Conditions, toutes** : C1 = 0 (un fichier) · C2 = 0 · C3 = 0 · C5 ≤ 1 · une poignée de lignes.
+- La session principale édite, lance `python .claude/tools/dod-gate.py run --fast`, puis commite comme pour un ticket délégué.
+- Ligne de trace : `ROUTAGE <id> : model=session effort=session agent=session — C1=0 C2=0 C3=0 C4=x C5=x (ticket minuscule)`.
+- Dès qu'une condition tombe en cours de route (deuxième fichier, zone à risque, doute), le ticket repart dans un sous-agent neuf.
 
 ### Trace obligatoire
 
 Avant chaque appel, l'orchestrateur écrit **une ligne de routage** dans son plan ou dans le board :
 
 ```
-ROUTAGE <id tâche> : model=<haiku|sonnet|opus> effort=<medium|high> agent=<fiche> — C1=x C2=x C3=x C4=x C5=x (<raison en 5-10 mots>)
+ROUTAGE <id tâche> : model=<haiku|sonnet|opus> effort=<low|medium|high> agent=<fiche> — C1=x C2=x C3=x C4=x C5=x (<raison en 5-10 mots>)
 ```
 
-Sans cette ligne, la revue du lot peut refuser le routage. Elle sert aussi à recalibrer la grille après coup (tâche réussie du 1er coup en `high` alors que `medium` aurait suffi ⇒ la grille surestime).
+Avant de présenter un plan, les lignes passent par `python .claude/tools/routage.py check` (exit 1 = un couple déclaré diffère de la grille ; une ligne `tentative 2|3` est seulement affichée). Sans cette ligne, la revue du lot peut refuser le routage. Elle sert aussi à recalibrer la grille après coup.
 
 ### Exemples PlexHub Backend
 

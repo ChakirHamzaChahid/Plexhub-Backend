@@ -2,7 +2,6 @@ import asyncio
 import logging
 from logging.handlers import RotatingFileHandler as _RotatingFileHandler
 import os
-import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -38,7 +37,7 @@ from app.api import (
 from app.utils.request_context import RequestIdLogFilter, RequestIdMiddleware
 from app.utils.job_health import mark_job_success, set_master, track_job
 
-APP_VERSION = "1.15.0"
+APP_VERSION = "1.16.0"
 
 # First run of the opt-in `epg_sync` job, counted from boot (see lifespan).
 _EPG_SYNC_FIRST_RUN_DELAY = timedelta(minutes=5)
@@ -143,135 +142,12 @@ async def _pipeline_guard():
             unified_group_service.set_pipeline_active(False)
 
 
-async def _auto_generate_plex_library():
-    """Auto-generate Plex library for all active accounts if PLEX_LIBRARY_DIR is set.
-
-    Thin wrapper (CR-A02): the generation wiring (`DatabaseSource` ->
-    `PlexLibraryGenerator` -> `LocalStorage` -> `generate()`) plus the
-    boot/schedule-time safety gating (skip if unconfigured / no active
-    accounts) now live in `app.services.plex_generation_service`, shared with
-    `app.api.sync`'s `/full-pipeline` endpoint — which used to reach into this
-    private coroutine directly (layering inversion) and now calls the service
-    instead.
-    """
-    from app.services.plex_generation_service import generate_plex_library_auto
-
-    await generate_plex_library_auto()
-
-
-async def _rebuild_unified_groups():
-    """CR-P01: rebuild the precomputed media_group snapshot the unfiltered
-    /movies|shows/unified browse endpoints page over.
-
-    Runs at the end of the pipeline (after enrichment/generation) so the
-    snapshot reflects the fully-enriched catalog — the same freshness as the
-    generated Plex library. Non-fatal: the unified list falls back to live
-    aggregation if this fails or hasn't run yet, so a failure never breaks
-    browsing.
-
-    Also refreshes sqlite_stat1 (AUDIT-P3-001) right after, while both
-    pipeline callers below still hold `_PIPELINE_LOCK`.
-    """
-    from app.services import unified_group_service
-    from app.db.database import async_session_factory, engine
-    from app.db.maintenance import run_sqlite_maintenance
-
-    try:
-        counts = await unified_group_service.rebuild_all(async_session_factory)
-        logger.info("Unified-group snapshot rebuilt: %s", counts)
-    except Exception as e:
-        logger.error("Unified-group snapshot rebuild failed: %s", e, exc_info=True)
-
-    await run_sqlite_maintenance(engine)
-
-
-async def _auto_provision_xtream_account():
-    """Create an Xtream account from env vars if it doesn't already exist."""
-    import hashlib
-    from sqlalchemy import select
-    from app.db.database import async_session_factory
-    from app.models.database import XtreamAccount
-    from app.services.xtream_credentials import XtreamCredentials
-    from app.services.xtream_service import xtream_service
-
-    account_id = hashlib.md5(
-        f"{settings.XTREAM_BASE_URL}{settings.XTREAM_USERNAME}".encode()
-    ).hexdigest()[:8]
-
-    async with async_session_factory() as db:
-        result = await db.execute(
-            select(XtreamAccount).where(XtreamAccount.id == account_id)
-        )
-        if result.scalars().first():
-            logger.info(f"Xtream account {account_id} already exists (from env)")
-            return
-
-        # Authenticate to get server info (CR-C10: shared typed credentials
-        # holder instead of a throwaway anonymous class).
-        credentials = XtreamCredentials(
-            base_url=settings.XTREAM_BASE_URL,
-            port=settings.XTREAM_PORT,
-            username=settings.XTREAM_USERNAME,
-            password=settings.XTREAM_PASSWORD,
-        )
-
-        try:
-            auth_data = await xtream_service.authenticate(credentials)
-            user_info = auth_data.get("user_info", {})
-            server_info = auth_data.get("server_info", {})
-        except Exception as e:
-            logger.error(f"Xtream auto-provision auth failed: {e}")
-            return
-
-        account = XtreamAccount(
-            id=account_id,
-            label="Auto (env)",
-            base_url=settings.XTREAM_BASE_URL,
-            port=settings.XTREAM_PORT,
-            username=settings.XTREAM_USERNAME,
-            password=settings.XTREAM_PASSWORD,
-            status=user_info.get("status", "Unknown"),
-            expiration_date=int(user_info["exp_date"]) * 1000
-            if user_info.get("exp_date") else None,
-            max_connections=int(user_info.get("max_connections", 1)),
-            allowed_formats=",".join(user_info.get("allowed_output_formats", [])),
-            server_url=server_info.get("url"),
-            https_port=int(server_info["https_port"])
-            if server_info.get("https_port") else None,
-            is_active=True,
-            created_at=int(time.time() * 1000),
-        )
-        db.add(account)
-        await db.commit()
-        logger.info(f"Xtream account auto-provisioned from env: {account_id}")
-
-
-async def _cleanup_stale_epg():
-    """Delete EPG entries whose end_time is in the past (stale programs)."""
-    from sqlalchemy import delete
-    from app.db.database import async_session_factory
-    from app.models.database import EpgEntry
-    from app.utils.db_retry import run_with_retry
-
-    cutoff = int(time.time() * 1000)  # now in ms
-
-    # This cron runs at hour=3, right after the hour=2 stream-validation cron,
-    # whose long write transaction can still hold SQLite's single writer lock.
-    # The DELETE below *opens* the write transaction, so contention raises
-    # "database is locked" on the `execute` itself — before any commit — which
-    # is why wrapping only the commit was not enough (the job crashed nightly).
-    # Retry the whole open-a-session → delete → commit unit; each attempt gets a
-    # fresh session so a failed attempt is cleanly rolled back and closed.
-    async def _prune() -> int:
-        async with async_session_factory() as db:
-            result = await db.execute(
-                delete(EpgEntry).where(EpgEntry.end_time < cutoff)
-            )
-            await db.commit()
-            return result.rowcount
-
-    rowcount = await run_with_retry(_prune, op="epg_cleanup")
-    logger.info(f"EPG cleanup: removed {rowcount} stale entries")
+from app.services.startup_tasks import (  # noqa: E402
+    auto_generate_plex_library as _auto_generate_plex_library,
+    auto_provision_xtream_account as _auto_provision_xtream_account,
+    cleanup_stale_epg as _cleanup_stale_epg,
+    rebuild_unified_groups as _rebuild_unified_groups,
+)
 
 
 @asynccontextmanager
@@ -283,7 +159,17 @@ async def lifespan(app: FastAPI):
     lock_fd = None
 
     try:
-        settings.DATA_DIR.mkdir(parents=True, exist_ok=True)
+        settings.ensure_dirs()
+
+        # CR-O05 / CR-P04: intra-process locks, rate-limiters, and caches
+        # assume a single worker process (--workers 1). Refuse or warn loudly
+        # if WEB_CONCURRENCY > 1 is configured.
+        web_concurrency = int(os.getenv("WEB_CONCURRENCY", "1") or "1")
+        if web_concurrency > 1:
+            raise RuntimeError(
+                f"WEB_CONCURRENCY={web_concurrency} is unsupported: PlexHub requires "
+                "--workers 1 (single-process SQLite/in-memory state, CR-O05/CR-P04)"
+            )
 
         # Initialize database
         await init_db()
@@ -318,6 +204,17 @@ async def lifespan(app: FastAPI):
             # Master election — atomic via fcntl.flock (no race condition)
             try:
                 lock_fd = open(lock_file, "w")
+            except PermissionError as exc:
+                logger.error(
+                    "Cannot open master lock file %s (%s) — check host volume "
+                    "permissions (expected UID:GID 1000:1000 on DATA_DIR); "
+                    "refusing silent slave fallback",
+                    lock_file,
+                    exc,
+                )
+                raise
+
+            try:
                 fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 lock_fd.write(str(os.getpid()))
                 lock_fd.flush()
@@ -602,7 +499,7 @@ async def lifespan(app: FastAPI):
         from app.services.tmdb_service import tmdb_service
         from app.workers import health_check_worker
         from app.dav import relay as dav_relay
-        from app.services import poster_match_service
+        from app.services import poster_match_service, ollama_service
 
         await xtream_service.close()
         await tmdb_service.close()
@@ -613,6 +510,7 @@ async def lifespan(app: FastAPI):
         # Manual-scrape poster-match's dedicated image client (ADR 0005 D5) —
         # a no-op if no poster was ever compared (lazy client, stays `None`).
         await poster_match_service.close()
+        await ollama_service.close_client()
 
         # Shutdown image download thread pool
         from app.plex_generator.storage import shutdown_image_pool
@@ -633,7 +531,7 @@ app = FastAPI(
 
 if settings.CORS_ORIGINS == ["*"]:
     logger.warning(
-        "CORS_ORIGINS is '*' (default) — restrict to explicit origins in production "
+        "CORS_ORIGINS is '*' (wildcard) — restrict to explicit origins in production "
         "deployments via the CORS_ORIGINS env var"
     )
 
@@ -651,13 +549,16 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 # Body size cap (64 KiB) for /api/scrape/v1/ ONLY — pure ASGI, see app/api/body_limit.py.
 # Inserted between GZip and RequestId so the relative order of the existing middlewares is unchanged.
 from app.api.body_limit import (  # noqa: E402
+    DEFAULT_API_MAX_BODY_BYTES,
     METADATA_MAX_BODY_BYTES,
     METADATA_PREFIX,
     ScrapeBodyLimitMiddleware,
 )
-# ONE instance, per-prefix caps (B2: /api/metadata/v1/ 256 KiB, ADR 0010 D2.4).
+# ONE instance, per-prefix caps (B2: /api/metadata/v1/ 256 KiB, Lot 4 CR-S06: /api/* mutations 4 MiB).
 app.add_middleware(
-    ScrapeBodyLimitMiddleware, extra_limits={METADATA_PREFIX: METADATA_MAX_BODY_BYTES},
+    ScrapeBodyLimitMiddleware,
+    extra_limits={METADATA_PREFIX: METADATA_MAX_BODY_BYTES},
+    default_api_limit=DEFAULT_API_MAX_BODY_BYTES,
 )
 # Added last so it wraps the others — request_id is set before any other middleware runs.
 app.add_middleware(RequestIdMiddleware)
@@ -665,64 +566,54 @@ app.add_middleware(RequestIdMiddleware)
 from app.api.csrf import AdminCsrfMiddleware  # noqa: E402
 app.add_middleware(AdminCsrfMiddleware)
 
-# ─── Routes / auth-per-router (CR-A04) ───────────────────────────────────
-# Three mounting patterns coexist here by necessity (a public health check, a
-# browser-facing admin UI needing Basic Auth instead of a custom header, and
-# two routers that self-guard because they own a broader path prefix than
-# "/api"). They are grouped and labelled explicitly below so the guard for
-# every router is visible in this ONE place, without changing any path or
-# which guard applies to which router. The startup assertion once tracked
-# here as "not done" now runs at the end of this block (AUDIT-P4-001 /
-# CR-A04) — see app/api/route_audit.py.
+# ─── Routes / auth-per-router (CR-A02 / CR-A04) ──────────────────────────
+# Two canonical mounting conventions (verified at boot by route_audit.py):
+#   1. Mount-guarded routers (`_MOUNT_GUARDED_ROUTERS`): router carries no
+#      module-level auth; the guard dependency is attached here at mount time.
+#   2. Self- or route-guarded routers (`_SELF_OR_ROUTE_GUARDED_ROUTERS`):
+#      router defines its own prefix + module-level or per-route guard
+#      (or is explicitly allow-listed in `PUBLIC_API_ALLOWLIST`).
 from app.api.deps import (  # noqa: E402
     verify_admin_basic_auth,
     verify_backend_secret,
     verify_metrics_basic_auth,
 )
 
-# Shared X-API-Key guard for the JSON API (fail-closed, constant-time).
-_guard = [Depends(verify_backend_secret)]
+_MOUNT_GUARDED_ROUTERS = (
+    (accounts.router, "/api", verify_backend_secret),
+    (categories.router, "/api", verify_backend_secret),
+    (live.router, "/api", verify_backend_secret),
+    (media.router, "/api", verify_backend_secret),
+    (stream.router, "/api", verify_backend_secret),
+    (sync.router, "/api", verify_backend_secret),
+    (plex.router, "/api", verify_backend_secret),
+    (admin.router, "", verify_admin_basic_auth),
+    (admin_downloads.router, "", verify_admin_basic_auth),
+    (admin_plex_downloads.router, "", verify_admin_basic_auth),
+    (admin_unified_downloads.router, "", verify_admin_basic_auth),
+)
 
-app.include_router(health.router, prefix="/api")  # Pattern B — public: monitoring
+for _router, _prefix, _guard_fn in _MOUNT_GUARDED_ROUTERS:
+    app.include_router(_router, prefix=_prefix, dependencies=[Depends(_guard_fn)])
 
-# Pattern A — guard attached at the mount site via `dependencies=_guard`.
-app.include_router(accounts.router, prefix="/api", dependencies=_guard)
-app.include_router(categories.router, prefix="/api", dependencies=_guard)
-app.include_router(live.router, prefix="/api", dependencies=_guard)
-app.include_router(media.router, prefix="/api", dependencies=_guard)
-app.include_router(stream.router, prefix="/api", dependencies=_guard)
-app.include_router(sync.router, prefix="/api", dependencies=_guard)
-app.include_router(plex.router, prefix="/api", dependencies=_guard)
-# Pattern B — public at router level (the TV has no key yet); /approve
-# is individually protected inside tv_auth via verify_pairing_api_key.
-app.include_router(tv_auth.router, prefix="/api")
+_SELF_OR_ROUTE_GUARDED_ROUTERS = (
+    (health.router, "/api"),
+    (tv_auth.router, "/api"),
+    (ai.router, ""),
+    (api_keys.router, ""),
+    (downloads.router, ""),
+    (plex_downloads.router, ""),
+    (enrichment.router, ""),
+    (scrape_v1.router, ""),
+    (metadata_v1.router, ""),
+    (dav.router, ""),
+)
 
-# Admin web UI (HTML / HTMX) — no /api prefix. Browser-facing, so HTTP Basic
-# Auth instead of the X-API-Key header (a navigation can't carry custom
-# headers). Same mount-site-guard style as Pattern A, just a different
-# dependency and no "/api" prefix.
-app.include_router(admin.router, dependencies=[Depends(verify_admin_basic_auth)])
-# Admin "Télécharger" tab (PH-DL-06) — already self-prefixed "/admin/downloads"
-# by the router itself; same Basic Auth guard applied at the same mount site
-# as the rest of /admin (identical convention, separate router module per the
-# feature's disjoint-file-ownership rule, docs/20-impl-media-download.md §7.3).
-app.include_router(admin_downloads.router, dependencies=[Depends(verify_admin_basic_auth)])
-# Admin "Télécharger Plex" tab (ticket C6) — mirror of the block above, same
-# self-prefixed "/admin/plex-downloads" + same Basic Auth guard at the same
-# mount site; separate router module per the feature's disjoint-file-
-# ownership convention.
-app.include_router(admin_plex_downloads.router, dependencies=[Depends(verify_admin_basic_auth)])
-# Admin unified "Téléchargements" tab (Vague W3) — merges the Xtream + Plex
-# catalogues into one deduplicated browse screen; browse-only, delegates
-# per-source enqueue to the two routers above. Same self-prefixed
-# "/admin/unified-downloads" + Basic Auth guard convention.
-app.include_router(admin_unified_downloads.router, dependencies=[Depends(verify_admin_basic_auth)])
+for _router, _prefix in _SELF_OR_ROUTE_GUARDED_ROUTERS:
+    app.include_router(_router, prefix=_prefix)
 
 # Interactive API docs — kept off the public default URLs above (docs_url=None …)
-# and re-exposed here behind the SAME HTTP Basic Auth as /admin, so they're
-# reachable for debugging on the LAN but never advertised to the public tunnel.
-# The browser reuses the /admin Basic-Auth credentials for the Swagger UI's
-# same-origin fetch of /openapi.json.
+# and re-exposed here behind the SAME HTTP Basic Auth as /admin.
 from fastapi.openapi.docs import get_swagger_ui_html  # noqa: E402
 from fastapi.responses import JSONResponse  # noqa: E402
 
@@ -735,54 +626,6 @@ async def protected_swagger_ui():
 @app.get("/openapi.json", include_in_schema=False, dependencies=[Depends(verify_admin_basic_auth)])
 async def protected_openapi():
     return JSONResponse(app.openapi())
-
-# Pattern C — bare mount, self-prefixed + self-guarded: the router module
-# itself declares its full path prefix AND a module-level
-# `dependencies=[Depends(...)]`, so no dependency is passed at the mount site
-# (unlike Pattern A). All three already enforce their own auth on every route:
-#   - `ai.router` — its own /api/ai prefix + module-level verify_api_key.
-#   - `api_keys.router` — its own /api/admin/keys prefix + module-level
-#     verify_master_key (master secret only).
-#   - `downloads.router` (PH-DL-06) — its own /api/admin/downloads prefix +
-#     module-level verify_master_key (JSON read mirror of the download
-#     queue, master secret only — same convention as api_keys.router).
-#   - `plex_downloads.router` (feature "Télécharger Plex", ticket C7) — its
-#     own /api/admin/plex-downloads prefix + module-level verify_master_key
-#     (JSON read-only mirror of the Plex catalogue/servers, master secret
-#     only — same convention as downloads.router above).
-#   - `enrichment.router` (dual-provider enrichment refacto, Wave 3) — its
-#     own /api/admin/enrichment prefix + module-level verify_master_key
-#     (manual OMDb ratings backfill: spends the OMDb budget + mutates the
-#     whole catalog, master secret only — same convention as above). Not
-#     master-gated at the worker level (admin-triggered, not scheduler/cron —
-#     any process may run it, unlike the download workers).
-app.include_router(ai.router)
-app.include_router(api_keys.router)
-app.include_router(downloads.router)
-app.include_router(plex_downloads.router)
-app.include_router(enrichment.router)
-#   - `scrape_v1.router` (lot B1, scrape gateway for plexhubTMM) — its own
-#     /api/scrape/v1 prefix and, deliberately, NO router-level dependency:
-#     each route declares its guard (verify_scrape_scope on the 7 read
-#     routes, verify_scrape_admin_scope ALONE on /cache/invalidate|purge,
-#     ADR 0008 D2.4) followed by the per-key rate limit.
-app.include_router(scrape_v1.router)
-#   - `metadata_v1.router` (lot B2, metadata edit API for plexhubTMM) — same
-#     convention: /api/metadata/v1 prefix, NO router-level dependency, each route
-#     declares verify_media_read_scope (reads + simulations) or
-#     verify_media_write_scope (the 3 routes that validate a write), then the
-#     per-key rate limits (ADR 0010 D2.2/D2.4).
-app.include_router(metadata_v1.router)
-# `dav.router` (WebDAV virtual filesystem for Plex, ticket DAV-2) — its own
-# /dav prefix + module-level verify_dav_basic_auth. Deliberately OUTSIDE
-# /api: rclone (the only client this endpoint targets) speaks HTTP Basic
-# Auth, never a custom X-API-Key header, same rationale as the /admin block
-# above but with its own dedicated DAV_USERNAME/DAV_PASSWORD secret (not
-# ADMIN_*). Fail-closed at two layers: verify_dav_basic_auth 503s if
-# DAV_PASSWORD is unset, and the handler itself 503s if DAV_ENABLED=false.
-# Not part of the CR-A04 `/api/*` route-walk follow-up mentioned above (this
-# router never carries the /api prefix in the first place).
-app.include_router(dav.router)
 
 # Boot-time route-auth audit (AUDIT-P4-001 / CR-A04): fails startup if any
 # `/api/*` route above lacks a recognised auth dependency. All logic lives in

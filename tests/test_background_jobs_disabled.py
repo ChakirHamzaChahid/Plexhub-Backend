@@ -99,14 +99,14 @@ async def test_account_creation_still_starts_its_sync_when_jobs_are_disabled(
         started.append(account_id)
 
     monkeypatch.setattr(sync_worker, "sync_account", spy_sync)
-    xtream_mock.get("http://127.0.0.1:9/player_api.php").respond(200, json={
+    xtream_mock.get("http://provider.example:9/player_api.php").respond(200, json={
         "user_info": {"status": "Active", "exp_date": "2000000000", "max_connections": "2",
                       "allowed_output_formats": ["m3u8", "ts"]},
-        "server_info": {"url": "127.0.0.1", "https_port": "443"},
+        "server_info": {"url": "provider.example", "https_port": "443"},
     })
     resp = await api_client.post(
         "/api/accounts",
-        json={"label": "fake", "baseUrl": "http://127.0.0.1", "port": 9, "username": "u", "password": "p"},
+        json={"label": "fake", "baseUrl": "http://provider.example", "port": 9, "username": "u", "password": "p"},
         headers={"X-API-Key": "factice-master-bg-jobs"},
     )
     assert resp.status_code in (200, 201), resp.text

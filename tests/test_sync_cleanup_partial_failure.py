@@ -52,7 +52,7 @@ def _live(sid: int, cat: str) -> dict:
 @pytest_asyncio.fixture
 async def db(db_engine, monkeypatch):
     factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
-    monkeypatch.setattr(sw, "async_session_factory", factory)
+    monkeypatch.setattr(sw, "worker_session_factory", factory)
 
     async def _empty_list(*a, **kw):
         return []

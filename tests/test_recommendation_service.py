@@ -168,6 +168,40 @@ async def test_hydrate_misses_propagates_embedding_unavailable(monkeypatch, ai_s
         await hydrate_misses([1], "movie", ai_sessionmaker)
 
 
+async def test_hydrate_misses_retries_on_locked_db(monkeypatch, ai_sessionmaker):
+    """CR-D04: _fetch_and_store_one persists via write_with_retry so transient
+    'database is locked' errors do not drop hydrated embeddings."""
+    from app.utils import db_retry as db_retry_module
+
+    async def fake_get(tmdb_id):
+        return _FakeEnrichment(tmdb_id=tmdb_id, imdb_id=None, overview="x", genres="y")
+
+    monkeypatch.setattr(
+        "app.services.recommendation_service.tmdb_service.get_movie_details",
+        fake_get,
+    )
+
+    async def fake_embed(texts):
+        return [_unit_vec(0) for _ in texts]
+
+    monkeypatch.setattr("app.services.recommendation_service.embed_passages", fake_embed)
+
+    calls = {"n": 0}
+    real_write = db_retry_module.write_with_retry
+
+    async def _spy_write(work, **kwargs):
+        calls["n"] += 1
+        return await real_write(work, **kwargs)
+
+    monkeypatch.setattr(db_retry_module, "write_with_retry", _spy_write)
+
+    vectors, stats = await hydrate_misses([77], "movie", ai_sessionmaker)
+    assert calls["n"] == 1
+    assert 77 in vectors
+    assert stats.hydrated == 1
+    assert stats.dropped == 0
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # CR-P08 — adaptive KNN over-fetch under a skewed type mix
 # ──────────────────────────────────────────────────────────────────────────────

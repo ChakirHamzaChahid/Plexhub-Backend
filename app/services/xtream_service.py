@@ -6,11 +6,24 @@ from typing import Any, Optional
 import httpx
 
 from app.config import settings
+from app.utils.ssrf import vet_request
 
 logger = logging.getLogger("plexhub.xtream")
 
 _RETRY_DELAYS = (1, 2, 4)  # Exponential backoff: 1s, 2s, 4s
 _RETRYABLE = (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError)
+
+
+def safe_xtream_error(exc: BaseException) -> str:
+    """Return a log/response-safe description without Xtream URLs or credentials.
+
+    ``httpx.HTTPStatusError`` (and some ``httpx.RequestError`` subclasses) embed
+    the full request URL—including ``username`` and ``password`` query params—in
+    ``str(exc)``.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"HTTP {exc.response.status_code}"
+    return type(exc).__name__
 
 
 class XmltvTooLargeError(Exception):
@@ -33,6 +46,7 @@ class XtreamService:
                     max_keepalive_connections=30,
                     keepalive_expiry=30,
                 ),
+                event_hooks={"request": [vet_request]},
             )
         return self._client
 
@@ -71,7 +85,9 @@ class XtreamService:
             except _RETRYABLE as e:
                 last_exc = e
                 if delay is not None:
-                    logger.warning(f"Xtream API {action} attempt {attempt+1} failed ({e}), retrying in {delay}s")
+                    logger.warning(
+                        f"Xtream API {action} attempt {attempt+1} failed ({safe_xtream_error(e)}), retrying in {delay}s"
+                    )
                     await asyncio.sleep(delay)
             except httpx.HTTPStatusError as e:
                 if e.response.status_code in (429, 502, 503, 504) and delay is not None:

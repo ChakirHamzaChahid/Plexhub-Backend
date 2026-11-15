@@ -123,7 +123,9 @@ async def _fetch_and_store_one(
 
     now_ms = int(time.time() * 1000)
     imdb_id = getattr(data, "imdb_id", None)
-    async with sessionmaker() as session:
+    vec_blob = serialize_vec(vec)
+
+    async def _persist(session: AsyncSession) -> None:
         await session.execute(
             text(
                 "INSERT INTO ai_tmdb_cache(tmdb_id, imdb_id, media_type, title, "
@@ -151,9 +153,17 @@ async def _fetch_and_store_one(
         )
         await session.execute(
             text("INSERT INTO ai_embeddings(tmdb_id, embedding) VALUES(:tid, :v)"),
-            {"tid": tmdb_id, "v": serialize_vec(vec)},
+            {"tid": tmdb_id, "v": vec_blob},
         )
         await session.commit()
+
+    from app.utils.db_retry import write_with_retry
+
+    await write_with_retry(
+        _persist,
+        session_factory=sessionmaker,
+        op="recommendation.hydrate_one",
+    )
 
     return (tmdb_id, vec)
 

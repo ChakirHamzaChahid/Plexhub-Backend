@@ -1,9 +1,26 @@
 import logging
 from typing import Optional
 
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.database import XtreamAccount
 from app.services.xtream_service import xtream_service
+from app.utils.server_id import parse_server_id
 
 logger = logging.getLogger("plexhub.stream")
+
+
+class InvalidStreamServerIdError(ValueError):
+    """Raised when server_id does not match 'xtream_{account_id}'."""
+
+
+class StreamAccountNotFoundError(LookupError):
+    """Raised when the XtreamAccount for server_id does not exist."""
+
+
+class UnbuildableStreamUrlError(ValueError):
+    """Raised when a stream URL cannot be constructed for rating_key."""
 
 
 def parse_rating_key(rating_key: str) -> dict:
@@ -69,3 +86,22 @@ def build_stream_url(account, rating_key: str) -> Optional[str]:
     else:
         logger.warning(f"Cannot build stream URL for type: {parsed['type']}")
         return None
+
+
+async def resolve_stream_url(db: AsyncSession, rating_key: str, server_id: str) -> str:
+    """Resolve the direct Xtream stream URL for `(server_id, rating_key)`."""
+    account_id = parse_server_id(server_id)
+    if account_id is None:
+        raise InvalidStreamServerIdError("Invalid server_id format")
+
+    result = await db.execute(
+        select(XtreamAccount).where(XtreamAccount.id == account_id)
+    )
+    account = result.scalars().first()
+    if not account:
+        raise StreamAccountNotFoundError("Account not found")
+
+    url = build_stream_url(account, rating_key)
+    if not url:
+        raise UnbuildableStreamUrlError(f"Cannot build stream URL for: {rating_key}")
+    return url

@@ -1,24 +1,20 @@
 import logging
 import time
-
-from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select, func
-from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.db.database import get_db
-from app.models.database import LiveChannel, EpgEntry, XtreamAccount
 from app.models.schemas import (
-    LiveChannelResponse,
-    LiveChannelListResponse,
     EpgEntryResponse,
     EpgListResponse,
+    LiveChannelListResponse,
+    LiveChannelResponse,
     StreamResponse,
 )
 from app.services import live_service
-from app.services.xtream_service import xtream_service
-from app.utils.db_retry import commit_with_retry
-from app.utils.server_id import parse_server_id
+from app.utils.db_retry import session_factory_for, write_with_retry
 
 logger = logging.getLogger("plexhub.live")
 
@@ -36,46 +32,15 @@ async def list_channels(
     db: AsyncSession = Depends(get_db),
 ):
     """List live TV channels with pagination, filtering, and search."""
-    query = select(LiveChannel).where(
-        LiveChannel.is_in_allowed_categories == True,
+    items, total = await live_service.list_channels(
+        db,
+        limit=limit,
+        offset=offset,
+        sort=sort,
+        server_id=server_id,
+        category_id=category_id,
+        search=search,
     )
-
-    if server_id:
-        query = query.where(LiveChannel.server_id == server_id)
-    if category_id:
-        query = query.where(LiveChannel.category_id == category_id)
-    if search:
-        # Escape LIKE wildcards to prevent pattern injection
-        safe_search = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        query = query.where(LiveChannel.name.ilike(f"%{safe_search}%", escape="\\"))
-
-    # Count.
-    # CR-P03: narrow func.count() over the base table with the SAME filters,
-    # instead of wrapping a `SELECT *` subquery — avoids materializing every
-    # matched channel's columns just to count them (still a full scan because
-    # of the leading-wildcard ILIKE search — see CR-P03 residual note, an
-    # FTS5/trigram index would be the real fix).
-    count_query = select(func.count()).select_from(LiveChannel)
-    if query.whereclause is not None:
-        count_query = count_query.where(query.whereclause)
-    total = (await db.execute(count_query)).scalar() or 0
-
-    # Sort
-    if sort == "name_asc":
-        query = query.order_by(LiveChannel.name_sortable.asc())
-    elif sort == "name_desc":
-        query = query.order_by(LiveChannel.name_sortable.desc())
-    elif sort == "added_desc":
-        query = query.order_by(LiveChannel.added_at.desc())
-    elif sort == "added_asc":
-        query = query.order_by(LiveChannel.added_at.asc())
-    else:
-        query = query.order_by(LiveChannel.name_sortable.asc())
-
-    query = query.offset(offset).limit(limit)
-    result = await db.execute(query)
-    items = list(result.scalars().all())
-
     return LiveChannelListResponse(
         items=[LiveChannelResponse.model_validate(ch) for ch in items],
         total=total,
@@ -90,14 +55,9 @@ async def get_channel(
     db: AsyncSession = Depends(get_db),
 ):
     """Get a single live channel by stream_id."""
-    result = await db.execute(
-        select(LiveChannel).where(
-            LiveChannel.stream_id == stream_id,
-            LiveChannel.server_id == server_id,
-        )
-    )
-    channel = result.scalars().first()
-    if not channel:
+    try:
+        channel = await live_service.get_channel(db, stream_id, server_id)
+    except live_service.ChannelNotFoundError:
         raise HTTPException(404, "Channel not found")
     return LiveChannelResponse.model_validate(channel)
 
@@ -109,34 +69,14 @@ async def get_channel_stream(
     db: AsyncSession = Depends(get_db),
 ):
     """Get the live stream URL for a channel."""
-    account_id = parse_server_id(server_id)
-    if account_id is None:
+    try:
+        url = await live_service.resolve_live_stream_url(db, stream_id, server_id)
+    except live_service.InvalidServerIdError:
         raise HTTPException(400, "Invalid server_id format")
-
-    result = await db.execute(
-        select(XtreamAccount).where(XtreamAccount.id == account_id)
-    )
-    account = result.scalars().first()
-    if not account:
+    except live_service.AccountNotFoundError:
         raise HTTPException(404, "Account not found")
-
-    # Verify channel exists
-    ch_result = await db.execute(
-        select(LiveChannel).where(
-            LiveChannel.stream_id == stream_id,
-            LiveChannel.server_id == server_id,
-        )
-    )
-    channel = ch_result.scalars().first()
-    if not channel:
+    except live_service.ChannelNotFoundError:
         raise HTTPException(404, "Channel not found")
-
-    ext = channel.container_extension or "ts"
-    url = xtream_service.build_live_url(
-        account.base_url, account.port,
-        account.username, account.password,
-        stream_id, ext,
-    )
     return StreamResponse(url=url)
 
 
@@ -151,26 +91,18 @@ async def get_channel_epg(
     First checks local DB cache. If empty, fetches from Xtream short EPG
     and caches the results.
     """
-    # Try from DB first
     now_ms = int(time.time() * 1000)
-    query = select(EpgEntry).where(
-        EpgEntry.stream_id == stream_id,
-        EpgEntry.server_id == server_id,
-        EpgEntry.end_time >= now_ms,
-    ).order_by(EpgEntry.start_time.asc())
-
-    result = await db.execute(query)
-    entries = list(result.scalars().all())
-
+    entries = await live_service.list_channel_epg_cached(db, stream_id, server_id, now_ms)
     if entries:
         return EpgListResponse(
             items=[EpgEntryResponse.model_validate(e) for e in entries],
             total=len(entries),
         )
 
-    # Fetch from Xtream API + stage new EpgEntry rows (live_service.ingest_short_epg)
+    # Fetch from Xtream API first (outside write_with_retry so lock retries
+    # never replay the upstream Xtream HTTP request).
     try:
-        new_entries = await live_service.ingest_short_epg(
+        rows = await live_service.fetch_short_epg_rows(
             db, server_id, stream_id, fetched_at=now_ms,
         )
     except live_service.InvalidServerIdError:
@@ -178,19 +110,18 @@ async def get_channel_epg(
     except live_service.AccountNotFoundError:
         raise HTTPException(404, "Account not found")
 
-    if new_entries:
-        # AUDIT-P1-001 (S3.3) — deliberately NOT converted to write_with_retry.
-        # live_service.ingest_short_epg mixes a real network call (Xtream
-        # short-EPG fetch) with the staged EpgEntry writes on the SAME `db`
-        # session (ADR 0004, Decision 4: `work` must be fully replayable).
-        # Wrapping the whole call would re-fetch from the Xtream provider on
-        # every lock retry (up to 4x) — an external side effect this zone
-        # (S3.3, routers only) cannot remove without restructuring
-        # app/services/live_service.py (owned by S3.2). commit_with_retry
-        # (now honest per ADR 0004) is kept: a real, sustained lock surfaces
-        # the true OperationalError instead of silently retrying a provider
-        # refetch.
-        await commit_with_retry(db)  # Persist EPG entries
+    new_entries = []
+    if rows:
+        async def _work(session: AsyncSession):
+            entries = await live_service.upsert_short_epg_rows(session, rows)
+            await session.commit()
+            return entries
+
+        new_entries = await write_with_retry(
+            _work,
+            session_factory=session_factory_for(db),
+            op="live.ingest_short_epg",
+        )
 
     return EpgListResponse(
         items=[EpgEntryResponse.model_validate(e) for e in new_entries],
@@ -207,20 +138,9 @@ async def get_epg_now(
 ):
     """Get currently airing EPG entries across all channels for a server."""
     now_ms = int(time.time() * 1000)
-
-    query = select(EpgEntry).where(
-        EpgEntry.server_id == server_id,
-        EpgEntry.start_time <= now_ms,
-        EpgEntry.end_time >= now_ms,
-    ).order_by(EpgEntry.start_time.asc())
-
-    count_query = select(func.count()).select_from(query.subquery())
-    total = (await db.execute(count_query)).scalar() or 0
-
-    query = query.offset(offset).limit(limit)
-    result = await db.execute(query)
-    entries = list(result.scalars().all())
-
+    entries, total = await live_service.list_epg_now(
+        db, server_id, now_ms, limit=limit, offset=offset,
+    )
     return EpgListResponse(
         items=[EpgEntryResponse.model_validate(e) for e in entries],
         total=total,

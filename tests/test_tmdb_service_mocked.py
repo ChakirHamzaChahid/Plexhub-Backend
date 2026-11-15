@@ -245,7 +245,7 @@ async def test_enrichment_halts_on_real_call_budget_not_item_count(monkeypatch):
         await conn.execute(text("PRAGMA journal_mode=WAL"))
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    monkeypatch.setattr(ew, "async_session_factory", factory)
+    monkeypatch.setattr(ew, "worker_session_factory", factory)
 
     async with factory() as s:
         s.add_all([

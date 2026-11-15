@@ -4,13 +4,15 @@ import json
 import logging
 from types import SimpleNamespace
 
+import httpx
 from sqlalchemy import select, delete, update, func, case
 from sqlalchemy.dialects.sqlite import insert as sqlite_upsert
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.database import async_session_factory
+from app.db.database import worker_session_factory
 from app.models.database import Media, XtreamAccount, EnrichmentQueue, LiveChannel
 from app.services.metadata_columns import METADATA_WRITABLE_COLUMNS
-from app.services.xtream_service import xtream_service
+from app.services.xtream_service import safe_xtream_error, xtream_service
 from app.utils.string_normalizer import (
     clean_title,
     normalize_for_sorting,
@@ -23,7 +25,7 @@ from app.utils.unification import (
     calculate_display_rating,
 )
 from app.utils.time import now_ms
-from app.utils.db_retry import commit_with_retry, write_with_retry
+from app.utils.db_retry import session_factory_for, write_with_retry
 from app.utils.youtube import extract_youtube_id
 from app.services import job_registry
 
@@ -1123,7 +1125,7 @@ async def _fetch_streams_by_categories(
                 return await fetch_fn(account, category_id=cat_id)
         except Exception as e:
             failed_ids.add(str(cat_id))
-            logger.warning(f"Failed to fetch {content_type} category {cat_id}: {e}")
+            logger.warning(f"Failed to fetch {content_type} category {cat_id}: {safe_xtream_error(e)}")
             return []
 
     tasks = [_fetch_one(cat_id) for cat_id in category_ids]
@@ -1157,7 +1159,7 @@ async def _refresh_categories(db, account, account_id: str):
         series_cats = await xtream_service.get_series_categories(account)
         live_cats = await xtream_service.get_live_categories(account)
     except Exception as e:
-        logger.warning(f"Failed to fetch categories for account {account_id}: {e}")
+        logger.warning(f"Failed to fetch categories for account {account_id}: {safe_xtream_error(e)}")
         return
 
     now = now_ms()
@@ -1188,24 +1190,26 @@ async def _refresh_categories(db, account, account_id: str):
     )
     count = len(all_cat_rows)
 
-    for i in range(0, count, 200):
-        chunk = all_cat_rows[i:i + 200]
-        stmt = sqlite_upsert(XtreamCategory).values(chunk)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["account_id", "category_id", "category_type"],
-            set_={
-                "category_name": stmt.excluded.category_name,
-                "last_fetched_at": stmt.excluded.last_fetched_at,
-            },
-        )
-        await db.execute(stmt)
+    async def _upsert_cats(session: AsyncSession) -> None:
+        for i in range(0, count, 200):
+            chunk = all_cat_rows[i:i + 200]
+            stmt = sqlite_upsert(XtreamCategory).values(chunk)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["account_id", "category_id", "category_type"],
+                set_={
+                    "category_name": stmt.excluded.category_name,
+                    "last_fetched_at": stmt.excluded.last_fetched_at,
+                },
+            )
+            await session.execute(stmt)
+        await session.commit()
 
-    # Same-session coupling -- see the module-level note above (ADR 0004 D4):
-    # `_load_category_config` reads these rows back on the SAME `db` right
-    # after this call returns; a fresh-session write here could leave that
-    # read on a stale WAL snapshot. Left on `commit_with_retry` (honest,
-    # non-retrying) intentionally.
-    await commit_with_retry(db)
+    await write_with_retry(
+        _upsert_cats,
+        session_factory=session_factory_for(db) or worker_session_factory,
+        op="sync_worker.refresh_categories",
+    )
+    await db.rollback()
     logger.info(f"Refreshed {count} categories for account {account_id} "
                 f"({len(live_cats)} Live, {len(vod_cats)} VOD, {len(series_cats)} Series)")
 
@@ -1250,7 +1254,7 @@ async def sync_account(account_id: str, job_id: str | None = None):
     sync_result = "error"
     async with lock:
         try:
-            async with async_session_factory() as db:
+            async with worker_session_factory() as db:
                 # Load account
                 result = await db.execute(
                     select(XtreamAccount).where(
@@ -1307,7 +1311,7 @@ async def sync_account(account_id: str, job_id: str | None = None):
                     else:
                         vod_streams = await xtream_service.get_vod_streams(account_snapshot)
                 except Exception as e:
-                    logger.error(f"Failed to fetch VOD streams: {e}")
+                    logger.error(f"Failed to fetch VOD streams: {safe_xtream_error(e)}")
                     vod_streams = []
                     vod_failed_cats = set()  # whole-type failure: empty keys -> no cleanup
 
@@ -1357,7 +1361,7 @@ async def sync_account(account_id: str, job_id: str | None = None):
                             try:
                                 vod_info = await xtream_service.get_vod_info(account_snapshot, vod_id=dto["stream_id"])
                             except Exception as e:
-                                logger.warning(f"Failed to fetch vod_info for stream {dto.get('stream_id')}: {e}")
+                                logger.warning(f"Failed to fetch vod_info for stream {dto.get('stream_id')}: {safe_xtream_error(e)}")
                         # Mapping happens outside semaphore — frees a slot sooner
                         row = map_vod_to_media(dto, account_id, index, vod_info)
                         row["dto_hash"] = dto_hash
@@ -1381,39 +1385,44 @@ async def sync_account(account_id: str, job_id: str | None = None):
                     batch_fetch_time = now_ms() - batch_fetch_start
 
                     try:
-                        async with db.begin_nested():  # SAVEPOINT
-                            await upsert_media_batch(db, batch_rows, current_rating_keys=all_vod_keys)
+                        async def _write_vod_batch(session: AsyncSession) -> None:
+                            await upsert_media_batch(session, batch_rows, current_rating_keys=all_vod_keys)
+                            await session.commit()
+
+                        await write_with_retry(
+                            _write_vod_batch,
+                            session_factory=session_factory_for(db) or worker_session_factory,
+                            op="sync_worker.vod_batch",
+                        )
                         vod_rows.extend(batch_rows)
-                        # Same-session coupling -- see module-level note (ADR
-                        # 0004 D4): `differential_cleanup*` below reads these
-                        # rows back on `db`. Left honest-not-retrying.
-                        await commit_with_retry(db)
                     except Exception as e:
-                        logger.error(f"VOD batch {batch_start}-{batch_end} failed, rolling back: {e}")
-                        await db.rollback()
+                        logger.error(f"VOD batch {batch_start}-{batch_end} failed, skipping batch: {e}")
                         continue  # Skip this batch, continue with next
 
                     logger.info(f"VOD batch {batch_end}/{len(items_to_fetch)} synced "
                                f"({len(batch_rows)} items in {batch_fetch_time}ms)")
 
-                # Cleanup stale items (delisted by provider)
-                if all_vod_keys:
-                    if filter_mode == "all":
-                        await differential_cleanup(db, server_id, "all", all_vod_keys, media_type="movie")
-                    else:
-                        # In whitelist/blacklist mode: only cleanup items in allowed categories
-                        # (don't touch items in non-synced categories)
-                        synced_cat_ids = _cleanup_category_ids(allowed_vod, vod_failed_cats, "VOD")
-                        if synced_cat_ids:
-                            await differential_cleanup_filtered(
-                                db, server_id, synced_cat_ids, all_vod_keys, media_type="movie"
-                            )
-                if vod_rows:
-                    await enqueue_for_enrichment(db, vod_rows)
-                # Same-session coupling -- see module-level note (ADR 0004
-                # D4): the Series phase right after reads/writes the SAME
-                # `db`. Left honest-not-retrying.
-                await commit_with_retry(db)
+                # Cleanup stale items (delisted by provider) & enqueue enrichment
+                async def _finalize_vod(session: AsyncSession) -> None:
+                    if all_vod_keys:
+                        if filter_mode == "all":
+                            await differential_cleanup(session, server_id, "all", all_vod_keys, media_type="movie")
+                        else:
+                            synced_cat_ids = _cleanup_category_ids(allowed_vod, vod_failed_cats, "VOD")
+                            if synced_cat_ids:
+                                await differential_cleanup_filtered(
+                                    session, server_id, synced_cat_ids, all_vod_keys, media_type="movie"
+                                )
+                    if vod_rows:
+                        await enqueue_for_enrichment(session, vod_rows)
+                    await session.commit()
+
+                await write_with_retry(
+                    _finalize_vod,
+                    session_factory=session_factory_for(db) or worker_session_factory,
+                    op="sync_worker.vod_finalize",
+                )
+                await db.rollback()
                 total_synced += len(all_vod_keys)
                 logger.info(f"VOD sync: {len(vod_rows)} updated, {skipped_vod} unchanged, {len(all_vod_keys)} total")
 
@@ -1430,7 +1439,7 @@ async def sync_account(account_id: str, job_id: str | None = None):
                     else:
                         series_list = await xtream_service.get_series(account_snapshot)
                 except Exception as e:
-                    logger.error(f"Failed to fetch series: {e}")
+                    logger.error(f"Failed to fetch series: {safe_xtream_error(e)}")
                     series_list = []
                     series_failed_cats = set()
 
@@ -1495,27 +1504,38 @@ async def sync_account(account_id: str, job_id: str | None = None):
                         logger.error(f"Failed to process series item {i}: {e}", exc_info=True)
                 if series_rows:
                     try:
-                        async with db.begin_nested():
-                            await upsert_media_batch(db, series_rows, current_rating_keys=all_series_keys)
-                            await enqueue_for_enrichment(db, series_rows)
-                    except Exception as e:
-                        logger.error(f"Series batch failed, rolling back: {e}")
-                        await db.rollback()
-                if all_series_keys:
-                    if filter_mode == "all":
-                        await differential_cleanup(db, server_id, "all", all_series_keys, media_type="show")
-                    else:
-                        synced_series_cat_ids = _cleanup_category_ids(
-                            allowed_series, series_failed_cats, "Series"
+                        async def _write_series_batch(session: AsyncSession) -> None:
+                            await upsert_media_batch(session, series_rows, current_rating_keys=all_series_keys)
+                            await enqueue_for_enrichment(session, series_rows)
+                            await session.commit()
+
+                        await write_with_retry(
+                            _write_series_batch,
+                            session_factory=session_factory_for(db) or worker_session_factory,
+                            op="sync_worker.series_batch",
                         )
-                        if synced_series_cat_ids:
-                            await differential_cleanup_filtered(
-                                db, server_id, synced_series_cat_ids, all_series_keys, media_type="show"
+                    except Exception as e:
+                        logger.error(f"Series batch failed: {e}")
+                if all_series_keys:
+                    async def _cleanup_series(session: AsyncSession) -> None:
+                        if filter_mode == "all":
+                            await differential_cleanup(session, server_id, "all", all_series_keys, media_type="show")
+                        else:
+                            synced_series_cat_ids = _cleanup_category_ids(
+                                allowed_series, series_failed_cats, "Series"
                             )
-                # Same-session coupling -- see module-level note (ADR 0004
-                # D4): the Episodes phase right after reads/writes the SAME
-                # `db`. Left honest-not-retrying.
-                await commit_with_retry(db)
+                            if synced_series_cat_ids:
+                                await differential_cleanup_filtered(
+                                    session, server_id, synced_series_cat_ids, all_series_keys, media_type="show"
+                                )
+                        await session.commit()
+
+                    await write_with_retry(
+                        _cleanup_series,
+                        session_factory=session_factory_for(db) or worker_session_factory,
+                        op="sync_worker.series_cleanup",
+                    )
+                await db.rollback()
                 total_synced += len(all_series_keys)
                 logger.info(f"Series sync: {len(series_rows)} updated, {unchanged_count} unchanged")
 
@@ -1562,7 +1582,7 @@ async def sync_account(account_id: str, job_id: str | None = None):
                             )
                     except Exception as e:
                         logger.warning(
-                            f"Failed to fetch series_info for series {series_dto.get('series_id')}: {e}"
+                            f"Failed to fetch series_info for series {series_dto.get('series_id')}: {safe_xtream_error(e)}"
                         )
                         return False, [], None
 
@@ -1650,24 +1670,27 @@ async def sync_account(account_id: str, job_id: str | None = None):
                             )
 
                     try:
-                        async with db.begin_nested():  # SAVEPOINT
+                        async def _write_episode_batch(session: AsyncSession) -> int:
+                            removed = 0
                             if episode_batch:
-                                await upsert_media_batch(db, episode_batch)
+                                await upsert_media_batch(session, episode_batch)
                             for grandparent_rating_key, live_keys in cleanup_scopes:
-                                episodes_removed += await differential_cleanup_episodes(
-                                    db, server_id, grandparent_rating_key, live_keys
+                                removed += await differential_cleanup_episodes(
+                                    session, server_id, grandparent_rating_key, live_keys
                                 )
-                            await apply_series_trailers(db, server_id, series_trailer_updates)
-                        # Same-session coupling -- see module-level note (ADR
-                        # 0004 D4): this loop's own next batch, and the Live
-                        # phase after it, read/write the SAME `db`. Left
-                        # honest-not-retrying.
-                        await commit_with_retry(db)
+                            await apply_series_trailers(session, server_id, series_trailer_updates)
+                            await session.commit()
+                            return removed
+
+                        episodes_removed += await write_with_retry(
+                            _write_episode_batch,
+                            session_factory=session_factory_for(db) or worker_session_factory,
+                            op="sync_worker.episode_batch",
+                        )
                         episode_count += len(episode_batch)
                         logger.info(f"Synced {episode_count} episodes ({batch_end}/{len(all_series_dtos)} series)")
                     except Exception as e:
-                        logger.error(f"Episode batch {batch_start}-{batch_end} failed, rolling back: {e}")
-                        await db.rollback()
+                        logger.error(f"Episode batch {batch_start}-{batch_end} failed: {e}")
 
                 total_synced += episode_count
                 logger.info(f"Synced {episode_count} episodes, removed {episodes_removed} stale episodes")
@@ -1685,7 +1708,7 @@ async def sync_account(account_id: str, job_id: str | None = None):
                     else:
                         live_streams = await xtream_service.get_live_streams(account_snapshot)
                 except Exception as e:
-                    logger.error(f"Failed to fetch live streams: {e}")
+                    logger.error(f"Failed to fetch live streams: {safe_xtream_error(e)}")
                     live_streams = []
                     live_failed_cats = set()
 
@@ -1728,60 +1751,57 @@ async def sync_account(account_id: str, job_id: str | None = None):
                     for batch_start in range(0, len(live_rows), batch_size):
                         batch = live_rows[batch_start:batch_start + batch_size]
                         try:
-                            async with db.begin_nested():
-                                await upsert_live_channels_batch(db, batch)
-                            # Same-session coupling -- see module-level note
-                            # (ADR 0004 D4): `differential_cleanup_live*`
-                            # below reads these rows back on `db`. Left
-                            # honest-not-retrying.
-                            await commit_with_retry(db)
+                            async def _write_live_batch(session: AsyncSession) -> None:
+                                await upsert_live_channels_batch(session, batch)
+                                await session.commit()
+
+                            await write_with_retry(
+                                _write_live_batch,
+                                session_factory=session_factory_for(db) or worker_session_factory,
+                                op="sync_worker.live_batch",
+                            )
                         except Exception as e:
-                            logger.error(f"Live batch {batch_start} failed, rolling back: {e}")
-                            await db.rollback()
+                            logger.error(f"Live batch {batch_start} failed: {e}")
 
                 if all_live_ids:
-                    if filter_mode == "all":
-                        await differential_cleanup_live(db, server_id, all_live_ids)
-                    else:
-                        synced_live_cat_ids = _cleanup_category_ids(allowed_live, live_failed_cats, "Live")
-                        if synced_live_cat_ids:
-                            await differential_cleanup_live_filtered(
-                                db, server_id, synced_live_cat_ids, all_live_ids
-                            )
+                    async def _cleanup_live(session: AsyncSession) -> None:
+                        if filter_mode == "all":
+                            await differential_cleanup_live(session, server_id, all_live_ids)
+                        else:
+                            synced_live_cat_ids = _cleanup_category_ids(allowed_live, live_failed_cats, "Live")
+                            if synced_live_cat_ids:
+                                await differential_cleanup_live_filtered(
+                                    session, server_id, synced_live_cat_ids, all_live_ids
+                                )
+                        await session.commit()
 
-                # Same-session coupling -- see module-level note (ADR 0004
-                # D4): the visibility/adult/cleanup finalize block right
-                # after reads the rows this phase just wrote, on `db`. Left
-                # honest-not-retrying.
-                await commit_with_retry(db)
+                    await write_with_retry(
+                        _cleanup_live,
+                        session_factory=session_factory_for(db) or worker_session_factory,
+                        op="sync_worker.live_cleanup",
+                    )
+                await db.rollback()
                 total_synced += len(all_live_ids)
                 logger.info(f"Live sync: {len(live_rows)} updated, {live_skipped} unchanged, {len(all_live_ids)} total")
 
                 # Recalculate visibility for ALL media based on category
-                # config, tag adult content, reconcile orphaned
+                # config, tag adult content, then reconcile orphaned
                 # enrichment-queue rows and bump the account's
-                # last_synced_at -- all in ONE fresh session, committed via
-                # `write_with_retry` (ADR 0004 Decision 4). Safe here --
-                # unlike every earlier commit in this function (see the
-                # module-level note) -- because this is the LAST use of the
-                # database in `sync_account`: nothing downstream reads from
-                # `db` again, so a fresh connection is guaranteed to already
-                # see everything the VOD/series/episode/live phases just
-                # committed through `db` itself (the commit right above).
-                # `session_factory=async_session_factory` is passed
-                # EXPLICITLY (not the `write_with_retry` default) because
-                # this module's own `async_session_factory` name is what
-                # tests monkeypatch (`wired_sync_db`) -- the default would
-                # silently resolve to the real `app.db.database` one instead.
+                # last_synced_at via `write_with_retry` (ADR 0004 Decision 4).
+                # Visibility & adult flags already run their own
+                # `write_with_retry` internally, so run them sequentially
+                # before `_finalize_account` to avoid nesting two
+                # `worker_session_factory` checkouts (pool_size=2).
                 from app.services.category_service import (
                     update_media_category_visibility,
                     update_media_adult_flags,
                 )
 
+                await update_media_category_visibility(db, account_id)
+                # Tag adult movies (+18 rating) from their Xtream category
+                await update_media_adult_flags(db, account_id)
+
                 async def _finalize_account(session):
-                    await update_media_category_visibility(session, account_id)
-                    # Tag adult movies (+18 rating) from their Xtream category
-                    await update_media_adult_flags(session, account_id)
                     # Reconcile enrichment_queue: drop rows whose media was
                     # removed (provider churn / pagination eviction leaves
                     # them orphaned).
@@ -1796,7 +1816,7 @@ async def sync_account(account_id: str, job_id: str | None = None):
 
                 await write_with_retry(
                     _finalize_account,
-                    session_factory=async_session_factory,
+                    session_factory=worker_session_factory,
                     op="sync_worker.finalize_account",
                 )
 
@@ -1811,9 +1831,13 @@ async def sync_account(account_id: str, job_id: str | None = None):
                 sync_result = "success"
 
         except Exception as e:
-            logger.error(f"Sync failed for account {account_id}: {e}", exc_info=True)
+            err_msg = safe_xtream_error(e) if isinstance(e, httpx.HTTPError) else str(e)
+            logger.error(
+                f"Sync failed for account {account_id}: {err_msg}",
+                exc_info=not isinstance(e, httpx.HTTPError),
+            )
             job_registry.update_job(
-                job_id, status="failed", progress={"error": str(e)}, error=str(e),
+                job_id, status="failed", progress={"error": err_msg}, error=err_msg,
             )
             sync_result = "error"
         finally:
@@ -1827,7 +1851,7 @@ async def sync_account(account_id: str, job_id: str | None = None):
 async def run_all_accounts():
     """Sync all active accounts."""
     logger.info("Starting catalog sync for all accounts")
-    async with async_session_factory() as db:
+    async with worker_session_factory() as db:
         result = await db.execute(
             select(XtreamAccount).where(XtreamAccount.is_active == True)
         )

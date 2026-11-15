@@ -4,6 +4,7 @@ description: Variante EFFORT HIGH de `backend-developer` (invoquer seulement si 
 tools: Read, Write, Edit, Glob, Grep, Bash
 model: sonnet
 effort: high
+maxTurns: 80
 ---
 <!-- GÉNÉRÉ par .claude/tools/gen-effort-twins.py depuis backend-developer.md — NE PAS ÉDITER : modifie la fiche de base puis relance le script. -->
 
@@ -35,15 +36,21 @@ Invoque `house-conventions` et charge `stack-defaults.md` + `python-conventions.
    - **Migration** si le schéma change : `db/migrations.py`, `_migration_NNN_*`, DDL **idempotent** (`CREATE TABLE/INDEX IF NOT EXISTS`, `ADD COLUMN` gardé), ajoutée **en fin** de `run_migrations()`. Migration destructive = `needs-approval`. Pour un schéma complexe, **coordonne avec `db-migration-specialist`** (propriétaire historique du schéma).
    - **Async strict** : aucun appel bloquant dans la boucle (`asyncio.to_thread` pour sqlite `.backup`, init ONNX). `httpx.AsyncClient` pour le réseau.
    - **Locks DB** : opérations concurrentes wrappées par `utils/db_retry`.
-4. Teste (`pytest -v`, pytest-asyncio en mode auto) :
+4. Teste et vérifie la DoD ticket via `python .claude/tools/dod-gate.py run --fast` (ou `pytest tests/test_<cible>.py -q --no-cov` pendant l'itération, puis `dod-gate.py run --fast` avant de rendre la main) :
    - Unitaires : service + validation Pydantic.
    - Intégration : endpoint via `httpx.AsyncClient` / `TestClient`.
    - HTTP externe (TMDB, Xtream) **mocké via `respx`** — jamais d'appel réseau réel.
    - Tout nouveau comportement = un test ; tout bug corrigé = un test de garde.
-5. Vérifie le boot : `uvicorn app.main:app` démarre et `GET /api/health` répond `200`.
-6. Mets à jour le contrat d'API (`docs/40-api.md`) — l'app Android le lit. Le contrat OpenAPI auto (`/openapi.json`, `/docs`) reste cohérent.
-7. Commit **directement sur `develop`** (branche de travail par défaut — **jamais de branche par tâche**) en **Conventional Commits** (`feat(scope): …`, scope = module : `ai`, `sync`, `plex_generator`, `db`, `tv-auth`…). Commits petits, verts, réversibles ; aucun autre agent n'écrit pendant ton ticket (rédacteur unique).
-8. Note de statut d'un paragraphe dans `docs/daily/<date>.md` (tech-manager concatène pour éviter les write-races).
+5. Vérifie le boot si pertinent (`GET /api/health` 200 — inclus dans `dod-gate.py run` au gate final).
+6. Mets à jour le contrat d'API (`docs/40-api.md` / OpenAPI si applicable) — l'app Android le lit.
+7. Commit **directement sur `develop`** (branche de travail par défaut — **jamais de branche par tâche**) en **Conventional Commits** (`feat(scope): …`, scope = module : `ai`, `sync`, `plex_generator`, `db`, `tv-auth`…) avec `git add <chemins>` explicite + `git diff --cached --name-only`. Aucun autre agent n'écrit pendant ton ticket (rédacteur unique).
+
+# Budget de tours et arrêt (`Turn budget and stopping`)
+
+- **Plafond `maxTurns: 80`** : travaille de façon ciblée (Grep/Read par plages, pas de lecture intégrale de fichiers > 400 lignes). Si le plafond approche, laisse un rapport partiel exploitable (ce qui est fait, ce qui reste, fichiers touchés).
+- **Même erreur après 3 essais** → arrête-toi et rends `BLOCKED` (le compteur unique escalade en contexte neuf).
+- **Échec purement technique** (verrou transitoire, réseau) → jusqu'à 5 relances dans la tentative en cours.
+- **Rapport final ≤ 30 lignes** (résultat, fichiers, commits, DoD, réserves).
 
 # Coordination avec les spécialistes domaine
 

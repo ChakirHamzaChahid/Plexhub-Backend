@@ -78,11 +78,12 @@ def looks_encrypted(value: str) -> bool:
     return value.startswith(_FERNET_PREFIX)
 
 
-def get_xtream_fernet() -> Fernet | None:
-    """Resolve the Fernet instance for Xtream credential encryption.
+def get_xtream_fernet() -> Fernet:
+    """Resolve the Fernet instance for Xtream credential encryption (fail-closed CR-S05).
 
-    Returns None when unconfigured — callers must treat that as "no
-    encryption available" and fail OPEN (see module docstring), never raise.
+    Raises RuntimeError when neither XTREAM_ENCRYPTION_KEY nor AI_API_KEY is
+    configured (or when XTREAM_ENCRYPTION_KEY is invalid), so credentials are
+    never silently stored in plaintext.
     Settings are read at call time (not import time) so tests can monkeypatch.
     """
     global _warned_no_key
@@ -91,7 +92,7 @@ def get_xtream_fernet() -> Fernet | None:
             return Fernet(settings.XTREAM_ENCRYPTION_KEY.encode("utf-8"))
         except (ValueError, TypeError) as exc:
             logger.error("XTREAM_ENCRYPTION_KEY is not a valid Fernet key: %s", exc)
-            return None
+            raise RuntimeError("Invalid XTREAM_ENCRYPTION_KEY") from exc
     if settings.AI_API_KEY:
         derived = base64.urlsafe_b64encode(
             hashlib.sha256(
@@ -100,22 +101,22 @@ def get_xtream_fernet() -> Fernet | None:
         )
         return Fernet(derived)
     if not _warned_no_key:
-        logger.warning(
-            "Neither XTREAM_ENCRYPTION_KEY nor AI_API_KEY is set — Xtream "
-            "account passwords will be stored in PLAINTEXT at rest (CR-S03). "
-            "Set XTREAM_ENCRYPTION_KEY (recommended) or AI_API_KEY to encrypt."
+        logger.error(
+            "Neither XTREAM_ENCRYPTION_KEY nor AI_API_KEY is set — refusing "
+            "to store Xtream account passwords in plaintext (CR-S05)."
         )
         _warned_no_key = True
-    return None
+    raise RuntimeError(
+        "XTREAM_ENCRYPTION_KEY or AI_API_KEY must be configured to encrypt Xtream passwords"
+    )
 
 
 class EncryptedString(TypeDecorator):
     """Fernet-encrypt a TEXT column on write, decrypt it on read.
 
-    - Fail-open when no key is configured: values pass through unchanged
-      (see module docstring) so a missing key can never break account
-      creation, sync, or streaming — only the at-rest confidentiality
-      guarantee is lost, exactly as it was before this fix.
+    - Fail-closed on write when no key is configured (`get_xtream_fernet()`
+      raises `RuntimeError`, CR-S05) so plaintext credentials are never
+      persisted silently without an encryption key.
     - Idempotent: a value that already looks like a Fernet token is never
       re-encrypted (`looks_encrypted`).
     - Never raises on decrypt failure (wrong/rotated key, corrupt token):
@@ -132,8 +133,6 @@ class EncryptedString(TypeDecorator):
         if looks_encrypted(value):
             return value
         fernet = get_xtream_fernet()
-        if fernet is None:
-            return value
         return fernet.encrypt(value.encode("utf-8")).decode("ascii")
 
     def process_result_value(self, value, dialect):
@@ -141,8 +140,9 @@ class EncryptedString(TypeDecorator):
             return value
         if not looks_encrypted(value):
             return value
-        fernet = get_xtream_fernet()
-        if fernet is None:
+        try:
+            fernet = get_xtream_fernet()
+        except RuntimeError:
             logger.error(
                 "Cannot decrypt a stored Xtream password: no key configured "
                 "(XTREAM_ENCRYPTION_KEY/AI_API_KEY both empty). Returning ciphertext."

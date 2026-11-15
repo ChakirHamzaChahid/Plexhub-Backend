@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import logging
 
+import httpx
 from sqlalchemy import select, delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,8 +26,9 @@ from app.models.database import (
 )
 from app.models.schemas import AccountCreate, AccountUpdate
 from app.services.xtream_credentials import XtreamCredentials
-from app.services.xtream_service import xtream_service
+from app.services.xtream_service import safe_xtream_error, xtream_service
 from app.utils.server_id import build_server_id
+from app.utils.ssrf import assert_public_host
 from app.utils.time import now_ms
 
 logger = logging.getLogger("plexhub.services.account")
@@ -49,8 +51,12 @@ def generate_account_id(base_url: str, username: str) -> str:
     return hashlib.md5(raw.encode()).hexdigest()[:8]
 
 
-async def create_account(db: AsyncSession, body: AccountCreate) -> XtreamAccount:
-    """Authenticate against Xtream and stage a new account row.
+async def prepare_account_create(db: AsyncSession, body: AccountCreate) -> dict:
+    """Validate, check duplicates/SSRF, and authenticate against Xtream.
+
+    Returns a plain dict of ``XtreamAccount`` column values so persistence
+    can run inside ``write_with_retry`` on a fresh session without replaying
+    the external Xtream authentication call on lock retries.
 
     Raises:
         AccountAlreadyExistsError: an account with this (base_url, username) exists.
@@ -64,6 +70,8 @@ async def create_account(db: AsyncSession, body: AccountCreate) -> XtreamAccount
     if existing.scalars().first():
         raise AccountAlreadyExistsError(account_id)
 
+    await assert_public_host(httpx.URL(body.base_url).host)
+
     credentials = XtreamCredentials(
         base_url=body.base_url,
         port=body.port,
@@ -74,30 +82,42 @@ async def create_account(db: AsyncSession, body: AccountCreate) -> XtreamAccount
         auth_data = await xtream_service.authenticate(credentials)
         user_info = auth_data.get("user_info", {})
         server_info = auth_data.get("server_info", {})
+    except httpx.HTTPError as e:
+        raise AccountAuthenticationError(safe_xtream_error(e)) from e
     except Exception as e:
         raise AccountAuthenticationError(str(e)) from e
 
-    account = XtreamAccount(
-        id=account_id,
-        label=body.label,
-        base_url=body.base_url,
-        port=body.port,
-        username=body.username,
-        password=body.password,
-        status=user_info.get("status", "Unknown"),
-        expiration_date=int(user_info["exp_date"]) * 1000
+    return {
+        "id": account_id,
+        "label": body.label,
+        "base_url": body.base_url,
+        "port": body.port,
+        "username": body.username,
+        "password": body.password,
+        "status": user_info.get("status", "Unknown"),
+        "expiration_date": int(user_info["exp_date"]) * 1000
         if user_info.get("exp_date")
         else None,
-        max_connections=int(user_info.get("max_connections", 1)),
-        allowed_formats=",".join(user_info.get("allowed_output_formats", [])),
-        server_url=server_info.get("url"),
-        https_port=int(server_info["https_port"])
+        "max_connections": int(user_info.get("max_connections", 1)),
+        "allowed_formats": ",".join(user_info.get("allowed_output_formats", [])),
+        "server_url": server_info.get("url"),
+        "https_port": int(server_info["https_port"])
         if server_info.get("https_port")
         else None,
-        is_active=True,
-        created_at=now_ms(),
-    )
+        "is_active": True,
+        "created_at": now_ms(),
+    }
 
+
+async def create_account(db: AsyncSession, body: AccountCreate) -> XtreamAccount:
+    """Authenticate against Xtream and stage a new account row.
+
+    Raises:
+        AccountAlreadyExistsError: an account with this (base_url, username) exists.
+        AccountAuthenticationError: Xtream authentication failed.
+    """
+    values = await prepare_account_create(db, body)
+    account = XtreamAccount(**values)
     db.add(account)
     return account
 
@@ -118,6 +138,8 @@ async def update_account(
         raise AccountNotFoundError(account_id)
 
     update_data = body.model_dump(exclude_unset=True)
+    if "base_url" in update_data and update_data["base_url"] is not None:
+        await assert_public_host(httpx.URL(update_data["base_url"]).host)
     if update_data:
         await db.execute(
             update(XtreamAccount)
@@ -182,6 +204,6 @@ async def test_account_connection(db: AsyncSession, account_id: str) -> dict:
     try:
         auth_data = await xtream_service.authenticate(account)
     except Exception as e:
-        raise AccountAuthenticationError(str(e)) from e
+        raise AccountAuthenticationError(safe_xtream_error(e)) from e
 
     return auth_data.get("user_info", {})

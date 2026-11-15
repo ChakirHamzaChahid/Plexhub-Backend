@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from sqlalchemy import select
 
 from app.config import settings
-from app.db.database import async_session_factory
+from app.db.database import worker_session_factory
 from app.models.database import Media, XtreamAccount
 from app.plex_generator.models import (
     PlexMovie, PlexMovieVersion,
@@ -139,7 +139,7 @@ class DatabaseSource(MediaSource):
         return movies
 
     async def get_movies(self) -> list[PlexMovie]:
-        async with async_session_factory() as db:
+        async with worker_session_factory() as db:
             accounts = await self._load_accounts(db)
             if not accounts:
                 logger.warning("No active accounts for Plex generation (movies)")
@@ -245,7 +245,7 @@ class DatabaseSource(MediaSource):
         return series_list
 
     async def get_series(self) -> list[PlexSeries]:
-        async with async_session_factory() as db:
+        async with worker_session_factory() as db:
             accounts = await self._load_accounts(db)
             if not accounts:
                 logger.warning("No active accounts for Plex generation (series)")

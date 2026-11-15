@@ -38,8 +38,6 @@ from __future__ import annotations
 import logging
 import re
 import secrets
-import time
-import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -47,20 +45,19 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
-from sqlalchemy import delete, func, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import verify_backend_secret as verify_pairing_api_key
 from app.config import settings
 from app.db.database import get_db
 from app.models.database import TvAuthSession
+from app.services import tv_auth_service
 from app.utils import rate_limit
-from app.utils.db_retry import commit_with_retry, write_with_retry
+from app.utils.db_retry import session_factory_for, write_with_retry
 from app.utils.payload_crypto import (
     PayloadDecryptError,
     decrypt_payload,
-    encrypt_payload,
     get_fernet,
 )
 
@@ -160,22 +157,19 @@ class StatusResponse(BaseModel):
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _now_ms() -> int:
-    return int(time.time() * 1000)
+    return tv_auth_service.now_ms()
 
 
 def _generate_user_code() -> str:
-    return "".join(secrets.choice(_USER_CODE_ALPHABET) for _ in range(_USER_CODE_LENGTH))
+    return tv_auth_service.generate_user_code()
 
 
 def _format_user_code(code: str) -> str:
-    """ABCDEFGH -> ABCD-EFGH (display form)."""
-    half = _USER_CODE_LENGTH // 2
-    return f"{code[:half]}-{code[half:]}"
+    return tv_auth_service.format_user_code(code)
 
 
 def _normalize_user_code(code: str) -> str:
-    """Accept 'abcd-efgh', 'ABCD EFGH', 'ABCDEFGH' -> 'ABCDEFGH'."""
-    return "".join(c for c in code.upper() if c.isalnum())
+    return tv_auth_service.normalize_user_code(code)
 
 
 def _require_crypto_configured() -> None:
@@ -187,10 +181,6 @@ def _require_crypto_configured() -> None:
 
 
 def _too_many_requests(retry_after_seconds: float, detail: str) -> HTTPException:
-    """429 + Retry-After (AUDIT-P2-004/CR-S05, S4.2) — never a 500/403 for a
-    rate-limit rejection, same HTTP semantics already used by the DAV
-    relay's throttle (503+Retry-After there; 429 here since this IS a rate
-    limit, not an upstream-capacity limit)."""
     retry_after = max(1, round(retry_after_seconds))
     return HTTPException(
         status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -200,40 +190,9 @@ def _too_many_requests(retry_after_seconds: float, detail: str) -> HTTPException
 
 
 async def _expire_if_needed(db: AsyncSession, session: TvAuthSession) -> bool:
-    """Lazily flip a stale session to expired and scrub its payload.
-
-    Returns True when the session is (now) expired.
-
-    AUDIT-P1-001 (S3.3): the write is converted to `write_with_retry` (ADR
-    0004, Decision 4 — a fresh session per attempt is the only pattern that
-    actually survives a real SQLite lock). This does NOT mutate the
-    `session` ORM object passed in (which belongs to the caller's `db`,
-    the request-scoped session from Depends(get_db)) — it targets the row
-    by id with a blind UPDATE instead. That's safe here because every
-    caller (approve/get_status/complete) only branches on this function's
-    **return value** when it's True (410/EXPIRED), never re-reads
-    `session.status`/`session.payload_encrypted` afterwards in that branch
-    — so there's nothing that depends on the in-memory object reflecting
-    the new state, and no risk of `db`'s own implicit commit (at the end of
-    the request) re-writing the same row a second time.
-    """
-    if session.status in (STATUS_EXPIRED, STATUS_COMPLETED):
-        return session.status == STATUS_EXPIRED
-    if _now_ms() <= session.expires_at:
-        return False
-
-    session_id = session.id
-
-    async def _work(fresh_session: AsyncSession) -> None:
-        await fresh_session.execute(
-            update(TvAuthSession)
-            .where(TvAuthSession.id == session_id)
-            .values(status=STATUS_EXPIRED, payload_encrypted=None)
-        )
-        await fresh_session.commit()
-
-    await write_with_retry(_work, op="tv_auth.expire_session")
-    return True
+    return await tv_auth_service.expire_if_needed(
+        db, session, write_fn=write_with_retry
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -283,94 +242,14 @@ async def start(
             exc.retry_after_seconds, "Too many pairing requests, slow down"
         ) from None
 
-    now = _now_ms()
-    ttl_ms = settings.TV_AUTH_TTL_SECONDS * 1000
-
-    device_code = secrets.token_urlsafe(32)
     device_name = payload.device_name if payload else None
 
-    # AUDIT-P1-001 (S3.3): converted to write_with_retry. The user_code
-    # collision retry (IntegrityError) and the lock retry (OperationalError)
-    # are two DIFFERENT concerns that must not be conflated (ADR 0004,
-    # Decision 4 — the exact "cas délicat" flagged for this endpoint): a
-    # lock-retry must NOT replay the same candidate (that would just trade
-    # one failure mode for another), so the entire 5-attempt collision loop
-    # lives INSIDE `work` and generates a fresh random user_code every time
-    # it runs — including on a brand-new invocation triggered by an outer
-    # lock retry (a fresh session, per write_with_retry's contract). Inside
-    # a single `work` invocation, `session.rollback()` before trying a new
-    # candidate on the SAME session is the normal, safe idiom for a business
-    # constraint violation (IntegrityError) — this is NOT the same trap as
-    # retrying a commit on the same session after a lock (PendingRollbackError,
-    # ADR 0004): IntegrityError doesn't invalidate the transaction the way a
-    # failed commit under a lock does.
-    #
-    # The opportunistic cleanup delete moved IN HERE too (it used to be
-    # staged on the request-scoped `db` session, ahead of the loop). Leaving
-    # it on `db` — uncommitted until get_db's implicit commit at the very
-    # end of the request — turned out to be a genuine self-deadlock, not a
-    # harmless decoupling: SQLite allows only ONE writer at a time across
-    # ALL connections (even from the same process), so `db`'s still-open
-    # write transaction would starve every attempt this fresh session makes
-    # to acquire the write lock for the insert, and `db` never gets to
-    # commit because the endpoint is still awaiting `write_with_retry`
-    # (caught by the real-lock regression test below — it hung/failed until
-    # this fix). Running both in the SAME fresh-session transaction removes
-    # the second writer entirely and mirrors the original single-session
-    # coupling (delete-then-insert, both committed — or rolled back and
-    # retried — together).
-    class _UserCodeExhaustedError(Exception):
-        """All 5 collision attempts failed within one `work` invocation."""
-
-    async def _work(fresh_session: AsyncSession) -> TvAuthSession:
-        await fresh_session.execute(
-            delete(TvAuthSession).where(TvAuthSession.expires_at < now - _CLEANUP_GRACE_MS)
-        )
-
-        # AUDIT-P2-004 (S4.2): THE actual bound on unauthenticated table
-        # growth — a DB-authoritative COUNT of literal status='pending' rows
-        # (deliberately NOT "not yet individually expired": a flood's rows
-        # sit at status='pending' until either the 1h-grace cleanup just
-        # above or a lazy `_expire_if_needed` call elsewhere flips them —
-        # this counts them anyway, which is exactly the growth this cap
-        # exists to bound). Global, not per-IP; see
-        # app/utils/rate_limit.py's module docstring for why.
-        pending_count = (
-            await fresh_session.execute(
-                select(func.count())
-                .select_from(TvAuthSession)
-                .where(TvAuthSession.status == STATUS_PENDING)
-            )
-        ).scalar_one()
-        rate_limit.check_pending_cap(
-            pending_count,
-            settings.TV_AUTH_PENDING_SESSIONS_CAP,
-            retry_after_seconds=_PENDING_CAP_RETRY_AFTER_SECONDS,
-        )
-
-        for _ in range(5):
-            candidate = TvAuthSession(
-                id=uuid.uuid4().hex,
-                device_code=device_code,
-                user_code=_generate_user_code(),
-                status=STATUS_PENDING,
-                payload_encrypted=None,
-                payload_delivered=False,
-                device_name=device_name,
-                created_at=now,
-                expires_at=now + ttl_ms,
-            )
-            fresh_session.add(candidate)
-            try:
-                await fresh_session.commit()
-                return candidate
-            except IntegrityError:
-                await fresh_session.rollback()
-        raise _UserCodeExhaustedError()
-
     try:
-        session = await write_with_retry(_work, op="tv_auth.start")
-    except _UserCodeExhaustedError:
+        session = await tv_auth_service.create_pairing_session(
+            device_name=device_name,
+            write_fn=write_with_retry,
+        )
+    except tv_auth_service.UserCodeExhaustedError:
         session = None
     except rate_limit.PendingCapExceeded as exc:
         raise _too_many_requests(
@@ -473,6 +352,23 @@ async def approve_page(request: Request) -> HTMLResponse:
 # POST /api/tv-auth/approve — mobile/web validates the user code
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _enforce_ip_limit(
+    request: Request | None,
+    limiter: rate_limit.SlidingWindowLimiter,
+    max_events: int,
+    window_seconds: int = 60,
+) -> None:
+    if request is None:
+        return
+    client_key = rate_limit.resolve_client_ip(request) or "unknown"
+    try:
+        limiter.hit(client_key, max_events=max_events, window_seconds=window_seconds)
+    except rate_limit.RateLimitExceeded as exc:
+        raise _too_many_requests(
+            exc.retry_after_seconds, "Too many requests, slow down"
+        ) from None
+
+
 @router.post(
     "/approve",
     response_model=ApproveResponse,
@@ -481,60 +377,38 @@ async def approve_page(request: Request) -> HTMLResponse:
 )
 async def approve(
     body: ApproveRequest,
+    request: Request = None,  # type: ignore[assignment]
     db: AsyncSession = Depends(get_db),
 ) -> ApproveResponse:
     """Attach the (encrypted) config payload to a pending session.
 
     Authenticated: requires an X-API-Key (backend shared secret or an active
     per-user key) — only a device that is already configured can hand its
-    config to a TV. Known gap: no per-IP limiter on this POST (the code space
-    is 31^8 and a valid key is required) — tracked as a follow-up.
+    config to a TV.
     """
+    _enforce_ip_limit(
+        request,
+        rate_limit.tv_auth_approve_limiter,
+        settings.TV_AUTH_APPROVE_RATE_LIMIT_MAX,
+    )
     _require_crypto_configured()
 
     if not body.payload:
         raise HTTPException(status_code=422, detail="payload cannot be empty")
 
-    user_code = _normalize_user_code(body.user_code)
-    result = await db.execute(
-        select(TvAuthSession).where(TvAuthSession.user_code == user_code)
-    )
-    session = result.scalars().first()
-    if session is None:
+    try:
+        session = await tv_auth_service.approve_pairing_session(
+            db,
+            user_code=body.user_code,
+            payload=body.payload,
+            write_fn=write_with_retry,
+        )
+    except tv_auth_service.UnknownPairingCodeError:
         raise HTTPException(status_code=404, detail="Unknown pairing code")
-
-    if await _expire_if_needed(db, session):
+    except tv_auth_service.PairingExpiredError:
         raise HTTPException(status_code=410, detail="Pairing session expired")
-    if session.status != STATUS_PENDING:
-        raise HTTPException(
-            status_code=409, detail=f"Pairing session already {session.status}"
-        )
-
-    # AUDIT-P1-001 (S3.3): converted to write_with_retry. Validation above
-    # (unknown code / expired / already-approved) already happened against
-    # `db`, the request-scoped session — this targets the row by id with a
-    # blind UPDATE of the already-computed values instead of mutating the
-    # `session` ORM object, so replaying it whole on a lock retry is a
-    # harmless no-op re-write, and `db`'s own implicit commit at the end of
-    # the request has nothing left dirty to double-write (ADR 0004,
-    # Decision 4).
-    encrypted_payload = encrypt_payload(body.payload)
-    approved_at = _now_ms()
-    session_id = session.id
-
-    async def _work(fresh_session: AsyncSession) -> None:
-        await fresh_session.execute(
-            update(TvAuthSession)
-            .where(TvAuthSession.id == session_id)
-            .values(
-                payload_encrypted=encrypted_payload,
-                status=STATUS_APPROVED,
-                approved_at=approved_at,
-            )
-        )
-        await fresh_session.commit()
-
-    await write_with_retry(_work, op="tv_auth.approve")
+    except tv_auth_service.PairingConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
     logger.info("tv-auth session %s approved", session.id)
     return ApproveResponse(status=STATUS_APPROVED)
@@ -555,9 +429,15 @@ async def get_status(
     device_code_legacy: str | None = Query(
         default=None, alias="device_code", min_length=16, max_length=128
     ),
+    request: Request = None,  # type: ignore[assignment]
     db: AsyncSession = Depends(get_db),
 ) -> StatusResponse:
     """Return the session status; deliver the decrypted payload exactly once."""
+    _enforce_ip_limit(
+        request,
+        rate_limit.tv_auth_status_limiter,
+        settings.TV_AUTH_STATUS_RATE_LIMIT_MAX,
+    )
     code = device_code or device_code_legacy
     if not code:
         raise HTTPException(
@@ -599,39 +479,27 @@ async def get_status(
         # payload. `decrypt_payload` above is pure (no side effect), so
         # computing it twice under contention is harmless; only the DELIVERY
         # is guarded.
-        # AUDIT-P1-001 (S3.3) — deliberately NOT converted to write_with_retry.
-        # This is the CR-F07 atomic one-shot delivery claim: correctness
-        # depends only on `rowcount` from THIS execute() being read before
-        # commit, which holds regardless of which session/connection issues
-        # the UPDATE. The blocker is test/production identity, not
-        # correctness: write_with_retry's fresh session is resolved from a
-        # single process-wide default (app.db.database.async_session_factory)
-        # unless a `session_factory` bound to the SAME engine as `db` is
-        # explicitly derived and threaded through — and the existing
-        # regression test for this exact race
-        # (tests/test_tv_auth.py::test_status_concurrent_polls_deliver_payload_exactly_once)
-        # deliberately drives `get_status` with a hand-built, per-thread
-        # session/engine pointing at a test-only file, specifically to prove
-        # the claim survives real cross-connection contention — swapping in
-        # a different, globally-resolved engine here would silently stop
-        # exercising (or even miswire) that exact scenario. Given the
-        # explicit warning that a fresh session in the wrong place would ruin
-        # this atomicity, the safer choice is zero structural change:
-        # `commit_with_retry` (now honest per ADR 0004) still protects the
-        # common case where SQLite's own busy_timeout resolves the
-        # contention before commit() ever raises; a real, sustained lock now
-        # surfaces the true OperationalError instead of a misleading one.
-        claim_result = await db.execute(
-            update(TvAuthSession)
-            .where(
-                TvAuthSession.id == session.id,
-                TvAuthSession.payload_delivered.is_(False),
+        # Derive a session_factory bound to the same engine as `db` so both
+        # production and per-thread/per-test engines survive real locks.
+        async def _claim(s: AsyncSession) -> int:
+            res = await s.execute(
+                update(TvAuthSession)
+                .where(
+                    TvAuthSession.id == session.id,
+                    TvAuthSession.payload_delivered.is_(False),
+                )
+                .values(payload_delivered=True)
             )
-            .values(payload_delivered=True)
-        )
-        await commit_with_retry(db)
+            await s.commit()
+            return res.rowcount
 
-        if claim_result.rowcount == 1:
+        claimed_rows = await write_with_retry(
+            _claim,
+            session_factory=session_factory_for(db),
+            op="tv_auth.claim_payload",
+        )
+
+        if claimed_rows == 1:
             session.payload_delivered = True  # keep the ORM object in sync
             logger.info("tv-auth session %s payload delivered", session.id)
             return StatusResponse(
@@ -653,9 +521,15 @@ async def get_status(
 @router.post("/complete", response_model=CompleteResponse, response_model_by_alias=True)
 async def complete(
     body: CompleteRequest,
+    request: Request = None,  # type: ignore[assignment]
     db: AsyncSession = Depends(get_db),
 ) -> CompleteResponse:
     """Finalize an approved session: single-use, scrubs the encrypted payload."""
+    _enforce_ip_limit(
+        request,
+        rate_limit.tv_auth_complete_limiter,
+        settings.TV_AUTH_COMPLETE_RATE_LIMIT_MAX,
+    )
     result = await db.execute(
         select(TvAuthSession).where(TvAuthSession.device_code == body.device_code)
     )

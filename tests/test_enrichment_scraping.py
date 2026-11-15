@@ -64,7 +64,7 @@ class TestEnrichmentCacheShortCircuit:
             await scrape_cache.put(s, key, "movie", "matched", 0.97, _data(), now_ms=now_ms())
             await s.commit()
 
-        monkeypatch.setattr(ew, "async_session_factory", factory)
+        monkeypatch.setattr(ew, "worker_session_factory", factory)
 
         class _Boom:
             is_configured = True
@@ -91,7 +91,7 @@ class TestEnrichmentCacheShortCircuit:
         from app.services.tmdb_service import TMDBMatch, TMDBSearchOutcome
 
         factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
-        monkeypatch.setattr(ew, "async_session_factory", factory)
+        monkeypatch.setattr(ew, "worker_session_factory", factory)
 
         calls = {"search": 0, "details": 0}
 
@@ -283,7 +283,7 @@ class TestResolveOmdbFetch:
     async def test_by_id_fetched_once_and_put_set(self, db_engine, monkeypatch):
         from app.workers import enrichment_worker as ew
         factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
-        monkeypatch.setattr(ew, "async_session_factory", factory)
+        monkeypatch.setattr(ew, "worker_session_factory", factory)
         monkeypatch.setattr(ew, "tmdb_service", _FakeTmdbDetails())
         fake = _FakeOmdbSvc(by_id=_omdb())
         monkeypatch.setattr(ew, "omdb_service", fake)
@@ -299,7 +299,7 @@ class TestResolveOmdbFetch:
     async def test_budget_exhausted_skips_omdb_keeps_tmdb(self, db_engine, monkeypatch):
         from app.workers import enrichment_worker as ew
         factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
-        monkeypatch.setattr(ew, "async_session_factory", factory)
+        monkeypatch.setattr(ew, "worker_session_factory", factory)
         monkeypatch.setattr(ew, "tmdb_service", _FakeTmdbDetails())
         fake = _FakeOmdbSvc(by_id=_omdb(), count=settings.OMDB_DAILY_LIMIT)
         monkeypatch.setattr(ew, "omdb_service", fake)
@@ -314,7 +314,7 @@ class TestResolveOmdbFetch:
     async def test_unconfigured_skips_omdb(self, db_engine, monkeypatch):
         from app.workers import enrichment_worker as ew
         factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
-        monkeypatch.setattr(ew, "async_session_factory", factory)
+        monkeypatch.setattr(ew, "worker_session_factory", factory)
         monkeypatch.setattr(ew, "tmdb_service", _FakeTmdbDetails())
         fake = _FakeOmdbSvc(by_id=_omdb(), configured=False)
         monkeypatch.setattr(ew, "omdb_service", fake)
@@ -329,7 +329,7 @@ class TestResolveOmdbFetch:
     async def test_by_id_raises_fail_open(self, db_engine, monkeypatch):
         from app.workers import enrichment_worker as ew
         factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
-        monkeypatch.setattr(ew, "async_session_factory", factory)
+        monkeypatch.setattr(ew, "worker_session_factory", factory)
         monkeypatch.setattr(ew, "tmdb_service", _FakeTmdbDetails())
         fake = _FakeOmdbSvc(raises=True)
         monkeypatch.setattr(ew, "omdb_service", fake)
@@ -348,7 +348,7 @@ class TestResolveOmdbFetch:
         async with factory() as s:
             await omdb_scrape_cache.put(s, "tt0088247", "found", _omdb(), now_ms())
             await s.commit()
-        monkeypatch.setattr(ew, "async_session_factory", factory)
+        monkeypatch.setattr(ew, "worker_session_factory", factory)
         monkeypatch.setattr(ew, "tmdb_service", _FakeTmdbDetails())
         fake = _FakeOmdbSvc(by_id=_omdb())  # would count if called
         monkeypatch.setattr(ew, "omdb_service", fake)
@@ -363,7 +363,7 @@ class TestResolveOmdbFetch:
     async def test_fresh_nomatch_by_title_strong(self, db_engine, monkeypatch):
         from app.workers import enrichment_worker as ew
         factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
-        monkeypatch.setattr(ew, "async_session_factory", factory)
+        monkeypatch.setattr(ew, "worker_session_factory", factory)
         monkeypatch.setattr(ew, "tmdb_service", _FakeTmdbNomatch())
         fake = _FakeOmdbSvc(by_title=_omdb(title="Terminator", year="1984", type="movie"))
         monkeypatch.setattr(ew, "omdb_service", fake)
@@ -380,7 +380,7 @@ class TestResolveOmdbFetch:
     async def test_fresh_nomatch_by_title_weak_year_off(self, db_engine, monkeypatch):
         from app.workers import enrichment_worker as ew
         factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
-        monkeypatch.setattr(ew, "async_session_factory", factory)
+        monkeypatch.setattr(ew, "worker_session_factory", factory)
         monkeypatch.setattr(ew, "tmdb_service", _FakeTmdbNomatch())
         fake = _FakeOmdbSvc(by_title=_omdb(title="Terminator", year="1990", type="movie"))
         monkeypatch.setattr(ew, "omdb_service", fake)
@@ -396,7 +396,7 @@ class TestResolveOmdbFetch:
     async def test_fresh_nomatch_by_title_discard_low_sim(self, db_engine, monkeypatch):
         from app.workers import enrichment_worker as ew
         factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
-        monkeypatch.setattr(ew, "async_session_factory", factory)
+        monkeypatch.setattr(ew, "worker_session_factory", factory)
         monkeypatch.setattr(ew, "tmdb_service", _FakeTmdbNomatch())
         fake = _FakeOmdbSvc(by_title=_omdb(title="Zzz Totally Unrelated Picture", year="1984"))
         monkeypatch.setattr(ew, "omdb_service", fake)
@@ -419,7 +419,7 @@ class TestResolveOmdbFetch:
         async with factory() as s:
             await scrape_cache.put(s, key, "movie", "nomatch", 0.4, None, now_ms())
             await s.commit()
-        monkeypatch.setattr(ew, "async_session_factory", factory)
+        monkeypatch.setattr(ew, "worker_session_factory", factory)
         # TMDB must not even be searched (cache hit) — a boom double proves it.
         monkeypatch.setattr(ew, "tmdb_service", _FakeTmdbNomatch())
         fake = _FakeOmdbSvc(by_title=_omdb())
@@ -438,7 +438,7 @@ class TestResolveOmdbFetch:
         from app.workers.enrichment_worker import _apply_enrichment_results
         from app.workers import enrichment_worker as ew
         factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
-        monkeypatch.setattr(ew, "async_session_factory", factory)
+        monkeypatch.setattr(ew, "worker_session_factory", factory)
         monkeypatch.setattr(ew, "tmdb_service", _FakeTmdbMatchLowConf())
         # Contradicting OMDb payload (year off by 3, unrelated title).
         fake = _FakeOmdbSvc(by_id=_omdb(title="Zzz Totally Unrelated Picture Qqq", year="1987"))
@@ -491,7 +491,7 @@ class TestRunEndOfRunRecompute:
         from app.workers import enrichment_worker as ew
 
         factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
-        monkeypatch.setattr(ew, "async_session_factory", factory)
+        monkeypatch.setattr(ew, "worker_session_factory", factory)
 
         async with factory() as s:
             s.add(Media(

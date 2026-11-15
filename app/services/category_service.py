@@ -4,12 +4,12 @@ Category management service for Xtream account filtering.
 import logging
 import time
 from typing import List, Optional
-from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy import select, tuple_, update
+from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.models.database import XtreamCategory, XtreamAccount, Media, LiveChannel
 from app.services.xtream_service import xtream_service
-from app.utils.db_retry import commit_with_retry, write_with_retry
+from app.utils.db_retry import session_factory_for, write_with_retry
 from app.utils.server_id import build_server_id
 
 logger = logging.getLogger(__name__)
@@ -213,52 +213,50 @@ async def bulk_update_categories(
         filter_mode: "all", "whitelist", or "blacklist"
         categories: List of dicts with categoryId, categoryType, isAllowed
     """
-    # Update filter mode
-    await update_filter_mode(db, account_id, filter_mode)
+    async def _work_cats(session: AsyncSession) -> int | None:
+        await update_filter_mode(session, account_id, filter_mode)
 
-    # Build set of explicitly listed category keys
-    listed_keys = set()
-    for cat_dict in categories:
-        category_id = cat_dict.get("categoryId")
-        category_type = cat_dict.get("categoryType")
-        is_allowed = cat_dict.get("isAllowed", True)
+        listed_keys = set()
+        for cat_dict in categories:
+            category_id = cat_dict.get("categoryId")
+            category_type = cat_dict.get("categoryType")
+            is_allowed = cat_dict.get("isAllowed", True)
 
-        if category_id and category_type:
-            listed_keys.add((str(category_id), category_type))
-            await update_category_allowed(
-                db, account_id, str(category_id), category_type, is_allowed
-            )
-
-    # Set default for unlisted categories based on filter mode (single bulk UPDATE)
-    if filter_mode in ("whitelist", "blacklist"):
-        default_allowed = filter_mode == "blacklist"  # whitelist: False, blacklist: True
-
-        # Build exclusion filter: skip categories that were explicitly listed
-        from sqlalchemy import tuple_
-        base_stmt = (
-            update(XtreamCategory)
-            .where(XtreamCategory.account_id == account_id)
-            .values(is_allowed=default_allowed)
-        )
-        if listed_keys:
-            # Exclude explicitly listed categories from bulk default
-            base_stmt = base_stmt.where(
-                ~tuple_(XtreamCategory.category_id, XtreamCategory.category_type).in_(
-                    list(listed_keys)
+            if category_id and category_type:
+                listed_keys.add((str(category_id), category_type))
+                await update_category_allowed(
+                    session, account_id, str(category_id), category_type, is_allowed
                 )
+
+        unlisted_count: int | None = None
+        if filter_mode in ("whitelist", "blacklist"):
+            default_allowed = filter_mode == "blacklist"  # whitelist: False, blacklist: True
+            base_stmt = (
+                update(XtreamCategory)
+                .where(XtreamCategory.account_id == account_id)
+                .values(is_allowed=default_allowed)
             )
-        result = await db.execute(base_stmt)
-        # NOT converted to write_with_retry (AUDIT-P1-001, ADR 0004 Decision
-        # 4 — "no mechanical conversion"): this is the only commit point for
-        # update_filter_mode()'s and the per-category update_category_
-        # allowed() statements executed above, all pending on this SAME `db`
-        # session (no earlier commit in this function). A fresh session
-        # would either orphan those uncommitted statements or race this
-        # session's own held write transaction. commit_with_retry is honest
-        # here; busy_timeout=60s is the real safety net for this call path.
-        await commit_with_retry(db)
+            if listed_keys:
+                base_stmt = base_stmt.where(
+                    ~tuple_(XtreamCategory.category_id, XtreamCategory.category_type).in_(
+                        list(listed_keys)
+                    )
+                )
+            result = await session.execute(base_stmt)
+            unlisted_count = result.rowcount
+
+        await session.commit()
+        return unlisted_count
+
+    unlisted_count = await write_with_retry(
+        _work_cats,
+        session_factory=session_factory_for(db),
+        op="category_service.bulk_update_categories",
+    )
+    if unlisted_count is not None:
+        default_allowed = filter_mode == "blacklist"
         logger.info(
-            f"Set {result.rowcount} unlisted categories to is_allowed={default_allowed} "
+            f"Set {unlisted_count} unlisted categories to is_allowed={default_allowed} "
             f"(filter_mode={filter_mode})"
         )
 
@@ -270,24 +268,13 @@ async def bulk_update_categories(
     )
 
 
-async def update_media_category_visibility(
+async def _apply_media_category_visibility(
     db: AsyncSession,
     account_id: str,
-) -> None:
-    """
-    Recalculate is_in_allowed_categories for ALL media of an account
-    based on the current category configuration.
-
-    The media.filter column stores the category_id from Xtream.
-    - mode 'all': everything visible
-    - mode 'whitelist': only categories with is_allowed=True are visible
-    - mode 'blacklist': everything except categories with is_allowed=False
-
-    Episodes inherit visibility from their parent series (grandparent_rating_key).
-    """
+) -> tuple[str, int, int, int, int]:
+    """Execute the category visibility recalculation on ``db`` and commit."""
     server_id = build_server_id(account_id)
 
-    # Load current config
     result = await db.execute(
         select(XtreamAccount.category_filter_mode).where(
             XtreamAccount.id == account_id
@@ -296,7 +283,6 @@ async def update_media_category_visibility(
     filter_mode = result.scalar_one_or_none() or "all"
 
     if filter_mode == "all":
-        # Everything visible
         await db.execute(
             update(Media)
             .where(Media.server_id == server_id)
@@ -307,18 +293,8 @@ async def update_media_category_visibility(
             .where(LiveChannel.server_id == server_id)
             .values(is_in_allowed_categories=True)
         )
-        # NOT converted to write_with_retry (AUDIT-P1-001, ADR 0004 Decision
-        # 4 — "no mechanical conversion"): this function's own
-        # `category_filter_mode` read at the top of update_media_category_
-        # visibility() depends on read-after-write consistency with this
-        # SAME `db` session — notably bulk_update_categories()'s
-        # update_filter_mode() call when filter_mode == "all" (this is its
-        # only commit point). A fresh session would silently read the STALE
-        # filter_mode instead. commit_with_retry is honest here;
-        # busy_timeout=60s is the real safety net for this call path.
-        await commit_with_retry(db)
-        logger.info(f"Visibility update [{account_id}]: mode=all, all media + live channels set to visible")
-        return
+        await db.commit()
+        return ("all", 0, 0, 0, 0)
 
     # Load category config
     result = await db.execute(
@@ -430,23 +406,52 @@ async def update_media_category_visibility(
                 .values(is_in_allowed_categories=True)
             )
 
-    # NOT converted to write_with_retry (AUDIT-P1-001, ADR 0004 Decision 4 —
-    # "no mechanical conversion"): same read-after-uncommitted-write
-    # dependency as the mode=="all" branch above (this function's own
-    # `category_filter_mode` read, plus whatever bulk_update_categories()
-    # left pending on this SAME `db` session before calling us) — a fresh
-    # session risks a stale read or a lock race against `db`'s own held
-    # write transaction. commit_with_retry is honest here; busy_timeout=60s
-    # is the real safety net for this call path.
-    await commit_with_retry(db)
-
-    logger.info(
-        f"Visibility update [{account_id}]: mode={filter_mode}, "
-        f"VOD categories={len(allowed_vod_ids)}, "
-        f"Series categories={len(allowed_series_ids)}, "
-        f"Live categories={len(allowed_live_ids)}, "
-        f"visible series={len(visible_series_keys)}"
+    await db.commit()
+    return (
+        filter_mode,
+        len(allowed_vod_ids),
+        len(allowed_series_ids),
+        len(allowed_live_ids),
+        len(visible_series_keys),
     )
+
+
+async def update_media_category_visibility(
+    db: AsyncSession,
+    account_id: str,
+) -> None:
+    """
+    Recalculate is_in_allowed_categories for ALL media of an account
+    based on the current category configuration.
+
+    The media.filter column stores the category_id from Xtream.
+    - mode 'all': everything visible
+    - mode 'whitelist': only categories with is_allowed=True are visible
+    - mode 'blacklist': everything except categories with is_allowed=False
+
+    Episodes inherit visibility from their parent series (grandparent_rating_key).
+    """
+    async def _work_visibility(session: AsyncSession) -> tuple[str, int, int, int, int]:
+        return await _apply_media_category_visibility(session, account_id)
+
+    filter_mode, n_vod, n_series, n_live, n_visible = await write_with_retry(
+        _work_visibility,
+        session_factory=session_factory_for(db),
+        op="category_service.update_media_category_visibility",
+    )
+
+    if filter_mode == "all":
+        logger.info(
+            f"Visibility update [{account_id}]: mode=all, all media + live channels set to visible"
+        )
+    else:
+        logger.info(
+            f"Visibility update [{account_id}]: mode={filter_mode}, "
+            f"VOD categories={n_vod}, "
+            f"Series categories={n_series}, "
+            f"Live categories={n_live}, "
+            f"visible series={n_visible}"
+        )
 
 
 async def update_media_adult_flags(
@@ -536,10 +541,9 @@ async def update_media_adult_flags(
         await session.commit()
         return len(adult_vod_ids)
 
-    session_factory = async_sessionmaker(db.bind, class_=AsyncSession, expire_on_commit=False)
     adult_category_count = await write_with_retry(
         _work,
-        session_factory=session_factory,
+        session_factory=session_factory_for(db),
         op="category_service.update_media_adult_flags",
     )
 
@@ -549,26 +553,15 @@ async def update_media_adult_flags(
     )
 
 
-async def refresh_categories_from_provider(
+async def fetch_categories_from_provider(
     db: AsyncSession,
     account_id: str,
-) -> tuple[int, int]:
-    """Force-refresh VOD + series categories from the Xtream provider.
+) -> tuple[list[dict], list[dict], bool]:
+    """Fetch VOD and series categories from Xtream for ``account_id``.
 
-    Fetches current categories from Xtream and upserts them (preserves
-    existing is_allowed settings — upsert_category only sets is_allowed on
-    first insert, from ``default_is_allowed_for_new_category`` (False unless
-    the account is in blacklist mode); already-known categories keep their
-    prior flag).
-
-    Caller commits (CR-C04 lock-retry stays with the caller, unchanged).
-
-    Args:
-        db: Database session
-        account_id: Xtream account ID
-
-    Returns:
-        (vod_count, series_count)
+    Returns ``(vod_categories, series_categories, new_allowed)`` with no DB
+    writes so callers can persist via ``write_with_retry`` without replaying
+    provider HTTP calls on lock retries.
 
     Raises:
         AccountNotFoundError: no account with this id.
@@ -580,7 +573,6 @@ async def refresh_categories_from_provider(
     if not account:
         raise AccountNotFoundError(account_id)
 
-    # Fetch VOD categories
     vod_categories = await xtream_service.get_vod_categories(
         account.base_url,
         account.port,
@@ -588,7 +580,6 @@ async def refresh_categories_from_provider(
         account.password,
     )
 
-    # Fetch Series categories
     series_categories = await xtream_service.get_series_categories(
         account.base_url,
         account.port,
@@ -597,8 +588,17 @@ async def refresh_categories_from_provider(
     )
 
     new_allowed = default_is_allowed_for_new_category(account.category_filter_mode)
+    return vod_categories, series_categories, new_allowed
 
-    # Upsert VOD categories
+
+async def upsert_categories_batch(
+    db: AsyncSession,
+    account_id: str,
+    vod_categories: list[dict],
+    series_categories: list[dict],
+    new_allowed: bool,
+) -> tuple[int, int]:
+    """Upsert fetched VOD and series categories on ``db`` without committing."""
     for cat in vod_categories:
         await upsert_category(
             db,
@@ -606,10 +606,9 @@ async def refresh_categories_from_provider(
             cat.get("category_id", ""),
             "vod",
             cat.get("category_name", "Unknown"),
-            is_allowed=new_allowed,  # first insert only; existing rows keep their flag
+            is_allowed=new_allowed,
         )
 
-    # Upsert Series categories
     for cat in series_categories:
         await upsert_category(
             db,
@@ -621,3 +620,23 @@ async def refresh_categories_from_provider(
         )
 
     return len(vod_categories), len(series_categories)
+
+
+async def refresh_categories_from_provider(
+    db: AsyncSession,
+    account_id: str,
+) -> tuple[int, int]:
+    """Force-refresh VOD + series categories from the Xtream provider.
+
+    Fetches current categories from Xtream and upserts them on ``db``
+    (preserves existing is_allowed settings). Caller commits.
+
+    Raises:
+        AccountNotFoundError: no account with this id.
+    """
+    vod_categories, series_categories, new_allowed = await fetch_categories_from_provider(
+        db, account_id
+    )
+    return await upsert_categories_batch(
+        db, account_id, vod_categories, series_categories, new_allowed
+    )

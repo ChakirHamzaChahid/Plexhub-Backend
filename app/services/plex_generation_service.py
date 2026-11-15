@@ -98,12 +98,12 @@ async def generate_plex_library_auto() -> SyncReport | None:
         return None
 
     from sqlalchemy import select
-    from app.db.database import async_session_factory
+    from app.db.database import worker_session_factory
     from app.models.database import XtreamAccount
 
     output = Path(settings.PLEX_LIBRARY_DIR)
 
-    async with async_session_factory() as db:
+    async with worker_session_factory() as db:
         result = await db.execute(
             select(XtreamAccount.id).where(XtreamAccount.is_active == True)
         )

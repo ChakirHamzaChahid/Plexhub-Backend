@@ -11,6 +11,7 @@ import respx
 
 from app.services import xtream_service as xs_module
 from app.services.xtream_service import XmltvTooLargeError, XtreamService
+from app.utils import ssrf
 from tests._records import Records
 
 SECRET = "S3CR3T-PASSWORD"
@@ -43,10 +44,18 @@ def svc():
 
 @pytest.fixture(autouse=True)
 def _no_real_sleep(monkeypatch):
+    import socket
+
     async def _instant(_):
         return None
 
     monkeypatch.setattr(xs_module.asyncio, "sleep", _instant)
+    ssrf.clear_cache()
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda host, port, *a, **kw: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))],
+    )
 
 
 async def test_streams_body_to_file_and_sends_credentials_as_params(svc, tmp_path):

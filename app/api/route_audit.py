@@ -69,6 +69,14 @@ _GENERAL_GUARDS: frozenset[Callable[..., Any]] = frozenset(
         deps.verify_admin_basic_auth,
     }
 )
+# Guards accepted on non-`/api/` routes (`/admin*`, `/dav*`, `/metrics`, CR-S11).
+_NON_API_GUARDS: frozenset[Callable[..., Any]] = _GENERAL_GUARDS | frozenset(
+    {
+        deps.verify_dav_basic_auth,
+        deps.verify_metrics_basic_auth,
+    }
+)
+_NON_API_AUDITED_PREFIXES: tuple[str, ...] = ("/admin", "/dav", "/metrics", "/docs", "/openapi.json")
 
 # Scope guards (ADR 0008 § D2.4 lot B1, ADR 0010 § D2.3 lot B2). Each is ONLY
 # accepted on routes under ITS OWN prefix: elsewhere it would let an unscoped
@@ -166,10 +174,11 @@ def _is_allow_listed(route: APIRoute) -> bool:
 
 
 def assert_api_routes_authenticated(app: FastAPI) -> None:
-    """Raise `RuntimeError` if any `/api/*` route lacks a recognised auth guard.
+    """Raise `RuntimeError` if any `/api/*` or `/admin*`/`/dav*`/`/metrics`
+    route lacks a recognised auth guard.
 
     Call once, after every `include_router(...)` call that can add a
-    `/api/*` path (see `app/main.py`). Runs at import time of `app.main` —
+    path (see `app/main.py`). Runs at import time of `app.main` —
     i.e. on every process boot, master or worker alike (piège 7): this check
     has nothing to do with the `fcntl` master election.
     """
@@ -177,11 +186,15 @@ def assert_api_routes_authenticated(app: FastAPI) -> None:
     for route in app.routes:
         if not isinstance(route, APIRoute):
             continue
-        if not route.path.startswith("/api/"):
-            continue
-        if _is_allow_listed(route):
-            continue
-        if _is_guarded(route):
+        if route.path.startswith("/api/"):
+            if _is_allow_listed(route):
+                continue
+            if _is_guarded(route):
+                continue
+        elif route.path.startswith(_NON_API_AUDITED_PREFIXES):
+            if _dependency_calls(route) & _NON_API_GUARDS:
+                continue
+        else:
             continue
         methods = ",".join(sorted(route.methods or ())) or "?"
         unguarded.append(f"{methods} {route.path}")

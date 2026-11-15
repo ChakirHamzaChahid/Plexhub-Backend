@@ -1,22 +1,9 @@
-import re
-
-
-# Characters invalid on Windows and/or problematic for Plex path parsing
-_INVALID_CHARS = re.compile(r'[\\/:*?"<>|]')
+from app.utils.path_naming import sanitize_path_segment
 
 
 def sanitize_for_filesystem(name: str) -> str:
-    """Remove or replace characters that are invalid in file/folder names.
-
-    - Replaces \\ / : * ? \" < > | with a space
-    - Collapses multiple spaces
-    - Strips leading/trailing whitespace
-    - Strips trailing dots (Windows silently ignores them)
-    """
-    name = _INVALID_CHARS.sub(" ", name)
-    name = re.sub(r"\s+", " ", name).strip()
-    name = name.rstrip(".")
-    return name.strip() or "Unknown"
+    """Remove or replace characters that are invalid in file/folder names."""
+    return sanitize_path_segment(name, fallback="Unknown", ntfs_remap=False)
 
 
 def _decorate_with_disambiguator(

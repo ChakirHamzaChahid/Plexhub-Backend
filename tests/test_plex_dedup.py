@@ -260,7 +260,7 @@ class TestUnifiedDatabaseSource:
             await s.commit()
 
         import app.plex_generator.source as source_mod
-        monkeypatch.setattr(source_mod, "async_session_factory", factory)
+        monkeypatch.setattr(source_mod, "worker_session_factory", factory)
         return factory
 
     @pytest.mark.asyncio
@@ -324,7 +324,7 @@ class TestBrokenRowSelectionAlignment:
             await s.commit()
 
         import app.plex_generator.source as source_mod
-        monkeypatch.setattr(source_mod, "async_session_factory", factory)
+        monkeypatch.setattr(source_mod, "worker_session_factory", factory)
         return factory
 
     @pytest.mark.asyncio

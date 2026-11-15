@@ -49,7 +49,7 @@ from typing import Any, Literal
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.exc import OperationalError
 
-from app.db.database import async_session_factory
+from app.db.database import worker_session_factory
 from app.models.database import Media
 from app.services import omdb_scrape_cache_service as omdb_scrape_cache
 from app.services.omdb_service import omdb_service
@@ -450,7 +450,7 @@ async def enqueue_backfill(
     })
     create_background_task(
         run_backfill(
-            job_id, async_session_factory,
+            job_id, worker_session_factory,
             media_type=media_type,
             recompute_display_rating=recompute_display_rating,
             limit=limit,

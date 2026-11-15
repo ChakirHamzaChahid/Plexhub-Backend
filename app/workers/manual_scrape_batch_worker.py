@@ -166,9 +166,9 @@ def start(
         raise BatchAlreadyRunningError("a manual-scrape batch is already running")
 
     if session_factory is None:
-        from app.db.database import async_session_factory
+        from app.db.database import worker_session_factory
 
-        session_factory = async_session_factory
+        session_factory = worker_session_factory
 
     job_id = f"scrape_batch_{now_ms()}"
     _register(job_id, _new_job(job_id, media_type=media_type, dry_run=dry_run))

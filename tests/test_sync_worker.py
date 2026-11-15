@@ -553,7 +553,7 @@ async def wired_sync_db(db_engine, monkeypatch):
     `category_filter_mode` defaults to "all" so no XtreamCategory row is needed).
     """
     factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
-    monkeypatch.setattr(sync_worker_module, "async_session_factory", factory)
+    monkeypatch.setattr(sync_worker_module, "worker_session_factory", factory)
 
     async def _empty(*args, **kwargs):
         return []

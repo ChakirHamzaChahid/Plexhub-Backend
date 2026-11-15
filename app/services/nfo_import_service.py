@@ -613,12 +613,12 @@ async def _import_movies_for_account(
         nfo_path = strm_full.parent / "movie.nfo"
         folder_name = strm_full.parent.name
 
-        if not nfo_path.exists():
+        exists, parsed = await asyncio.to_thread(_probe_and_parse_nfo, nfo_path, "movie")
+        if not exists:
             report.unmatched.append(f"{folder_name}: missing movie.nfo")
             continue
         report.scanned += 1
 
-        parsed = parse_nfo_file(nfo_path, "movie")
         if parsed is None:
             report.parse_errors.append(folder_name)
             continue
@@ -676,6 +676,13 @@ async def _import_movies_for_account(
     return report
 
 
+def _probe_and_parse_nfo(nfo_path: Path, media_type: str) -> tuple[bool, Optional[NfoEntry]]:
+    """Blocking stat + XML parse run in a worker thread via asyncio.to_thread."""
+    if not nfo_path.exists():
+        return False, None
+    return True, parse_nfo_file(nfo_path, media_type)
+
+
 async def _apply_show_nfo(
     db: AsyncSession, show: Media, nfo_path: Path,
     label: str, overwrite: bool, dry_run: bool,
@@ -683,12 +690,12 @@ async def _apply_show_nfo(
 ) -> int:
     """Read tvshow.nfo at `nfo_path`, apply updates to the show row.
     Returns the new pending_writes counter (commits every _COMMIT_BATCH_SIZE)."""
-    if not nfo_path.exists():
+    exists, parsed = await asyncio.to_thread(_probe_and_parse_nfo, nfo_path, "show")
+    if not exists:
         report.unmatched.append(f"{label}: {nfo_path.relative_to(nfo_path.anchor)} not found")
         return pending_writes
     report.scanned += 1
 
-    parsed = parse_nfo_file(nfo_path, "show")
     if parsed is None:
         report.parse_errors.append(label)
         return pending_writes

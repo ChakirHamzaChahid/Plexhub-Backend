@@ -10,42 +10,98 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import AsyncIterator
 
 import httpx
 
 from app.config import settings
+from app.utils.metrics import ollama_request_duration_seconds, ollama_requests_total
 
 logger = logging.getLogger("plexhub.ollama")
 
 _GENERATE_TIMEOUT = 120.0
 _STATUS_TIMEOUT = 5.0
+_HTTP_LIMITS = httpx.Limits(max_connections=20, max_keepalive_connections=10)
+
+_client: httpx.AsyncClient | None = None
+
+
+def _get_client() -> httpx.AsyncClient:
+    """Return a shared, keep-alive pooled AsyncClient (recreated if closed)."""
+    global _client
+    if _client is None or _client.is_closed:
+        _client = httpx.AsyncClient(
+            timeout=httpx.Timeout(_GENERATE_TIMEOUT, connect=_STATUS_TIMEOUT),
+            limits=_HTTP_LIMITS,
+        )
+    return _client
+
+
+async def close_client() -> None:
+    """Close the shared Ollama HTTP client if open (for shutdown/tests)."""
+    global _client
+    if _client is not None and not _client.is_closed:
+        await _client.aclose()
+    _client = None
 
 
 async def generate(prompt: str) -> str:
     """Send a prompt to Ollama /api/generate and return the full response."""
     payload = {"model": settings.OLLAMA_MODEL, "prompt": prompt, "stream": False}
-    async with httpx.AsyncClient(timeout=_GENERATE_TIMEOUT) as client:
-        r = await client.post(f"{settings.OLLAMA_URL}/api/generate", json=payload)
+    t0 = time.monotonic()
+    result = "error"
+    try:
+        client = _get_client()
+        r = await client.post(
+            f"{settings.OLLAMA_URL}/api/generate",
+            json=payload,
+            timeout=_GENERATE_TIMEOUT,
+        )
         r.raise_for_status()
+        result = "ok"
         return r.json()["response"]
+    finally:
+        ollama_requests_total.labels(endpoint="generate", result=result).inc()
+        ollama_request_duration_seconds.labels(endpoint="generate").observe(
+            max(0.0, time.monotonic() - t0)
+        )
 
 
 async def chat(messages: list[dict[str, str]]) -> str:
     """Send a messages list to Ollama /api/chat and return the assistant reply."""
     payload = {"model": settings.OLLAMA_MODEL, "messages": messages, "stream": False}
-    async with httpx.AsyncClient(timeout=_GENERATE_TIMEOUT) as client:
-        r = await client.post(f"{settings.OLLAMA_URL}/api/chat", json=payload)
+    t0 = time.monotonic()
+    result = "error"
+    try:
+        client = _get_client()
+        r = await client.post(
+            f"{settings.OLLAMA_URL}/api/chat",
+            json=payload,
+            timeout=_GENERATE_TIMEOUT,
+        )
         r.raise_for_status()
+        result = "ok"
         return r.json()["message"]["content"]
+    finally:
+        ollama_requests_total.labels(endpoint="chat", result=result).inc()
+        ollama_request_duration_seconds.labels(endpoint="chat").observe(
+            max(0.0, time.monotonic() - t0)
+        )
 
 
 async def stream_generate(prompt: str) -> AsyncIterator[str]:
     """Streaming version of generate — yields text chunks as they arrive."""
     payload = {"model": settings.OLLAMA_MODEL, "prompt": prompt, "stream": True}
-    async with httpx.AsyncClient(timeout=_GENERATE_TIMEOUT) as client:
+    t0 = time.monotonic()
+    result = "error"
+    try:
+        client = _get_client()
         async with client.stream(
-            "POST", f"{settings.OLLAMA_URL}/api/generate", json=payload
+            "POST",
+            f"{settings.OLLAMA_URL}/api/generate",
+            json=payload,
+            timeout=_GENERATE_TIMEOUT,
         ) as r:
             r.raise_for_status()
             async for line in r.aiter_lines():
@@ -57,17 +113,34 @@ async def stream_generate(prompt: str) -> AsyncIterator[str]:
                     yield text
                 if chunk.get("done"):
                     break
+        result = "ok"
+    finally:
+        ollama_requests_total.labels(endpoint="stream_generate", result=result).inc()
+        ollama_request_duration_seconds.labels(endpoint="stream_generate").observe(
+            max(0.0, time.monotonic() - t0)
+        )
 
 
 async def is_healthy() -> tuple[bool, str]:
     """Return (ok, detail) — checks that Ollama is up and the model is available."""
+    t0 = time.monotonic()
+    result = "error"
     try:
-        async with httpx.AsyncClient(timeout=_STATUS_TIMEOUT) as client:
-            r = await client.get(f"{settings.OLLAMA_URL}/api/tags")
-            r.raise_for_status()
-            models = [m["name"] for m in r.json().get("models", [])]
-            ok = settings.OLLAMA_MODEL in models
-            detail = "ok" if ok else f"model {settings.OLLAMA_MODEL!r} not found in {models}"
-            return ok, detail
+        client = _get_client()
+        r = await client.get(
+            f"{settings.OLLAMA_URL}/api/tags",
+            timeout=_STATUS_TIMEOUT,
+        )
+        r.raise_for_status()
+        models = [m["name"] for m in r.json().get("models", [])]
+        ok = settings.OLLAMA_MODEL in models
+        detail = "ok" if ok else f"model {settings.OLLAMA_MODEL!r} not found in {models}"
+        result = "ok" if ok else "error"
+        return ok, detail
     except Exception as exc:  # noqa: BLE001
         return False, str(exc)
+    finally:
+        ollama_requests_total.labels(endpoint="tags", result=result).inc()
+        ollama_request_duration_seconds.labels(endpoint="tags").observe(
+            max(0.0, time.monotonic() - t0)
+        )

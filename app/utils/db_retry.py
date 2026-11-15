@@ -18,7 +18,7 @@ import logging
 from typing import Awaitable, Callable, TypeVar
 
 from sqlalchemy.exc import OperationalError, PendingRollbackError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 logger = logging.getLogger("plexhub.db.retry")
 
@@ -174,3 +174,16 @@ async def write_with_retry(
             return await work(session)
 
     return await run_with_retry(_attempt, delays=delays, op=op)
+
+
+def session_factory_for(db: AsyncSession) -> Callable[[], AsyncSession] | None:
+    """Return a fresh-session factory bound to the same AsyncEngine as ``db``.
+
+    Falls back to ``None`` (so ``write_with_retry`` uses its default
+    ``async_session_factory``) when ``db`` is a mock or has no ``AsyncEngine``
+    bind (e.g. a connection-scoped test session).
+    """
+    bind = getattr(db, "bind", None)
+    if isinstance(bind, AsyncEngine):
+        return async_sessionmaker(bind, class_=AsyncSession, expire_on_commit=False)
+    return None

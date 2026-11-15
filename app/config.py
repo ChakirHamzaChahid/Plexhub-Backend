@@ -234,8 +234,20 @@ class Settings:
     # Wall-clock ceiling for ONE XMLTV download attempt (seconds).
     EPG_SYNC_DOWNLOAD_TIMEOUT_SECONDS: int = _safe_int("EPG_SYNC_DOWNLOAD_TIMEOUT_SECONDS", 600)
     CORS_ORIGINS: list[str] = [
-        o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",") if o.strip()
+        o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()
     ]
+    # Trusted reverse-proxy / tunnel peer IPs allowed to supply
+    # CF-Connecting-IP / X-Forwarded-For (CR-S08). Untrusted peers cannot spoof.
+    TRUSTED_PROXY_IPS: set[str] = {
+        ip.strip()
+        for ip in os.getenv("TRUSTED_PROXY_IPS", "127.0.0.1,::1,testclient").split(",")
+        if ip.strip()
+    }
+    BASIC_AUTH_FAIL_RATE_LIMIT_MAX: int = _safe_int("BASIC_AUTH_FAIL_RATE_LIMIT_MAX", 10)
+    BASIC_AUTH_FAIL_RATE_LIMIT_WINDOW_SECONDS: int = _safe_int("BASIC_AUTH_FAIL_RATE_LIMIT_WINDOW_SECONDS", 60)
+    TV_AUTH_STATUS_RATE_LIMIT_MAX: int = _safe_int("TV_AUTH_STATUS_RATE_LIMIT_MAX", 120)
+    TV_AUTH_APPROVE_RATE_LIMIT_MAX: int = _safe_int("TV_AUTH_APPROVE_RATE_LIMIT_MAX", 30)
+    TV_AUTH_COMPLETE_RATE_LIMIT_MAX: int = _safe_int("TV_AUTH_COMPLETE_RATE_LIMIT_MAX", 30)
     TMDB_LANGUAGE: str = os.getenv("TMDB_LANGUAGE", "fr-FR")
 
     # Ollama LLM (gemma4 via khoj-ollama)
@@ -509,28 +521,13 @@ class Settings:
                 "(expected xx-XX tags such as fr-FR)",
                 ", ".join(repr(item) for item in ignored_languages),
             )
-        self.DATA_DIR.mkdir(parents=True, exist_ok=True)
-        self.LOG_DIR.mkdir(parents=True, exist_ok=True)
         self.DB_PATH = self.DATA_DIR / "plexhub.db"
 
         env_client_id = os.getenv("PLEX_CLIENT_IDENTIFIER", "")
         if env_client_id:
             self.PLEX_CLIENT_IDENTIFIER = env_client_id
         else:
-            client_id_path = self.DATA_DIR / "plex_client_id"
-            try:
-                if client_id_path.exists():
-                    self.PLEX_CLIENT_IDENTIFIER = client_id_path.read_text(encoding="utf-8").strip()
-                if not self.PLEX_CLIENT_IDENTIFIER:
-                    self.PLEX_CLIENT_IDENTIFIER = uuid.uuid4().hex
-                    client_id_path.write_text(self.PLEX_CLIENT_IDENTIFIER, encoding="utf-8")
-            except OSError as exc:
-                # DATA_DIR unwritable (read-only mount, permissions, ...):
-                # fall back to a per-process id rather than crashing boot —
-                # the Plex download source stays functional, just without a
-                # stable identifier across restarts.
-                logger.warning("Could not read/persist plex_client_id (%s) — using a transient id", exc)
-                self.PLEX_CLIENT_IDENTIFIER = uuid.uuid4().hex
+            self.PLEX_CLIENT_IDENTIFIER = uuid.uuid4().hex
 
         if self.TMDB_API_KEY:
             logger.info(f"TMDB API Key loaded: {self.TMDB_API_KEY[:4]}****")
@@ -569,30 +566,11 @@ class Settings:
         else:
             logger.info("Physical download: DOWNLOAD_DIR not set — feature disabled")
 
-        # `TRAILER_CACHE_DIR` depends on `DATA_DIR` (default `DATA_DIR/trailers`)
-        # so it is resolved here rather than as a class attribute default —
-        # same pattern as `PLEX_CLIENT_IDENTIFIER` above. An explicit env
-        # value (including an explicit empty string) always wins.
         env_trailer_dir = os.getenv("TRAILER_CACHE_DIR")
         if env_trailer_dir is None:
             self.TRAILER_CACHE_DIR = str(self.DATA_DIR / "trailers")
         else:
             self.TRAILER_CACHE_DIR = env_trailer_dir
-        if self.TRAILER_CACHE_DIR:
-            try:
-                Path(self.TRAILER_CACHE_DIR).mkdir(parents=True, exist_ok=True)
-                logger.info(
-                    f"Trailer cache: dir={self.TRAILER_CACHE_DIR!r}, "
-                    f"max_mb={self.TRAILER_CACHE_MAX_MB}"
-                )
-            except OSError as exc:
-                logger.warning(
-                    "Could not create TRAILER_CACHE_DIR=%r (%s) — trailer "
-                    "resolution will fail until the directory is writable",
-                    self.TRAILER_CACHE_DIR, exc,
-                )
-        else:
-            logger.info("Trailer cache: TRAILER_CACHE_DIR explicitly empty — feature disabled")
 
         if self.PLEX_ACCOUNT_TOKEN:
             logger.info("Plex download source: enabled (client_id=%s…)", self.PLEX_CLIENT_IDENTIFIER[:8])
@@ -620,6 +598,47 @@ class Settings:
             )
         else:
             logger.info("DAV WebDAV: disabled (DAV_ENABLED=false)")
+
+    def ensure_dirs(self) -> None:
+        """Create runtime directories and persist client identifier (CR-C01).
+
+        Kept out of `__init__` so importing `app.config` performs no
+        filesystem mutations. Called explicitly by `lifespan` and CLI.
+        """
+        self.DATA_DIR.mkdir(parents=True, exist_ok=True)
+        self.LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+        if not os.getenv("PLEX_CLIENT_IDENTIFIER", ""):
+            client_id_path = self.DATA_DIR / "plex_client_id"
+            try:
+                if client_id_path.exists():
+                    persisted = client_id_path.read_text(encoding="utf-8").strip()
+                    if persisted:
+                        self.PLEX_CLIENT_IDENTIFIER = persisted
+                    else:
+                        client_id_path.write_text(self.PLEX_CLIENT_IDENTIFIER, encoding="utf-8")
+                else:
+                    client_id_path.write_text(self.PLEX_CLIENT_IDENTIFIER, encoding="utf-8")
+            except OSError as exc:
+                logger.warning(
+                    "Could not read/persist plex_client_id (%s) — using a transient id", exc
+                )
+
+        if self.TRAILER_CACHE_DIR:
+            try:
+                Path(self.TRAILER_CACHE_DIR).mkdir(parents=True, exist_ok=True)
+                logger.info(
+                    f"Trailer cache: dir={self.TRAILER_CACHE_DIR!r}, "
+                    f"max_mb={self.TRAILER_CACHE_MAX_MB}"
+                )
+            except OSError as exc:
+                logger.warning(
+                    "Could not create TRAILER_CACHE_DIR=%r (%s) — trailer "
+                    "resolution will fail until the directory is writable",
+                    self.TRAILER_CACHE_DIR, exc,
+                )
+        else:
+            logger.info("Trailer cache: TRAILER_CACHE_DIR explicitly empty — feature disabled")
 
 
 settings = Settings()

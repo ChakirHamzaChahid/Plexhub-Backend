@@ -237,3 +237,86 @@ class TestUpdateMediaAdultFlagsRealLock:
         is_adult, content_rating = _read_flags(db_path)
         assert is_adult == 1
         assert content_rating == settings.ADULT_CONTENT_RATING
+
+
+async def test_update_media_category_visibility_survives_real_lock(tmp_path):
+    """CR-D01: update_media_category_visibility survives a genuine BEGIN IMMEDIATE
+    SQLite lock via write_with_retry."""
+    from app.services.category_service import update_media_category_visibility
+
+    db_path = str(tmp_path / "visibility_real_lock.db")
+    await _create_schema(db_path)
+    _add_probe_table(db_path)
+
+    engine = _make_engine(db_path)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as session:
+        session.add_all([
+            XtreamAccount(
+                id="a",
+                label="Compte",
+                base_url="http://a.example",
+                port=80,
+                username="u",
+                password="p",
+                is_active=True,
+                created_at=0,
+                category_filter_mode="whitelist",
+            ),
+            XtreamCategory(
+                account_id="a",
+                category_id="42",
+                category_type="vod",
+                category_name="Action",
+                is_allowed=True,
+                last_fetched_at=0,
+            ),
+            Media(
+                rating_key="rk1",
+                server_id=build_server_id("a"),
+                filter="42",
+                sort_order="default",
+                library_section_id="xtream_vod",
+                type="movie",
+                title="Film",
+                unification_id="tmdb://rk1",
+                is_in_allowed_categories=False,
+                is_broken=False,
+            ),
+        ])
+        await session.commit()
+
+    list_handler = _ListHandler()
+    retry_logger = logging.getLogger("plexhub.db.retry")
+    retry_logger.addHandler(list_handler)
+    try:
+        lock_acquired = threading.Event()
+        blocker = threading.Thread(
+            target=_hold_write_lock,
+            args=(db_path, lock_acquired, 0.35),
+            daemon=True,
+        )
+        blocker.start()
+        assert lock_acquired.wait(timeout=5)
+
+        async with factory() as session:
+            await update_media_category_visibility(session, "a")
+
+        blocker.join(timeout=5)
+    finally:
+        retry_logger.removeHandler(list_handler)
+        await engine.dispose()
+
+    locked_warnings = [
+        r for r in list_handler.records if "database is locked" in r.getMessage().lower()
+    ]
+    assert locked_warnings, "expected a REAL 'database is locked' warning from write_with_retry"
+
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT is_in_allowed_categories FROM media WHERE rating_key = 'rk1'"
+        ).fetchone()
+        assert row == (1,)
+    finally:
+        conn.close()

@@ -1,5 +1,81 @@
 {
+  "permissions": {
+    "deny": [
+      "Read(.env)",
+      "Edit(.env)",
+      "Bash(gh secret set *)",
+      "Bash(gh secret delete *)",
+      "Bash(gh secret remove *)"
+    ],
+    "ask": [
+      "Edit(/pyproject.toml)",
+      "Edit(/requirements.txt)",
+      "Edit(/requirements-dev.txt)"
+    ]
+  },
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/pitfalls-guard.js"
+          }
+        ]
+      },
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/subagent-model-guard.js",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/bash-guard.js"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/tools/dod-gate.py touch"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/tools/dod-gate.py check",
+            "timeout": 20
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/tools/cost-tracker.py hook",
+            "async": true,
+            "timeout": 60
+          }
+        ]
+      }
+    ],
     "SessionStart": [
       {
         "matcher": "startup",
@@ -21,18 +97,6 @@
         ]
       }
     ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python .claude/tools/cost-tracker.py hook",
-            "async": true,
-            "timeout": 60
-          }
-        ]
-      }
-    ],
     "PreCompact": [
       {
         "hooks": [
@@ -43,27 +107,8 @@
           }
         ]
       }
-    ],
-    "PreToolUse": [
-      {
-        "matcher": "Agent|Task",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node .claude/hooks/subagent-model-guard.js",
-            "timeout": 10
-          }
-        ]
-      }
     ]
   },
-  "permissions": {
-    "deny": [
-      "Read(.env)",
-      "Edit(.env)"
-    ],
-    "ask": [
-      "Edit(/pyproject.toml)"
-    ]
-  }
+  "autoCompactWindow": 200000,
+  "subagentPromptCacheTtl": "1h"
 }

@@ -17,7 +17,20 @@ from app.models.schemas import AccountCreate, AccountUpdate
 from app.services import account_service
 from app.services.xtream_credentials import XtreamCredentials
 from app.services.xtream_service import xtream_service
+from app.utils import ssrf
 from app.utils.server_id import build_server_id
+
+
+@pytest.fixture(autouse=True)
+def _public_dns_for_example_hosts(monkeypatch):
+    import socket
+
+    ssrf.clear_cache()
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda host, port, *a, **kw: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))],
+    )
 
 
 def _account(id_: str = "a") -> XtreamAccount:
@@ -206,5 +219,5 @@ async def test_test_account_connection_auth_failure_raises(monkeypatch, db_sessi
 
     monkeypatch.setattr(xtream_service, "authenticate", _boom)
 
-    with pytest.raises(account_service.AccountAuthenticationError, match="timeout"):
+    with pytest.raises(account_service.AccountAuthenticationError, match="RuntimeError"):
         await account_service.test_account_connection(db_session, "a")

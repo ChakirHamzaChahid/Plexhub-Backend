@@ -121,7 +121,7 @@ EXPECTED: dict[tuple[str, str, str], tuple[int, str, str]] = {
     ("app/services/manual_scrape_service.py", "work", "update(Media)"): (
         4, "operator", "manual scraper apply/propagate/unlock/clear: honors the lock for non-manual sources"),
     # ── no protected column written (or assumed exception) ──────────────────
-    ("app/services/category_service.py", "update_media_category_visibility", "update(Media)"): (
+    ("app/services/category_service.py", "_apply_media_category_visibility", "update(Media)"): (
         7, "exempt", "is_in_allowed_categories visibility flag only"),
     ("app/services/category_service.py", "_work", "update(Media)"): (
         3, "exempt", "assumed exception: adult classification (is_adult, content_rating='XXX') prevails; "
@@ -130,7 +130,7 @@ EXPECTED: dict[tuple[str, str, str], tuple[int, str, str]] = {
         1, "exempt", "display_rating derived from imdb/tmdb ratings, which are protected"),
     ("app/workers/health_check_worker.py", "_apply_batch", "update(Media)"): (
         1, "exempt", "stream health flags (is_broken, last_stream_check, file_size)"),
-    ("app/workers/health_check_worker.py", "_run_pipeline_validation_impl", "update(Media)"): (
+    ("app/workers/health_check_worker.py", "_apply_pipeline_batch_tx", "update(Media)"): (
         1, "exempt", "stream health flags"),
     ("app/services/account_service.py", "delete_account_cascade", "delete(Media)"): (
         1, "exempt", "the owning Xtream account is being deleted"),

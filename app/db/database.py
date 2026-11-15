@@ -62,6 +62,41 @@ worker_session_factory = async_sessionmaker(
 # the most recent connect. Consumed by J3b's verify_api_key dependency to
 # short-circuit AI endpoints with HTTP 503 when the extension is unavailable.
 _VEC_LOADED: dict[str, object] = {"ok": False, "error": ""}
+_PRAGMA_REGISTERED_ENGINES: set[int] = set()
+
+
+def register_sqlite_pragmas_listener(target_engine) -> None:
+    """Attach an idempotent SQLAlchemy 'connect' listener applying SQLite
+    performance PRAGMAs on every newly opened connection (API + worker pools).
+    """
+    from sqlalchemy import event
+
+    sync_engine = getattr(target_engine, "sync_engine", target_engine)
+    if id(sync_engine) in _PRAGMA_REGISTERED_ENGINES:
+        return
+    _PRAGMA_REGISTERED_ENGINES.add(id(sync_engine))
+
+    @event.listens_for(sync_engine, "connect")
+    def _apply_sqlite_pragmas(dbapi_conn, _record):
+        import logging
+
+        logger = logging.getLogger("plexhub.db")
+
+        async def _do_pragmas(aiosqlite_conn):
+            try:
+                await aiosqlite_conn.execute("PRAGMA synchronous=NORMAL")
+                await aiosqlite_conn.execute("PRAGMA cache_size=-64000")
+                await aiosqlite_conn.execute("PRAGMA temp_store=MEMORY")
+                await aiosqlite_conn.execute("PRAGMA mmap_size=268435456")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("SQLite connect PRAGMA setup failed: %s", exc)
+
+        if hasattr(dbapi_conn, "run_async"):
+            dbapi_conn.run_async(_do_pragmas)
+
+
+register_sqlite_pragmas_listener(engine)
+register_sqlite_pragmas_listener(worker_engine)
 
 
 def register_sqlite_vec_listener(engine) -> None:

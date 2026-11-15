@@ -156,9 +156,12 @@ async def load_items(
     """Items for `(server_id, rating_key)` pairs, in one query."""
     if not keys:
         return {}
+    # Media PK is (rating_key, server_id, filter, sort_order): leading with
+    # rating_key lets SQLite use the primary key index instead of a full scan.
+    pk_keys = [(rk, sv) for sv, rk in keys]
     rows = (
         await session.execute(
-            select(Media).where(tuple_(Media.server_id, Media.rating_key).in_(list(keys)))
+            select(Media).where(tuple_(Media.rating_key, Media.server_id).in_(pk_keys))
         )
     ).scalars().all()
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}

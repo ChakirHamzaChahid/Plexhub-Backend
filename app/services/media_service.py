@@ -5,7 +5,7 @@ import json
 import logging
 from typing import Literal, Optional
 
-from sqlalchemy import select, func, delete, update, or_, tuple_
+from sqlalchemy import case, select, func, delete, update, or_, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.database import (
@@ -413,13 +413,13 @@ class MediaService:
             return [], total  # valid empty page (offset past the end)
 
         member_pks = (await db.execute(
-            select(MediaGroupMember.server_id, MediaGroupMember.rating_key)
+            select(MediaGroupMember.rating_key, MediaGroupMember.server_id)
             .where(
                 MediaGroupMember.media_type == media_type,
                 MediaGroupMember.group_key.in_(page_keys),
             )
         )).all()
-        pk_pairs = [(sv, rk) for sv, rk in member_pks]
+        pk_pairs = [(rk, sv) for rk, sv in member_pks]
         if not pk_pairs:
             return [], total  # stale snapshot: members deleted since build
 
@@ -428,7 +428,7 @@ class MediaService:
         # same (server_id, rating_key): one physical item can have both an
         # allowed and a non-allowed category row (same server_id+rating_key,
         # different `filter`) — only the allowed one is a real version, and the
-        # `(server_id, rating_key)` IN-join alone would otherwise re-inflate the
+        # `(rating_key, server_id)` IN-join alone would otherwise re-inflate the
         # non-allowed twin and diverge from the live versions[].
         #
         # The snapshot itself carries no outage awareness (it is rebuilt at
@@ -440,7 +440,7 @@ class MediaService:
             select(Media).where(
                 Media.type == media_type,
                 Media.is_in_allowed_categories == True,  # noqa: E712
-                tuple_(Media.server_id, Media.rating_key).in_(pk_pairs),
+                tuple_(Media.rating_key, Media.server_id).in_(pk_pairs),
                 *_outage_clause(await account_outage_service.masked_server_ids(db)),
             )
         )).scalars().all())
@@ -628,15 +628,18 @@ class MediaService:
         self, db: AsyncSession,
     ) -> tuple[int, int, int]:
         """Return (total_movies, missing_imdb, missing_tmdb)."""
-        base = select(func.count()).select_from(Media).where(Media.type == "movie")
-        total = (await db.execute(base)).scalar() or 0
-        missing_imdb = (await db.execute(
-            base.where(or_(Media.imdb_id.is_(None), Media.imdb_id == ""))
-        )).scalar() or 0
-        missing_tmdb = (await db.execute(
-            base.where(or_(Media.tmdb_id.is_(None), Media.tmdb_id == ""))
-        )).scalar() or 0
-        return total, missing_imdb, missing_tmdb
+        row = (await db.execute(
+            select(
+                func.count().label("total"),
+                func.sum(
+                    case((or_(Media.imdb_id.is_(None), Media.imdb_id == ""), 1), else_=0)
+                ).label("missing_imdb"),
+                func.sum(
+                    case((or_(Media.tmdb_id.is_(None), Media.tmdb_id == ""), 1), else_=0)
+                ).label("missing_tmdb"),
+            ).where(Media.type == "movie")
+        )).one()
+        return int(row.total or 0), int(row.missing_imdb or 0), int(row.missing_tmdb or 0)
 
     async def update_external_ids(
         self,

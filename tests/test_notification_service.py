@@ -23,6 +23,13 @@ from app.utils import ssrf
 
 
 @pytest.fixture(autouse=True)
+def _propagate_plexhub_logs(monkeypatch):
+    """app.main sets plexhub.propagate = False; enable propagation for caplog."""
+    monkeypatch.setattr(logging.getLogger("plexhub"), "propagate", True)
+    monkeypatch.setattr(logging.getLogger("httpx"), "level", logging.WARNING)
+
+
+@pytest.fixture(autouse=True)
 def _clean_notification_state():
     """Ensure clean cooldown cache, SSRF cache, and closed HTTP client between tests."""
     notification_service.clear_cooldown_cache()

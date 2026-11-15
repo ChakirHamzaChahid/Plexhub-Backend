@@ -65,6 +65,7 @@ async def run_migrations(engine: AsyncEngine) -> None:
     await _migration_030_api_key_scopes(engine)
     await _migration_031_metadata_edits(engine)
     await _migration_032_media_scrape_fields(engine)
+    await _migration_033_media_fts5(engine)
 
     logger.info("All migrations completed successfully")
 
@@ -1584,3 +1585,121 @@ async def _migration_032_media_scrape_fields(engine: AsyncEngine) -> None:
                 logger.info("Migration 032: %s column added", name)
             except Exception as e:
                 logger.warning("Migration 032: %s may already exist: %s", name, e)
+
+
+async def _migration_033_media_fts5(engine: AsyncEngine) -> None:
+    """Create and backfill FTS5 trigram index on media(title, genres) (CR-P03).
+
+    Uses an indexed `media_fts_map(rating_key, server_id -> fts_rowid)` lookup
+    table so trigger maintenance deletes/inserts by FTS5 `rowid` in O(1)
+    instead of scanning `media_fts`.
+    """
+    logger.info("Migration 033: Ensuring FTS5 trigram index media_fts")
+
+    async with engine.begin() as conn:
+        map_exists = (
+            await conn.execute(
+                text(
+                    "SELECT 1 FROM sqlite_master "
+                    "WHERE type='table' AND name='media_fts_map'"
+                )
+            )
+        ).first() is not None
+
+        if not map_exists:
+            # Drop any legacy trigger/table layout lacking O(1) rowid map.
+            await conn.execute(text("DROP TRIGGER IF EXISTS trg_media_fts_insert"))
+            await conn.execute(text("DROP TRIGGER IF EXISTS trg_media_fts_update"))
+            await conn.execute(text("DROP TRIGGER IF EXISTS trg_media_fts_delete"))
+            await conn.execute(text("DROP TABLE IF EXISTS media_fts"))
+
+            await conn.execute(
+                text(
+                    "CREATE TABLE IF NOT EXISTS media_fts_map ("
+                    "fts_rowid INTEGER PRIMARY KEY AUTOINCREMENT, "
+                    "rating_key TEXT NOT NULL, "
+                    "server_id TEXT NOT NULL, "
+                    "UNIQUE (rating_key, server_id)"
+                    ")"
+                )
+            )
+            await conn.execute(
+                text(
+                    "CREATE VIRTUAL TABLE IF NOT EXISTS media_fts "
+                    "USING fts5(rating_key UNINDEXED, server_id UNINDEXED, "
+                    "title, genres, tokenize='trigram')"
+                )
+            )
+            await conn.execute(
+                text(
+                    "INSERT OR IGNORE INTO media_fts_map(rating_key, server_id) "
+                    "SELECT rating_key, server_id FROM media GROUP BY rating_key, server_id"
+                )
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO media_fts(rowid, rating_key, server_id, title, genres) "
+                    "SELECT m_map.fts_rowid, m.rating_key, m.server_id, "
+                    "COALESCE(MAX(m.title), ''), COALESCE(MAX(m.genres), '') "
+                    "FROM media m "
+                    "JOIN media_fts_map m_map "
+                    "  ON m_map.rating_key = m.rating_key AND m_map.server_id = m.server_id "
+                    "GROUP BY m.rating_key, m.server_id"
+                )
+            )
+            await conn.execute(text("ANALYZE media_fts_map"))
+
+        await conn.execute(
+            text(
+                "CREATE TRIGGER IF NOT EXISTS trg_media_fts_insert "
+                "AFTER INSERT ON media BEGIN "
+                "INSERT OR IGNORE INTO media_fts_map(rating_key, server_id) "
+                "VALUES (NEW.rating_key, NEW.server_id); "
+                "DELETE FROM media_fts WHERE rowid = ("
+                "SELECT fts_rowid FROM media_fts_map "
+                "WHERE rating_key = NEW.rating_key AND server_id = NEW.server_id"
+                "); "
+                "INSERT INTO media_fts(rowid, rating_key, server_id, title, genres) "
+                "SELECT fts_rowid, NEW.rating_key, NEW.server_id, "
+                "COALESCE(NEW.title, ''), COALESCE(NEW.genres, '') "
+                "FROM media_fts_map "
+                "WHERE rating_key = NEW.rating_key AND server_id = NEW.server_id; "
+                "END"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE TRIGGER IF NOT EXISTS trg_media_fts_update "
+                "AFTER UPDATE OF title, genres ON media "
+                "WHEN (NEW.title IS NOT OLD.title OR NEW.genres IS NOT OLD.genres) BEGIN "
+                "INSERT OR IGNORE INTO media_fts_map(rating_key, server_id) "
+                "VALUES (NEW.rating_key, NEW.server_id); "
+                "DELETE FROM media_fts WHERE rowid = ("
+                "SELECT fts_rowid FROM media_fts_map "
+                "WHERE rating_key = NEW.rating_key AND server_id = NEW.server_id"
+                "); "
+                "INSERT INTO media_fts(rowid, rating_key, server_id, title, genres) "
+                "SELECT fts_rowid, NEW.rating_key, NEW.server_id, "
+                "COALESCE(NEW.title, ''), COALESCE(NEW.genres, '') "
+                "FROM media_fts_map "
+                "WHERE rating_key = NEW.rating_key AND server_id = NEW.server_id; "
+                "END"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE TRIGGER IF NOT EXISTS trg_media_fts_delete "
+                "AFTER DELETE ON media "
+                "WHEN NOT EXISTS ("
+                "SELECT 1 FROM media "
+                "WHERE rating_key = OLD.rating_key AND server_id = OLD.server_id"
+                ") BEGIN "
+                "DELETE FROM media_fts WHERE rowid = ("
+                "SELECT fts_rowid FROM media_fts_map "
+                "WHERE rating_key = OLD.rating_key AND server_id = OLD.server_id"
+                "); "
+                "DELETE FROM media_fts_map "
+                "WHERE rating_key = OLD.rating_key AND server_id = OLD.server_id; "
+                "END"
+            )
+        )

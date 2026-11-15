@@ -3,9 +3,10 @@ import base64
 import binascii
 import json
 import logging
+import weakref
 from typing import Literal, Optional
 
-from sqlalchemy import case, select, func, delete, update, or_, tuple_
+from sqlalchemy import case, delete, func, literal_column, or_, select, text, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.database import (
@@ -22,6 +23,51 @@ from app.utils.unification import calculate_history_group_key, calculate_unifica
 from app.utils.ttl_cache import TTLCache
 
 logger = logging.getLogger("plexhub.media")
+
+
+def _escape_fts5_phrase(term: str) -> str:
+    """Wrap `term` as a literal FTS5 phrase so operators/wildcards aren't parsed."""
+    return '"' + term.replace('"', '""') + '"'
+
+
+_MEDIA_FTS_CACHE: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+async def _has_media_fts(db: AsyncSession) -> bool:
+    """Return True if `media_fts` exists (cached positive result per Engine)."""
+    bind = db.get_bind()
+    if bind is not None and _MEDIA_FTS_CACHE.get(bind):
+        return True
+    row = (
+        await db.execute(
+            text("SELECT 1 FROM sqlite_master WHERE type='table' AND name='media_fts'")
+        )
+    ).first()
+    found = row is not None
+    if found and bind is not None:
+        _MEDIA_FTS_CACHE[bind] = True
+    return found
+
+
+def _media_text_filter(
+    column, column_name: str, term: str, *, use_fts: bool
+):
+    """Use FTS5 trigram match for >=3-char terms when available, else ILIKE."""
+    cleaned = term.strip()
+    if use_fts and len(cleaned) >= 3:
+        param_name = f"fts_{column_name}"
+        fts_subq = (
+            select(literal_column("rating_key"), literal_column("server_id"))
+            .select_from(text("media_fts"))
+            .where(
+                text(f"{column_name} MATCH :{param_name}").bindparams(
+                    **{param_name: _escape_fts5_phrase(cleaned)}
+                )
+            )
+        )
+        return tuple_(Media.rating_key, Media.server_id).in_(fts_subq)
+    safe = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return column.ilike(f"%{safe}%", escape="\\")
 
 
 def _aggregate_and_sort_movies(rows: list[Media]) -> list[MovieGroup]:
@@ -172,14 +218,17 @@ class MediaService:
 
         query = select(Media).where(Media.type == media_type)
 
+        use_fts = bool(
+            (search and len(search.strip()) >= 3)
+            or (genre and len(genre.strip()) >= 3)
+        ) and await _has_media_fts(db)
+
         if server_id:
             query = query.where(Media.server_id == server_id)
         if search:
-            safe_search = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            query = query.where(Media.title.ilike(f"%{safe_search}%", escape="\\"))
+            query = query.where(_media_text_filter(Media.title, "title", search, use_fts=use_fts))
         if genre:
-            safe_genre = genre.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            query = query.where(Media.genres.ilike(f"%{safe_genre}%", escape="\\"))
+            query = query.where(_media_text_filter(Media.genres, "genres", genre, use_fts=use_fts))
         if year:
             query = query.where(Media.year == year)
         imdb_missing = or_(Media.imdb_id.is_(None), Media.imdb_id == "")
@@ -319,12 +368,15 @@ class MediaService:
             Media.is_in_allowed_categories == True,  # noqa: E712
             *_outage_clause(masked),
         )
+        use_fts = bool(
+            (search and len(search.strip()) >= 3)
+            or (genre and len(genre.strip()) >= 3)
+        ) and await _has_media_fts(db)
+
         if search:
-            safe = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            query = query.where(Media.title.ilike(f"%{safe}%", escape="\\"))
+            query = query.where(_media_text_filter(Media.title, "title", search, use_fts=use_fts))
         if genre:
-            safe = genre.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            query = query.where(Media.genres.ilike(f"%{safe}%", escape="\\"))
+            query = query.where(_media_text_filter(Media.genres, "genres", genre, use_fts=use_fts))
         if year:
             query = query.where(Media.year == year)
 

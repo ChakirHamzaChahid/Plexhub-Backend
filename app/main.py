@@ -2,7 +2,6 @@ import asyncio
 import logging
 from logging.handlers import RotatingFileHandler as _RotatingFileHandler
 import os
-import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -143,135 +142,12 @@ async def _pipeline_guard():
             unified_group_service.set_pipeline_active(False)
 
 
-async def _auto_generate_plex_library():
-    """Auto-generate Plex library for all active accounts if PLEX_LIBRARY_DIR is set.
-
-    Thin wrapper (CR-A02): the generation wiring (`DatabaseSource` ->
-    `PlexLibraryGenerator` -> `LocalStorage` -> `generate()`) plus the
-    boot/schedule-time safety gating (skip if unconfigured / no active
-    accounts) now live in `app.services.plex_generation_service`, shared with
-    `app.api.sync`'s `/full-pipeline` endpoint — which used to reach into this
-    private coroutine directly (layering inversion) and now calls the service
-    instead.
-    """
-    from app.services.plex_generation_service import generate_plex_library_auto
-
-    await generate_plex_library_auto()
-
-
-async def _rebuild_unified_groups():
-    """CR-P01: rebuild the precomputed media_group snapshot the unfiltered
-    /movies|shows/unified browse endpoints page over.
-
-    Runs at the end of the pipeline (after enrichment/generation) so the
-    snapshot reflects the fully-enriched catalog — the same freshness as the
-    generated Plex library. Non-fatal: the unified list falls back to live
-    aggregation if this fails or hasn't run yet, so a failure never breaks
-    browsing.
-
-    Also refreshes sqlite_stat1 (AUDIT-P3-001) right after, while both
-    pipeline callers below still hold `_PIPELINE_LOCK`.
-    """
-    from app.services import unified_group_service
-    from app.db.database import async_session_factory, engine
-    from app.db.maintenance import run_sqlite_maintenance
-
-    try:
-        counts = await unified_group_service.rebuild_all(async_session_factory)
-        logger.info("Unified-group snapshot rebuilt: %s", counts)
-    except Exception as e:
-        logger.error("Unified-group snapshot rebuild failed: %s", e, exc_info=True)
-
-    await run_sqlite_maintenance(engine)
-
-
-async def _auto_provision_xtream_account():
-    """Create an Xtream account from env vars if it doesn't already exist."""
-    import hashlib
-    from sqlalchemy import select
-    from app.db.database import async_session_factory
-    from app.models.database import XtreamAccount
-    from app.services.xtream_credentials import XtreamCredentials
-    from app.services.xtream_service import safe_xtream_error, xtream_service
-
-    account_id = hashlib.md5(
-        f"{settings.XTREAM_BASE_URL}{settings.XTREAM_USERNAME}".encode()
-    ).hexdigest()[:8]
-
-    async with async_session_factory() as db:
-        result = await db.execute(
-            select(XtreamAccount).where(XtreamAccount.id == account_id)
-        )
-        if result.scalars().first():
-            logger.info(f"Xtream account {account_id} already exists (from env)")
-            return
-
-        # Authenticate to get server info (CR-C10: shared typed credentials
-        # holder instead of a throwaway anonymous class).
-        credentials = XtreamCredentials(
-            base_url=settings.XTREAM_BASE_URL,
-            port=settings.XTREAM_PORT,
-            username=settings.XTREAM_USERNAME,
-            password=settings.XTREAM_PASSWORD,
-        )
-
-        try:
-            auth_data = await xtream_service.authenticate(credentials)
-            user_info = auth_data.get("user_info", {})
-            server_info = auth_data.get("server_info", {})
-        except Exception as e:
-            logger.error(f"Xtream auto-provision auth failed: {safe_xtream_error(e)}")
-            return
-
-        account = XtreamAccount(
-            id=account_id,
-            label="Auto (env)",
-            base_url=settings.XTREAM_BASE_URL,
-            port=settings.XTREAM_PORT,
-            username=settings.XTREAM_USERNAME,
-            password=settings.XTREAM_PASSWORD,
-            status=user_info.get("status", "Unknown"),
-            expiration_date=int(user_info["exp_date"]) * 1000
-            if user_info.get("exp_date") else None,
-            max_connections=int(user_info.get("max_connections", 1)),
-            allowed_formats=",".join(user_info.get("allowed_output_formats", [])),
-            server_url=server_info.get("url"),
-            https_port=int(server_info["https_port"])
-            if server_info.get("https_port") else None,
-            is_active=True,
-            created_at=int(time.time() * 1000),
-        )
-        db.add(account)
-        await db.commit()
-        logger.info(f"Xtream account auto-provisioned from env: {account_id}")
-
-
-async def _cleanup_stale_epg():
-    """Delete EPG entries whose end_time is in the past (stale programs)."""
-    from sqlalchemy import delete
-    from app.db.database import async_session_factory
-    from app.models.database import EpgEntry
-    from app.utils.db_retry import run_with_retry
-
-    cutoff = int(time.time() * 1000)  # now in ms
-
-    # This cron runs at hour=3, right after the hour=2 stream-validation cron,
-    # whose long write transaction can still hold SQLite's single writer lock.
-    # The DELETE below *opens* the write transaction, so contention raises
-    # "database is locked" on the `execute` itself — before any commit — which
-    # is why wrapping only the commit was not enough (the job crashed nightly).
-    # Retry the whole open-a-session → delete → commit unit; each attempt gets a
-    # fresh session so a failed attempt is cleanly rolled back and closed.
-    async def _prune() -> int:
-        async with async_session_factory() as db:
-            result = await db.execute(
-                delete(EpgEntry).where(EpgEntry.end_time < cutoff)
-            )
-            await db.commit()
-            return result.rowcount
-
-    rowcount = await run_with_retry(_prune, op="epg_cleanup")
-    logger.info(f"EPG cleanup: removed {rowcount} stale entries")
+from app.services.startup_tasks import (  # noqa: E402
+    auto_generate_plex_library as _auto_generate_plex_library,
+    auto_provision_xtream_account as _auto_provision_xtream_account,
+    cleanup_stale_epg as _cleanup_stale_epg,
+    rebuild_unified_groups as _rebuild_unified_groups,
+)
 
 
 @asynccontextmanager

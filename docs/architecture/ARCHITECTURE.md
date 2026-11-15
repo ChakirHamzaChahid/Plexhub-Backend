@@ -1,13 +1,12 @@
 # PlexHub Backend — Architecture
 
-> **À jour au : 2026-07-11 (HEAD `742cd5d`, release v1.1.5, branche `develop`).** Document régénéré contre le code à HEAD (`/refresh-context`, agent a0-cartographer). `742cd5d` est un commit **docs-only** (`sync-context`) au-dessus du parent code `1879f83` → le **code auditté ici == `1879f83`**. Chaque fait est sourcé `fichier:ligne` ; les points non re-vérifiables sont marqués « à confirmer ». Source de cartographie fraîche et indépendante : `docs/audit/cleanroom-2026-07-11/` (photo clean-room à ce HEAD, 56 findings). Remplace les notes périmées `architecture-2026-05-13.md` / `architecture-2026-05-14.md`.
+> **À jour au : 2026-11-15 (HEAD `8fe3e52`, release `v1.16.0`, branche `develop`).** Document recalé sur le code à HEAD (`/refresh-context`) et l'audit clean-room [`docs/audit/cleanroom-2026-11-14/`](../audit/cleanroom-2026-11-14/README.md) + ses 6 lots de remédiation (`01bc900`..`de9ff56` + `8fe3e52`).
 >
-> **Changements de fond vs l'ancienne version de ce document (v1.0.2 / `3958c0d` / migration courante M013) :**
-> - **Auth désormais FAIL-CLOSED sur toute l'API JSON** — l'ancien modèle « catalogue/sync/plex OUVERTS » est **CADUC** (confirmé empiriquement : `GET /api/media/movies` sans `X-API-Key` → **401**). `_guard = [Depends(verify_backend_secret)]` garde `accounts`/`categories`/`live`/`media`/`stream`/`sync`/`plex` (`main.py:399-405`).
-> - **Migration courante = 014** (chaîne 001→014, `media` +13 colonnes métadonnées NFO tinyMM), plus M013 `media.is_adult`.
-> - **`GET /api/health` renvoie la version live** (`request.app.version`, `health.py:33`) — la dette « version 1.0.0 codée en dur » est **RÉSOLUE**.
-> - **Nouveau module de gestion multi-clés API** : router `api_keys` (`/api/admin/keys`, master-only), service `api_key_service`, entité ORM `ApiKey` (12 routers au total).
-> - **`APP_VERSION = "1.1.5"`** (`main.py:17`) ; CI **verte** (484 passed / 1 deselected, `docs/audit/cleanroom-2026-07-11/00-benchmark.md`).
+> **Synthèse de l'architecture courante (`v1.16.0`, `APP_VERSION = "1.16.0"`, `app/main.py:40`) :**
+> - **Auth FAIL-CLOSED** sur toute l'API JSON + vérification au démarrage `assert_api_routes_authenticated(app)` (`app/main.py:634`, `app/api/route_audit.py`), scopes granulaires (`scrape`/`scrape.admin`, `media.read`/`media.write`), CSRF `AdminCsrfMiddleware`, limiteur de corps ASGI pur `ScrapeBodyLimitMiddleware`.
+> - **Migrations 001→033** (`app/db/migrations.py:29-68`) sur **22 tables ORM** (`app/models/database.py`), incluant `scrape_cache` (M029), `api_keys.scopes` (M030), `metadata_edits` (M031), champs de scrape (M032) et **FTS5 trigram `media_fts` + `media_fts_map`** avec triggers $O(1)$ (M033).
+> - **Inventaire modules** : `app/main.py` (640 LOC, tâches de démarrage extraites dans `app/services/startup_tasks.py`), **25 modules** dans `app/api/` (11 routers `_MOUNT_GUARDED_ROUTERS` + 10 `_SELF_OR_ROUTE_GUARDED_ROUTERS`, `main.py:582-613`), **49 modules** dans `app/services/`, **7 workers** dans `app/workers/`, **18 utilitaires** dans `app/utils/`.
+> - **Packaging & CI** : `pyproject.toml` (`requires-python = ">=3.12"`, `--cov-fail-under=73`, `ruff`, `mypy`), CI alignée sur **Python 3.12** (`.github/workflows/tests.yml`), Docker multi-arch QEMU `linux/amd64,linux/arm64` (`.github/workflows/docker.yml`).
 
 ## 1. Vue d'ensemble
 

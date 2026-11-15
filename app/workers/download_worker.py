@@ -95,7 +95,7 @@ from pathlib import Path
 from sqlalchemy import func, select, update
 
 from app.config import settings
-from app.models.database import DownloadJob, Media, PlexMediaItem, XtreamAccount
+from app.models.database import DownloadBatch, DownloadJob, Media, PlexMediaItem, XtreamAccount
 from app.services import download_service, plex_download_service
 from app.services.download_nfo import render_media_nfo, render_plex_media_nfo
 from app.services.download_service import (
@@ -476,6 +476,92 @@ async def _mark_failed(session_factory, job_id: str, message: str) -> None:
         metrics.download_failures_total.labels(reason=reason).inc()
 
 
+async def _check_and_notify_batch_completion(session_factory, batch_id: str | None) -> None:
+    """If *batch_id* belongs to a DownloadBatch whose jobs have ALL reached a
+    terminal state (completed / failed / canceled), dispatch a structured
+    notification (severity='info' if completed, 'warning' if partial, 'error' if failed).
+    """
+    if not batch_id:
+        return
+
+    async def _inspect_batch():
+        async with session_factory() as db:
+            batch = await db.get(DownloadBatch, batch_id)
+            if batch is None:
+                return None
+            rows = (
+                await db.execute(
+                    select(DownloadJob.state, func.count())
+                    .where(DownloadJob.batch_id == batch_id)
+                    .group_by(DownloadJob.state)
+                )
+            ).all()
+            return batch.title, {state: count for state, count in rows}
+
+    try:
+        data = await run_with_retry(_inspect_batch, op="check_batch_completion")
+    except Exception:
+        logger.debug("Failed to inspect batch %s completion", batch_id, exc_info=True)
+        return
+
+    if not data:
+        return
+
+    batch_title, counts = data
+    # Non-terminal states: if any job is still queued or running, batch is in progress
+    queued = counts.get("queued", 0)
+    running = counts.get("running", 0)
+    if queued > 0 or running > 0:
+        return
+
+    completed = counts.get("completed", 0)
+    failed = counts.get("failed", 0)
+    canceled = counts.get("canceled", 0)
+    total = sum(counts.values())
+    if total == 0:
+        return
+
+    if completed == total:
+        status = "completed"
+        severity = "info"
+        title = f"Téléchargement terminé : {batch_title}"
+    elif completed > 0:
+        status = "partial"
+        severity = "warning"
+        title = f"Téléchargement partiel : {batch_title}"
+    else:
+        status = "failed"
+        severity = "error"
+        title = f"Téléchargement échoué : {batch_title}"
+
+    msg = f"Batch {batch_id} ({status}) : {completed}/{total} terminé(s) avec succès"
+    if failed:
+        msg += f", {failed} échec(s)"
+    if canceled:
+        msg += f", {canceled} annulé(s)"
+
+    try:
+        from app.services.notification_service import notify_fire_and_forget
+        notify_fire_and_forget(
+            event="download",
+            title=title,
+            message=msg,
+            severity=severity,
+            key=f"download_batch:{batch_id}",
+            details={
+                "batch_id": batch_id,
+                "title": batch_title,
+                "status": status,
+                "total": total,
+                "completed": completed,
+                "failed": failed,
+                "canceled": canceled,
+            },
+        )
+    except Exception:
+        logger.debug("Failed to dispatch download batch notification for %s", batch_id, exc_info=True)
+
+
 async def _handle_transient(session_factory, job_id: str, message: str) -> None:
     """Bump `attempts`; if still within `DOWNLOAD_MAX_RETRIES`, requeue
     IMMEDIATELY (state='queued') and only THEN back off, else mark `failed`.
@@ -515,11 +601,12 @@ async def _handle_transient(session_factory, job_id: str, message: str) -> None:
             job = await db.get(DownloadJob, job_id)
             if job is None or job.state != "running":
                 return None
-            return (job.attempts or 0) + 1
+            return (job.attempts or 0) + 1, job.batch_id
 
-    attempts = await run_with_retry(_peek_attempts, op="handle_transient_peek")
-    if attempts is None:
+    peek_result = await run_with_retry(_peek_attempts, op="handle_transient_peek")
+    if peek_result is None:
         return  # already canceled/gone — nothing to do
+    attempts, batch_id = peek_result
 
     if attempts <= settings.DOWNLOAD_MAX_RETRIES:
         delay = min(2 ** attempts, 30)
@@ -560,6 +647,8 @@ async def _handle_transient(session_factory, job_id: str, message: str) -> None:
         logger.warning(
             "Download job %s: giving up after %d attempt(s) (%s)", job_id, attempts, message,
         )
+        if batch_id:
+            await _check_and_notify_batch_completion(session_factory, batch_id)
 
 
 async def _run_job(session_factory, job_id: str, sem: asyncio.Semaphore) -> None:
@@ -569,6 +658,7 @@ async def _run_job(session_factory, job_id: str, sem: asyncio.Semaphore) -> None
     # `None` on every other exit path (claim miss / not-found / permanent
     # failure / cancel / success), where no post-semaphore work is needed.
     transient_message: str | None = None
+    batch_id: str | None = None
 
     async with sem:
         if not await _claim(session_factory, job_id):
@@ -577,6 +667,7 @@ async def _run_job(session_factory, job_id: str, sem: asyncio.Semaphore) -> None
         job = await _load_job(session_factory, job_id)
         if job is None:
             return
+        batch_id = job.batch_id
 
         # Direct-stream fallbacks (Plex download-disabled recovery); Xtream
         # jobs never populate this, so their transfer is byte-for-byte
@@ -586,6 +677,8 @@ async def _run_job(session_factory, job_id: str, sem: asyncio.Semaphore) -> None
             plex_urls = await plex_download_service.resolve_job_urls(session_factory, job)
             if not plex_urls:
                 await _mark_failed(session_factory, job_id, "source Plex introuvable ou non synchronisée")
+                if batch_id:
+                    await _check_and_notify_batch_completion(session_factory, batch_id)
                 return
             # [0] = original-file `?download=1` URL (share allows downloads);
             # the rest are direct-stream fallbacks download_to_disk switches to
@@ -596,10 +689,14 @@ async def _run_job(session_factory, job_id: str, sem: asyncio.Semaphore) -> None
             account = await _load_account(session_factory, job.server_id)
             if account is None:
                 await _mark_failed(session_factory, job_id, "compte source introuvable ou inactif")
+                if batch_id:
+                    await _check_and_notify_batch_completion(session_factory, batch_id)
                 return
             url = build_stream_url(account, job.rating_key)
             if not url:
                 await _mark_failed(session_factory, job_id, "URL de flux introuvable")
+                if batch_id:
+                    await _check_and_notify_batch_completion(session_factory, batch_id)
                 return
 
         try:
@@ -613,6 +710,8 @@ async def _run_job(session_factory, job_id: str, sem: asyncio.Semaphore) -> None
             # patterns, so this increment does not double up with the one
             # `_mark_failed` would otherwise skip for this message.
             metrics.download_failures_total.labels(reason="confinement").inc()
+            if batch_id:
+                await _check_and_notify_batch_completion(session_factory, batch_id)
             return
 
         last_persist = {"t": 0.0}
@@ -652,9 +751,13 @@ async def _run_job(session_factory, job_id: str, sem: asyncio.Semaphore) -> None
             )
         except DownloadCanceled:
             logger.info("Download job %s: canceled (title=%r)", job_id, job.title)
+            if batch_id:
+                await _check_and_notify_batch_completion(session_factory, batch_id)
             return
         except DownloadPermanentError as exc:
             await _mark_failed(session_factory, job_id, _safe_error(exc))
+            if batch_id:
+                await _check_and_notify_batch_completion(session_factory, batch_id)
             return
         except DownloadTransientError as exc:
             transient_message = _safe_error(exc)
@@ -669,6 +772,8 @@ async def _run_job(session_factory, job_id: str, sem: asyncio.Semaphore) -> None
             # job is already marked completed so it can never turn a good
             # download into a failure.
             await _write_sidecar_nfo(session_factory, job, dest)
+            if batch_id:
+                await _check_and_notify_batch_completion(session_factory, batch_id)
     # `sem` is released here — `_handle_transient` (peek + immediate requeue
     # + exponential back-off sleep) must NEVER run while still holding the
     # concurrency slot, or a single flaky job freezes the whole queue at

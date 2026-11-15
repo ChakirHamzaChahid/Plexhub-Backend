@@ -81,7 +81,7 @@ async def record_trip(
     trip of a streak (COALESCE), so it keeps meaning "down since" rather than
     "last seen down".
     """
-    async def _work(session: AsyncSession) -> int:
+    async def _work(session: AsyncSession) -> tuple[int, str]:
         await session.execute(
             update(XtreamAccount)
             .where(XtreamAccount.id == account_id)
@@ -91,12 +91,14 @@ async def record_trip(
             )
         )
         await session.commit()
-        strikes = (await session.execute(
-            select(XtreamAccount.outage_strikes).where(XtreamAccount.id == account_id)
-        )).scalar()
-        return int(strikes or 0)
+        row = (await session.execute(
+            select(XtreamAccount.outage_strikes, XtreamAccount.label).where(XtreamAccount.id == account_id)
+        )).first()
+        strikes = int(row[0] or 0) if row else 0
+        label = (row[1] if row and row[1] else account_id)
+        return strikes, label
 
-    strikes = await write_with_retry(
+    strikes, label = await write_with_retry(
         _work, session_factory=session_factory or worker_session_factory,
         op="outage_trip",
     )
@@ -114,6 +116,29 @@ async def record_trip(
             "" if settings.ACCOUNT_OUTAGE_MASK_ENABLED
             else " (masking DISABLED by ACCOUNT_OUTAGE_MASK_ENABLED=false)",
         )
+        server_id = build_server_id(account_id)
+        try:
+            from app.services.notification_service import notify_fire_and_forget
+            notify_fire_and_forget(
+                event="outage",
+                title=f"Panne fournisseur confirmée : {label}",
+                message=(
+                    f"Le fournisseur '{label}' ({server_id}) a atteint {strikes} échecs "
+                    f"consécutifs de validation (seuil {threshold}). Ses médias sont masqués."
+                ),
+                severity="error",
+                key=f"outage:{server_id}",
+                details={
+                    "account_id": account_id,
+                    "server_id": server_id,
+                    "label": label,
+                    "strikes": strikes,
+                    "threshold": threshold,
+                    "status": "outage",
+                },
+            )
+        except Exception:
+            logger.debug("Failed to dispatch outage notification for %s", account_id, exc_info=True)
     else:
         logger.warning(
             "Account %s: validation circuit breaker tripped (%d/%d consecutive "
@@ -131,21 +156,23 @@ async def record_clear(
     No-op at the DB level when there is nothing to clear (the common case,
     every run for every healthy account), so this never writes needlessly.
     """
-    async def _work(session: AsyncSession) -> int:
-        previous = (await session.execute(
-            select(XtreamAccount.outage_strikes).where(XtreamAccount.id == account_id)
-        )).scalar()
-        if not previous:
-            return 0
+    async def _work(session: AsyncSession) -> tuple[int, str]:
+        row = (await session.execute(
+            select(XtreamAccount.outage_strikes, XtreamAccount.label).where(XtreamAccount.id == account_id)
+        )).first()
+        if not row or not row[0]:
+            return 0, ""
+        previous = int(row[0])
+        label = row[1] if row[1] else account_id
         await session.execute(
             update(XtreamAccount)
             .where(XtreamAccount.id == account_id)
             .values(outage_strikes=0, outage_since=None)
         )
         await session.commit()
-        return int(previous)
+        return previous, label
 
-    previous = await write_with_retry(
+    previous, label = await write_with_retry(
         _work, session_factory=session_factory or worker_session_factory,
         op="outage_clear",
     )
@@ -157,6 +184,30 @@ async def record_clear(
             "its media are visible again",
             account_id, previous,
         )
+        threshold = settings.ACCOUNT_OUTAGE_STRIKES
+        if previous >= threshold:
+            server_id = build_server_id(account_id)
+            try:
+                from app.services.notification_service import notify_fire_and_forget
+                notify_fire_and_forget(
+                    event="outage",
+                    title=f"Rétablissement fournisseur : {label}",
+                    message=(
+                        f"Le fournisseur '{label}' ({server_id}) est rétabli après "
+                        f"{previous} échec(s) de validation. Ses médias sont de nouveau visibles."
+                    ),
+                    severity="info",
+                    key=f"recovery:{server_id}",
+                    details={
+                        "account_id": account_id,
+                        "server_id": server_id,
+                        "label": label,
+                        "previous_strikes": previous,
+                        "status": "recovered",
+                    },
+                )
+            except Exception:
+                logger.debug("Failed to dispatch outage recovery notification for %s", account_id, exc_info=True)
 
 
 async def list_outages(db: AsyncSession) -> list[dict]:

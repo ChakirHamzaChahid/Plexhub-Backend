@@ -4,10 +4,12 @@ Mounted at `/admin`, separate from the JSON API (`/api/...`). Routes here render
 HTML fragments rather than JSON; they call the same `media_service` functions
 the API uses, so business logic isn't duplicated.
 """
+import asyncio
 import logging
 import re
+import uuid
 from pathlib import Path
-from typing import Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, Response
@@ -28,11 +30,14 @@ from app.services import (
     account_outage_service,
     account_service,
     api_key_service,
+    backup_status_service,
     category_service,
+    job_registry,
     manual_scrape_service,
     nfo_import_service,
     poster_match_service,
 )
+from app.utils import job_health, tasks as app_tasks
 from app.utils.db_retry import session_factory_for, write_with_retry
 from app.utils.ssrf import SsrfBlockedError
 from app.utils.string_normalizer import clean_title
@@ -126,6 +131,7 @@ async def _stats_ctx(db: AsyncSession) -> dict:
         "movie_stats": stats["movie"],
         "show_stats": stats["show"],
         "outages": await account_outage_service.list_outages(db),
+        "backup_status": backup_status_service.compute_status(now_ms()),
     }
 
 
@@ -1351,6 +1357,281 @@ async def admin_accounts_categories_block_adult(
     )
     return templates.TemplateResponse(request, "admin/_categories_editor.html", ctx)
 
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Pilotage & suivi temps réel des jobs et sauvegardes (T9.2)
+# ──────────────────────────────────────────────────────────────────────────────
+
+_SECRET_URL_CREDS_RE = re.compile(r"://[^:/\s@]+:[^@/\s]+@")
+_SECRET_KV_RE = re.compile(
+    r"(?i)(password|passwd|token|api_key|apikey|secret|authorization|x-api-key)\s*[:=]\s*\S+"
+)
+
+
+def _sanitize_job_message(raw: object, max_len: int = 160) -> str:
+    """Strip URL credentials and key=value secrets, then bound length."""
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    text = _SECRET_URL_CREDS_RE.sub("://***:***@", text)
+    text = _SECRET_KV_RE.sub(lambda m: f"{m.group(1)}=***", text)
+    text = " ".join(text.split())
+    if len(text) > max_len:
+        return text[: max_len - 1] + "…"
+    return text
+
+
+async def _exec_sync_job() -> None:
+    from app.workers import sync_worker
+
+    await sync_worker.run_all_accounts()
+
+
+async def _exec_epg_sync_job() -> None:
+    from app.services import epg_sync_service
+
+    await epg_sync_service.run_epg_sync_job()
+
+
+async def _exec_enrichment_job() -> None:
+    from app.workers import enrichment_worker
+
+    await enrichment_worker.run()
+
+
+async def _exec_health_check_job() -> None:
+    from app.workers import health_check_worker
+
+    await health_check_worker.run()
+
+
+async def _exec_plex_generate_job() -> None:
+    from app.services import plex_generation_service
+
+    await plex_generation_service.generate_plex_library_auto()
+
+
+async def _exec_backup_job() -> None:
+    from app.scripts import backup_db
+
+    await asyncio.to_thread(backup_db.run_backup)
+
+
+_ADMIN_JOB_SPECS: dict[str, dict[str, Any]] = {
+    "sync": {
+        "label": "Synchronisation Xtream",
+        "phase": "sync",
+        "phases": ("sync",),
+        "prefixes": ("sync_", "admin_sync_"),
+        "health_key": "pipeline",
+        "runner": _exec_sync_job,
+    },
+    "epg_sync": {
+        "label": "Synchro EPG (XMLTV)",
+        "phase": "epg_sync",
+        "phases": ("epg_sync",),
+        "prefixes": ("epg_sync_", "admin_epg_sync_"),
+        "health_key": "epg_sync",
+        "runner": _exec_epg_sync_job,
+    },
+    "enrichment": {
+        "label": "Enrichissement TMDB",
+        "phase": "enrichment",
+        "phases": ("enrichment",),
+        "prefixes": ("enrichment_", "admin_enrichment_"),
+        "health_key": None,
+        "runner": _exec_enrichment_job,
+    },
+    "health_check": {
+        "label": "Validation des flux",
+        "phase": "validation",
+        "phases": ("validation", "health_check"),
+        "prefixes": ("validation_", "health_check_", "admin_health_check_"),
+        "health_key": "health_check",
+        "runner": _exec_health_check_job,
+    },
+    "plex_generate": {
+        "label": "Génération bibliothèque Plex",
+        "phase": "generation",
+        "phases": ("generation", "plex_generate"),
+        "prefixes": ("plex_generate_", "admin_plex_generate_"),
+        "health_key": None,
+        "runner": _exec_plex_generate_job,
+    },
+    "backup": {
+        "label": "Sauvegarde BDD",
+        "phase": "backup",
+        "phases": ("backup", "db_backup"),
+        "prefixes": ("backup_", "admin_backup_"),
+        "health_key": "db_backup",
+        "runner": _exec_backup_job,
+    },
+}
+
+
+def _match_job_entry(job_name: str, entry: dict[str, Any]) -> bool:
+    spec = _ADMIN_JOB_SPECS[job_name]
+    job_id = str(entry.get("job_id") or "")
+    phase = str(entry.get("phase") or "")
+    return job_id.startswith(spec["prefixes"]) or phase in spec["phases"]
+
+
+def _is_job_running(job_name: str, all_jobs: list[dict[str, Any]] | None = None) -> bool:
+    task_name = f"admin_job_{job_name}"
+    if any(
+        not task.done() and task.get_name() == task_name
+        for task in app_tasks._background_tasks
+    ):
+        return True
+    entries = all_jobs if all_jobs is not None else job_registry.get_all_jobs()
+    return any(
+        _match_job_entry(job_name, entry) and entry.get("status") == "processing"
+        for entry in entries
+    )
+
+
+def _build_job_views(backup_status: dict[str, Any]) -> list[dict[str, Any]]:
+    all_jobs = job_registry.get_all_jobs()
+    views: list[dict[str, Any]] = []
+    for name, spec in _ADMIN_JOB_SPECS.items():
+        matched = [e for e in all_jobs if _match_job_entry(name, e)]
+        running = _is_job_running(name, all_jobs)
+
+        health_success = (
+            job_health.last_success_ms(spec["health_key"])
+            if spec["health_key"]
+            else None
+        )
+        registry_success = next(
+            (
+                e.get("finished_at") or e.get("started_at")
+                for e in matched
+                if e.get("status") == "completed"
+            ),
+            None,
+        )
+        success_candidates = [
+            ts for ts in (health_success, registry_success) if isinstance(ts, int)
+        ]
+        if name == "backup" and isinstance(backup_status.get("lastSuccessAt"), int):
+            success_candidates.append(backup_status["lastSuccessAt"])
+        last_success_at = max(success_candidates) if success_candidates else None
+
+        last_failed = next(
+            (e for e in matched if e.get("status") == "failed"), None
+        )
+        last_failure_at = (
+            (last_failed.get("finished_at") or last_failed.get("started_at"))
+            if last_failed
+            else None
+        )
+        latest = matched[0] if matched else None
+
+        if running:
+            status = "running"
+            message = "En cours d'exécution…"
+        elif latest and latest.get("status") == "failed":
+            status = "error"
+            message = _sanitize_job_message(latest.get("error")) or "Échec du dernier run"
+        elif (
+            last_failure_at is not None
+            and (last_success_at is None or last_failure_at > last_success_at)
+        ):
+            status = "error"
+            message = (
+                _sanitize_job_message(last_failed.get("error") if last_failed else None)
+                or "Échec du dernier run"
+            )
+        else:
+            status = "idle"
+            message = (
+                "Dernier run réussi"
+                if last_success_at is not None
+                else "Aucun run récent"
+            )
+
+        views.append(
+            {
+                "name": name,
+                "label": spec["label"],
+                "status": status,
+                "last_success_at": last_success_at,
+                "last_failure_at": last_failure_at,
+                "message": message,
+            }
+        )
+    return views
+
+
+def _jobs_ctx(
+    *,
+    flash_message: str | None = None,
+    flash_error: str | None = None,
+) -> dict[str, Any]:
+    current_ms = now_ms()
+    backup_status = backup_status_service.compute_status(current_ms)
+    return {
+        "jobs": _build_job_views(backup_status),
+        "backup_status": backup_status,
+        "is_master": job_health.is_master(),
+        "server_now_ms": current_ms,
+        "flash_message": flash_message,
+        "flash_error": flash_error,
+    }
+
+
+@router.get("/jobs", response_class=HTMLResponse)
+async def admin_jobs_index(request: Request):
+    return templates.TemplateResponse(request, "admin/jobs.html", _jobs_ctx())
+
+
+@router.get("/jobs/panel", response_class=HTMLResponse)
+async def admin_jobs_panel(request: Request):
+    return templates.TemplateResponse(request, "admin/_jobs_panel.html", _jobs_ctx())
+
+
+@router.post("/jobs/{job_name}/run", response_class=HTMLResponse)
+async def admin_jobs_run(job_name: str, request: Request):
+    spec = _ADMIN_JOB_SPECS.get(job_name)
+    if spec is None:
+        raise HTTPException(status_code=404, detail=f"Unknown job '{job_name}'")
+
+    if _is_job_running(job_name):
+        return templates.TemplateResponse(
+            request,
+            "admin/_jobs_panel.html",
+            _jobs_ctx(
+                flash_error=f"Le job « {spec['label']} » est déjà en cours."
+            ),
+            status_code=409,
+        )
+
+    job_id = f"admin_{job_name}_{uuid.uuid4().hex[:8]}"
+    job_registry.create_job(job_id, phase=spec["phase"])
+    runner: Callable[[], Awaitable[None]] = spec["runner"]
+    health_key: str | None = spec["health_key"]
+
+    async def _tracked() -> None:
+        try:
+            await runner()
+            job_registry.update_job(job_id, status="completed", progress={})
+            if health_key:
+                job_health.mark_job_success(health_key)
+        except Exception as exc:
+            logger.error("Admin job %s (%s) failed: %s", job_name, job_id, exc)
+            job_registry.update_job(
+                job_id,
+                status="failed",
+                error=_sanitize_job_message(str(exc)) or "Job failed",
+            )
+
+    create_background_task(_tracked(), name=f"admin_job_{job_name}")
+    return templates.TemplateResponse(
+        request,
+        "admin/_jobs_panel.html",
+        _jobs_ctx(flash_message=f"Job « {spec['label']} » démarré."),
+    )
 
 
 __all__ = ["router"]

@@ -64,4 +64,24 @@
     {% endfor %}
   </div>
   {% endif %}
+  {% if backup_status %}
+  <div class="w-full border-t border-slate-100 pt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600">
+    <div>
+      <span class="font-semibold text-slate-700">Sauvegarde BDD :</span>
+      {% if backup_status.lastSuccessAt %}
+      dernière le {{ backup_status.lastSuccessAt | ms }}
+      {% else %}
+      aucune sauvegarde détectée
+      {% endif %}
+      · intégrité :
+      <span class="font-medium {{ 'text-emerald-700' if backup_status.integrityCheck == 'ok' else ('text-amber-700' if backup_status.integrityCheck == 'unknown' else 'text-slate-500') }}">
+        {{ backup_status.integrityCheck }}
+      </span>
+      {% if not backup_status.enabled %}
+      · <span class="text-slate-400">planification désactivée</span>
+      {% endif %}
+    </div>
+    <a href="/admin/jobs" class="text-blue-600 hover:underline font-medium">Jobs &amp; Backups →</a>
+  </div>
+  {% endif %}
 </div>

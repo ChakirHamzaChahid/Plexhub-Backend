@@ -164,6 +164,7 @@ async def list_unified(
     limit: int,
     offset: int,
     genre: str | None = None,
+    server_id: str | None = None,
 ) -> tuple[list[PlexUnifiedItem], int]:
     """Paginated, deduplicated browse list for *media_type* ('movie'|'show').
 
@@ -208,6 +209,8 @@ async def list_unified(
         base_filters.append(
             PlexMediaItem.genres.ilike(f"%{_escape_like(genre)}%", escape="\\")
         )
+    if server_id:
+        base_filters.append(PlexMediaItem.server_id == server_id)
 
     max_added = func.max(PlexMediaItem.added_at)
     group_query = (

@@ -255,3 +255,51 @@ class TestOriginVersionLoaders:
             resp = await api_client.get(url, auth=(ADMIN_USER, ADMIN_PASS))
             assert "secret-token" not in resp.text
             assert "10.0.0.9" not in resp.text
+
+
+    async def test_id_filter_and_plex_server_filter(
+        self, api_client, monkeypatch, db_factory,
+    ):
+        _configure_admin(monkeypatch)
+        _wire_db(monkeypatch, db_factory)
+        monkeypatch.setattr(settings, "PLEX_ACCOUNT_TOKEN", "plex-acct-tok")
+        async with db_factory() as s:
+            s.add_all([
+                _plex_server(),
+                _plex("p1", title="Interstellar", unification_id=SHARED_UID),
+                _media("x1", title="Local Only", unification_id="title_local_only"),
+            ])
+            await s.commit()
+
+        # Index exposes Plex sync button + Plex server option
+        idx = await api_client.get("/admin/unified-downloads", auth=(ADMIN_USER, ADMIN_PASS))
+        assert idx.status_code == 200
+        assert "Synchroniser Plex" in idx.text
+        assert PLEX_SID in idx.text
+
+        # id_filter=imdb keeps Interstellar, excludes title_local_only
+        r_imdb = await api_client.get(
+            "/admin/unified-downloads/list?type=movie&id_filter=imdb",
+            auth=(ADMIN_USER, ADMIN_PASS),
+        )
+        assert r_imdb.status_code == 200
+        assert "Interstellar" in r_imdb.text
+        assert "Local Only" not in r_imdb.text
+
+        # id_filter=none keeps only title_local_only
+        r_none = await api_client.get(
+            "/admin/unified-downloads/list?type=movie&id_filter=none",
+            auth=(ADMIN_USER, ADMIN_PASS),
+        )
+        assert r_none.status_code == 200
+        assert "Local Only" in r_none.text
+        assert "Interstellar" not in r_none.text
+
+        # plex_server_id filters to media present on that Plex server
+        r_srv = await api_client.get(
+            f"/admin/unified-downloads/list?type=movie&plex_server_id={PLEX_SID}",
+            auth=(ADMIN_USER, ADMIN_PASS),
+        )
+        assert r_srv.status_code == 200
+        assert "Interstellar" in r_srv.text
+        assert "Local Only" not in r_srv.text

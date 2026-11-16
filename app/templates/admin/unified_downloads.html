@@ -3,16 +3,25 @@
 
 {% block content %}
 {% with active_tab='unified' %}{% include "admin/_downloads_subtabs.html" %}{% endwith %}
-<section class="mb-6">
-  <h2 class="text-xl font-semibold mb-1">Téléchargements — Plex &amp; Xtream</h2>
-  <p class="text-sm text-slate-500">
-    Écran unifié : films et séries des deux sources (Plex partagés + comptes Xtream), dédupliqués
-    par identité (un titre présent des deux côtés n'apparaît qu'une fois). Ouvre un titre pour
-    choisir la source à télécharger — chaque source réutilise le sélecteur de l'onglet d'origine
-    (<a href="/admin/downloads" class="underline">Télécharger</a> /
-    <a href="/admin/plex-downloads" class="underline">Télécharger Plex</a>) et alimente la même
-    file de téléchargement.
-  </p>
+<section class="mb-4 flex flex-wrap items-start justify-between gap-3">
+  <div>
+    <h2 class="text-xl font-semibold mb-1">Téléchargements — Plex &amp; Xtream</h2>
+    <p class="text-sm text-slate-500">
+      Écran unifié : films et séries des deux sources (Plex partagés + comptes Xtream), dédupliqués
+      par identité (un titre présent des deux côtés n'apparaît qu'une fois).
+    </p>
+  </div>
+  {% if plex_enabled %}
+  <div class="flex flex-wrap items-center gap-2 bg-white border border-slate-200 rounded px-3 py-2 shadow-sm">
+    <form hx-post="/admin/plex-downloads/sync" hx-target="#plex-sync-status" hx-swap="outerHTML" class="inline">
+      <button type="submit"
+              class="px-3 py-1 text-xs font-medium rounded bg-slate-900 text-slate-100 hover:bg-slate-700">
+        Synchroniser Plex
+      </button>
+    </form>
+    {% include "admin/_plex_sync_status.html" %}
+  </div>
+  {% endif %}
 </section>
 
 <form id="udl-filters"
@@ -35,13 +44,36 @@
   <div class="flex flex-col">
     <label class="text-xs text-slate-500" for="udl-search">Recherche</label>
     <input id="udl-search" name="search" type="search" value="{{ search }}" placeholder="titre…"
-           class="border border-slate-300 rounded px-2 py-1 text-sm w-56">
+           class="border border-slate-300 rounded px-2 py-1 text-sm w-48">
   </div>
 
   <div class="flex flex-col">
-    <label class="text-xs text-slate-500" for="udl-genre">Genre</label>
-    <input id="udl-genre" name="genre" type="search" value="{{ genre }}" placeholder="ex. Action"
+    <label class="text-xs text-slate-500" for="udl-genre">Catégorie / Genre</label>
+    <input id="udl-genre" name="genre" type="search" value="{{ genre }}" placeholder="ex. Action, Anime"
            class="border border-slate-300 rounded px-2 py-1 text-sm w-40">
+  </div>
+
+  <div class="flex flex-col">
+    <label class="text-xs text-slate-500" for="udl-id-filter">Identifiants</label>
+    <select id="udl-id-filter" name="id_filter" class="border border-slate-300 rounded px-2 py-1 text-sm">
+      <option value="all"    {% if id_filter == 'all' %}selected{% endif %}>Tous</option>
+      <option value="has_id" {% if id_filter == 'has_id' %}selected{% endif %}>Avec IMDb ou TMDB</option>
+      <option value="imdb"   {% if id_filter == 'imdb' %}selected{% endif %}>Avec IMDb</option>
+      <option value="tmdb"   {% if id_filter == 'tmdb' %}selected{% endif %}>Avec TMDB</option>
+      <option value="none"   {% if id_filter == 'none' %}selected{% endif %}>Sans identifiant</option>
+    </select>
+  </div>
+
+  <div class="flex flex-col">
+    <label class="text-xs text-slate-500" for="udl-plex-server">Serveur Plex</label>
+    <select id="udl-plex-server" name="plex_server_id" class="border border-slate-300 rounded px-2 py-1 text-sm">
+      <option value="">Tous (Plex + Xtream)</option>
+      {% for srv in plex_servers %}
+      <option value="{{ srv.server_id }}" {% if plex_server_id == srv.server_id %}selected{% endif %}>
+        {{ srv.name }}{% if srv.owner_title %} ({{ srv.owner_title }}){% endif %}
+      </option>
+      {% endfor %}
+    </select>
   </div>
 
   <input type="hidden" name="page" value="1">

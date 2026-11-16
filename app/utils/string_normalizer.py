@@ -125,7 +125,7 @@ _TRAILING_LANG_TAG_RE = re.compile(
 )
 # French box-set / pack suffix ("intégrales des saisons", "INTEGRALE VOF 576p Opu", ...)
 _INTEGRALE_SUFFIX_RE = re.compile(
-    r"(?<=\S)\s+(?:int[ée]grales?|int[ée]gral|integral)\b.*$",
+    r"(?<=\S)\s+(?:l['’]\s*)?(?:int[ée]grales?|int[ée]gral|integral)\b.*$",
     re.IGNORECASE,
 )
 _LEADING_PIPE_MARK_RE = re.compile(r"^\s*\|[^|]*\|\s*")

@@ -30,6 +30,12 @@
     <div class="flex flex-wrap items-center gap-1 mt-1">
       <span class="px-1.5 py-0.5 text-[10px] rounded {{ 'bg-emerald-100 text-emerald-800' if item.imdb_id else 'bg-slate-100 text-slate-400' }}">IMDb</span>
       <span class="px-1.5 py-0.5 text-[10px] rounded {{ 'bg-emerald-100 text-emerald-800' if item.tmdb_id else 'bg-slate-100 text-slate-400' }}">TMDB</span>
+      {% if item.match_locked %}
+      <span class="px-1.5 py-0.5 text-[10px] rounded bg-amber-100 text-amber-800">verrouillé</span>
+      {% endif %}
+      {% if item.is_adult %}
+      <span class="px-1.5 py-0.5 text-[10px] rounded bg-rose-100 text-rose-800">adulte</span>
+      {% endif %}
       {% if item.match_source %}
       <span class="px-1.5 py-0.5 text-[10px] rounded bg-indigo-100 text-indigo-800">{{ item.match_source }}</span>
       {% endif %}

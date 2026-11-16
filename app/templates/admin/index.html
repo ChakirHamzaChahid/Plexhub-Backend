@@ -5,57 +5,70 @@
   {% include "admin/_stats.html" %}
 </section>
 
-{# ── Lot + file « À vérifier » en accès direct au-dessus du tableau ──────── #}
-<section class="grid gap-4 mb-4 lg:grid-cols-3">
-  <div class="bg-white rounded shadow-sm border border-slate-200 p-3">
-    <h2 class="text-sm font-semibold text-slate-900">Scraping par lot</h2>
-    <p class="text-xs text-slate-500 mt-1">
-      Apparie les médias avec 1 ID, puis scrape ceux sans ID. Les cas sûrs sont
-      appliqués ; le reste part dans « À vérifier ».
-    </p>
-    <form hx-post="/admin/scrape-batch"
-          hx-target="#scrape-batch-status"
-          hx-swap="outerHTML"
-          class="flex flex-wrap items-end gap-2 mt-3">
-      <label class="flex flex-col text-xs text-slate-500">
-        Type
-        <select name="type" class="border border-slate-300 rounded px-2 py-1 text-sm">
-          <option value="all">Films + séries</option>
-          <option value="movie">Films</option>
-          <option value="show">Séries</option>
-        </select>
-      </label>
-      <label class="flex flex-col text-xs text-slate-500">
-        Max items
-        <input name="max_items" type="number" min="1" placeholder="défaut"
-               class="border border-slate-300 rounded px-2 py-1 text-sm w-24">
-      </label>
-      <label class="flex items-center gap-1 text-xs text-slate-600 pb-1">
-        <input type="checkbox" name="dry_run" value="1" checked> simulation
-      </label>
-      <label class="flex items-center gap-1 text-xs text-slate-600 pb-1"
-             title="Re-tente les médias actuellement en attente dans « À vérifier »">
-        <input type="checkbox" name="include_pending" value="1"> réessayer À vérifier
-      </label>
-      <button type="submit"
-              class="px-3 py-1 text-xs rounded bg-slate-900 text-slate-100 hover:bg-slate-700">
-        Lancer
-      </button>
-    </form>
-    <div class="mt-3">
+{# ── Barre de pilotage Scraping par lot + À vérifier repliable ─────────── #}
+<section class="grid gap-3 mb-4">
+  <div class="bg-white rounded-lg shadow-sm border border-slate-200 p-3">
+    <div class="flex flex-wrap items-center justify-between gap-2">
+      <div>
+        <h2 class="text-sm font-semibold text-slate-900">Scraping par lot</h2>
+        <p class="text-xs text-slate-500">
+          Apparie les médias avec 1 ID, puis scrape ceux sans ID. Les correspondances sûres sont appliquées automatiquement ; le reste part dans « À vérifier ».
+        </p>
+      </div>
+      <form hx-post="/admin/scrape-batch"
+            hx-target="#scrape-batch-status"
+            hx-swap="outerHTML"
+            class="flex flex-wrap items-end gap-2">
+        <label class="flex flex-col text-xs text-slate-500">
+          Type
+          <select name="type" class="border border-slate-300 rounded px-2 py-1 text-xs bg-white">
+            <option value="all">Films + séries</option>
+            <option value="movie">Films</option>
+            <option value="show">Séries</option>
+          </select>
+        </label>
+        <label class="flex flex-col text-xs text-slate-500">
+          Max items
+          <input name="max_items" type="number" min="1" placeholder="défaut"
+                 class="border border-slate-300 rounded px-2 py-1 text-xs w-20">
+        </label>
+        <label class="flex items-center gap-1 text-xs text-slate-600 pb-1 cursor-pointer">
+          <input type="checkbox" name="dry_run" value="1" checked> simulation
+        </label>
+        <label class="flex items-center gap-1 text-xs text-slate-600 pb-1 cursor-pointer"
+               title="Re-tente les médias actuellement en attente dans « À vérifier »">
+          <input type="checkbox" name="include_pending" value="1"> réessayer À vérifier
+        </label>
+        <button type="submit"
+                class="px-3 py-1.5 text-xs font-medium rounded bg-slate-900 text-slate-100 hover:bg-slate-700">
+          Lancer le lot
+        </button>
+      </form>
+    </div>
+    <div class="mt-2.5 pt-2.5 border-t border-slate-100">
       {% include "admin/_scrape_batch_status.html" %}
     </div>
   </div>
 
-  <div class="lg:col-span-2 bg-white rounded shadow-sm border border-slate-200 overflow-hidden">
-    <h2 class="text-sm font-semibold text-slate-900 px-3 pt-3">À vérifier</h2>
+  {% set total_review_pending = (movie_stats.review_pending or 0) + (show_stats.review_pending or 0) %}
+  <details class="bg-white rounded-lg shadow-sm border border-slate-200 overflow-hidden">
+    <summary class="flex items-center justify-between px-3 py-2.5 cursor-pointer select-none hover:bg-slate-50">
+      <span class="flex items-center gap-2 text-sm font-semibold text-slate-900">
+        File « À vérifier »
+        <span class="px-2 py-0.5 text-xs rounded-full {{ 'bg-amber-100 text-amber-800' if total_review_pending else 'bg-slate-100 text-slate-500' }}">
+          {{ total_review_pending }}
+        </span>
+      </span>
+      <span class="text-xs text-slate-500">Cliquer pour afficher / masquer les candidats</span>
+    </summary>
     <div id="review-list"
          hx-get="/admin/review"
          hx-trigger="load, refresh-review from:body"
          hx-target="#review-list"
-         hx-swap="innerHTML">
+         hx-swap="innerHTML"
+         class="max-h-[36rem] overflow-y-auto border-t border-slate-200">
     </div>
-  </div>
+  </details>
 </section>
 
 {#

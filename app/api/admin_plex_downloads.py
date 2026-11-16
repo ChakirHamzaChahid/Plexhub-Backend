@@ -371,6 +371,7 @@ async def admin_plex_downloads_enqueue(
     # only) -- FastAPI collects same-named form fields into these lists.
     season_pick: list[str] = Form(default=[]),
     episode_pick: list[str] = Form(default=[]),
+    target_library: Optional[str] = Form(None),
     db: AsyncSession = Depends(get_db),
 ):
     error: Optional[str] = None
@@ -387,6 +388,7 @@ async def admin_plex_downloads_enqueue(
             result = await plex_download_service.enqueue_plex_selection(
                 db, media_type=type, unification_id=unification_id, scope=scope,
                 server_id=server_id, rating_key=rating_key,
+                target_library=target_library,
             )
             error = result.error
     elif scope == "seasons":
@@ -396,7 +398,7 @@ async def admin_plex_downloads_enqueue(
         else:
             result = await plex_download_service.enqueue_plex_selection(
                 db, media_type=type, unification_id=unification_id, scope=scope,
-                season_picks=picks,
+                season_picks=picks, target_library=target_library,
             )
             error = result.error
     else:  # scope == "episodes"
@@ -406,7 +408,7 @@ async def admin_plex_downloads_enqueue(
         else:
             result = await plex_download_service.enqueue_plex_selection(
                 db, media_type=type, unification_id=unification_id, scope=scope,
-                episode_picks=picks,
+                episode_picks=picks, target_library=target_library,
             )
             error = result.error
 

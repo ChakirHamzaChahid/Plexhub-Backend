@@ -826,7 +826,7 @@ async def _run_job(session_factory, job_id: str, sem: asyncio.Semaphore) -> None
             # `download_to_disk` so `InsufficientDiskSpaceError` (a
             # `DownloadPermanentError` subclass) is handled identically —
             # `failed` immediately, no retry budget consumed.
-            await download_service.check_free_disk_space()
+            await download_service.check_free_disk_space(dest.parent)
             result = await download_service.download_to_disk(
                 url, dest, on_progress=_on_progress, cancel_check=_cancel_check,
                 fallback_urls=fallback_urls,

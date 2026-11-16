@@ -166,6 +166,36 @@ def _sanitize_segment(name: str, *, fallback: str) -> str:
     )
 
 
+_ANIME_KEYWORDS = ("anime", "animé", "japanim", "animation")
+
+
+def is_anime_metadata(
+    genres: Optional[str] = None,
+    category_name: Optional[str] = None,
+) -> bool:
+    """Return True when genres or category_name indicate an anime/animated show."""
+    haystack = f"{genres or ''} {category_name or ''}".lower()
+    return any(kw in haystack for kw in _ANIME_KEYWORDS)
+
+
+def resolve_target_library(
+    media_type: str,
+    *,
+    target_library: Optional[str] = None,
+    genres: Optional[str] = None,
+    category_name: Optional[str] = None,
+) -> str:
+    """Resolve effective target library ('movies' | 'series' | 'anime')."""
+    explicit = (target_library or "").strip().lower()
+    if explicit in ("movies", "series", "anime"):
+        return explicit
+    if media_type == "movie":
+        return "movies"
+    if is_anime_metadata(genres=genres, category_name=category_name):
+        return "anime"
+    return "series"
+
+
 def compute_dest_path(
     *,
     media_type: str,
@@ -174,25 +204,24 @@ def compute_dest_path(
     season: Optional[int],
     episode: Optional[int],
     ext: str,
+    target_library: Optional[str] = None,
 ) -> str:
-    """Relative destination path under `DOWNLOAD_DIR` (NEVER absolute, NEVER
-    derived from client input).
+    """Relative destination path under `DOWNLOAD_DIR` (or per-library root
+    `DOWNLOAD_MOVIES_DIR` / `DOWNLOAD_SERIES_DIR` / `DOWNLOAD_ANIME_DIR`).
 
-    Movies:  ``Movies/<Title (Year)>/<Title (Year)>.<ext>``
+    Movies:  ``Movies/<Title (Year)>/<Title (Year)>.<ext>`` (or ``Anime/...``)
     Episode: ``Series/<Show Title>/Season NN/<Show Title> - SxxEyy.<ext>``
-
-    Every segment goes through `_sanitize_segment` (defense); `resolve_confined`
-    proves confinement at write time (F-007) — the two are complementary, not
-    redundant. The adult `[XXX]` prefix is not applied to download paths
-    (spec §12 — "non appliqué au MVP").
+             (or ``Anime/<Show Title>/Season NN/...``)
     """
     safe_ext = _sanitize_segment((ext or _DEFAULT_EXT).lstrip("."), fallback=_DEFAULT_EXT)
     display_title = title or "Unknown"
+    lib = (target_library or "").strip().lower()
 
     if media_type == "movie":
         display = f"{display_title} ({year})" if year else display_title
         folder = _sanitize_segment(display, fallback="Unknown")
-        return f"Movies/{folder}/{folder}.{safe_ext}"
+        root_dir = "Anime" if lib == "anime" else "Movies"
+        return f"{root_dir}/{folder}/{folder}.{safe_ext}"
 
     if media_type == "episode":
         show_folder = _sanitize_segment(display_title, fallback="Unknown")
@@ -201,28 +230,32 @@ def compute_dest_path(
         season_dir = f"Season {season_n:02d}"
         base_name = f"{show_folder} - S{season_n:02d}E{episode_n:02d}"
         file_name = _sanitize_segment(base_name, fallback=f"S{season_n:02d}E{episode_n:02d}")
-        return f"Series/{show_folder}/{season_dir}/{file_name}.{safe_ext}"
+        root_dir = "Anime" if lib == "anime" else "Series"
+        return f"{root_dir}/{show_folder}/{season_dir}/{file_name}.{safe_ext}"
 
     raise ValueError(f"unsupported media_type for download: {media_type!r}")
 
 
-async def check_free_disk_space() -> None:
-    """Préflight disk-space guard (DL-02, `DOWNLOAD_MIN_FREE_DISK_MB`).
-
-    Raises `InsufficientDiskSpaceError` if `DOWNLOAD_DIR`'s filesystem has
-    fewer free bytes than the configured threshold. No-op if the threshold
-    is `<= 0` (opt-out) or `DOWNLOAD_DIR` is unset (an unrelated
-    `DownloadDisabledError` is raised elsewhere on that path first).
-
-    `shutil.disk_usage` is a blocking stat syscall — always offloaded via
-    `asyncio.to_thread` (house law §9.11), never called inline on the loop.
-    """
+async def check_free_disk_space(target_path: Optional[Path] = None) -> None:
+    """Préflight disk-space guard (DL-02, `DOWNLOAD_MIN_FREE_DISK_MB`)."""
     threshold_mb = settings.DOWNLOAD_MIN_FREE_DISK_MB
-    if threshold_mb <= 0 or not settings.DOWNLOAD_DIR:
+    if threshold_mb <= 0:
         return
 
+    probe_dir: Optional[Path] = None
+    if target_path is not None:
+        cur = target_path
+        while not cur.exists() and cur != cur.parent:
+            cur = cur.parent
+        if cur.exists():
+            probe_dir = cur
+    if probe_dir is None:
+        if not settings.DOWNLOAD_DIR:
+            return
+        probe_dir = Path(settings.DOWNLOAD_DIR)
+
     def _stat_free_mb() -> float:
-        return shutil.disk_usage(settings.DOWNLOAD_DIR).free / (1024 * 1024)
+        return shutil.disk_usage(probe_dir).free / (1024 * 1024)
 
     free_mb = await asyncio.to_thread(_stat_free_mb)
     if free_mb < threshold_mb:
@@ -231,16 +264,44 @@ async def check_free_disk_space() -> None:
         )
 
 
+def _configured_download_roots() -> list[Path]:
+    roots: list[Path] = []
+    for raw in (
+        settings.DOWNLOAD_DIR,
+        settings.DOWNLOAD_MOVIES_DIR,
+        settings.DOWNLOAD_SERIES_DIR,
+        settings.DOWNLOAD_ANIME_DIR,
+    ):
+        if raw:
+            roots.append(Path(raw).resolve(strict=False))
+    return roots
+
+
 def resolve_confined(rel_path: str) -> Path:
     """Resolve *rel_path* (as stored on `DownloadJob.dest_path`) to an
-    ABSOLUTE path proven to sit under `DOWNLOAD_DIR`, or raise
-    `PathConfinementError`. This is the actual security invariant (F-007) —
-    `compute_dest_path` only sanitizes defensively; this proves it.
+    ABSOLUTE path proven to sit under the target library root (if configured)
+    or `DOWNLOAD_DIR`, or raise `PathConfinementError` (F-007).
     """
-    if not settings.DOWNLOAD_DIR:
+    if not rel_path or rel_path.startswith(("/", "\\")) or os.path.isabs(rel_path):
+        raise PathConfinementError(f"destination must be relative: {rel_path!r}")
+    norm = rel_path.replace("\\", "/")
+    base_override: Optional[str] = None
+    sub_rel = norm
+    if norm.startswith("Movies/") and settings.DOWNLOAD_MOVIES_DIR:
+        base_override = settings.DOWNLOAD_MOVIES_DIR
+        sub_rel = norm[len("Movies/"):]
+    elif norm.startswith("Series/") and settings.DOWNLOAD_SERIES_DIR:
+        base_override = settings.DOWNLOAD_SERIES_DIR
+        sub_rel = norm[len("Series/"):]
+    elif norm.startswith("Anime/") and settings.DOWNLOAD_ANIME_DIR:
+        base_override = settings.DOWNLOAD_ANIME_DIR
+        sub_rel = norm[len("Anime/"):]
+
+    raw_base = base_override or settings.DOWNLOAD_DIR
+    if not raw_base:
         raise DownloadDisabledError("DOWNLOAD_DIR is not configured")
-    base = Path(settings.DOWNLOAD_DIR).resolve(strict=False)
-    resolved = Path(os.path.realpath(base / rel_path))
+    base = Path(raw_base).resolve(strict=False)
+    resolved = Path(os.path.realpath(base / sub_rel))
     if resolved != base and base not in resolved.parents:
         raise PathConfinementError(f"destination escapes DOWNLOAD_DIR: {rel_path!r}")
     return resolved
@@ -686,9 +747,10 @@ def glob_escape(s: str) -> str:
 
 def write_sidecar_subtitle(dest: Path, lang: str, content: str) -> Path:
     """Atomically write `<stem>.<lang>.srt` in `dest.parent` (confined dir)."""
-    if settings.DOWNLOAD_DIR:
-        root = Path(settings.DOWNLOAD_DIR).resolve()
-        if not dest.parent.resolve().is_relative_to(root):
+    roots = _configured_download_roots()
+    if roots:
+        parent_resolved = dest.parent.resolve()
+        if not any(parent_resolved == r or parent_resolved.is_relative_to(r) for r in roots):
             raise PathConfinementError("subtitle sidecar escapes DOWNLOAD_DIR")
     sidecar = dest.with_name(f"{dest.stem}.{lang}.srt")
     tmp = sidecar.with_name(sidecar.name + ".tmp")
@@ -950,6 +1012,7 @@ async def enqueue_selection(
     scope: str,                # 'movie' | 'series_all' | 'seasons' | 'episodes'
     season_picks: Optional[list[tuple[int, str, str]]] = None,  # (season, server_id, series_rating_key) — scope='seasons'
     episode_picks: Optional[list[tuple[str, str]]] = None,      # (server_id, episode_rating_key) — scope='episodes'
+    target_library: Optional[str] = None,
 ) -> EnqueueResult:
     """Resolve an operator selection into 1..N persisted `DownloadJob` rows.
 
@@ -969,12 +1032,14 @@ async def enqueue_selection(
 
     if scope == "seasons":
         return await _enqueue_seasons(
-            db, media_type=media_type, unification_id=unification_id, season_picks=season_picks,
+            db, media_type=media_type, unification_id=unification_id,
+            season_picks=season_picks, target_library=target_library,
         )
 
     if scope == "episodes":
         return await _enqueue_episodes(
-            db, media_type=media_type, unification_id=unification_id, episode_picks=episode_picks,
+            db, media_type=media_type, unification_id=unification_id,
+            episode_picks=episode_picks, target_library=target_library,
         )
 
     account = await _resolve_active_account(db, server_id)
@@ -997,9 +1062,14 @@ async def enqueue_selection(
             return EnqueueResult(jobs=[existing], batch_id=existing.batch_id, error=None)
 
         title, year = canonical_title_year(media_row)
+        eff_lib = resolve_target_library(
+            "movie", target_library=target_library,
+            genres=media_row.genres, category_name=getattr(media_row, "category_name", None),
+        )
         dest_path = compute_dest_path(
             media_type="movie", title=title, year=year,
             season=None, episode=None, ext=_ext_from_rating_key(rating_key),
+            target_library=eff_lib,
         )
         job = DownloadJob(
             id=uuid.uuid4().hex,
@@ -1050,6 +1120,10 @@ async def enqueue_selection(
             return EnqueueResult(jobs=[], batch_id=None, error="aucun épisode disponible")
 
         show_title, show_year = canonical_title_year(show_row)
+        eff_lib = resolve_target_library(
+            "episode", target_library=target_library,
+            genres=show_row.genres, category_name=getattr(show_row, "category_name", None),
+        )
         batch = DownloadBatch(
             id=uuid.uuid4().hex,
             media_type=media_type or "show",
@@ -1081,6 +1155,7 @@ async def enqueue_selection(
                 media_type="episode", title=show_title, year=show_year,
                 season=ep.parent_index, episode=ep.index,
                 ext=_ext_from_rating_key(ep.rating_key),
+                target_library=eff_lib,
             )
             job = DownloadJob(
                 id=uuid.uuid4().hex,
@@ -1143,6 +1218,7 @@ async def _persist_episode_batch(
     episodes: list[Media],
     show_title_for: Callable[[Media], Optional[str]],
     op: str,
+    target_library: Optional[str] = None,
 ) -> EnqueueResult:
     """Create one `DownloadBatch` + one `DownloadJob` per episode, deduped
     against any existing non-terminal job for the same `(server_id,
@@ -1179,10 +1255,15 @@ async def _persist_episode_batch(
             continue
 
         show_title = show_title_for(ep) or "Unknown"
+        eff_lib = resolve_target_library(
+            "episode", target_library=target_library,
+            genres=ep.genres, category_name=getattr(ep, "category_name", None),
+        )
         dest_path = compute_dest_path(
             media_type="episode", title=show_title, year=None,
             season=ep.parent_index, episode=ep.index,
             ext=_ext_from_rating_key(ep.rating_key),
+            target_library=eff_lib,
         )
         job = DownloadJob(
             id=uuid.uuid4().hex,
@@ -1243,6 +1324,7 @@ async def _resolve_show_title(
 async def _enqueue_seasons(
     db: AsyncSession, *, media_type: str, unification_id: str,
     season_picks: Optional[list[tuple[int, str, str]]],
+    target_library: Optional[str] = None,
 ) -> EnqueueResult:
     """`scope='seasons'` (X2): each pick is `(season, server_id,
     series_rating_key)` — its OWN source, so one operator action can pull
@@ -1293,13 +1375,14 @@ async def _enqueue_seasons(
         db, media_type=media_type, unification_id=unification_id,
         scope="seasons", batch_server_id=first_srv, batch_rating_key=first_series_rk,
         batch_title=batch_title, episodes=episodes, show_title_for=_show_title_for,
-        op="enqueue_seasons",
+        op="enqueue_seasons", target_library=target_library,
     )
 
 
 async def _enqueue_episodes(
     db: AsyncSession, *, media_type: str, unification_id: str,
     episode_picks: Optional[list[tuple[str, str]]],
+    target_library: Optional[str] = None,
 ) -> EnqueueResult:
     """`scope='episodes'` (X2): each pick is `(server_id,
     episode_rating_key)` — its own source. An unknown/missing episode is
@@ -1345,7 +1428,7 @@ async def _enqueue_episodes(
         db, media_type=media_type, unification_id=unification_id,
         scope="episodes", batch_server_id=first_srv, batch_rating_key=first_ep_rk,
         batch_title=batch_title, episodes=episodes, show_title_for=_show_title_for,
-        op="enqueue_episodes",
+        op="enqueue_episodes", target_library=target_library,
     )
 
 

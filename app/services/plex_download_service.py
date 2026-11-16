@@ -55,6 +55,7 @@ from app.services.download_service import (
     EnqueueResult,
     compute_dest_path,
     find_non_terminal_job,
+    resolve_target_library,
 )
 from app.utils.db_retry import run_with_retry
 from app.utils.server_id import is_plex_server_id, parse_plex_server_id
@@ -91,10 +92,16 @@ def _ext_for(item: PlexMediaItem) -> str:
 
 def _build_episode_job(
     batch_id: str, ep: PlexMediaItem, show_title: str, unification_id: Optional[str],
+    *, target_library: Optional[str] = None,
 ) -> DownloadJob:
+    eff_lib = resolve_target_library(
+        "episode", target_library=target_library,
+        genres=ep.genres,
+    )
     dest_path = compute_dest_path(
         media_type="episode", title=show_title, year=None,
         season=ep.parent_index, episode=ep.index, ext=_ext_for(ep),
+        target_library=eff_lib,
     )
     return DownloadJob(
         id=uuid.uuid4().hex,
@@ -128,6 +135,7 @@ async def _persist_batch_and_jobs(
     episodes: list[PlexMediaItem],
     show_title_for: Callable[[PlexMediaItem], Optional[str]],
     op: str,
+    target_library: Optional[str] = None,
 ) -> EnqueueResult:
     """Create one `DownloadBatch` + one `DownloadJob` per episode (deduped
     against any existing non-terminal job for the same (server_id,
@@ -156,7 +164,9 @@ async def _persist_batch_and_jobs(
             continue
 
         show_title = show_title_for(ep) or "Unknown"
-        job = _build_episode_job(batch.id, ep, show_title, unification_id)
+        job = _build_episode_job(
+            batch.id, ep, show_title, unification_id, target_library=target_library,
+        )
         db.add(job)
         jobs.append(job)
         new_job_count += 1
@@ -181,6 +191,7 @@ async def _persist_batch_and_jobs(
 
 async def _enqueue_movie(
     db: AsyncSession, *, unification_id: str, server_id: Optional[str], rating_key: Optional[str],
+    target_library: Optional[str] = None,
 ) -> EnqueueResult:
     if not server_id or not rating_key:
         return EnqueueResult(jobs=[], batch_id=None, error="sélection invalide")
@@ -193,9 +204,14 @@ async def _enqueue_movie(
     if existing is not None:
         return EnqueueResult(jobs=[existing], batch_id=existing.batch_id, error=None)
 
+    eff_lib = resolve_target_library(
+        "movie", target_library=target_library,
+        genres=item.genres,
+    )
     dest_path = compute_dest_path(
         media_type="movie", title=item.title, year=item.year,
         season=None, episode=None, ext=_ext_for(item),
+        target_library=eff_lib,
     )
     job = DownloadJob(
         id=uuid.uuid4().hex,
@@ -228,6 +244,7 @@ async def _enqueue_movie(
 async def _enqueue_series_all(
     db: AsyncSession, *, media_type: str, unification_id: str,
     server_id: Optional[str], rating_key: Optional[str],
+    target_library: Optional[str] = None,
 ) -> EnqueueResult:
     if not server_id or not rating_key:
         return EnqueueResult(jobs=[], batch_id=None, error="sélection invalide")
@@ -254,12 +271,14 @@ async def _enqueue_series_all(
         batch_title=show_title, episodes=episodes,
         show_title_for=lambda _ep: show_title,
         op="enqueue_plex_series_all",
+        target_library=target_library,
     )
 
 
 async def _enqueue_seasons(
     db: AsyncSession, *, media_type: str, unification_id: str,
     season_picks: Optional[list[tuple[int, str, str]]],
+    target_library: Optional[str] = None,
 ) -> EnqueueResult:
     if not season_picks:
         return EnqueueResult(jobs=[], batch_id=None, error="aucune sélection")
@@ -307,12 +326,14 @@ async def _enqueue_seasons(
         batch_title=batch_title, episodes=episodes,
         show_title_for=_show_title_for,
         op="enqueue_plex_seasons",
+        target_library=target_library,
     )
 
 
 async def _enqueue_episodes(
     db: AsyncSession, *, media_type: str, unification_id: str,
     episode_picks: Optional[list[tuple[str, str]]],
+    target_library: Optional[str] = None,
 ) -> EnqueueResult:
     if not episode_picks:
         return EnqueueResult(jobs=[], batch_id=None, error="aucune sélection")
@@ -355,6 +376,7 @@ async def _enqueue_episodes(
         batch_title=batch_title, episodes=episodes,
         show_title_for=_show_title_for,
         op="enqueue_plex_episodes",
+        target_library=target_library,
     )
 
 
@@ -370,6 +392,7 @@ async def enqueue_plex_selection(
     rating_key: Optional[str] = None,    # movie / series_all (movie item rk, or show rk)
     season_picks: Optional[list[tuple[int, str, str]]] = None,  # (season, server_id, show_rating_key)
     episode_picks: Optional[list[tuple[str, str]]] = None,      # (server_id, episode_rating_key)
+    target_library: Optional[str] = None,
 ) -> EnqueueResult:
     """Resolve an ALREADY-STRUCTURED operator selection into 1..N persisted
     `DownloadJob` rows sourced from `plex_media_item` (never `media`).
@@ -391,22 +414,26 @@ async def enqueue_plex_selection(
     if scope == "movie":
         return await _enqueue_movie(
             db, unification_id=unification_id, server_id=server_id, rating_key=rating_key,
+            target_library=target_library,
         )
 
     if scope == "series_all":
         return await _enqueue_series_all(
             db, media_type=media_type, unification_id=unification_id,
             server_id=server_id, rating_key=rating_key,
+            target_library=target_library,
         )
 
     if scope == "seasons":
         return await _enqueue_seasons(
             db, media_type=media_type, unification_id=unification_id, season_picks=season_picks,
+            target_library=target_library,
         )
 
     if scope == "episodes":
         return await _enqueue_episodes(
             db, media_type=media_type, unification_id=unification_id, episode_picks=episode_picks,
+            target_library=target_library,
         )
 
     return EnqueueResult(jobs=[], batch_id=None, error=f"scope inconnu: {scope!r}")

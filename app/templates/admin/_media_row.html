@@ -22,6 +22,10 @@
 
   <td class="px-3 py-2">
     <div class="font-medium text-slate-900">{{ item.title }}</div>
+    {% set cleaned_t = item.title | clean_title_only %}
+    {% if cleaned_t != item.title %}
+    <div class="text-[11px] text-indigo-700 font-mono">clean → {{ cleaned_t }}</div>
+    {% endif %}
     {% if item.summary %}<div class="text-xs text-slate-500 line-clamp-1">{{ item.summary[:120] }}</div>{% endif %}
     <div class="flex flex-wrap items-center gap-1 mt-1">
       <span class="px-1.5 py-0.5 text-[10px] rounded {{ 'bg-emerald-100 text-emerald-800' if item.imdb_id else 'bg-slate-100 text-slate-400' }}">IMDb</span>

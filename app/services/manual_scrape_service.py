@@ -1103,13 +1103,23 @@ def _id_filter_clause(id_filter: IdFilter):
     return None
 
 
-def _catalogue_where(media_type: MediaKind, id_filter: IdFilter, search: str | None):
+def _catalogue_where(
+    media_type: MediaKind,
+    id_filter: IdFilter,
+    search: str | None,
+    server_id: str | None = None,
+    exclude_adult: bool = False,
+):
     # No outage mask (CLAUDE.md piège 20): the operator's diagnostic view
     # must show exactly what a provider outage hides from the app.
     clauses = [
         Media.type == media_type,
         Media.is_in_allowed_categories == True,  # noqa: E712
     ]
+    if server_id:
+        clauses.append(Media.server_id == server_id)
+    if exclude_adult:
+        clauses.append(Media.is_adult == False)  # noqa: E712
     if search:
         safe = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         clauses.append(Media.title.ilike(f"%{safe}%", escape="\\"))
@@ -1125,6 +1135,8 @@ async def list_catalogue(
     media_type: MediaKind,
     id_filter: IdFilter = "incomplete",
     search: str | None = None,
+    server_id: str | None = None,
+    exclude_adult: bool = False,
     sort: str = "added_desc",
     page: int = 1,
     page_size: int = 50,
@@ -1132,7 +1144,10 @@ async def list_catalogue(
     """One page of items of `media_type`, deduplicated to one row per
     `(server_id, rating_key)` (ADR 0005 F1: `media`'s PK carries `filter`
     and `sort_order`, so an item in N categories is N rows)."""
-    clauses = _catalogue_where(media_type, id_filter, search)
+    clauses = _catalogue_where(
+        media_type, id_filter, search,
+        server_id=server_id, exclude_adult=exclude_adult,
+    )
     offset = max(0, (max(1, page) - 1) * page_size)
 
     distinct_items = (

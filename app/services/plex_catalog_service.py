@@ -54,6 +54,7 @@ class PlexUnifiedItem:
     year: int | None
     source_count: int
     sources: list[PlexSource] = field(default_factory=list)
+    added_at: int | None = None
     # [] from list_unified (only source_count is cheap to compute there),
     # populated from get_group.
 
@@ -238,6 +239,7 @@ async def list_unified(
 
     group_ids = [row.unification_id for row in page]
     source_counts = {row.unification_id: row.source_count for row in page}
+    max_added_map = {row.unification_id: row.max_added for row in page}
     order = {uid: i for i, uid in enumerate(group_ids)}
 
     member_rows = (await db.execute(
@@ -261,6 +263,7 @@ async def list_unified(
             year=representatives[uid].year if uid in representatives else None,
             source_count=source_counts.get(uid, 0),
             sources=[],
+            added_at=max_added_map.get(uid),
         )
         for uid in group_ids
         if uid in representatives  # defensive: skip a group whose members vanished mid-query

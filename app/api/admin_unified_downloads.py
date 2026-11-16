@@ -68,18 +68,29 @@ def _card_to_dict(card: "unified_catalog.UnifiedCard") -> dict:
 
 
 _ID_FILTERS = ("all", "has_id", "imdb", "tmdb", "none")
+_SORT_OPTIONS = ("title_asc", "added_desc", "year_desc")
+
+
+def _parse_opt_int(raw: Optional[str]) -> Optional[int]:
+    if not raw or not raw.strip().isdigit():
+        return None
+    val = int(raw.strip())
+    return val if val > 0 else None
 
 
 async def _load_cards(
     db: AsyncSession, *, media_type: str, search: Optional[str], genre: Optional[str],
     plex_server_id: Optional[str], id_filter: str,
+    days: Optional[int], year: Optional[int], sort: str,
     page: int, page_size: int,
 ):
     offset = max(0, (page - 1) * page_size)
     norm_id = id_filter if id_filter in _ID_FILTERS else "all"
+    norm_sort = sort if sort in _SORT_OPTIONS else "title_asc"
     cards, total, truncated = await unified_catalog.list_unified(
         db, media_type=media_type, search=search or None, genre=genre or None,
         plex_server_id=plex_server_id or None, id_filter=norm_id,
+        days=days, year=year, sort=norm_sort,
         limit=page_size, offset=offset,
     )
     return [_card_to_dict(c) for c in cards], total, truncated, offset
@@ -88,6 +99,7 @@ async def _load_cards(
 def _list_context(
     cards, total, truncated, offset,
     *, page, page_size, media_type, search, genre, plex_server_id, id_filter,
+    days, year, sort,
 ):
     # `catalogue_total` is the browse-count the list fragment renders. It is
     # DISTINCT from `total` because the full-page index also merges the shared
@@ -101,6 +113,9 @@ def _list_context(
         "search": search or "", "genre": genre or "",
         "plex_server_id": plex_server_id or "",
         "id_filter": id_filter if id_filter in _ID_FILTERS else "all",
+        "days": str(days) if days else "",
+        "year": str(year) if year else "",
+        "sort": sort if sort in _SORT_OPTIONS else "title_asc",
     }
 
 
@@ -116,20 +131,27 @@ async def admin_unified_downloads_index(
     genre: Optional[str] = Query(None),
     plex_server_id: Optional[str] = Query(None),
     id_filter: str = Query("all"),
+    days: Optional[str] = Query(None),
+    year: Optional[str] = Query(None),
+    sort: str = Query("title_asc"),
     page: int = Query(1, ge=1),
     page_size: int = Query(24, ge=6, le=200),
     db: AsyncSession = Depends(get_db),
 ):
     media_type = type if type in ("movie", "show") else "movie"
+    days_i = _parse_opt_int(days)
+    year_i = _parse_opt_int(year)
     cards, total, truncated, offset = await _load_cards(
         db, media_type=media_type, search=search, genre=genre,
         plex_server_id=plex_server_id, id_filter=id_filter,
+        days=days_i, year=year_i, sort=sort,
         page=page, page_size=page_size,
     )
     ctx = _list_context(
         cards, total, truncated, offset,
         page=page, page_size=page_size, media_type=media_type,
         search=search, genre=genre, plex_server_id=plex_server_id, id_filter=id_filter,
+        days=days_i, year=year_i, sort=sort,
     )
     ctx["plex_enabled"] = bool(settings.PLEX_ACCOUNT_TOKEN)
     ctx["plex_servers"] = await plex_catalog_service.list_servers(db)
@@ -146,14 +168,20 @@ async def admin_unified_downloads_list_fragment(
     genre: Optional[str] = Query(None),
     plex_server_id: Optional[str] = Query(None),
     id_filter: str = Query("all"),
+    days: Optional[str] = Query(None),
+    year: Optional[str] = Query(None),
+    sort: str = Query("title_asc"),
     page: int = Query(1, ge=1),
     page_size: int = Query(24, ge=6, le=200),
     db: AsyncSession = Depends(get_db),
 ):
     media_type = type if type in ("movie", "show") else "movie"
+    days_i = _parse_opt_int(days)
+    year_i = _parse_opt_int(year)
     cards, total, truncated, offset = await _load_cards(
         db, media_type=media_type, search=search, genre=genre,
         plex_server_id=plex_server_id, id_filter=id_filter,
+        days=days_i, year=year_i, sort=sort,
         page=page, page_size=page_size,
     )
     return templates.TemplateResponse(
@@ -162,5 +190,6 @@ async def admin_unified_downloads_list_fragment(
             cards, total, truncated, offset,
             page=page, page_size=page_size, media_type=media_type,
             search=search, genre=genre, plex_server_id=plex_server_id, id_filter=id_filter,
+            days=days_i, year=year_i, sort=sort,
         ),
     )

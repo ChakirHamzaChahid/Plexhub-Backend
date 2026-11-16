@@ -527,3 +527,90 @@ class TestRelayedBytesMetric:
         for line in body.splitlines():
             if line.startswith("plexhub_dav_relayed_bytes_total "):
                 assert "{" not in line
+
+
+class TestDavProbeCache:
+    async def test_probe_cache_header_and_tail_hit_without_upstream(self, tmp_path, monkeypatch):
+        from app.dav.relay import (
+            DAV_PROBE_HEADER_BYTES,
+            DAV_PROBE_TAIL_BYTES,
+            probe_cache_key,
+            try_serve_cached_range,
+            write_probe_slice,
+        )
+
+        monkeypatch.setattr(settings, "DAV_PROBE_CACHE_DIR", str(tmp_path))
+        monkeypatch.setattr(settings, "DAV_PROBE_CACHE_MAX_MB", 100)
+
+        total_size = 64 * 1024 * 1024  # 64 MiB
+        key = probe_cache_key("xtream_1", "vod_42")
+        head_data = b"H" * 4096
+        tail_data = b"T" * 4096
+        # Write a synthetic small head (first 4096 bytes) and full-tail-sized slice
+        # Actually for tail, _read_cached_slice checks tail_path.stat().st_size == total_size - tail_base
+        # so let's test with a file smaller than 32 MiB + 16 MiB, e.g. 1000 bytes!
+        small_total = 1000
+        write_probe_slice(key, "head", b"0123456789" * 100, small_total)
+        write_probe_slice(key, "tail", b"abcdefghij" * 100, small_total)
+
+        stream_head = await try_serve_cached_range(key, "bytes=10-19", small_total)
+        assert stream_head is not None
+        assert stream_head.status_code == 206
+        assert stream_head.headers["Content-Range"] == "bytes 10-19/1000"
+        assert await _drain(stream_head) == b"0123456789"
+
+        # Verify constants match spec (16 MiB / 32 MiB)
+        assert DAV_PROBE_HEADER_BYTES == 16 * 1024 * 1024
+        assert DAV_PROBE_TAIL_BYTES == 32 * 1024 * 1024
+        assert total_size > DAV_PROBE_TAIL_BYTES
+        assert len(head_data) == 4096 and len(tail_data) == 4096
+
+    async def test_probe_cache_lru_eviction_respects_budget(self, tmp_path, monkeypatch):
+        import os
+        from app.dav.relay import probe_cache_key, write_probe_slice
+
+        monkeypatch.setattr(settings, "DAV_PROBE_CACHE_DIR", str(tmp_path))
+        monkeypatch.setattr(settings, "DAV_PROBE_CACHE_MAX_MB", 1)  # 1 MiB budget
+
+        k1 = probe_cache_key("xtream_1", "vod_1")
+        k2 = probe_cache_key("xtream_1", "vod_2")
+        payload_600k = b"X" * (600 * 1024)
+
+        write_probe_slice(k1, "head", payload_600k, 1_000_000)
+        # Ensure k1 is strictly older than k2
+        os.utime(tmp_path / f"{k1}.head", (1000, 1000))
+        write_probe_slice(k2, "head", payload_600k, 1_000_000)
+
+        assert not (tmp_path / f"{k1}.head").exists()
+        assert (tmp_path / f"{k2}.head").is_file()
+
+    async def test_open_upstream_tees_header_probe_into_cache(self, tmp_path, monkeypatch, xtream_mock):
+        from app.dav.relay import DAV_PROBE_HEADER_BYTES, probe_cache_key, try_serve_cached_range
+
+        monkeypatch.setattr(settings, "DAV_PROBE_CACHE_DIR", str(tmp_path))
+        monkeypatch.setattr(settings, "DAV_PROBE_CACHE_MAX_MB", 64)
+
+        total_size = 500
+        payload = b"M" * total_size
+        url = "http://provider.example/movie/u/p/probe.mkv"
+        xtream_mock.get(url).mock(
+            return_value=httpx.Response(
+                206,
+                content=payload,
+                headers={
+                    "Content-Range": f"bytes 0-{total_size - 1}/{total_size}",
+                    "Content-Length": str(total_size),
+                },
+            )
+        )
+        key = probe_cache_key("xtream_1", "vod_probe")
+        stream = await open_upstream(
+            url, f"bytes=0-{min(total_size, DAV_PROBE_HEADER_BYTES) - 1}",
+            cache_key=key, total_size=total_size,
+        )
+        assert await _drain(stream) == payload
+        assert (tmp_path / f"{key}.head").is_file()
+
+        cached = await try_serve_cached_range(key, "bytes=0-9", total_size)
+        assert cached is not None
+        assert await _drain(cached) == b"M" * 10

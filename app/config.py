@@ -391,6 +391,11 @@ class Settings:
     # class of Xtream provider connections) — independently env-overridable.
     DAV_CONNECT_TIMEOUT: float = _safe_float("DAV_CONNECT_TIMEOUT", float(DOWNLOAD_CONNECT_TIMEOUT))
     DAV_READ_TIMEOUT: float = _safe_float("DAV_READ_TIMEOUT", float(DOWNLOAD_READ_TIMEOUT))
+    # Opt-in bounded disk cache for /dav Range probes (first 16 MiB header +
+    # last 32 MiB tail) so Plex scans answer locally without holding upstream
+    # permits or locking SQLite. "" = disabled.
+    DAV_PROBE_CACHE_DIR: str = os.getenv("DAV_PROBE_CACHE_DIR", "").strip()
+    DAV_PROBE_CACHE_MAX_MB: int = _safe_int("DAV_PROBE_CACHE_MAX_MB", 2048)
 
     # Manual scraper (ADR 0005 D9/D11) — `unified_group_service.schedule_rebuild`
     # debounce window: several `apply_candidate` calls in quick succession (a

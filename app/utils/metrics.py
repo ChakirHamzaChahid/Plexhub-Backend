@@ -189,6 +189,23 @@ _DOWNLOAD_JOB_STATES = ("queued", "running", "completed", "failed", "canceled")
 for _state in _DOWNLOAD_JOB_STATES:
     download_jobs.labels(state=_state)
 
+# Lot 12 T12.2 (AUDIT-P8-002) — terminal download job counters by source & status,
+# plus scalar active queue size (queued + running).
+DOWNLOAD_SOURCES = ("xtream", "plex")
+DOWNLOAD_TERMINAL_STATUSES = ("completed", "failed", "canceled")
+download_jobs_total = Counter(
+    "plexhub_download_job_outcomes_total",
+    "Total download jobs reaching a terminal state, partitioned by source and status.",
+    labelnames=("source", "status"),
+)
+for _dl_src, _dl_status in itertools.product(DOWNLOAD_SOURCES, DOWNLOAD_TERMINAL_STATUSES):
+    download_jobs_total.labels(source=_dl_src, status=_dl_status)
+
+download_queue_size = Gauge(
+    "plexhub_download_queue_size",
+    "Total number of queued + running download jobs.",
+)
+
 download_bytes_total = Counter(
     "plexhub_download_bytes_total",
     "Total bytes written to disk by the download worker (Xtream + Plex jobs).",
@@ -248,6 +265,22 @@ dav_permit_wait_seconds = Histogram(
 dav_relayed_bytes_total = Counter(
     "plexhub_dav_relayed_bytes_total",
     "Total bytes relayed to WebDAV clients (e.g. rclone) by the /dav GET handler.",
+)
+
+# Lot 12 T12.2 (AUDIT-P8-002) — DAV request counter & served-bytes counter.
+DAV_METHODS = ("OPTIONS", "PROPFIND", "HEAD", "GET")
+DAV_STATUS_CLASSES = ("2xx", "4xx", "5xx")
+dav_requests_total = Counter(
+    "plexhub_dav_requests_total",
+    "WebDAV requests handled by /dav, partitioned by HTTP method and status class.",
+    labelnames=("method", "status"),
+)
+for _dav_method, _dav_status in itertools.product(DAV_METHODS, DAV_STATUS_CLASSES):
+    dav_requests_total.labels(method=_dav_method, status=_dav_status)
+
+dav_bytes_served_total = Counter(
+    "plexhub_dav_bytes_served_total",
+    "Total bytes served to WebDAV clients (upstream relay + probe cache hits).",
 )
 
 # S5.4 (AUDIT-P8-002) — OMDb budget consumption (fail-open: exhausting

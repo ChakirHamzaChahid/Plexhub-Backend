@@ -99,6 +99,11 @@ class DavTreeCache:
     def __init__(self) -> None:
         self._tree: DavTree | None = None
         self._lock = asyncio.Lock()
+        self._on_tree_built = None
+
+    def set_on_tree_built(self, callback) -> None:
+        """Register an optional hook ``callback(tree)`` invoked after rebuild."""
+        self._on_tree_built = callback
 
     def invalidate(self) -> None:
         """Force the next `get()` to rebuild, regardless of TTL. Called after
@@ -132,6 +137,11 @@ class DavTreeCache:
 
                 self._tree = await build_dav_tree()
                 self._tree.built_at = time.monotonic()
+                if self._on_tree_built is not None:
+                    self._on_tree_built(self._tree)
+                elif settings.DAV_PROBE_CACHE_DIR and settings.DAV_PROBE_CACHE_MAX_MB > 0:
+                    from app.dav import relay
+                    relay.schedule_probe_prewarm(self._tree)
             return self._tree  # type: ignore[return-value]
 
 

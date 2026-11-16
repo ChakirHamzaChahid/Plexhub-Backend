@@ -14,7 +14,7 @@
 | **Lot 9** | Centre de contrôle Admin (`/admin`) | P1-C | Gestion comptes Xtream, éditeur catégories, pilotage/suivi jobs, audit `metadata_edits` & `scrape_cache`, fusion onglets download | ✅ Fait |
 | **Lot 10** | IA « Playable-first » & Nouveautés catalogue | P2-A | Filtrage disponibilité réelle sur `/api/ai/search` & `/rank`, filtres année/genre/note, endpoint `/api/media/recent` | ✅ Fait |
 | **Lot 11** | Pipeline Téléchargements avancé (Sous-titres auto & Plex HLS) | P2-B | Sidecar `.fr.srt` auto via `subtitle_service`, fallback HLS + remux `ffmpeg` sur partages Plex transcode-only | ✅ Fait |
-| **Lot 12** | Relais WebDAV `/dav` sans friction (Pré-cache & Observabilité) | P2-C | Cache header+tail intégré au relais `/dav`, métriques Prometheus DAV/downloads | ⏳ À faire |
+| **Lot 12** | Relais WebDAV `/dav` sans friction (Pré-cache & Observabilité) | P2-C | Cache header+tail intégré au relais `/dav`, métriques Prometheus DAV/downloads | ✅ Fait |
 
 ---
 

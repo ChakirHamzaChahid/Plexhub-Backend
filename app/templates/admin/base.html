@@ -80,6 +80,25 @@
       window.plexhubScrape.next();
     });
 
+    // When the scrape drawer is opened from "À vérifier" ("Autres…"), the
+    // item's table row may not be in the current #media-table page. Fall back
+    // to hx-swap="none" so htmx still submits the apply POST and honours the
+    // HX-Trigger headers (refresh-stats, refresh-review, close-scrape-panel).
+    document.addEventListener('htmx:afterSwap', function (evt) {
+      var target = evt.detail && evt.detail.target;
+      if (!target || (target.id !== 'scrape-panel' && target.id !== 'scrape-candidates')) {
+        return;
+      }
+      target.querySelectorAll('form[data-row-target]').forEach(function (form) {
+        var sel = form.getAttribute('data-row-target');
+        if (sel && !document.querySelector(sel)) {
+          form.setAttribute('hx-target', '#scrape-panel');
+          form.setAttribute('hx-swap', 'none');
+          if (window.htmx) { window.htmx.process(form); }
+        }
+      });
+    });
+
     document.addEventListener('keydown', function (evt) {
       if (evt.key === 'Escape') { window.plexhubScrape.close(); }
     });

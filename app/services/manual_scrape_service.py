@@ -1403,6 +1403,7 @@ def _media_exists_for_review():
         .where(
             Media.rating_key == ScrapeReview.rating_key,
             Media.server_id == ScrapeReview.server_id,
+            Media.is_in_allowed_categories == True,  # noqa: E712
         )
         .correlate(ScrapeReview)
     )

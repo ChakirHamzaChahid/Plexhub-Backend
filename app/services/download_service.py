@@ -334,6 +334,7 @@ async def download_to_disk(
     cancel_check: Optional[Callable[[], Awaitable[bool]]] = None,
     chunk_bytes: int = settings.DOWNLOAD_CHUNK_BYTES,
     fallback_urls: Optional[list[str]] = None,
+    hls_fallback_url: Optional[str] = None,
 ) -> DownloadResult:
     """GET streaming httpx into `<dest>.part`, atomic promotion on success.
 
@@ -395,6 +396,7 @@ async def download_to_disk(
         pool=settings.DOWNLOAD_CONNECT_TIMEOUT,
     )
 
+    use_hls_fallback = False
     try:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
             # follow_redirects stays False so we vet each hop ourselves (DL-01).
@@ -441,6 +443,13 @@ async def download_to_disk(
                             " via direct-stream fallback"
                         )
                         continue
+                    if resp.status_code == 403 and hls_fallback_url:
+                        logger.info(
+                            "Download: direct-stream rejected (403) — switching"
+                            " to Plex HLS transcode fallback"
+                        )
+                        use_hls_fallback = True
+                        break
                     if resp.status_code in (404, 403):
                         raise DownloadPermanentError(f"upstream {resp.status_code}")
                     if resp.status_code >= 500 or resp.status_code == 429:
@@ -534,6 +543,159 @@ async def download_to_disk(
         raise DownloadTransientError(
             f"disk error: {exc.strerror or exc.__class__.__name__}"
         ) from None
+
+    if use_hls_fallback and hls_fallback_url:
+        return await download_hls_to_disk(
+            hls_fallback_url,
+            dest,
+            on_progress=on_progress,
+            cancel_check=cancel_check,
+        )
+    raise DownloadPermanentError("upstream 403")
+
+
+async def download_hls_to_disk(
+    hls_url: str,
+    dest: Path,
+    *,
+    on_progress: Optional[Callable[[int, Optional[int]], Awaitable[None]]] = None,
+    cancel_check: Optional[Callable[[], Awaitable[bool]]] = None,
+) -> DownloadResult:
+    """Capture a Plex HLS transcode stream and atomically remux to .mp4/.mkv.
+
+    Writes into `<dest>.hls.part` inside `dest.parent` (confined directory)
+    and promotes to `dest` via `os.replace` only on zero exit code and
+    non-empty output. Never logs `hls_url` (contains `X-Plex-Token`).
+    """
+    parsed = httpx.URL(hls_url)
+    if parsed.scheme not in ("http", "https") or not parsed.host:
+        raise DownloadPermanentError("invalid hls url")
+    await _assert_public_redirect_host(parsed.host)
+
+    ffmpeg_bin = shutil.which("ffmpeg")
+    if not ffmpeg_bin:
+        raise DownloadPermanentError("ffmpeg unavailable for HLS fallback")
+
+    await asyncio.to_thread(dest.parent.mkdir, parents=True, exist_ok=True)
+    tmp_part = dest.with_name(dest.name + ".hls.part")
+    resolved_tmp = str(tmp_part.resolve())
+
+    if dest.suffix.lower() == ".mp4":
+        mux_args = ["-f", "mp4", "-movflags", "+faststart"]
+    else:
+        mux_args = ["-f", "matroska"]
+
+    cmd = [
+        ffmpeg_bin,
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-protocol_whitelist", "http,https,tcp,tls,crypto",
+        "-user_agent", settings.XTREAM_USER_AGENT,
+        "-i", hls_url,
+        "-c", "copy",
+        *mux_args,
+        "-y",
+        resolved_tmp,
+    ]
+
+    def _cleanup_tmp() -> None:
+        try:
+            tmp_part.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+        while proc.returncode is None:
+            if cancel_check is not None and await cancel_check():
+                proc.terminate()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+                await asyncio.to_thread(_cleanup_tmp)
+                raise DownloadCanceled("canceled")
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+
+        if proc.returncode != 0:
+            await asyncio.to_thread(_cleanup_tmp)
+            raise DownloadPermanentError("hls remux failed")
+
+        file_size = await asyncio.to_thread(lambda: tmp_part.stat().st_size if tmp_part.exists() else 0)
+        if file_size <= 0:
+            await asyncio.to_thread(_cleanup_tmp)
+            raise DownloadPermanentError("hls remux produced empty file")
+
+        await asyncio.to_thread(os.replace, tmp_part, dest)
+        metrics.download_bytes_total.inc(file_size)
+        if on_progress is not None:
+            await on_progress(file_size, file_size)
+        return DownloadResult(
+            bytes_downloaded=file_size,
+            bytes_total=file_size,
+            already_present=False,
+            resumed=False,
+        )
+    except DownloadCanceled:
+        raise
+    except DownloadPermanentError:
+        raise
+    except OSError as exc:
+        await asyncio.to_thread(_cleanup_tmp)
+        raise DownloadTransientError(
+            f"disk error: {exc.strerror or exc.__class__.__name__}"
+        ) from None
+
+
+def find_external_subtitle(dest: Path, target_lang: str) -> Optional[Path]:
+    """Find an adjacent external subtitle file (.srt or .vtt) for *dest*.
+
+    Excludes the target sidecar `<stem>.<target_lang>.srt` itself so we never
+    re-translate an already-generated sidecar. Prefers `.srt` over `.vtt`.
+    """
+    parent = dest.parent
+    if not parent.is_dir():
+        return None
+    stem = dest.stem
+    target_name = f"{stem}.{target_lang}.srt".lower()
+
+    candidates: list[Path] = []
+    for ext in (".srt", ".vtt"):
+        exact = parent / f"{stem}{ext}"
+        if exact.is_file() and exact.name.lower() != target_name:
+            candidates.append(exact)
+        for p in sorted(parent.glob(f"{glob_escape(stem)}.*{ext}")):
+            if p.is_file() and p.name.lower() != target_name and p not in candidates:
+                candidates.append(p)
+    return candidates[0] if candidates else None
+
+
+def glob_escape(s: str) -> str:
+    """Escape glob metacharacters in a filename stem."""
+    return s.replace("[", "[[]").replace("?", "[?]").replace("*", "[*]")
+
+
+def write_sidecar_subtitle(dest: Path, lang: str, content: str) -> Path:
+    """Atomically write `<stem>.<lang>.srt` in `dest.parent` (confined dir)."""
+    if settings.DOWNLOAD_DIR:
+        root = Path(settings.DOWNLOAD_DIR).resolve()
+        if not dest.parent.resolve().is_relative_to(root):
+            raise PathConfinementError("subtitle sidecar escapes DOWNLOAD_DIR")
+    sidecar = dest.with_name(f"{dest.stem}.{lang}.srt")
+    tmp = sidecar.with_name(sidecar.name + ".tmp")
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    tmp.write_text(content, encoding="utf-8")
+    os.replace(tmp, sidecar)
+    return sidecar
 
 
 # --- Enqueue (spec §5.4) ------------------------------------------------------

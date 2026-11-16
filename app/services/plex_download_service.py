@@ -41,6 +41,9 @@ from __future__ import annotations
 import logging
 import uuid
 from typing import Callable, Optional
+from urllib.parse import urlencode
+
+import httpx
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -463,3 +466,58 @@ async def resolve_job_urls(session_factory, job) -> list[str]:
         f"{base}{part_key}?download=1&X-Plex-Token={token}",
         f"{base}{part_key}?X-Plex-Token={token}",
     ]
+
+
+def build_hls_transcode_url(
+    base_uri: str, access_token: str, rating_key: str,
+) -> Optional[str]:
+    """Build a Plex universal HLS transcode URL for transcode-only shares.
+
+    Returns None when `base_uri`, `access_token`, or `rating_key` is invalid.
+    The returned URL embeds `X-Plex-Token` — callers MUST NOT log or persist it.
+    """
+    if not base_uri or not access_token or not rating_key:
+        return None
+    parsed = httpx.URL(base_uri.strip())
+    if parsed.scheme not in ("http", "https") or not parsed.host:
+        return None
+    clean_rk = rating_key.strip().lstrip("/")
+    if not clean_rk or any(ch in clean_rk for ch in ("?", "#", " ", "\n", "\r")):
+        return None
+    base = base_uri.strip().rstrip("/")
+    query = urlencode({
+        "path": f"/library/metadata/{clean_rk}",
+        "mediaIndex": "0",
+        "partIndex": "0",
+        "protocol": "hls",
+        "directPlay": "0",
+        "directStream": "1",
+        "videoQuality": "100",
+        "X-Plex-Client-Identifier": settings.PLEX_CLIENT_IDENTIFIER or "plexhub",
+        "X-Plex-Platform": "Generic",
+        "X-Plex-Product": "PlexHub",
+        "X-Plex-Token": access_token,
+    })
+    return f"{base}/video/:/transcode/universal/start.m3u8?{query}"
+
+
+async def resolve_hls_fallback_url(session_factory, job) -> Optional[str]:
+    """Resolve the Plex HLS transcode URL for *job* when `PLEX_HLS_FALLBACK_ENABLED`
+    is enabled. Returns None if disabled, missing server/token, or invalid URI.
+    """
+    if not settings.PLEX_HLS_FALLBACK_ENABLED:
+        return None
+    if not is_plex_server_id(job.server_id):
+        return None
+    client_identifier = parse_plex_server_id(job.server_id)
+    if not client_identifier:
+        return None
+
+    async def _do() -> Optional[PlexServer]:
+        async with session_factory() as db:
+            return await db.get(PlexServer, client_identifier)
+
+    server = await run_with_retry(_do, op="resolve_plex_hls_url")
+    if server is None or not server.base_uri or not server.access_token:
+        return None
+    return build_hls_transcode_url(server.base_uri, server.access_token, job.rating_key)

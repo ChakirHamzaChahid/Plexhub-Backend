@@ -359,6 +359,50 @@ async def _write_sidecar_nfo(session_factory, job: DownloadJob, dest: Path) -> N
         )
 
 
+async def _write_sidecar_subtitles(job: DownloadJob, dest: Path) -> None:
+    """Best-effort: translate an external or embedded subtitle into ``.<lang>.srt``.
+
+    Never raises — Ollama unavailability, missing ffmpeg, or malformed
+    subtitles must never fail the video download job.
+    """
+    from app.services import subtitle_service
+
+    lang = subtitle_service.sanitize_lang_tag(settings.DOWNLOAD_AUTO_SUBTITLES_LANG)
+    if not lang:
+        return
+
+    try:
+        sidecar = dest.with_name(f"{dest.stem}.{lang}.srt")
+        if await asyncio.to_thread(lambda: sidecar.is_file() and sidecar.stat().st_size > 0):
+            return
+
+        ext_sub = await asyncio.to_thread(download_service.find_external_subtitle, dest, lang)
+        content: str | None = None
+        if ext_sub is not None:
+            raw = await asyncio.to_thread(ext_sub.read_text, encoding="utf-8-sig", errors="replace")
+            if raw.strip():
+                fmt = subtitle_service.detect_format(raw)
+                content = subtitle_service.convert_vtt_to_srt(raw) if fmt == "vtt" else raw
+        else:
+            content = await subtitle_service.extract_srt_from_media(dest)
+
+        if not content or not content.strip():
+            return
+
+        translation = await subtitle_service.translate_subtitles(
+            content, target_lang=lang, fmt="srt",
+        )
+        written = await asyncio.to_thread(
+            download_service.write_sidecar_subtitle, dest, lang, translation.translated_content,
+        )
+        logger.info("Download job %s: wrote sidecar subtitle %s", job.id, written.name)
+    except Exception:
+        logger.warning(
+            "Download job %s: sidecar subtitle generation failed (non-fatal)",
+            job.id, exc_info=True,
+        )
+
+
 async def _load_account(session_factory, server_id: str) -> XtreamAccount | None:
     account_id = parse_server_id(server_id)
     if not account_id:
@@ -680,6 +724,7 @@ async def _run_job(session_factory, job_id: str, sem: asyncio.Semaphore) -> None
         # jobs never populate this, so their transfer is byte-for-byte
         # unchanged (download_to_disk treats [] like the old single-URL call).
         fallback_urls: list[str] = []
+        hls_fallback_url: str | None = None
         if is_plex_server_id(job.server_id):
             plex_urls = await plex_download_service.resolve_job_urls(session_factory, job)
             if not plex_urls:
@@ -692,6 +737,9 @@ async def _run_job(session_factory, job_id: str, sem: asyncio.Semaphore) -> None
             # on a 403 — see plex_download_service.resolve_job_urls.
             url = plex_urls[0]
             fallback_urls = plex_urls[1:]
+            hls_fallback_url = await plex_download_service.resolve_hls_fallback_url(
+                session_factory, job,
+            )
         else:
             account = await _load_account(session_factory, job.server_id)
             if account is None:
@@ -755,6 +803,7 @@ async def _run_job(session_factory, job_id: str, sem: asyncio.Semaphore) -> None
             result = await download_service.download_to_disk(
                 url, dest, on_progress=_on_progress, cancel_check=_cancel_check,
                 fallback_urls=fallback_urls,
+                hls_fallback_url=hls_fallback_url,
             )
         except DownloadCanceled:
             logger.info("Download job %s: canceled (title=%r)", job_id, job.title)
@@ -779,6 +828,7 @@ async def _run_job(session_factory, job_id: str, sem: asyncio.Semaphore) -> None
             # job is already marked completed so it can never turn a good
             # download into a failure.
             await _write_sidecar_nfo(session_factory, job, dest)
+            await _write_sidecar_subtitles(job, dest)
             if batch_id:
                 await _check_and_notify_batch_completion(session_factory, batch_id)
     # `sem` is released here — `_handle_transient` (peek + immediate requeue

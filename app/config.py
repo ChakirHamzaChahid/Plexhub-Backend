@@ -316,6 +316,9 @@ class Settings:
     # verified to resolve to a PUBLIC IP first (DL-01 SSRF guard). Set to 0 to
     # restore the old strict behaviour (any 3xx = permanent failure).
     DOWNLOAD_MAX_REDIRECTS: int = _safe_int("DOWNLOAD_MAX_REDIRECTS", 5)
+    # Optional target language (e.g. "fr") for best-effort post-download
+    # subtitle translation into a `.<lang>.srt` sidecar. "" = disabled.
+    DOWNLOAD_AUTO_SUBTITLES_LANG: str = os.getenv("DOWNLOAD_AUTO_SUBTITLES_LANG", "").strip()
     # Per-source ceiling for the unified "Téléchargements" screen's in-memory
     # cross-catalogue merge (Xtream + Plex). Beyond this a source's window is
     # truncated and the UI says so (never a silent cap). The admin screen is
@@ -330,6 +333,11 @@ class Settings:
     PLEX_ACCOUNT_TOKEN: str = os.getenv("PLEX_ACCOUNT_TOKEN", "")
     PLEX_PROBE_TIMEOUT: int = _safe_int("PLEX_PROBE_TIMEOUT", 5)          # per-connection probe (s)
     PLEX_SYNC_INTERVAL_HOURS: int = _safe_int("PLEX_SYNC_INTERVAL_HOURS", 0)  # 0 = no periodic cron (manual only)
+    # Opt-in HLS transcode + ffmpeg remux fallback when a Plex share rejects
+    # both `?download=1` and direct-play with HTTP 403 (transcode-only shares).
+    PLEX_HLS_FALLBACK_ENABLED: bool = (
+        os.getenv("PLEX_HLS_FALLBACK_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
+    )
     # Stable UUID sent as X-Plex-Client-Identifier to plex.tv. Resolved in
     # __init__: explicit env value wins; otherwise read/generate-and-persist
     # a uuid4 under DATA_DIR/plex_client_id so it survives restarts (plex.tv

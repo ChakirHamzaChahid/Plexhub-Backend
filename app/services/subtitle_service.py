@@ -28,9 +28,12 @@ Alignment fallback:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
+import shutil
 from dataclasses import dataclass
+from pathlib import Path
 
 from sqlalchemy import delete
 
@@ -641,3 +644,140 @@ async def cleanup_cache(sessionmaker) -> int:
     deleted = await run_with_retry(_prune, op="subtitle_cache_cleanup")
     logger.info("Subtitle cache cleanup: removed %d entries older than %d days", deleted, retention_days)
     return deleted
+
+
+# ---------------------------------------------------------------------------
+# Post-download helpers (Lot 11 — T11.1)
+# ---------------------------------------------------------------------------
+
+_LANG_TAG_RE = re.compile(r"^[a-zA-Z]{2,3}(?:-[a-zA-Z0-9]{2,8})?$")
+_TEXT_SUBTITLE_CODECS = frozenset({
+    "subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text",
+})
+
+
+def sanitize_lang_tag(lang: str | None) -> str | None:
+    """Return a normalized safe language tag (e.g. 'fr', 'pt-BR') or None."""
+    if not lang:
+        return None
+    cleaned = lang.strip()
+    if not _LANG_TAG_RE.match(cleaned):
+        return None
+    return cleaned.lower() if "-" not in cleaned else cleaned
+
+
+def convert_vtt_to_srt(content: str) -> str:
+    """Convert WebVTT text into SRT format using the existing parser/serializer."""
+    blocks = parse(content, "vtt")
+    srt_blocks: list[_Block] = []
+    seq = 1
+    for block in blocks:
+        if isinstance(block, _Cue):
+            # VTT uses '.' for milliseconds; SRT uses ','
+            tc = re.sub(r"(\d{2}:\d{2}:\d{2})\.(\d{3})", r"\1,\2", block.timecode)
+            srt_blocks.append(
+                _Cue(
+                    index=block.index,
+                    header=str(seq),
+                    timecode=tc,
+                    cue_settings="",
+                    text=block.text,
+                    fmt="srt",
+                )
+            )
+            seq += 1
+    if not srt_blocks:
+        raise SubtitleFormatError("No translatable cues found in VTT content")
+    return serialize(srt_blocks, "srt")
+
+
+async def _probe_text_subtitle_stream(media_path: Path, *, timeout_s: float) -> str:
+    """Return ffmpeg stream specifier (e.g. '0:3' or '0:s:0') for the first
+    text-based subtitle track, or '' if ffprobe confirms none exists."""
+    ffprobe_bin = shutil.which("ffprobe")
+    if not ffprobe_bin:
+        return "0:s:0"
+
+    resolved = str(media_path.resolve())
+    proc = await asyncio.create_subprocess_exec(
+        ffprobe_bin,
+        "-v", "error",
+        "-select_streams", "s",
+        "-show_entries", "stream=index,codec_name",
+        "-of", "json",
+        resolved,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=min(timeout_s, 15.0))
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return "0:s:0"
+
+    if proc.returncode != 0 or not stdout:
+        return "0:s:0"
+
+    try:
+        data = json.loads(stdout.decode("utf-8", errors="replace"))
+        streams = data.get("streams") or []
+    except Exception:
+        return "0:s:0"
+
+    if not streams:
+        return ""
+    for stream in streams:
+        codec = str(stream.get("codec_name") or "").lower()
+        idx = stream.get("index")
+        if codec in _TEXT_SUBTITLE_CODECS and isinstance(idx, int) and idx >= 0:
+            return f"0:{idx}"
+    return ""
+
+
+async def extract_srt_from_media(media_path: Path, *, timeout_s: float = 60.0) -> str | None:
+    """Best-effort extraction of an embedded text subtitle track to SRT via ffmpeg.
+
+    Returns None if ffmpeg is missing, no text subtitle track exists,
+    extraction fails, or output exceeds SUBTITLE_MAX_BYTES.
+    """
+    ffmpeg_bin = shutil.which("ffmpeg")
+    if not ffmpeg_bin or not media_path.is_file():
+        return None
+
+    stream_spec = await _probe_text_subtitle_stream(media_path, timeout_s=timeout_s)
+    if not stream_spec:
+        return None
+
+    resolved = str(media_path.resolve())
+    proc = await asyncio.create_subprocess_exec(
+        ffmpeg_bin,
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-i", resolved,
+        "-map", stream_spec,
+        "-f", "srt",
+        "pipe:1",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        logger.warning("ffmpeg subtitle extraction timed out for %s", media_path.name)
+        return None
+
+    if proc.returncode != 0 or not stdout:
+        return None
+    if len(stdout) > settings.SUBTITLE_MAX_BYTES:
+        logger.warning(
+            "Extracted subtitle from %s exceeds SUBTITLE_MAX_BYTES (%d > %d)",
+            media_path.name, len(stdout), settings.SUBTITLE_MAX_BYTES,
+        )
+        return None
+
+    text = stdout.decode("utf-8-sig", errors="replace").strip()
+    return text or None

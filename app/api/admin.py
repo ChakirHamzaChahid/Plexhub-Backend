@@ -84,6 +84,14 @@ templates.env.filters["ms"] = _fmt_ms
 templates.env.filters["css_id"] = _css_id
 
 
+def _clean_title_only(value: object) -> str:
+    from app.utils.string_normalizer import clean_title
+    return clean_title(str(value or ""))[0]
+
+
+templates.env.filters["clean_title_only"] = _clean_title_only
+
+
 _ID_FILTERS = (
     "all", "missing_imdb", "missing_tmdb", "missing_both", "incomplete",
     "locked", "batch", "review",
@@ -106,14 +114,25 @@ async def _catalogue_ctx(
     media_type: str,
     ids: str,
     search: Optional[str],
+    server_id: Optional[str],
+    exclude_adult: bool,
     sort: str,
     page: int,
     page_size: int,
 ) -> dict:
+    from sqlalchemy import select as _select
+    from app.models.database import XtreamAccount as _XtreamAccount
+    from app.utils.server_id import build_server_id as _build_server_id
+
     page_obj = await manual_scrape_service.list_catalogue(
         db, media_type=media_type, id_filter=ids, search=search or None,
+        server_id=server_id or None, exclude_adult=exclude_adult,
         sort=sort, page=page, page_size=page_size,
     )
+    acc_rows = (await db.execute(
+        _select(_XtreamAccount.id, _XtreamAccount.label).order_by(_XtreamAccount.label)
+    )).all()
+    servers = [(_build_server_id(row.id), row.label or row.id) for row in acc_rows]
     return {
         "items": page_obj.items,
         "total": page_obj.total,
@@ -123,6 +142,9 @@ async def _catalogue_ctx(
         "media_type": media_type,
         "ids": ids,
         "search": search or "",
+        "server_id": server_id or "",
+        "exclude_adult": exclude_adult,
+        "servers": servers,
         "sort": sort,
     }
 
@@ -146,6 +168,8 @@ async def admin_index(
     type: str = Query("movie"),  # noqa: A002 — query name fixed by ADR 0005 D10
     ids: str = Query("incomplete"),
     search: Optional[str] = Query(None),
+    server_id: Optional[str] = Query(None),
+    exclude_adult: bool = Query(False),
     sort: str = Query("added_desc"),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=10, le=500),
@@ -153,7 +177,8 @@ async def admin_index(
 ):
     ctx = await _catalogue_ctx(
         db, media_type=_norm_type(type), ids=_norm_ids(ids),
-        search=search, sort=sort, page=page, page_size=page_size,
+        search=search, server_id=server_id, exclude_adult=exclude_adult,
+        sort=sort, page=page, page_size=page_size,
     )
     ctx.update(await _stats_ctx(db))
     # Reloading /admin while a batch runs must show that batch (with its
@@ -169,6 +194,8 @@ async def admin_catalogue_fragment(
     type: str = Query("movie"),  # noqa: A002
     ids: str = Query("incomplete"),
     search: Optional[str] = Query(None),
+    server_id: Optional[str] = Query(None),
+    exclude_adult: bool = Query(False),
     sort: str = Query("added_desc"),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=10, le=500),
@@ -176,7 +203,8 @@ async def admin_catalogue_fragment(
 ):
     ctx = await _catalogue_ctx(
         db, media_type=_norm_type(type), ids=_norm_ids(ids),
-        search=search, sort=sort, page=page, page_size=page_size,
+        search=search, server_id=server_id, exclude_adult=exclude_adult,
+        sort=sort, page=page, page_size=page_size,
     )
     return templates.TemplateResponse(request, "admin/_media_table.html", ctx)
 
@@ -729,6 +757,7 @@ async def admin_scrape_batch_start(
     request: Request,
     type: str = Form("all"),  # noqa: A002
     dry_run: Optional[str] = Form(None),
+    include_pending: Optional[str] = Form(None),
     max_items: Optional[str] = Form(None),
 ):
     media_type = "all" if (type or "all") == "all" else _norm_type(type)
@@ -739,6 +768,7 @@ async def admin_scrape_batch_start(
     try:
         job_id = manual_scrape_batch_worker.start(
             media_type=media_type, dry_run=bool(dry_run), max_items=parsed_max,
+            include_pending=bool(include_pending),
             session_factory=async_session_factory,
         )
     except manual_scrape_batch_worker.BatchAlreadyRunningError:

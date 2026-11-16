@@ -109,3 +109,27 @@ class TestNormalizeForSorting:
 
     def test_collapses_whitespace(self):
         assert normalize_for_sorting("A   :  B") == "b"
+
+
+class TestLot13TitleCleaningRegressions:
+    def test_fr_underscore_and_pipe_prefixes(self):
+        assert clean_title("FR_ XXx") == ("XXx", None)
+        assert clean_title("FR_ The Last Warrior") == ("The Last Warrior", None)
+        assert clean_title("TAMIL| Pattas") == ("Pattas", None)
+
+    def test_trailing_lang_markers(self):
+        assert clean_title("Film Test |FR|") == ("Film Test", None)
+        assert clean_title("Film Test _FR") == ("Film Test", None)
+
+    def test_integrale_series_pack_suffixes(self):
+        assert clean_title("NOOB intégrales des saisons") == ("NOOB", None)
+        assert clean_title("Peaky Blinders iNTEGRALE CUSTOM AAC 2 0 QC") == ("Peaky Blinders", None)
+        assert clean_title("Notre Belle Famille Step By Step 1991 Intégral 160EP Thebatou8652") == (
+            "Notre Belle Famille Step By Step", 1991,
+        )
+        assert clean_title("Les Enquetes du Commissaire Maigret 1967 INTEGRALE VOF 576p Opu") == (
+            "Les Enquetes du Commissaire Maigret", 1967,
+        )
+        assert clean_title("Les Demoiselles du téléphone Integrale MMCC") == (
+            "Les Demoiselles du téléphone", None,
+        )

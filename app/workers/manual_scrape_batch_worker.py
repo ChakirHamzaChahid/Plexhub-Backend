@@ -154,6 +154,7 @@ def start(
     media_type: MediaKind | Literal["all"],
     dry_run: bool,
     max_items: int | None = None,
+    include_pending: bool = False,
     session_factory: Callable[[], AsyncSession] | None = None,
 ) -> str:
     """Register and launch a batch run; returns its jobId.
@@ -181,6 +182,7 @@ def start(
             media_type=media_type,
             dry_run=dry_run,
             max_items=max_items,
+            include_pending=include_pending,
         ),
         name=job_id,
     )
@@ -201,22 +203,26 @@ _IMDB_PRESENT = and_(Media.imdb_id.isnot(None), Media.imdb_id != "")
 _TMDB_PRESENT = and_(Media.tmdb_id.isnot(None), Media.tmdb_id != "")
 
 
-def _no_open_review():
+def _no_open_review(*, include_pending: bool = False):
     """Skip items already in the queue (`pending`) or explicitly set aside by
-    the operator (`dismissed`) — re-scraping either would either churn the
-    same review row or override a deliberate "leave it alone"."""
+    the operator (`dismissed`). When `include_pending=True`, `pending` rows are
+    re-evaluated (e.g. after improving `clean_title`), while `dismissed` stays
+    excluded."""
+    statuses = ("dismissed",) if include_pending else ("pending", "dismissed")
     return ~exists(
         select(ScrapeReview.rating_key)
         .where(
             ScrapeReview.rating_key == Media.rating_key,
             ScrapeReview.server_id == Media.server_id,
-            ScrapeReview.status.in_(("pending", "dismissed")),
+            ScrapeReview.status.in_(statuses),
         )
         .correlate(Media)
     )
 
 
-def _selection_where(media_types: tuple[str, ...], *, pass_one: bool):
+def _selection_where(
+    media_types: tuple[str, ...], *, pass_one: bool, include_pending: bool = False,
+):
     id_clause = (
         or_(
             and_(_IMDB_PRESENT, _TMDB_MISSING),
@@ -237,13 +243,13 @@ def _selection_where(media_types: tuple[str, ...], *, pass_one: bool):
         # operator who wants to fix one by hand can.
         Media.is_adult == False,  # noqa: E712
         id_clause,
-        _no_open_review(),
+        _no_open_review(include_pending=include_pending),
     ]
 
 
 async def _fetch_page(
     session_factory, media_types: tuple[str, ...], *, pass_one: bool,
-    cursor: tuple[str, str] | None, limit: int,
+    cursor: tuple[str, str] | None, limit: int, include_pending: bool = False,
 ) -> list[Any]:
     """One keyset page of DISTINCT items (ADR 0005 F1: `GROUP BY
     server_id, rating_key`, since `media`'s PK has four columns)."""
@@ -253,7 +259,7 @@ async def _fetch_page(
             Media.year, Media.imdb_id, Media.tmdb_id, Media.thumb_url,
             Media.summary,
         )
-        .where(*_selection_where(media_types, pass_one=pass_one))
+        .where(*_selection_where(media_types, pass_one=pass_one, include_pending=include_pending))
         .group_by(Media.server_id, Media.rating_key)
     )
     if cursor is not None:
@@ -482,6 +488,7 @@ async def _run_pass(
     remaining: int,
     tally,
     touched: set[str],
+    include_pending: bool = False,
 ) -> int:
     """Run one pass to completion (or until budget/cancel/limit). Returns the
     number of items scanned."""
@@ -541,6 +548,7 @@ async def _run_pass(
         page = await _fetch_page(
             session_factory, media_types, pass_one=pass_one,
             cursor=cursor, limit=min(PAGE_SIZE, remaining),
+            include_pending=include_pending,
         )
         if not page:
             break
@@ -560,6 +568,7 @@ async def run(
     media_type: MediaKind | Literal["all"] = "all",
     dry_run: bool = False,
     max_items: int | None = None,
+    include_pending: bool = False,
 ) -> None:
     """Execute the batch. Never raises: every failure is recorded on the job."""
     global _running
@@ -584,6 +593,7 @@ async def run(
                 job_id, session_factory=session_factory, media_types=media_types,
                 pass_one=True, dry_run=dry_run, remaining=budget_items,
                 tally=tmdb_tally, touched=touched,
+                include_pending=include_pending,
             )
             if not job["cancelRequested"]:
                 job["phase"] = "scraping"
@@ -592,6 +602,7 @@ async def run(
                     pass_one=False, dry_run=dry_run,
                     remaining=max(0, budget_items - scanned),
                     tally=tmdb_tally, touched=touched,
+                    include_pending=include_pending,
                 )
             job["tmdbCalls"] = tmdb_tally.count
             job["omdbCalls"] = omdb_tally.count

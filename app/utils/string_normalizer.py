@@ -70,10 +70,10 @@ _QUALITY_TAGS = (
     # FHD sits before HD so the longer alternative wins. It was present in
     # `_TRAIL_QUALITY_RE` (the older parser) but missing here, so `clean_title`
     # shipped "The Captain FHD" to TMDB and got `no_candidates` every time.
-    "2160P", "1080P", "720P", "480P", "4K", "FHD", "UHD", "HDLIGHT", "HDR", "HD", "SD",
+    "2160P", "1080P", "720P", "576P", "480P", "4K", "FHD", "UHD", "HDLIGHT", "HDR", "HD", "SD",
     "HQ", "LQ", "X264", "X265", "H264", "H265", "HEVC", "WEB-DL", "WEBRIP", "WEB",
-    "BLURAY", "BRRIP", "BDRIP", "DVDRIP", "AC3", "DTS", "MULTI",
-    "TRUEFRENCH", "SUBFRENCH", "VOSTFR", "VOST", "VFF", "VFQ", "VFI", "VFB",
+    "BLURAY", "BRRIP", "BDRIP", "DVDRIP", "AAC", "EAC3", "FLAC", "AC3", "DTS", "MULTI",
+    "TRUEFRENCH", "SUBFRENCH", "VOSTFR", "VOST", "VFF", "VFQ", "VFI", "VFB", "VOF",
     "VFF2", "VF2", "VF", "VO", "FANSUB",
 )
 _QUALITY_RE = re.compile(
@@ -81,18 +81,16 @@ _QUALITY_RE = re.compile(
     re.IGNORECASE,
 )
 # Leading language/country prefix followed by a separator: "Fr - ", "FRA - ",
-# "VOSTFR - ", "VF | ", "NF: " … (case-insensitive, may be stacked).
+# "VOSTFR - ", "VF | ", "FR_ ", "NF: " … (case-insensitive, may be stacked).
 _LANG_PREFIX_TOKENS = (
     "VOSTFR", "VOST", "MULTI", "TRUEFRENCH", "VFF", "VFQ", "VFI", "VFB", "VF",
     "VO", "FR", "FRA", "EN", "US", "UK", "NF", "SC", "AR", "PL", "DE", "ES", "IT",
 )
 # A separator makes the prefix unambiguous, so the WHOLE token list applies
 # and the trailing space is optional ("FR|Les Visiteurs" is as much a prefix
-# as "FR | Les Visiteurs"). `[` is included because panels emit "FR[ Titre";
-# it is consumed here rather than by `_ANY_BRACKET_RE`, which needs a closing
-# bracket that never comes.
+# as "FR | Les Visiteurs", and "FR_ XXx" uses "_").
 _LANG_PREFIX_RE = re.compile(
-    r"^\s*(?:" + "|".join(_LANG_PREFIX_TOKENS) + r")\s*[-|:/\[]\s*",
+    r"^\s*(?:" + "|".join(_LANG_PREFIX_TOKENS) + r")\s*[-|:/\[_]\s*",
     re.IGNORECASE,
 )
 
@@ -118,6 +116,18 @@ _SPACE_PREFIX_RE = re.compile(
 # (4 such rows in the real catalogue). Language tokens keep `:` above, where
 # the closed token list makes it safe.
 _CAPS_PREFIX_RE = re.compile(r"^\s*[A-Z]{2,4}\s*[-|]\s+")
+# Uppercase language/section prefix with pipe, e.g. "TAMIL| Pattas", "MALAYALAM| ...".
+_LONG_PIPE_PREFIX_RE = re.compile(r"^\s*[A-Z]{2,14}\s*\|\s*")
+# Trailing language/pack markers like "Title |FR|", "Title _FR", "Title - FR".
+_TRAILING_LANG_TAG_RE = re.compile(
+    r"(?:\s*\|[^|]{1,12}\|\s*|\s+_[A-Z]{2,4}\s*|\s+-\s*(?:FR|EN|VF|VOSTFR|MULTI)\s*)$",
+    re.IGNORECASE,
+)
+# French box-set / pack suffix ("intégrales des saisons", "INTEGRALE VOF 576p Opu", ...)
+_INTEGRALE_SUFFIX_RE = re.compile(
+    r"(?<=\S)\s+(?:int[ée]grales?|int[ée]gral|integral)\b.*$",
+    re.IGNORECASE,
+)
 _LEADING_PIPE_MARK_RE = re.compile(r"^\s*\|[^|]*\|\s*")
 _LEADING_BRACKET_MARK_RE = re.compile(r"^\s*\[[^\]]*\]\s*")
 _YEAR_TOKEN_RE = re.compile(r"(?<!\d)(19|20)\d{2}(?!\d)")
@@ -156,6 +166,7 @@ def clean_title(raw: str) -> tuple[str, int | None]:
             value = _LANG_PREFIX_RE.sub("", value)
             value = _SPACE_PREFIX_RE.sub("", value)
             value = _CAPS_PREFIX_RE.sub("", value)
+            value = _LONG_PIPE_PREFIX_RE.sub("", value)
         return value
 
     # 1) Leading markers + stacked language/country prefixes (loop until stable).
@@ -187,8 +198,10 @@ def clean_title(raw: str) -> tuple[str, int | None]:
                 year = candidate
                 title = title[: m.start()] + " " + title[m.end():]
 
-    # 4) Quality/release/language tags anywhere, then re-strip prefixes the
-    #    removed tag was shielding ("4K FR Avatar" -> "FR Avatar" -> "Avatar").
+    # 4) Quality/release/language tags anywhere, integrale pack suffixes, and
+    #    trailing language markers, then re-strip prefixes the removed tag was shielding.
+    title = _INTEGRALE_SUFFIX_RE.sub("", title)
+    title = _TRAILING_LANG_TAG_RE.sub("", title)
     title = _QUALITY_RE.sub(" ", title)
     title = _strip_prefixes(title.strip())
 

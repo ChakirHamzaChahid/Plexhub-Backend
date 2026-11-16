@@ -1,4 +1,29 @@
 {% set page_count = ((total - 1) // page_size) + 1 if total else 1 %}
+<nav class="flex items-center justify-between px-3 py-2 bg-slate-50 border-b border-slate-200 text-xs text-slate-600">
+  <span>{{ total }} résultat(s) · page {{ page }} / {{ page_count }}</span>
+  <span class="flex gap-2">
+    {% if page > 1 %}
+    <button type="button"
+            hx-get="/admin/catalogue"
+            hx-target="#media-table"
+            hx-include="#filters"
+            hx-vals='{"page": {{ page - 1 }} }'
+            class="px-2 py-1 rounded border border-slate-300 bg-white hover:bg-slate-100">← Précédent</button>
+    {% else %}
+    <span class="px-2 py-1 rounded border border-slate-200 text-slate-300">← Précédent</span>
+    {% endif %}
+    {% if page < page_count %}
+    <button type="button"
+            hx-get="/admin/catalogue"
+            hx-target="#media-table"
+            hx-include="#filters"
+            hx-vals='{"page": {{ page + 1 }} }'
+            class="px-2 py-1 rounded border border-slate-300 bg-white hover:bg-slate-100">Suivant →</button>
+    {% else %}
+    <span class="px-2 py-1 rounded border border-slate-200 text-slate-300">Suivant →</span>
+    {% endif %}
+  </span>
+</nav>
 <div class="overflow-x-auto">
 <table class="min-w-full text-sm">
   <thead class="bg-slate-100 text-slate-600 text-xs uppercase">

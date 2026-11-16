@@ -284,3 +284,56 @@ async def test_catalogue_review_filter_lists_only_flagged_items(
     assert resp.status_code == 200
     assert "Flagged Film" in resp.text
     assert "Clean Film" not in resp.text
+
+
+async def test_catalogue_filters_exclude_adult_and_shows_clean_preview(
+    api_client, db_factory,
+):
+    from sqlalchemy import update
+    from app.models.database import Media
+
+    await _seed(db_factory, rating_key="vod_fr.mp4", title="FR_ The Matrix")
+    await _seed(db_factory, rating_key="vod_xxx.mp4", title="Adult Clip")
+    async with db_factory() as s:
+        await s.execute(
+            update(Media).where(Media.rating_key == "vod_xxx.mp4").values(is_adult=True)
+        )
+        await s.commit()
+
+    resp = await api_client.get(
+        "/admin/catalogue?type=movie&exclude_adult=true", auth=ADMIN_AUTH,
+    )
+    assert resp.status_code == 200
+    assert "FR_ The Matrix" in resp.text
+    assert "clean → The Matrix" in resp.text
+    assert "Adult Clip" not in resp.text
+
+
+async def test_batch_selection_include_pending_reselects_pending_but_not_dismissed(
+    db_factory,
+):
+    from sqlalchemy import update
+    from app.models.database import ScrapeReview
+    from app.workers.manual_scrape_batch_worker import _fetch_page
+
+    await _seed(db_factory, rating_key="vod_p.mp4", title="FR_ Pending")
+    await _seed(db_factory, rating_key="vod_d.mp4", title="FR_ Dismissed")
+    await _queue_review(db_factory, rating_key="vod_p.mp4")
+    await _queue_review(db_factory, rating_key="vod_d.mp4")
+    async with db_factory() as s:
+        await s.execute(
+            update(ScrapeReview)
+            .where(ScrapeReview.rating_key == "vod_d.mp4")
+            .values(status="dismissed")
+        )
+        await s.commit()
+
+    default_rows = await _fetch_page(
+        db_factory, ("movie",), pass_one=False, cursor=None, limit=50, include_pending=False,
+    )
+    assert [r.rating_key for r in default_rows] == []
+
+    retry_rows = await _fetch_page(
+        db_factory, ("movie",), pass_one=False, cursor=None, limit=50, include_pending=True,
+    )
+    assert [r.rating_key for r in retry_rows] == ["vod_p.mp4"]

@@ -303,3 +303,46 @@ class TestOriginVersionLoaders:
         assert r_srv.status_code == 200
         assert "Interstellar" in r_srv.text
         assert "Local Only" not in r_srv.text
+
+
+    async def test_date_year_and_sort_filters(
+        self, api_client, monkeypatch, db_factory,
+    ):
+        from app.utils.time import now_ms
+
+        _configure_admin(monkeypatch)
+        _wire_db(monkeypatch, db_factory)
+        recent_ms = now_ms() - 2 * 86_400_000   # 2 days ago
+        old_ms = now_ms() - 60 * 86_400_000     # 60 days ago
+
+        m_new = _media("x_new", title="Recent Movie", year=2026, unification_id="tmdb://901")
+        m_new.added_at = recent_ms
+        m_old = _media("x_old", title="Older Movie", year=2020, unification_id="tmdb://902")
+        m_old.added_at = old_ms
+        m_old.page_offset = 1
+        async with db_factory() as s:
+            s.add_all([m_new, m_old])
+            await s.commit()
+
+        r_days = await api_client.get(
+            "/admin/unified-downloads/list?type=movie&days=7",
+            auth=(ADMIN_USER, ADMIN_PASS),
+        )
+        assert r_days.status_code == 200
+        assert "Recent Movie" in r_days.text
+        assert "Older Movie" not in r_days.text
+
+        r_year = await api_client.get(
+            "/admin/unified-downloads/list?type=movie&year=2020",
+            auth=(ADMIN_USER, ADMIN_PASS),
+        )
+        assert r_year.status_code == 200
+        assert "Older Movie" in r_year.text
+        assert "Recent Movie" not in r_year.text
+
+        r_sort = await api_client.get(
+            "/admin/unified-downloads/list?type=movie&sort=added_desc",
+            auth=(ADMIN_USER, ADMIN_PASS),
+        )
+        assert r_sort.status_code == 200
+        assert r_sort.text.index("Recent Movie") < r_sort.text.index("Older Movie")

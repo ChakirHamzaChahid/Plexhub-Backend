@@ -76,6 +76,32 @@
     </select>
   </div>
 
+  <div class="flex flex-col">
+    <label class="text-xs text-slate-500" for="udl-days">Ajouté depuis</label>
+    <select id="udl-days" name="days" class="border border-slate-300 rounded px-2 py-1 text-sm">
+      <option value=""    {% if not days %}selected{% endif %}>Tout</option>
+      <option value="7"   {% if days == '7' %}selected{% endif %}>7 jours</option>
+      <option value="30"  {% if days == '30' %}selected{% endif %}>30 jours</option>
+      <option value="90"  {% if days == '90' %}selected{% endif %}>90 jours</option>
+      <option value="365" {% if days == '365' %}selected{% endif %}>1 an</option>
+    </select>
+  </div>
+
+  <div class="flex flex-col">
+    <label class="text-xs text-slate-500" for="udl-year">Année</label>
+    <input id="udl-year" name="year" type="number" min="1900" max="2100" value="{{ year }}" placeholder="ex. 2026"
+           class="border border-slate-300 rounded px-2 py-1 text-sm w-24">
+  </div>
+
+  <div class="flex flex-col">
+    <label class="text-xs text-slate-500" for="udl-sort">Tri</label>
+    <select id="udl-sort" name="sort" class="border border-slate-300 rounded px-2 py-1 text-sm">
+      <option value="title_asc"  {% if sort == 'title_asc' %}selected{% endif %}>Titre A→Z</option>
+      <option value="added_desc" {% if sort == 'added_desc' %}selected{% endif %}>Ajout récent</option>
+      <option value="year_desc"  {% if sort == 'year_desc' %}selected{% endif %}>Année récente</option>
+    </select>
+  </div>
+
   <input type="hidden" name="page" value="1">
   <input type="hidden" name="page_size" value="{{ page_size }}">
   <span class="htmx-indicator text-xs text-slate-500 self-center">⏳ chargement…</span>

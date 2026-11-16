@@ -36,6 +36,7 @@ from app.config import settings
 from app.services import plex_catalog_service
 from app.services.aggregation_service import canonical_title_year
 from app.services.media_service import media_service
+from app.utils.time import now_ms
 
 # Per-source ceiling for the in-memory merge (declared in config.py). Beyond
 # this, a source's window is truncated and `truncated=True` is surfaced (never
@@ -54,6 +55,7 @@ class UnifiedCard:
     year: int | None
     origins: list[str]              # sorted subset of ["plex", "xtream"]
     source_count: int               # total versions across BOTH origins
+    added_at: int | None = None
 
 
 def _merge_card(
@@ -65,6 +67,7 @@ def _merge_card(
     year: int | None,
     origin: str,
     source_count: int,
+    added_at: int | None = None,
 ) -> None:
     """Fold one source's group into the merged map, keyed by unification_id."""
     card = merged.get(unification_id)
@@ -76,6 +79,7 @@ def _merge_card(
             year=year,
             origins=[origin],
             source_count=source_count,
+            added_at=added_at,
         )
         return
     if origin not in card.origins:
@@ -85,6 +89,8 @@ def _merge_card(
     # fill a gap the first origin left (e.g. Plex year when Xtream had none).
     if card.year is None and year is not None:
         card.year = year
+    if added_at is not None and (card.added_at is None or added_at > card.added_at):
+        card.added_at = added_at
 
 
 async def list_unified(
@@ -95,6 +101,9 @@ async def list_unified(
     genre: str | None = None,
     plex_server_id: str | None = None,
     id_filter: str = "all",
+    days: int | None = None,
+    year: int | None = None,
+    sort: str = "title_asc",
     limit: int = 24,
     offset: int = 0,
     cap: int = DEFAULT_MERGE_CAP,
@@ -105,8 +114,7 @@ async def list_unified(
     Returns ``(page, total, truncated)`` where ``total`` is the merged group
     count within the fetched window and ``truncated`` is ``True`` if either
     source had more than ``cap`` groups (so the operator knows to narrow the
-    search/genre). Sorted by title (case-insensitive) then unification_id for a
-    stable, browsable order across both origins.
+    search/genre).
     """
     x_groups, x_total = await media_service.get_unified_list(
         db, media_type=media_type, limit=cap, offset=0, search=search, genre=genre,
@@ -119,15 +127,16 @@ async def list_unified(
 
     # Xtream first (its title/year become the card's representative).
     for g in x_groups:
-        title, year = canonical_title_year(g.best)
+        title, g_year = canonical_title_year(g.best)
         _merge_card(
             merged,
             unification_id=g.key,
             media_type=media_type,
             title=title,
-            year=year,
+            year=g_year,
             origin=ORIGIN_XTREAM,
             source_count=len(g.members),
+            added_at=getattr(g.best, "added_at", None),
         )
 
     for it in p_items:
@@ -140,6 +149,7 @@ async def list_unified(
             year=it.year,
             origin=ORIGIN_PLEX,
             source_count=it.source_count,
+            added_at=it.added_at,
         )
 
     cards = list(merged.values())
@@ -154,9 +164,20 @@ async def list_unified(
     elif id_filter == "none":
         cards = [c for c in cards if not c.unification_id.startswith(("imdb://", "tmdb://"))]
 
+    if days is not None and days > 0:
+        cutoff_ms = now_ms() - days * 86_400_000
+        cards = [c for c in cards if c.added_at is not None and c.added_at >= cutoff_ms]
+    if year is not None:
+        cards = [c for c in cards if c.year == year]
+
     for c in cards:
         c.origins.sort()
-    cards.sort(key=lambda c: ((c.title or "").casefold(), c.unification_id))
+    if sort == "added_desc":
+        cards.sort(key=lambda c: (-(c.added_at or 0), (c.title or "").casefold(), c.unification_id))
+    elif sort == "year_desc":
+        cards.sort(key=lambda c: (-(c.year or 0), (c.title or "").casefold(), c.unification_id))
+    else:
+        cards.sort(key=lambda c: ((c.title or "").casefold(), c.unification_id))
 
     total = len(cards)
     truncated = x_total > cap or p_total > cap

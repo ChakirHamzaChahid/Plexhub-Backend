@@ -181,6 +181,7 @@ async def test_200_simple_ranking(rank_client, monkeypatch):
             ],
             "limit": 10,
             "mediaType": "movie",
+            "playableOnly": False,
         },
     )
     assert resp.status_code == 200, resp.text

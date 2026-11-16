@@ -421,6 +421,68 @@ class MediaService:
         # never mutates it, so the cached snapshot stays immutable.
         return groups[offset:offset + limit], total
 
+    async def get_recent_unified(
+        self,
+        db: AsyncSession,
+        *,
+        media_type: Optional[str] = None,
+        days: int = 7,
+        limit: int = 50,
+        include_adult: bool = False,
+    ) -> tuple[list[MovieGroup], int]:
+        """Return recently added unified groups within the last *days* days.
+
+        Uses ``Media.added_at >= cutoff_ms`` (backed by ``ix_media_type_added``)
+        while enforcing ``is_in_allowed_categories``, ``is_broken == False``,
+        ``account_outage_service`` masking, and ``is_adult`` filtering.
+        """
+        cutoff_ms = now_ms() - days * 86_400_000
+        masked = await account_outage_service.masked_server_ids(db)
+        type_clause = (
+            Media.type == media_type
+            if media_type in ("movie", "show")
+            else Media.type.in_(("movie", "show"))
+        )
+        conditions = [
+            type_clause,
+            Media.added_at >= cutoff_ms,
+            Media.is_in_allowed_categories == True,  # noqa: E712
+            Media.is_broken == False,  # noqa: E712
+            *_outage_clause(masked),
+        ]
+        if not include_adult:
+            conditions.append(Media.is_adult == False)  # noqa: E712
+
+        rows = list(
+            (
+                await db.execute(
+                    select(Media).where(*conditions).order_by(Media.added_at.desc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if not rows:
+            return [], 0
+
+        def _group_and_sort(media_rows: list[Media]) -> list[MovieGroup]:
+            by_type: dict[str, list[Media]] = {}
+            for r in media_rows:
+                by_type.setdefault(r.type, []).append(r)
+            all_groups: list[MovieGroup] = []
+            for bucket in by_type.values():
+                all_groups.extend(aggregate_movies(bucket))
+            all_groups.sort(
+                key=lambda g: (
+                    -max((int(m.added_at or 0) for m in g.members), default=0),
+                    g.key,
+                )
+            )
+            return all_groups
+
+        groups = await asyncio.to_thread(_group_and_sort, rows)
+        return groups[:limit], len(groups)
+
     async def _unified_list_from_snapshot(
         self,
         db: AsyncSession,

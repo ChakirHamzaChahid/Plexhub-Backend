@@ -188,6 +188,7 @@ async def test_rank_503_when_embedding_unavailable(hydrate_client, monkeypatch):
         json={
             "ref": {"tmdbId": 555},
             "candidates": [{"tmdbId": 556}],
+            "playableOnly": False,
         },
     )
     assert resp.status_code == 503

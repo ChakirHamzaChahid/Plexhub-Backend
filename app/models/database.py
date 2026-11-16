@@ -785,6 +785,7 @@ class ScrapeCacheEntry(Base):
 
     __table_args__ = (
         Index("ix_scrape_cache_expires_at", "expires_at"),
+        Index("ix_scrape_cache_v1_fetched_at", "fetched_at"),
     )
 
 
@@ -822,5 +823,6 @@ class MetadataEdit(Base):
 
     __table_args__ = (
         Index("ix_metadata_edits_item", "server_id", "rating_key", "at_ms"),
+        Index("ix_metadata_edits_at_ms", "at_ms"),
         Index("ux_metadata_edits_idempotency", "key_id", "idempotency_key", unique=True),
     )

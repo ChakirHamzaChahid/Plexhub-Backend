@@ -188,6 +188,7 @@ async def admin_plex_downloads_index(
     ctx = {
         "items": [_item_to_card(it) for it in items],
         "total": total,
+        "catalogue_total": total,
         "offset": offset,
         "page": page,
         "page_size": page_size,
@@ -219,7 +220,7 @@ async def admin_plex_downloads_list_fragment(
         request,
         "admin/_plex_downloads_list.html",
         {
-            "items": [_item_to_card(it) for it in items], "total": total, "offset": offset,
+            "items": [_item_to_card(it) for it in items], "total": total, "catalogue_total": total, "offset": offset,
             "page": page, "page_size": page_size,
             "type": media_type, "search": search or "",
         },

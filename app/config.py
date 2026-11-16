@@ -233,6 +233,13 @@ class Settings:
     EPG_SYNC_BATCH_PAUSE_MS: int = _safe_int("EPG_SYNC_BATCH_PAUSE_MS", 0)
     # Wall-clock ceiling for ONE XMLTV download attempt (seconds).
     EPG_SYNC_DOWNLOAD_TIMEOUT_SECONDS: int = _safe_int("EPG_SYNC_DOWNLOAD_TIMEOUT_SECONDS", 600)
+
+    # Notifications (Webhook / Discord) — Lot 8 (T8.1)
+    NOTIFY_ENABLED: bool = os.getenv("NOTIFY_ENABLED", "false").lower() in ("true", "1", "yes")
+    NOTIFY_WEBHOOK_URL: str = os.getenv("NOTIFY_WEBHOOK_URL", "")
+    NOTIFY_EVENTS: str = os.getenv("NOTIFY_EVENTS", "outage,download,backup")
+    NOTIFY_COOLDOWN_SECONDS: int = _safe_int("NOTIFY_COOLDOWN_SECONDS", 300)
+
     CORS_ORIGINS: list[str] = [
         o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()
     ]
@@ -309,6 +316,9 @@ class Settings:
     # verified to resolve to a PUBLIC IP first (DL-01 SSRF guard). Set to 0 to
     # restore the old strict behaviour (any 3xx = permanent failure).
     DOWNLOAD_MAX_REDIRECTS: int = _safe_int("DOWNLOAD_MAX_REDIRECTS", 5)
+    # Optional target language (e.g. "fr") for best-effort post-download
+    # subtitle translation into a `.<lang>.srt` sidecar. "" = disabled.
+    DOWNLOAD_AUTO_SUBTITLES_LANG: str = os.getenv("DOWNLOAD_AUTO_SUBTITLES_LANG", "").strip()
     # Per-source ceiling for the unified "Téléchargements" screen's in-memory
     # cross-catalogue merge (Xtream + Plex). Beyond this a source's window is
     # truncated and the UI says so (never a silent cap). The admin screen is
@@ -323,6 +333,11 @@ class Settings:
     PLEX_ACCOUNT_TOKEN: str = os.getenv("PLEX_ACCOUNT_TOKEN", "")
     PLEX_PROBE_TIMEOUT: int = _safe_int("PLEX_PROBE_TIMEOUT", 5)          # per-connection probe (s)
     PLEX_SYNC_INTERVAL_HOURS: int = _safe_int("PLEX_SYNC_INTERVAL_HOURS", 0)  # 0 = no periodic cron (manual only)
+    # Opt-in HLS transcode + ffmpeg remux fallback when a Plex share rejects
+    # both `?download=1` and direct-play with HTTP 403 (transcode-only shares).
+    PLEX_HLS_FALLBACK_ENABLED: bool = (
+        os.getenv("PLEX_HLS_FALLBACK_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
+    )
     # Stable UUID sent as X-Plex-Client-Identifier to plex.tv. Resolved in
     # __init__: explicit env value wins; otherwise read/generate-and-persist
     # a uuid4 under DATA_DIR/plex_client_id so it survives restarts (plex.tv
@@ -376,6 +391,11 @@ class Settings:
     # class of Xtream provider connections) — independently env-overridable.
     DAV_CONNECT_TIMEOUT: float = _safe_float("DAV_CONNECT_TIMEOUT", float(DOWNLOAD_CONNECT_TIMEOUT))
     DAV_READ_TIMEOUT: float = _safe_float("DAV_READ_TIMEOUT", float(DOWNLOAD_READ_TIMEOUT))
+    # Opt-in bounded disk cache for /dav Range probes (first 16 MiB header +
+    # last 32 MiB tail) so Plex scans answer locally without holding upstream
+    # permits or locking SQLite. "" = disabled.
+    DAV_PROBE_CACHE_DIR: str = os.getenv("DAV_PROBE_CACHE_DIR", "").strip()
+    DAV_PROBE_CACHE_MAX_MB: int = _safe_int("DAV_PROBE_CACHE_MAX_MB", 2048)
 
     # Manual scraper (ADR 0005 D9/D11) — `unified_group_service.schedule_rebuild`
     # debounce window: several `apply_candidate` calls in quick succession (a
@@ -501,6 +521,7 @@ class Settings:
     SCRAPE_ALLOWED_LANGUAGES: str = os.getenv(
         "SCRAPE_ALLOWED_LANGUAGES", ",".join(DEFAULT_SCRAPE_ALLOWED_LANGUAGES),
     )
+    SCRAPE_CACHE_MAX_ENTRIES: int = _safe_int("SCRAPE_CACHE_MAX_ENTRIES", 50000)
 
     # Metadata API (lot B2, ADR 0010 D2.4 / ADR 0011 D2.4). The config only READS
     # the raw values; the clamping (timeout 5..28 s, rate <= 0 disables) lives in
@@ -508,6 +529,7 @@ class Settings:
     METADATA_RATE_LIMIT_PER_MINUTE: int = _safe_int("METADATA_RATE_LIMIT_PER_MINUTE", 300)
     METADATA_WRITE_RATE_LIMIT_PER_MINUTE: int = _safe_int("METADATA_WRITE_RATE_LIMIT_PER_MINUTE", 90)
     METADATA_REQUEST_TIMEOUT_SECONDS: int = _safe_int("METADATA_REQUEST_TIMEOUT_SECONDS", 15)
+    METADATA_EDITS_RETENTION_DAYS: int = _safe_int("METADATA_EDITS_RETENTION_DAYS", 365)
 
     @property
     def has_xtream_env(self) -> bool:
@@ -598,6 +620,16 @@ class Settings:
             )
         else:
             logger.info("DAV WebDAV: disabled (DAV_ENABLED=false)")
+
+        if self.NOTIFY_ENABLED:
+            logger.info(
+                "Notifications: enabled (events=%r, cooldown=%ds, url=%s)",
+                self.NOTIFY_EVENTS,
+                self.NOTIFY_COOLDOWN_SECONDS,
+                "configured" if self.NOTIFY_WEBHOOK_URL else "not set",
+            )
+        else:
+            logger.info("Notifications: disabled (NOTIFY_ENABLED=false)")
 
     def ensure_dirs(self) -> None:
         """Create runtime directories and persist client identifier (CR-C01).

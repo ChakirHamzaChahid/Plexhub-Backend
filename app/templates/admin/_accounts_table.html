@@ -1,0 +1,97 @@
+<table class="min-w-full bg-white rounded shadow-sm border border-slate-200 text-sm">
+  <thead class="bg-slate-100 text-slate-600 text-xs">
+    <tr>
+      <th class="text-left px-3 py-2.5">Libellé &amp; ID</th>
+      <th class="text-left px-3 py-2.5">Serveur &amp; Utilisateur</th>
+      <th class="text-left px-3 py-2.5">Statut Xtream</th>
+      <th class="text-left px-3 py-2.5">Actif</th>
+      <th class="text-left px-3 py-2.5">Santé / Outage</th>
+      <th class="text-left px-3 py-2.5">Filtrage Catégories</th>
+      <th class="text-right px-3 py-2.5">Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for a in accounts %}
+    <tr class="border-t border-slate-100 hover:bg-slate-50/50">
+      <td class="px-3 py-2.5">
+        <div class="font-semibold text-slate-900">{{ a.label }}</div>
+        <div class="font-mono text-[11px] text-slate-400">ID: {{ a.id }}</div>
+      </td>
+      <td class="px-3 py-2.5">
+        <div class="font-mono text-xs text-slate-700 truncate max-w-xs" title="{{ a.base_url }}:{{ a.port }}">
+          {{ a.base_url }}:{{ a.port }}
+        </div>
+        <div class="text-xs text-slate-500">Utilisateur : <span class="font-medium text-slate-700">{{ a.username }}</span></div>
+      </td>
+      <td class="px-3 py-2.5 text-xs text-slate-600">
+        <div>Statut : <span class="font-medium text-slate-800">{{ a.status }}</span></div>
+        <div class="text-[11px] text-slate-400">
+          {% if a.expiration_date %}
+            Exp : {{ a.expiration_date | ms }}
+          {% else %}
+            Exp : Illimitée
+          {% endif %}
+        </div>
+      </td>
+      <td class="px-3 py-2.5">
+        {% if a.is_active %}
+          <span class="inline-block px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-xs font-medium">Actif</span>
+        {% else %}
+          <span class="inline-block px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 text-xs font-medium">Inactif</span>
+        {% endif %}
+      </td>
+      <td class="px-3 py-2.5">
+        {% if a.is_outage %}
+          <span class="inline-block px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-xs font-medium" title="Panne confirmée ({{ a.outage_strikes }} échecs consécutifs)">
+            ⚠️ Panne confirmée ({{ a.outage_strikes }})
+          </span>
+        {% elif a.outage_strikes > 0 %}
+          <span class="inline-block px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 text-xs font-medium" title="{{ a.outage_strikes }} échec(s)">
+            ⚡ Instable ({{ a.outage_strikes }})
+          </span>
+        {% else %}
+          <span class="inline-block px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 text-xs font-medium">
+            ✓ Opérationnel
+          </span>
+        {% endif %}
+      </td>
+      <td class="px-3 py-2.5">
+        <span class="inline-block px-2 py-0.5 rounded font-mono text-xs {% if a.category_filter_mode == 'whitelist' %}bg-purple-100 text-purple-800{% elif a.category_filter_mode == 'blacklist' %}bg-amber-100 text-amber-800{% else %}bg-slate-100 text-slate-700{% endif %}">
+          {{ a.category_filter_mode }}
+        </span>
+      </td>
+      <td class="px-3 py-2.5 text-right space-x-1 whitespace-nowrap">
+        <button hx-post="/admin/accounts/{{ a.id }}/test"
+                hx-target="#test-result-{{ a.id }}"
+                hx-swap="innerHTML"
+                class="px-2 py-1 text-xs font-medium rounded border border-slate-300 text-slate-700 bg-white hover:bg-slate-50">
+          Tester
+        </button>
+        <button hx-post="/admin/accounts/{{ a.id }}/toggle"
+                hx-target="#accounts-table-wrap"
+                hx-swap="innerHTML"
+                class="px-2 py-1 text-xs font-medium rounded border {% if a.is_active %}border-amber-300 text-amber-700 bg-amber-50 hover:bg-amber-100{% else %}border-emerald-300 text-emerald-700 bg-emerald-50 hover:bg-emerald-100{% endif %}">
+          {% if a.is_active %}Désactiver{% else %}Activer{% endif %}
+        </button>
+        <button hx-get="/admin/accounts/{{ a.id }}/categories"
+                hx-target="#categories-editor"
+                hx-swap="innerHTML"
+                class="px-2.5 py-1 text-xs font-medium rounded bg-blue-600 hover:bg-blue-700 text-white shadow-sm">
+          Catégories
+        </button>
+      </td>
+    </tr>
+    <tr>
+      <td colspan="7" class="p-0">
+        <div id="test-result-{{ a.id }}" class="px-3"></div>
+      </td>
+    </tr>
+    {% else %}
+    <tr>
+      <td colspan="7" class="px-3 py-8 text-center text-slate-400 text-sm">
+        Aucun compte Xtream configuré. Utilisez le formulaire ci-dessus pour ajouter votre premier compte.
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>

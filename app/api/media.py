@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import Optional
+from typing import Literal, Optional
 
 from app.db.database import get_db
 from app.models.database import Media
@@ -500,6 +500,54 @@ async def get_trailer_file(cache_key: str):
         raise HTTPException(404, "Trailer not found")
     return FileResponse(
         path, media_type="video/mp4", headers={"Content-Encoding": "identity"},
+    )
+
+
+@router.get("/recent", response_model=UnifiedMediaListResponse)
+async def list_recent_media(
+    type: Optional[Literal["movie", "show"]] = Query(None),
+    days: int = Query(7, ge=1, le=365),
+    limit: int = Query(50, ge=1, le=500),
+    include_adult: bool = Query(False, alias="includeAdult"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Recently added unified groups within the last *days* days."""
+    groups, total = await media_service.get_recent_unified(
+        db,
+        media_type=type,
+        days=days,
+        limit=limit,
+        include_adult=include_adult,
+    )
+    labels = await media_service.account_labels(db)
+    items = []
+    for g in groups:
+        best = g.best
+        clean_title, clean_year = canonical_title_year(best)
+        is_adult = bool(getattr(best, "is_adult", False))
+        items.append(
+            UnifiedMediaResponse(
+                unification_id=g.key,
+                type=best.type,
+                title=apply_adult_prefix(clean_title, is_adult),
+                year=clean_year,
+                summary=best.summary,
+                genres=best.genres,
+                content_rating=best.content_rating,
+                thumb_url=best.resolved_thumb_url or best.thumb_url,
+                art_url=best.resolved_art_url or best.art_url,
+                imdb_id=best.imdb_id,
+                tmdb_id=_tmdb_str(best.tmdb_id),
+                rating=best.display_rating or best.scraped_rating,
+                cast=best.cast,
+                is_adult=is_adult,
+                versions=_build_versions(g.members, labels),
+                version_count=len(g.members),
+                **_nfo_metadata(best),
+            )
+        )
+    return _single_pass_json(
+        UnifiedMediaListResponse(items=items, total=total, has_more=limit < total)
     )
 
 

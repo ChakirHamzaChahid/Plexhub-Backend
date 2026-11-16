@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.config import settings
 from app.db.database import _VEC_LOADED, register_sqlite_vec_listener
 from app.db.migrations import _migration_008_ai_embeddings
+from app.models.database import Base, Media
 from app.services import embedding_service
 from app.services.embedding_service import EMBEDDING_DIM
 from app.services import ollama_service
@@ -51,8 +52,9 @@ async def _seed_row(
     media_type: str,
     title: str,
     vec: list[float],
+    playable: bool = True,
 ) -> None:
-    """Insert one row into both ai_tmdb_cache and ai_embeddings."""
+    """Insert one row into ai_tmdb_cache, ai_embeddings, and optionally Media."""
     now_ms = 1_700_000_000_000
     await session.execute(
         text(
@@ -66,6 +68,20 @@ async def _seed_row(
         text("INSERT INTO ai_embeddings(tmdb_id, embedding) VALUES(:tid, :v)"),
         {"tid": tmdb_id, "v": _serialize_vec(vec)},
     )
+    if playable:
+        session.add(
+            Media(
+                rating_key=f"rk-{tmdb_id}",
+                server_id="srv1",
+                library_section_id="lib1",
+                page_offset=tmdb_id,
+                title=title,
+                type="movie" if media_type == "movie" else "show",
+                tmdb_id=str(tmdb_id),
+                is_in_allowed_categories=True,
+                is_broken=False,
+            )
+        )
     await session.commit()
 
 
@@ -75,11 +91,12 @@ async def _seed_row(
 
 @pytest_asyncio.fixture
 async def search_engine(tmp_path):
-    """Isolated file-backed sqlite-vec engine with M008 applied."""
+    """Isolated file-backed sqlite-vec engine with Base schema + M008 applied."""
     db_path = tmp_path / "search_test.db"
     engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}", future=True)
     register_sqlite_vec_listener(engine)
     async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
         await _migration_008_ai_embeddings(conn)
     yield engine
     await engine.dispose()
@@ -307,3 +324,35 @@ async def test_camelcase_aliases_in_results(seeded_client):
         # snake_case aliases must NOT appear in serialised output.
         assert "tmdb_id" not in item
         assert "media_type" not in item
+
+
+async def test_search_playable_only_default_and_false(
+    search_client, search_factory, monkeypatch
+):
+    """T10.1: playableOnly defaults to True (hides unowned) and False includes unowned."""
+    monkeypatch.setattr(embedding_service, "embed_query", lambda _q: _async_val(_unit_vec(0)))
+    monkeypatch.setattr(ollama_service, "generate", lambda _p: _async_val(""))
+
+    async with search_factory() as s:
+        await _seed_row(s, tmdb_id=10, media_type="movie", title="Owned", vec=_unit_vec(0), playable=True)
+        await _seed_row(s, tmdb_id=11, media_type="movie", title="Unowned", vec=_unit_vec(0), playable=False)
+
+    resp_default = await search_client.post(
+        "/api/ai/search",
+        headers={"X-API-Key": "test-key-search"},
+        json={"query": "anything", "limit": 10},
+    )
+    assert resp_default.status_code == 200, resp_default.text
+    assert [r["tmdbId"] for r in resp_default.json()["results"]] == [10]
+
+    resp_all = await search_client.post(
+        "/api/ai/search",
+        headers={"X-API-Key": "test-key-search"},
+        json={"query": "anything", "limit": 10, "playableOnly": False},
+    )
+    assert resp_all.status_code == 200, resp_all.text
+    assert {r["tmdbId"] for r in resp_all.json()["results"]} == {10, 11}
+
+
+async def _async_val(v):
+    return v

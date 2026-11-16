@@ -38,6 +38,7 @@ from app.utils.time import now_ms
 from app.services.embedding_service import EmbeddingUnavailableError, weighted_centroid
 from app.services.recommendation_service import (
     cosine_rank,
+    filter_catalog_tmdb_ids,
     generate_blurb,
     hydrate_misses,
     load_cached_vectors,
@@ -86,6 +87,11 @@ class RankRequest(BaseModel):
     limit: int = Field(default=20, ge=1, le=200)
     media_type: Literal["movie", "tv"] = "movie"
     explain: bool = False
+    playable_only: bool = True
+    genres: list[str] | None = None
+    year_min: int | None = None
+    year_max: int | None = None
+    min_rating: float | None = Field(default=None, ge=0.0, le=10.0)
 
 
 class RankMultiRequest(BaseModel):
@@ -133,6 +139,11 @@ class SearchRequest(BaseModel):
     query: str = Field(min_length=1)
     media_type: Literal["movie", "tv"] | None = None
     limit: int = Field(default=20, ge=1, le=50)
+    playable_only: bool = True
+    genres: list[str] | None = None
+    year_min: int | None = None
+    year_max: int | None = None
+    min_rating: float | None = Field(default=None, ge=0.0, le=10.0)
 
 
 class SearchResult(BaseModel):
@@ -336,6 +347,25 @@ async def rank(
         payload.candidates, payload.media_type
     )
     resolution_failed = ref_failed + cand_failed
+
+    if (
+        payload.playable_only
+        or payload.genres
+        or payload.year_min is not None
+        or payload.year_max is not None
+        or payload.min_rating is not None
+    ) and cand_ids:
+        allowed_cand_ids = await filter_catalog_tmdb_ids(
+            db,
+            cand_ids,
+            media_type=payload.media_type,
+            playable_only=payload.playable_only,
+            genres=payload.genres,
+            year_min=payload.year_min,
+            year_max=payload.year_max,
+            min_rating=payload.min_rating,
+        )
+        cand_ids = [tid for tid in cand_ids if tid in allowed_cand_ids]
 
     # 2. Cache lookup (ref + candidates combined for a single SQL query)
     all_ids = list({ref_tmdb, *cand_ids})
@@ -559,6 +589,11 @@ async def search(
         query_vec=query_vec,
         media_type=payload.media_type,
         limit=payload.limit,
+        playable_only=payload.playable_only,
+        genres=payload.genres,
+        year_min=payload.year_min,
+        year_max=payload.year_max,
+        min_rating=payload.min_rating,
     )
 
     # 4. Build response.

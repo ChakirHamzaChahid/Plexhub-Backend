@@ -264,3 +264,143 @@ async def test_semantic_search_no_type_filter_unaffected(ai_db_session):
 
     results = await semantic_search(ai_db_session, query, media_type=None, limit=3)
     assert len(results) == 3
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# T10.1 — Playable-first & metadata filters
+# ──────────────────────────────────────────────────────────────────────────────
+
+async def _ensure_catalog_schema(engine) -> None:
+    from app.models.database import Base
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+
+async def test_semantic_search_playable_only_filters_broken_disallowed_outage_and_unowned(
+    ai_engine, ai_db_session
+):
+    from app.models.database import Media, XtreamAccount
+    from app.utils.server_id import build_server_id
+
+    await _ensure_catalog_schema(ai_engine)
+    srv_ok = build_server_id("srv_ok")
+    srv_out = build_server_id("srv_out")
+    ai_db_session.add_all([
+        XtreamAccount(
+            id="srv_ok", label="OK", base_url="http://ok.example",
+            port=80, username="u", password="p", outage_strikes=0,
+        ),
+        XtreamAccount(
+            id="srv_out", label="Out", base_url="http://out.example",
+            port=80, username="u", password="p", outage_strikes=10,
+        ),
+    ])
+
+    q = _unit_vec(0)
+    # 6001: playable
+    await _insert_cached_embedding(ai_db_session, 6001, q, media_type="movie")
+    ai_db_session.add(Media(
+        rating_key="rk1", server_id=srv_ok, library_section_id="1", page_offset=1,
+        title="Playable", type="movie", tmdb_id="6001",
+        is_in_allowed_categories=True, is_broken=False,
+    ))
+    # 6002: broken
+    await _insert_cached_embedding(ai_db_session, 6002, q, media_type="movie")
+    ai_db_session.add(Media(
+        rating_key="rk2", server_id=srv_ok, library_section_id="1", page_offset=2,
+        title="Broken", type="movie", tmdb_id="6002",
+        is_in_allowed_categories=True, is_broken=True,
+    ))
+    # 6003: disallowed category
+    await _insert_cached_embedding(ai_db_session, 6003, q, media_type="movie")
+    ai_db_session.add(Media(
+        rating_key="rk3", server_id=srv_ok, library_section_id="1", page_offset=3,
+        title="Disallowed", type="movie", tmdb_id="6003",
+        is_in_allowed_categories=False, is_broken=False,
+    ))
+    # 6004: outage server
+    await _insert_cached_embedding(ai_db_session, 6004, q, media_type="movie")
+    ai_db_session.add(Media(
+        rating_key="rk4", server_id=srv_out, library_section_id="1", page_offset=4,
+        title="Outage", type="movie", tmdb_id="6004",
+        is_in_allowed_categories=True, is_broken=False,
+    ))
+    # 6005: unowned (only in ai_tmdb_cache + ai_embeddings)
+    await _insert_cached_embedding(ai_db_session, 6005, q, media_type="movie")
+    await ai_db_session.commit()
+
+    playable_res = await semantic_search(
+        ai_db_session, q, media_type="movie", limit=10, playable_only=True
+    )
+    assert [r[0] for r in playable_res] == [6001]
+
+    all_res = await semantic_search(
+        ai_db_session, q, media_type="movie", limit=10, playable_only=False
+    )
+    assert {r[0] for r in all_res} == {6001, 6002, 6003, 6004, 6005}
+
+
+async def test_semantic_search_playable_only_overfetch_escalates(
+    monkeypatch, ai_engine, ai_db_session
+):
+    from app.models.database import Media
+
+    await _ensure_catalog_schema(ai_engine)
+    monkeypatch.setattr(recommendation_service, "KNN_OVERFETCH_CEILINGS", (5, 50))
+
+    q = _unit_vec(0)
+    # 20 unowned (closest) + 5 playable (farther)
+    for i in range(20):
+        await _insert_cached_embedding(ai_db_session, 7000 + i, q, media_type="movie")
+    other = _unit_vec(1)
+    for i in range(5):
+        tid = 7100 + i
+        await _insert_cached_embedding(ai_db_session, tid, other, media_type="movie")
+        ai_db_session.add(Media(
+            rating_key=f"rk-{tid}", server_id="srv_ok", library_section_id="1", page_offset=tid,
+            title=f"Playable {i}", type="movie", tmdb_id=str(tid),
+            is_in_allowed_categories=True, is_broken=False,
+        ))
+    await ai_db_session.commit()
+
+    results = await semantic_search(
+        ai_db_session, q, media_type=None, limit=5, playable_only=True
+    )
+    assert len(results) == 5
+    assert all(7100 <= r[0] < 7105 for r in results)
+
+
+async def test_semantic_search_filters_genres_year_and_min_rating(ai_engine, ai_db_session):
+    from app.models.database import Media
+
+    await _ensure_catalog_schema(ai_engine)
+    q = _unit_vec(0)
+
+    items = [
+        (8001, "Action, Sci-Fi", 2022, 8.2),
+        (8002, "Comedy", 2022, 8.5),
+        (8003, "Action", 2010, 8.0),
+        (8004, "Action", 2023, 5.0),
+    ]
+    for tid, genres, year, rating in items:
+        await _insert_cached_embedding(ai_db_session, tid, q, media_type="movie")
+        ai_db_session.add(Media(
+            rating_key=f"rk-{tid}", server_id="srv_ok", library_section_id="1", page_offset=tid,
+            title=f"Movie {tid}", type="movie", tmdb_id=str(tid),
+            genres=genres, year=year, display_rating=rating,
+            is_in_allowed_categories=True, is_broken=False,
+        ))
+    await ai_db_session.commit()
+
+    res = await semantic_search(
+        ai_db_session,
+        q,
+        media_type="movie",
+        limit=10,
+        playable_only=True,
+        genres=["action"],
+        year_min=2020,
+        year_max=2024,
+        min_rating=7.0,
+    )
+    assert [r[0] for r in res] == [8001]

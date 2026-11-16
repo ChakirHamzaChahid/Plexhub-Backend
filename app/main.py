@@ -37,7 +37,7 @@ from app.api import (
 from app.utils.request_context import RequestIdLogFilter, RequestIdMiddleware
 from app.utils.job_health import mark_job_success, set_master, track_job
 
-APP_VERSION = "1.16.0"
+APP_VERSION = "1.17.0"
 
 # First run of the opt-in `epg_sync` job, counted from boot (see lifespan).
 _EPG_SYNC_FIRST_RUN_DELAY = timedelta(minutes=5)
@@ -331,6 +331,19 @@ async def lifespan(app: FastAPI):
                 misfire_grace_time=3600,
             )
 
+            from app.services.startup_tasks import cleanup_retention_caches as _cleanup_retention_caches
+
+            scheduler.add_job(
+                track_job("retention_cleanup")(_cleanup_retention_caches),
+                "cron",
+                hour=3,
+                minute=30,
+                id="retention_cleanup",
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=3600,
+            )
+
             if settings.BACKUP_ENABLED:
                 from app.scripts.backup_db import run_backup as _run_backup
 
@@ -499,7 +512,7 @@ async def lifespan(app: FastAPI):
         from app.services.tmdb_service import tmdb_service
         from app.workers import health_check_worker
         from app.dav import relay as dav_relay
-        from app.services import poster_match_service, ollama_service
+        from app.services import poster_match_service, ollama_service, notification_service
 
         await xtream_service.close()
         await tmdb_service.close()
@@ -511,6 +524,7 @@ async def lifespan(app: FastAPI):
         # a no-op if no poster was ever compared (lazy client, stays `None`).
         await poster_match_service.close()
         await ollama_service.close_client()
+        await notification_service.close_client()
 
         # Shutdown image download thread pool
         from app.plex_generator.storage import shutdown_image_pool

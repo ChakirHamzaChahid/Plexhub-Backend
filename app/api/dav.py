@@ -68,6 +68,7 @@ from app.dav.throttle import ThrottleTimeout, account_throttle, upstream_limit
 from app.dav.vfs import DavEntry, DavTree, dav_tree_cache
 from app.models.database import XtreamAccount
 from app.services.stream_service import build_stream_url
+from app.utils import metrics
 from app.utils.server_id import parse_server_id
 
 logger = logging.getLogger("plexhub.api.dav")
@@ -163,6 +164,25 @@ def _warn_on_size_mismatch(entry: DavEntry, upstream: relay.UpstreamStream) -> N
 
 
 async def _get_response(request: Request, db: AsyncSession, entry: DavEntry) -> Response:
+    range_header = request.headers.get("range")
+    cache_key = (
+        relay.probe_cache_key(entry.server_id, entry.rating_key)
+        if entry.server_id and entry.rating_key
+        else None
+    )
+    if cache_key and range_header:
+        cached = await relay.try_serve_cached_range(cache_key, range_header, entry.size)
+        if cached is not None:
+            headers = dict(cached.headers)
+            headers["Content-Type"] = cached.headers.get("Content-Type") or content_type_for(entry.name)
+            headers["Content-Encoding"] = "identity"
+            headers["Last-Modified"] = http_date(entry.mtime)
+            return StreamingResponse(
+                cached.body,
+                status_code=cached.status_code,
+                headers=headers,
+            )
+
     account = await _resolve_account(db, entry)
     if account is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
@@ -182,7 +202,12 @@ async def _get_response(request: Request, db: AsyncSession, entry: DavEntry) -> 
         ) from None
 
     try:
-        upstream = await relay.open_upstream(url, request.headers.get("range"))
+        if cache_key and settings.DAV_PROBE_CACHE_DIR and settings.DAV_PROBE_CACHE_MAX_MB > 0:
+            upstream = await relay.open_upstream(
+                url, range_header, cache_key=cache_key, total_size=entry.size,
+            )
+        else:
+            upstream = await relay.open_upstream(url, range_header)
     except relay.UpstreamNotFound:
         release()
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from None
@@ -193,6 +218,9 @@ async def _get_response(request: Request, db: AsyncSession, entry: DavEntry) -> 
     except relay.UpstreamError:
         release()
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY) from None
+    except Exception:
+        release()
+        raise
 
     # From here on `upstream` holds a live upstream connection AND the
     # throttle permit is held — both need exactly one cleanup pass no
@@ -274,6 +302,14 @@ async def _get_response(request: Request, db: AsyncSession, entry: DavEntry) -> 
 # ─── Dispatch ────────────────────────────────────────────────────────────
 
 
+def _dav_status_class(status_code: int) -> str:
+    if 200 <= status_code < 300:
+        return "2xx"
+    if 400 <= status_code < 500:
+        return "4xx"
+    return "5xx"
+
+
 async def dav_dispatch(
     request: Request,
     path: str = "",
@@ -285,35 +321,52 @@ async def dav_dispatch(
     router's registered `methods=`, so Starlette's own routing answers 405
     before any dependency (including auth) runs.
     """
-    if not settings.DAV_ENABLED:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="WebDAV disabled")
-
     method = request.method
+    status_code = 500
+    try:
+        if not settings.DAV_ENABLED:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="WebDAV disabled")
 
-    if method == "OPTIONS":
-        return Response(
-            status_code=status.HTTP_204_NO_CONTENT,
-            headers={"Allow": ", ".join(_ALLOWED_METHODS), "DAV": "1"},
-        )
+        if method == "OPTIONS":
+            resp = Response(
+                status_code=status.HTTP_204_NO_CONTENT,
+                headers={"Allow": ", ".join(_ALLOWED_METHODS), "DAV": "1"},
+            )
+            status_code = resp.status_code
+            return resp
 
-    tree = await dav_tree_cache.get()
-    entry = tree.lookup(path)
+        tree = await dav_tree_cache.get()
+        entry = tree.lookup(path)
 
-    if method == "PROPFIND":
-        return _propfind_response(request, tree, path, entry)
+        if method == "PROPFIND":
+            resp = _propfind_response(request, tree, path, entry)
+            status_code = resp.status_code
+            return resp
 
-    # HEAD / GET share the same "resolve the file entry" preamble.
-    if entry is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
-    if entry.is_dir:
-        # Neither HEAD nor GET is meaningful on a directory in this
-        # read-only, file-serving-only WebDAV surface.
-        raise HTTPException(status_code=status.HTTP_405_METHOD_NOT_ALLOWED)
+        # HEAD / GET share the same "resolve the file entry" preamble.
+        if entry is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+        if entry.is_dir:
+            # Neither HEAD nor GET is meaningful on a directory in this
+            # read-only, file-serving-only WebDAV surface.
+            raise HTTPException(status_code=status.HTTP_405_METHOD_NOT_ALLOWED)
 
-    if method == "HEAD":
-        return _head_response(entry)
+        if method == "HEAD":
+            resp = _head_response(entry)
+            status_code = resp.status_code
+            return resp
 
-    return await _get_response(request, db, entry)
+        resp = await _get_response(request, db, entry)
+        status_code = resp.status_code
+        return resp
+    except HTTPException as exc:
+        status_code = exc.status_code
+        raise
+    finally:
+        if method in metrics.DAV_METHODS:
+            metrics.dav_requests_total.labels(
+                method=method, status=_dav_status_class(status_code),
+            ).inc()
 
 
 router.add_api_route("/{path:path}", dav_dispatch, methods=_ALLOWED_METHODS, include_in_schema=False)

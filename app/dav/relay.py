@@ -44,14 +44,18 @@ throttle metrics, not hidden by the byte counter.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import AsyncIterator, Awaitable, Callable, Optional
 
 import httpx
 
 from app.config import settings
-from app.utils.metrics import dav_relayed_bytes_total
+from app.utils.metrics import dav_bytes_served_total, dav_relayed_bytes_total
 from app.utils.ssrf import SsrfBlockedError, assert_public_host
 
 logger = logging.getLogger("plexhub.dav")
@@ -207,19 +211,18 @@ async def _shim_ranged_body(
             yield chunk[slice_start:slice_end]
 
 
-async def _counted_body(body: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
-    """Wrap an upstream byte iterator so every chunk actually handed to the
-    DAV client (`app/api/dav.py`'s `body()` generator drains `Upstream
-    Stream.body`) is counted into `plexhub_dav_relayed_bytes_total` (S5.3,
-    AUDIT-P8-002) — unlabelled, no URL/account/filename anywhere near it
-    (piège 18f). Applied uniformly at every place this module hands back a
-    real body (plain pass-through AND the range-shim's re-sliced body), so
-    a caller draining `UpstreamStream.body` always gets counted bytes
-    regardless of which path produced the stream. Not applied to
-    `_empty_body` (416 responses never carry bytes to count)."""
+async def _counted_body(
+    body: AsyncIterator[bytes], *, from_cache: bool = False,
+) -> AsyncIterator[bytes]:
+    """Wrap a byte iterator so every chunk served to the DAV client increments
+    `plexhub_dav_bytes_served_total`, and upstream-relayed chunks also increment
+    `plexhub_dav_relayed_bytes_total`."""
     async for chunk in body:
         if chunk:
-            dav_relayed_bytes_total.inc(len(chunk))
+            n = len(chunk)
+            dav_bytes_served_total.inc(n)
+            if not from_cache:
+                dav_relayed_bytes_total.inc(n)
         yield chunk
 
 
@@ -279,7 +282,13 @@ async def _send(client: httpx.AsyncClient, url: str, headers: dict[str, str]) ->
 
 # --- Public entry point ---------------------------------------------------------
 
-async def open_upstream(url: str, range_header: Optional[str]) -> UpstreamStream:
+async def open_upstream(
+    url: str,
+    range_header: Optional[str],
+    *,
+    cache_key: Optional[str] = None,
+    total_size: Optional[int] = None,
+) -> UpstreamStream:
     """Fetch `url` (an already-built Xtream stream URL — never logged),
     following redirects (SSRF-guarded via `app.utils.ssrf.assert_public_host`,
     up to `settings.DOWNLOAD_MAX_REDIRECTS` hops) and passing `range_header`
@@ -340,12 +349,22 @@ async def open_upstream(url: str, range_header: Optional[str]) -> UpstreamStream
         raise UpstreamError(f"unexpected upstream status {resp.status_code}")
 
     if resp.status_code == 200 and range_header and settings.DAV_RANGE_SHIM:
-        return await _apply_range_shim(resp, range_header)
+        stream = await _apply_range_shim(resp, range_header)
+        if cache_key and stream.status_code == 206 and total_size:
+            parsed_range = _parse_range_header(range_header, total_size)
+            if parsed_range is not None:
+                stream = _maybe_tee_probe_stream(stream, cache_key, parsed_range[0], parsed_range[1], total_size)
+        return stream
 
-    return UpstreamStream(
-        resp.status_code, _passthrough_headers(resp),
-        _counted_body(resp.aiter_bytes(settings.DOWNLOAD_CHUNK_BYTES)), resp.aclose,
+    body = _counted_body(resp.aiter_bytes(settings.DOWNLOAD_CHUNK_BYTES))
+    stream = UpstreamStream(
+        resp.status_code, _passthrough_headers(resp), body, resp.aclose,
     )
+    if cache_key and resp.status_code == 206 and range_header and total_size:
+        parsed_range = _parse_range_header(range_header, total_size)
+        if parsed_range is not None:
+            stream = _maybe_tee_probe_stream(stream, cache_key, parsed_range[0], parsed_range[1], total_size)
+    return stream
 
 
 async def _apply_range_shim(resp: httpx.Response, range_header: str) -> UpstreamStream:
@@ -383,3 +402,263 @@ async def _apply_range_shim(resp: httpx.Response, range_header: str) -> Upstream
         headers["Content-Type"] = content_type
     body = _counted_body(_shim_ranged_body(resp, start, end, settings.DOWNLOAD_CHUNK_BYTES))
     return UpstreamStream(206, headers, body, resp.aclose)
+
+
+# --- Header + Tail Probe Cache (Lot 12 T12.1) --------------------------------
+
+DAV_PROBE_HEADER_BYTES = 16 * 1024 * 1024  # 16 MiB
+DAV_PROBE_TAIL_BYTES = 32 * 1024 * 1024    # 32 MiB
+_PREWARM_TASKS: set[asyncio.Task] = set()
+
+
+def probe_cache_key(server_id: str, rating_key: str) -> str:
+    """Deterministic, path-safe cache key for `(server_id, rating_key)`."""
+    return hashlib.sha256(f"{server_id}:{rating_key}".encode("utf-8")).hexdigest()
+
+
+def _probe_cache_root() -> Optional[Path]:
+    if not settings.DAV_PROBE_CACHE_DIR or settings.DAV_PROBE_CACHE_MAX_MB <= 0:
+        return None
+    return Path(settings.DAV_PROBE_CACHE_DIR).resolve()
+
+
+def _confined_cache_file(root: Path, filename: str) -> Path:
+    target = (root / filename).resolve()
+    if not target.is_relative_to(root):
+        raise ValueError("probe cache path escapes DAV_PROBE_CACHE_DIR")
+    return target
+
+
+def _enforce_probe_cache_budget(root: Path, max_bytes: int) -> None:
+    """Evict oldest `.head`/`.tail` slices (by mtime) until total <= max_bytes."""
+    if max_bytes <= 0 or not root.is_dir():
+        return
+    files: list[tuple[float, int, Path]] = []
+    total = 0
+    for p in root.iterdir():
+        if not p.is_file() or p.suffix not in (".head", ".tail"):
+            continue
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        files.append((st.st_mtime, st.st_size, p))
+        total += st.st_size
+    if total <= max_bytes:
+        return
+    files.sort(key=lambda item: item[0])  # oldest first
+    for _mtime, sz, p in files:
+        if total <= max_bytes:
+            break
+        try:
+            p.unlink(missing_ok=True)
+            total -= sz
+        except OSError:
+            continue
+
+
+def write_probe_slice(cache_key: str, kind: str, data: bytes, total_size: int) -> None:
+    """Atomically persist a `.head` or `.tail` probe slice under `DAV_PROBE_CACHE_DIR`."""
+    if kind not in ("head", "tail") or not data or total_size <= 0:
+        return
+    root = _probe_cache_root()
+    if root is None:
+        return
+    max_bytes = settings.DAV_PROBE_CACHE_MAX_MB * 1024 * 1024
+    if len(data) > max_bytes:
+        return
+    root.mkdir(parents=True, exist_ok=True)
+    target = _confined_cache_file(root, f"{cache_key}.{kind}")
+    tmp = _confined_cache_file(root, f"{cache_key}.{kind}.tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, target)
+
+    meta_path = _confined_cache_file(root, f"{cache_key}.meta")
+    meta_tmp = _confined_cache_file(root, f"{cache_key}.meta.tmp")
+    meta_tmp.write_text(json.dumps({"size": total_size}), encoding="utf-8")
+    os.replace(meta_tmp, meta_path)
+
+    _enforce_probe_cache_budget(root, max_bytes)
+
+
+def _read_cached_slice(
+    root: Path, cache_key: str, start: int, end: int, total_size: int,
+) -> Optional[bytes]:
+    if end < DAV_PROBE_HEADER_BYTES:
+        head_path = _confined_cache_file(root, f"{cache_key}.head")
+        if not head_path.is_file():
+            return None
+        if head_path.stat().st_size <= end:
+            return None
+        os.utime(head_path, None)
+        with head_path.open("rb") as fh:
+            fh.seek(start)
+            return fh.read(end - start + 1)
+
+    tail_base = max(0, total_size - DAV_PROBE_TAIL_BYTES)
+    if start >= tail_base:
+        tail_path = _confined_cache_file(root, f"{cache_key}.tail")
+        meta_path = _confined_cache_file(root, f"{cache_key}.meta")
+        if not tail_path.is_file() or not meta_path.is_file():
+            return None
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if meta.get("size") != total_size:
+            return None
+        expected_tail_len = total_size - tail_base
+        if tail_path.stat().st_size != expected_tail_len:
+            return None
+        os.utime(tail_path, None)
+        rel_start = start - tail_base
+        with tail_path.open("rb") as fh:
+            fh.seek(rel_start)
+            return fh.read(end - start + 1)
+
+    return None
+
+
+async def _single_chunk_body(data: bytes) -> AsyncIterator[bytes]:
+    if data:
+        yield data
+
+
+async def try_serve_cached_range(
+    cache_key: str, range_header: Optional[str], total_size: Optional[int],
+) -> Optional[UpstreamStream]:
+    """Serve a Range request from `DAV_PROBE_CACHE_DIR` if it falls within
+    the cached header (first 16 MiB) or tail (last 32 MiB). Returns None on
+    cache miss or when caching is disabled."""
+    root = _probe_cache_root()
+    if root is None or not range_header or not total_size or total_size <= 0:
+        return None
+    parsed = _parse_range_header(range_header, total_size)
+    if parsed is None:
+        return None
+    start, end = parsed
+    if start > end or start >= total_size:
+        return None
+
+    data = await asyncio.to_thread(_read_cached_slice, root, cache_key, start, end, total_size)
+    if data is None:
+        return None
+
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Range": f"bytes {start}-{end}/{total_size}",
+        "Content-Length": str(len(data)),
+    }
+    return UpstreamStream(
+        206, headers, _counted_body(_single_chunk_body(data), from_cache=True), _noop_aclose,
+    )
+
+
+def _classify_probe_window(start: int, end: int, total_size: int) -> Optional[str]:
+    if start == 0 and end == min(total_size, DAV_PROBE_HEADER_BYTES) - 1:
+        return "head"
+    tail_base = max(0, total_size - DAV_PROBE_TAIL_BYTES)
+    if start == tail_base and end == total_size - 1:
+        return "tail"
+    return None
+
+
+def _maybe_tee_probe_stream(
+    stream: UpstreamStream, cache_key: str, start: int, end: int, total_size: int,
+) -> UpstreamStream:
+    root = _probe_cache_root()
+    kind = _classify_probe_window(start, end, total_size)
+    if root is None or kind is None:
+        return stream
+
+    expected_len = end - start + 1
+    max_cap = DAV_PROBE_TAIL_BYTES if kind == "tail" else DAV_PROBE_HEADER_BYTES
+    if expected_len <= 0 or expected_len > max_cap:
+        return stream
+
+    async def _tee() -> AsyncIterator[bytes]:
+        buf = bytearray()
+        completed = False
+        try:
+            async for chunk in stream.body:
+                if len(buf) + len(chunk) <= max_cap:
+                    buf.extend(chunk)
+                yield chunk
+            completed = True
+        finally:
+            if completed and len(buf) == expected_len:
+                try:
+                    await asyncio.to_thread(write_probe_slice, cache_key, kind, bytes(buf), total_size)
+                except Exception:
+                    logger.debug("DAV probe cache write skipped", exc_info=True)
+
+    return UpstreamStream(stream.status_code, stream.headers, _tee(), stream.aclose)
+
+
+async def prewarm_tree_probes(
+    tree,
+    resolve_url: Callable[[object], Awaitable[Optional[str]]],
+    *,
+    max_items: int = 50,
+) -> int:
+    """Best-effort background prewarm of header+tail slices for *tree* entries."""
+    root = _probe_cache_root()
+    if root is None:
+        return 0
+    warmed = 0
+    for entry in list(getattr(tree, "entries", {}).values()):
+        if warmed >= max_items:
+            break
+        if getattr(entry, "is_dir", True):
+            continue
+        size = getattr(entry, "size", None)
+        server_id = getattr(entry, "server_id", None)
+        rating_key = getattr(entry, "rating_key", None)
+        if not size or size <= 0 or not server_id or not rating_key:
+            continue
+        key = probe_cache_key(server_id, rating_key)
+        head_file = _confined_cache_file(root, f"{key}.head")
+        tail_file = _confined_cache_file(root, f"{key}.tail")
+        if head_file.is_file() and tail_file.is_file():
+            continue
+        try:
+            url = await resolve_url(entry)
+            if not url:
+                continue
+            head_end = min(size, DAV_PROBE_HEADER_BYTES) - 1
+            if not head_file.is_file():
+                s = await open_upstream(url, f"bytes=0-{head_end}", cache_key=key, total_size=size)
+                try:
+                    async for _ in s.body:
+                        pass
+                finally:
+                    await s.aclose()
+            tail_start = max(0, size - DAV_PROBE_TAIL_BYTES)
+            if not tail_file.is_file():
+                s = await open_upstream(url, f"bytes={tail_start}-{size - 1}", cache_key=key, total_size=size)
+                try:
+                    async for _ in s.body:
+                        pass
+                finally:
+                    await s.aclose()
+            warmed += 1
+        except Exception:
+            logger.debug("DAV probe prewarm skipped for %r", getattr(entry, "name", "?"), exc_info=True)
+    return warmed
+
+
+def schedule_probe_prewarm(
+    tree,
+    resolve_url: Optional[Callable[[object], Awaitable[Optional[str]]]] = None,
+) -> Optional[asyncio.Task]:
+    """Schedule non-blocking background prewarm when `DAV_PROBE_CACHE_DIR` is enabled."""
+    if _probe_cache_root() is None or resolve_url is None:
+        return None
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+    task = loop.create_task(prewarm_tree_probes(tree, resolve_url))
+    _PREWARM_TASKS.add(task)
+    task.add_done_callback(_PREWARM_TASKS.discard)
+    return task

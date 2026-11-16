@@ -298,6 +298,64 @@ def prune_old_backups(backup_dir: Path, retention_days: int) -> list[Path]:
     return deleted
 
 
+def _notify_backup_failure(reason: str, error_detail: str) -> None:
+    """Dispatch a fail-safe notification on backup failure or corrupt integrity_check.
+
+    Safe in both sync CLI / thread pool execution (via asyncio.run with ephemeral client)
+    and running event loops (via notify_fire_and_forget).
+    Never touches the global shared AsyncClient or disrupts caller error handling.
+    """
+    try:
+        import asyncio
+        from app.services.notification_service import (
+            create_client,
+            notify_fire_and_forget,
+            send_notification,
+        )
+
+        title = "Échec de sauvegarde de la base de données"
+        if reason == "integrity_check_failed":
+            title = "Sauvegarde corrompue : échec integrity_check"
+
+        message = f"La sauvegarde DB a échoué ({reason}) : {error_detail}"
+        details = {
+            "reason": reason,
+            "error": error_detail,
+        }
+
+        # Check if an event loop is already running in this thread
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is not None and loop.is_running():
+            notify_fire_and_forget(
+                event="backup",
+                title=title,
+                message=message,
+                severity="error",
+                key="backup_failure",
+                details=details,
+            )
+        else:
+            async def _send_with_ephemeral() -> None:
+                async with create_client() as ephemeral_client:
+                    await send_notification(
+                        event="backup",
+                        title=title,
+                        message=message,
+                        severity="error",
+                        key="backup_failure",
+                        details=details,
+                        client=ephemeral_client,
+                    )
+
+            asyncio.run(_send_with_ephemeral())
+    except Exception as exc:
+        logger.debug("Failed to dispatch backup failure notification: %s", exc)
+
+
 def run_backup(retention_days: int | None = None) -> Path:
     """Snapshot the live DB (atomic + verified) and prune old backups.
 
@@ -305,6 +363,7 @@ def run_backup(retention_days: int | None = None) -> Path:
     """
     if not settings.DB_PATH.exists():
         write_attempt_state(settings.BACKUP_DIR, "failed")
+        _notify_backup_failure("db_not_found", f"DB not found at {settings.DB_PATH}")
         raise FileNotFoundError(f"DB not found at {settings.DB_PATH}")
 
     swept = sweep_orphan_tmp(settings.BACKUP_DIR) + sweep_orphan_restore_tmp(settings.DB_PATH)
@@ -314,8 +373,10 @@ def run_backup(retention_days: int | None = None) -> Path:
     target = _build_target_path(settings.BACKUP_DIR)
     try:
         perform_backup(settings.DB_PATH, target)
-    except BaseException:
+    except BaseException as exc:
         write_attempt_state(settings.BACKUP_DIR, "failed")
+        reason = "integrity_check_failed" if isinstance(exc, BackupIntegrityError) else "backup_error"
+        _notify_backup_failure(reason, str(exc))
         raise
     write_attempt_state(settings.BACKUP_DIR, "ok")
     size_mb = target.stat().st_size / (1024 * 1024)
@@ -346,7 +407,11 @@ def verify_latest(backup_dir: Path) -> str | None:
         candidates,
         key=lambda f: _parse_backup_stamp(f.name[len(_FILE_PREFIX):-len(_FILE_SUFFIX)]),
     )
-    check_integrity(newest)
+    try:
+        check_integrity(newest)
+    except BackupIntegrityError as exc:
+        _notify_backup_failure("integrity_check_failed", str(exc))
+        raise
     write_verified_sidecar(newest, newest)
     logger.info(f"Verified existing backup: {newest.name}")
     return newest.name

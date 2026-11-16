@@ -95,7 +95,7 @@ from pathlib import Path
 from sqlalchemy import func, select, update
 
 from app.config import settings
-from app.models.database import DownloadJob, Media, PlexMediaItem, XtreamAccount
+from app.models.database import DownloadBatch, DownloadJob, Media, PlexMediaItem, XtreamAccount
 from app.services import download_service, plex_download_service
 from app.services.download_nfo import render_media_nfo, render_plex_media_nfo
 from app.services.download_service import (
@@ -190,6 +190,11 @@ async def _refresh_queue_depth_gauge(session_factory) -> None:
 
     for state in _QUEUE_STATES:
         metrics.download_jobs.labels(state=state).set(counts.get(state, 0))
+    metrics.download_queue_size.set(counts.get("queued", 0) + counts.get("running", 0))
+
+
+def _job_source(server_id: str | None) -> str:
+    return "plex" if server_id and is_plex_server_id(server_id) else "xtream"
 
 
 async def run_drain_loop(session_factory) -> None:
@@ -359,6 +364,50 @@ async def _write_sidecar_nfo(session_factory, job: DownloadJob, dest: Path) -> N
         )
 
 
+async def _write_sidecar_subtitles(job: DownloadJob, dest: Path) -> None:
+    """Best-effort: translate an external or embedded subtitle into ``.<lang>.srt``.
+
+    Never raises — Ollama unavailability, missing ffmpeg, or malformed
+    subtitles must never fail the video download job.
+    """
+    from app.services import subtitle_service
+
+    lang = subtitle_service.sanitize_lang_tag(settings.DOWNLOAD_AUTO_SUBTITLES_LANG)
+    if not lang:
+        return
+
+    try:
+        sidecar = dest.with_name(f"{dest.stem}.{lang}.srt")
+        if await asyncio.to_thread(lambda: sidecar.is_file() and sidecar.stat().st_size > 0):
+            return
+
+        ext_sub = await asyncio.to_thread(download_service.find_external_subtitle, dest, lang)
+        content: str | None = None
+        if ext_sub is not None:
+            raw = await asyncio.to_thread(ext_sub.read_text, encoding="utf-8-sig", errors="replace")
+            if raw.strip():
+                fmt = subtitle_service.detect_format(raw)
+                content = subtitle_service.convert_vtt_to_srt(raw) if fmt == "vtt" else raw
+        else:
+            content = await subtitle_service.extract_srt_from_media(dest)
+
+        if not content or not content.strip():
+            return
+
+        translation = await subtitle_service.translate_subtitles(
+            content, target_lang=lang, fmt="srt",
+        )
+        written = await asyncio.to_thread(
+            download_service.write_sidecar_subtitle, dest, lang, translation.translated_content,
+        )
+        logger.info("Download job %s: wrote sidecar subtitle %s", job.id, written.name)
+    except Exception:
+        logger.warning(
+            "Download job %s: sidecar subtitle generation failed (non-fatal)",
+            job.id, exc_info=True,
+        )
+
+
 async def _load_account(session_factory, server_id: str) -> XtreamAccount | None:
     account_id = parse_server_id(server_id)
     if not account_id:
@@ -424,7 +473,9 @@ def _safe_error(exc: Exception) -> str:
     return message[:200]
 
 
-async def _mark_completed(session_factory, job_id: str, result: DownloadResult) -> None:
+async def _mark_completed(
+    session_factory, job_id: str, result: DownloadResult, *, source: str | None = None,
+) -> None:
     async def _do() -> None:
         async with session_factory() as db:
             now = now_ms()
@@ -445,10 +496,14 @@ async def _mark_completed(session_factory, job_id: str, result: DownloadResult) 
             await db.commit()
 
     await run_with_retry(_do, op="mark_completed")
+    if source is not None:
+        metrics.download_jobs_total.labels(source=source, status="completed").inc()
     logger.info("Download job %s: completed (%d bytes)", job_id, result.bytes_downloaded)
 
 
-async def _mark_failed(session_factory, job_id: str, message: str) -> None:
+async def _mark_failed(
+    session_factory, job_id: str, message: str, *, source: str | None = None,
+) -> None:
     async def _do() -> None:
         async with session_factory() as db:
             now = now_ms()
@@ -460,6 +515,8 @@ async def _mark_failed(session_factory, job_id: str, message: str) -> None:
             await db.commit()
 
     await run_with_retry(_do, op="mark_failed")
+    if source is not None:
+        metrics.download_jobs_total.labels(source=source, status="failed").inc()
     logger.warning("Download job %s: failed (%s)", job_id, message)
     # S5.2: single hook for every call site of `_mark_failed` (permanent
     # transfer errors AND the pre-transfer "not found" messages below) —
@@ -474,6 +531,99 @@ async def _mark_failed(session_factory, job_id: str, message: str) -> None:
     reason = download_service.classify_failure_reason(message)
     if reason is not None:
         metrics.download_failures_total.labels(reason=reason).inc()
+
+
+async def _check_and_notify_batch_completion(session_factory, batch_id: str | None) -> None:
+    """If *batch_id* belongs to a DownloadBatch whose jobs have ALL reached a
+    terminal state (completed / failed / canceled), dispatch a structured
+    notification (severity='info' if completed, 'warning' if partial, 'error' if failed).
+    """
+    if not batch_id:
+        return
+
+    async def _inspect_batch():
+        async with session_factory() as db:
+            batch = await db.get(DownloadBatch, batch_id)
+            if batch is None:
+                return None
+            rows = (
+                await db.execute(
+                    select(DownloadJob.state, func.count())
+                    .where(DownloadJob.batch_id == batch_id)
+                    .group_by(DownloadJob.state)
+                )
+            ).all()
+            return batch.title, {state: count for state, count in rows}
+
+    try:
+        data = await run_with_retry(_inspect_batch, op="check_batch_completion")
+    except Exception:
+        logger.debug("Failed to inspect batch %s completion", batch_id, exc_info=True)
+        return
+
+    if not data:
+        return
+
+    batch_title, counts = data
+    # Non-terminal states: if any job is still queued or running, batch is in progress
+    queued = counts.get("queued", 0)
+    running = counts.get("running", 0)
+    if queued > 0 or running > 0:
+        return
+
+    completed = counts.get("completed", 0)
+    failed = counts.get("failed", 0)
+    canceled = counts.get("canceled", 0)
+    total = sum(counts.values())
+    if total == 0:
+        return
+
+    if completed == total:
+        status = "completed"
+        severity = "info"
+        title = f"Téléchargement terminé : {batch_title}"
+    elif completed > 0:
+        status = "partial"
+        severity = "warning"
+        title = f"Téléchargement partiel : {batch_title}"
+    elif failed == 0 and canceled > 0:
+        status = "canceled"
+        severity = "info"
+        title = f"Téléchargement annulé : {batch_title}"
+    else:
+        status = "failed"
+        severity = "error"
+        title = f"Téléchargement échoué : {batch_title}"
+
+    if status == "canceled":
+        msg = f"Batch {batch_id} (canceled) : {canceled}/{total} annulé(s)"
+    else:
+        msg = f"Batch {batch_id} ({status}) : {completed}/{total} terminé(s) avec succès"
+        if failed:
+            msg += f", {failed} échec(s)"
+        if canceled:
+            msg += f", {canceled} annulé(s)"
+
+    try:
+        from app.services.notification_service import notify_fire_and_forget
+        notify_fire_and_forget(
+            event="download",
+            title=title,
+            message=msg,
+            severity=severity,
+            key=f"download_batch:{batch_id}",
+            details={
+                "batch_id": batch_id,
+                "title": batch_title,
+                "status": status,
+                "total": total,
+                "completed": completed,
+                "failed": failed,
+                "canceled": canceled,
+            },
+        )
+    except Exception:
+        logger.debug("Failed to dispatch download batch notification for %s", batch_id, exc_info=True)
 
 
 async def _handle_transient(session_factory, job_id: str, message: str) -> None:
@@ -515,11 +665,12 @@ async def _handle_transient(session_factory, job_id: str, message: str) -> None:
             job = await db.get(DownloadJob, job_id)
             if job is None or job.state != "running":
                 return None
-            return (job.attempts or 0) + 1
+            return (job.attempts or 0) + 1, job.batch_id, job.server_id
 
-    attempts = await run_with_retry(_peek_attempts, op="handle_transient_peek")
-    if attempts is None:
+    peek_result = await run_with_retry(_peek_attempts, op="handle_transient_peek")
+    if peek_result is None:
         return  # already canceled/gone — nothing to do
+    attempts, batch_id, server_id = peek_result
 
     if attempts <= settings.DOWNLOAD_MAX_RETRIES:
         delay = min(2 ** attempts, 30)
@@ -557,9 +708,12 @@ async def _handle_transient(session_factory, job_id: str, message: str) -> None:
                 await db.commit()
 
         await run_with_retry(_fail, op="handle_transient_fail")
+        metrics.download_jobs_total.labels(source=_job_source(server_id), status="failed").inc()
         logger.warning(
             "Download job %s: giving up after %d attempt(s) (%s)", job_id, attempts, message,
         )
+        if batch_id:
+            await _check_and_notify_batch_completion(session_factory, batch_id)
 
 
 async def _run_job(session_factory, job_id: str, sem: asyncio.Semaphore) -> None:
@@ -569,6 +723,7 @@ async def _run_job(session_factory, job_id: str, sem: asyncio.Semaphore) -> None
     # `None` on every other exit path (claim miss / not-found / permanent
     # failure / cancel / success), where no post-semaphore work is needed.
     transient_message: str | None = None
+    batch_id: str | None = None
 
     async with sem:
         if not await _claim(session_factory, job_id):
@@ -577,42 +732,68 @@ async def _run_job(session_factory, job_id: str, sem: asyncio.Semaphore) -> None
         job = await _load_job(session_factory, job_id)
         if job is None:
             return
+        batch_id = job.batch_id
+        source = _job_source(job.server_id)
 
         # Direct-stream fallbacks (Plex download-disabled recovery); Xtream
         # jobs never populate this, so their transfer is byte-for-byte
         # unchanged (download_to_disk treats [] like the old single-URL call).
         fallback_urls: list[str] = []
+        hls_fallback_url: str | None = None
         if is_plex_server_id(job.server_id):
             plex_urls = await plex_download_service.resolve_job_urls(session_factory, job)
             if not plex_urls:
-                await _mark_failed(session_factory, job_id, "source Plex introuvable ou non synchronisée")
+                await _mark_failed(
+                    session_factory, job_id, "source Plex introuvable ou non synchronisée",
+                    source=source,
+                )
+                if batch_id:
+                    await _check_and_notify_batch_completion(session_factory, batch_id)
                 return
             # [0] = original-file `?download=1` URL (share allows downloads);
             # the rest are direct-stream fallbacks download_to_disk switches to
             # on a 403 — see plex_download_service.resolve_job_urls.
             url = plex_urls[0]
             fallback_urls = plex_urls[1:]
+            hls_fallback_url = await plex_download_service.resolve_hls_fallback_url(
+                session_factory, job,
+            )
         else:
             account = await _load_account(session_factory, job.server_id)
             if account is None:
-                await _mark_failed(session_factory, job_id, "compte source introuvable ou inactif")
+                await _mark_failed(
+                    session_factory, job_id, "compte source introuvable ou inactif",
+                    source=source,
+                )
+                if batch_id:
+                    await _check_and_notify_batch_completion(session_factory, batch_id)
                 return
             url = build_stream_url(account, job.rating_key)
             if not url:
-                await _mark_failed(session_factory, job_id, "URL de flux introuvable")
+                await _mark_failed(
+                    session_factory, job_id, "URL de flux introuvable",
+                    source=source,
+                )
+                if batch_id:
+                    await _check_and_notify_batch_completion(session_factory, batch_id)
                 return
 
         try:
             dest = resolve_confined(job.dest_path)
         except (PathConfinementError, DownloadDisabledError) as exc:
             logger.error("Download job %s: destination rejected: %s", job_id, exc)
-            await _mark_failed(session_factory, job_id, "chemin de destination invalide")
+            await _mark_failed(
+                session_factory, job_id, "chemin de destination invalide",
+                source=source,
+            )
             # S5.2: classified by exception TYPE here (unambiguous), not by
             # `_mark_failed`'s generic message-based `classify_failure_reason`
             # — "chemin de destination invalide" never matches any of its
             # patterns, so this increment does not double up with the one
             # `_mark_failed` would otherwise skip for this message.
             metrics.download_failures_total.labels(reason="confinement").inc()
+            if batch_id:
+                await _check_and_notify_batch_completion(session_factory, batch_id)
             return
 
         last_persist = {"t": 0.0}
@@ -649,12 +830,18 @@ async def _run_job(session_factory, job_id: str, sem: asyncio.Semaphore) -> None
             result = await download_service.download_to_disk(
                 url, dest, on_progress=_on_progress, cancel_check=_cancel_check,
                 fallback_urls=fallback_urls,
+                hls_fallback_url=hls_fallback_url,
             )
         except DownloadCanceled:
+            metrics.download_jobs_total.labels(source=source, status="canceled").inc()
             logger.info("Download job %s: canceled (title=%r)", job_id, job.title)
+            if batch_id:
+                await _check_and_notify_batch_completion(session_factory, batch_id)
             return
         except DownloadPermanentError as exc:
-            await _mark_failed(session_factory, job_id, _safe_error(exc))
+            await _mark_failed(session_factory, job_id, _safe_error(exc), source=source)
+            if batch_id:
+                await _check_and_notify_batch_completion(session_factory, batch_id)
             return
         except DownloadTransientError as exc:
             transient_message = _safe_error(exc)
@@ -664,11 +851,14 @@ async def _run_job(session_factory, job_id: str, sem: asyncio.Semaphore) -> None
             logger.error("Download job %s: unexpected error", job_id, exc_info=True)
             transient_message = "erreur inattendue"
         else:
-            await _mark_completed(session_factory, job_id, result)
+            await _mark_completed(session_factory, job_id, result, source=source)
             # Sidecar .nfo next to the finished file — best-effort, after the
             # job is already marked completed so it can never turn a good
             # download into a failure.
             await _write_sidecar_nfo(session_factory, job, dest)
+            await _write_sidecar_subtitles(job, dest)
+            if batch_id:
+                await _check_and_notify_batch_completion(session_factory, batch_id)
     # `sem` is released here — `_handle_transient` (peek + immediate requeue
     # + exponential back-off sleep) must NEVER run while still holding the
     # concurrency slot, or a single flaky job freezes the whole queue at

@@ -82,10 +82,8 @@ async def prepare_account_create(db: AsyncSession, body: AccountCreate) -> dict:
         auth_data = await xtream_service.authenticate(credentials)
         user_info = auth_data.get("user_info", {})
         server_info = auth_data.get("server_info", {})
-    except httpx.HTTPError as e:
-        raise AccountAuthenticationError(safe_xtream_error(e)) from e
     except Exception as e:
-        raise AccountAuthenticationError(str(e)) from e
+        raise AccountAuthenticationError(safe_xtream_error(e)) from e
 
     return {
         "id": account_id,
@@ -207,3 +205,27 @@ async def test_account_connection(db: AsyncSession, account_id: str) -> dict:
         raise AccountAuthenticationError(safe_xtream_error(e)) from e
 
     return auth_data.get("user_info", {})
+
+
+async def toggle_account_active(db: AsyncSession, account_id: str) -> XtreamAccount:
+    """Toggle is_active on account_id and return the updated account.
+
+    Raises:
+        AccountNotFoundError: no account with this id.
+    """
+    result = await db.execute(
+        select(XtreamAccount).where(XtreamAccount.id == account_id)
+    )
+    account = result.scalars().first()
+    if not account:
+        raise AccountNotFoundError(account_id)
+
+    new_status = not account.is_active
+    await db.execute(
+        update(XtreamAccount)
+        .where(XtreamAccount.id == account_id)
+        .values(is_active=new_status)
+    )
+    account.is_active = new_status
+    return account
+

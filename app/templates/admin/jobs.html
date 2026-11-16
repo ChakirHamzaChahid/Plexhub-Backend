@@ -1,0 +1,24 @@
+{% extends "admin/base.html" %}
+
+{% block title %}PlexHub Admin — Jobs & Sauvegardes{% endblock %}
+
+{% block content %}
+<section class="mb-6 flex flex-wrap items-center justify-between gap-4">
+  <div>
+    <h2 class="text-xl font-semibold mb-1">Jobs &amp; Sauvegardes</h2>
+    <p class="text-sm text-slate-500">
+      Pilotage en temps réel des tâches de fond (rafraîchissement automatique toutes les 5 s) et état de la dernière sauvegarde SQLite.
+    </p>
+  </div>
+  <div class="text-xs px-2.5 py-1 rounded border {{ 'bg-emerald-50 text-emerald-800 border-emerald-200' if is_master else 'bg-slate-100 text-slate-600 border-slate-200' }}">
+    Processus : <span class="font-semibold">{{ 'Master (planificateur actif)' if is_master else 'Worker / Secondaire' }}</span>
+  </div>
+</section>
+
+<section id="jobs-panel"
+         hx-get="/admin/jobs/panel"
+         hx-trigger="every 5s"
+         hx-swap="innerHTML">
+  {% include "admin/_jobs_panel.html" %}
+</section>
+{% endblock %}

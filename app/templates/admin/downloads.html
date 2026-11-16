@@ -2,6 +2,7 @@
 {% block title %}Télécharger — PlexHub Admin{% endblock %}
 
 {% block content %}
+{% with active_tab='xtream' %}{% include "admin/_downloads_subtabs.html" %}{% endwith %}
 <section class="mb-6">
   <h2 class="text-xl font-semibold mb-1">Télécharger des médias</h2>
   <p class="text-sm text-slate-500">

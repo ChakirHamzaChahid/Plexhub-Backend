@@ -4,14 +4,19 @@ Mounted at `/admin`, separate from the JSON API (`/api/...`). Routes here render
 HTML fragments rather than JSON; they call the same `media_service` functions
 the API uses, so business logic isn't duplicated.
 """
+import asyncio
+import json
 import logging
 import re
+import uuid
 from pathlib import Path
-from typing import Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
+from pydantic import ValidationError
+from sqlalchemy import case, func, select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,16 +25,26 @@ logger = logging.getLogger("plexhub.api.admin")
 
 from app.config import settings
 from app.db.database import async_session_factory, get_db
-from app.models.schemas import MediaUpdate
+from app.models.database import MetadataEdit, ScrapeCacheEntry, XtreamAccount, XtreamCategory
+from app.models.schemas import AccountCreate, MediaUpdate
 from app.services.media_service import media_service
 from app.services import (
     account_outage_service,
+    account_service,
     api_key_service,
+    backup_status_service,
+    category_service,
+    job_registry,
     manual_scrape_service,
     nfo_import_service,
     poster_match_service,
 )
+from app.services.xtream_service import safe_xtream_error
+from app.utils import job_health, tasks as app_tasks
+from app.utils.db_retry import session_factory_for, write_with_retry
+from app.utils.ssrf import SsrfBlockedError
 from app.utils.string_normalizer import clean_title
+from app.utils.tasks import create_background_task
 from app.utils.time import now_ms
 from app.workers import manual_scrape_batch_worker
 
@@ -114,11 +129,13 @@ async def _catalogue_ctx(
 
 async def _stats_ctx(db: AsyncSession) -> dict:
     stats = await manual_scrape_service.catalogue_stats(db)
+    backup_status = await asyncio.to_thread(backup_status_service.compute_status, now_ms())
     return {
         "stats": stats,
         "movie_stats": stats["movie"],
         "show_stats": stats["show"],
         "outages": await account_outage_service.list_outages(db),
+        "backup_status": backup_status,
     }
 
 
@@ -940,6 +957,839 @@ async def admin_keys_revoke(
     return templates.TemplateResponse(
         request, "admin/_keys_table.html", await _keys_ctx(db)
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Comptes Xtream & éditeur de catégories (T9.1)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+async def _accounts_ctx(db: AsyncSession) -> dict:
+    result = await db.execute(
+        select(XtreamAccount).order_by(XtreamAccount.created_at.desc())
+    )
+    accounts = result.scalars().all()
+    threshold = settings.ACCOUNT_OUTAGE_STRIKES
+    account_rows = [
+        {
+            "id": a.id,
+            "label": a.label,
+            "base_url": a.base_url,
+            "port": a.port,
+            "username": a.username,
+            "status": a.status,
+            "is_active": a.is_active,
+            "created_at": a.created_at,
+            "last_synced_at": a.last_synced_at,
+            "expiration_date": a.expiration_date,
+            "max_connections": a.max_connections,
+            "allowed_formats": a.allowed_formats,
+            "category_filter_mode": a.category_filter_mode,
+            "outage_strikes": int(a.outage_strikes or 0),
+            "outage_since": a.outage_since,
+            "is_outage": bool(
+                a.outage_strikes
+                and a.outage_strikes >= threshold
+                and settings.ACCOUNT_OUTAGE_MASK_ENABLED
+            ),
+        }
+        for a in accounts
+    ]
+    return {"accounts": account_rows}
+
+
+@router.get("/accounts", response_class=HTMLResponse)
+async def admin_accounts(request: Request, db: AsyncSession = Depends(get_db)):
+    return templates.TemplateResponse(
+        request, "admin/accounts.html", await _accounts_ctx(db)
+    )
+
+
+@router.get("/accounts/table", response_class=HTMLResponse)
+async def admin_accounts_table(request: Request, db: AsyncSession = Depends(get_db)):
+    return templates.TemplateResponse(
+        request, "admin/_accounts_table.html", await _accounts_ctx(db)
+    )
+
+
+@router.post("/accounts", response_class=HTMLResponse)
+async def admin_accounts_create(
+    request: Request,
+    label: str = Form(...),
+    base_url: str = Form(...),
+    port: int = Form(80),
+    username: str = Form(...),
+    password: str = Form(...),
+    db: AsyncSession = Depends(get_db),
+):
+    label = (label or "").strip()
+    base_url = (base_url or "").strip()
+    username = (username or "").strip()
+    if not label or not base_url or not username or not password:
+        return templates.TemplateResponse(
+            request,
+            "admin/_account_created.html",
+            {"error": "Tous les champs (libellé, URL, identifiant, mot de passe) sont obligatoires."},
+            status_code=422,
+        )
+
+    try:
+        body = AccountCreate(
+            label=label,
+            base_url=base_url,
+            port=port,
+            username=username,
+            password=password,
+        )
+        account_values = await account_service.prepare_account_create(db, body)
+    except account_service.AccountAlreadyExistsError:
+        return templates.TemplateResponse(
+            request,
+            "admin/_account_created.html",
+            {"error": "Un compte avec cette URL et cet identifiant existe déjà."},
+            status_code=409,
+        )
+    except (ValueError, ValidationError) as exc:
+        return templates.TemplateResponse(
+            request,
+            "admin/_account_created.html",
+            {"error": f"Paramètres invalides : {exc}"},
+            status_code=422,
+        )
+    except (account_service.AccountAuthenticationError, SsrfBlockedError) as exc:
+        return templates.TemplateResponse(
+            request,
+            "admin/_account_created.html",
+            {"error": f"Échec d'authentification : {exc}"},
+            status_code=422,
+        )
+
+    async def _work_create(session: AsyncSession) -> XtreamAccount:
+        existing = await session.execute(
+            select(XtreamAccount).where(XtreamAccount.id == account_values["id"])
+        )
+        if existing.scalars().first():
+            raise account_service.AccountAlreadyExistsError(account_values["id"])
+        row = XtreamAccount(**account_values)
+        session.add(row)
+        await session.commit()
+        return row
+
+    try:
+        account = await write_with_retry(
+            _work_create,
+            session_factory=session_factory_for(db),
+            op="admin.create_account",
+        )
+    except account_service.AccountAlreadyExistsError:
+        return templates.TemplateResponse(
+            request,
+            "admin/_account_created.html",
+            {"error": "Un compte avec cette URL et cet identifiant existe déjà."},
+            status_code=409,
+        )
+
+    from app.workers.sync_worker import sync_account
+    create_background_task(sync_account(account.id), name=f"sync_{account.id}")
+
+    return templates.TemplateResponse(
+        request,
+        "admin/_account_created.html",
+        {
+            "error": None,
+            "label": account.label,
+            "account_id": account.id,
+        },
+        headers={"HX-Trigger": "refresh-accounts"},
+    )
+
+
+@router.post("/accounts/{account_id}/test", response_class=HTMLResponse)
+async def admin_accounts_test(
+    account_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        user_info = await account_service.test_account_connection(db, account_id)
+        exp_date_raw = user_info.get("exp_date")
+        exp_date_ms = int(exp_date_raw) * 1000 if exp_date_raw else None
+        return templates.TemplateResponse(
+            request,
+            "admin/_account_test_result.html",
+            {
+                "success": True,
+                "status": user_info.get("status", "Unknown"),
+                "expiration_date": exp_date_ms,
+                "max_connections": int(user_info.get("max_connections", 1)),
+                "allowed_formats": ",".join(user_info.get("allowed_output_formats", [])),
+                "error": None,
+            },
+        )
+    except account_service.AccountNotFoundError:
+        return templates.TemplateResponse(
+            request,
+            "admin/_account_test_result.html",
+            {"success": False, "error": "Compte introuvable."},
+            status_code=404,
+        )
+    except (account_service.AccountAuthenticationError, Exception) as exc:
+        return templates.TemplateResponse(
+            request,
+            "admin/_account_test_result.html",
+            {"success": False, "error": str(exc)},
+            status_code=200,
+        )
+
+
+@router.post("/accounts/{account_id}/toggle", response_class=HTMLResponse)
+async def admin_accounts_toggle(
+    account_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    async def _work_toggle(session: AsyncSession):
+        updated = await account_service.toggle_account_active(session, account_id)
+        await session.commit()
+        return updated
+
+    try:
+        await write_with_retry(
+            _work_toggle,
+            session_factory=session_factory_for(db),
+            op="admin.toggle_account_active",
+        )
+    except account_service.AccountNotFoundError:
+        raise HTTPException(404, "Compte introuvable")
+
+    return templates.TemplateResponse(
+        request, "admin/_accounts_table.html", await _accounts_ctx(db)
+    )
+
+
+async def _categories_ctx(
+    db: AsyncSession, account_id: str, message: str | None = None
+) -> dict:
+    result = await db.execute(
+        select(XtreamAccount).where(XtreamAccount.id == account_id)
+    )
+    account = result.scalars().first()
+    if not account:
+        raise HTTPException(404, "Compte introuvable")
+
+    categories, filter_mode = await category_service.get_categories(db, account_id)
+
+    cat_rows = []
+    allowed_count = 0
+    blocked_count = 0
+    adult_count = 0
+
+    for cat in categories:
+        is_adult = category_service.is_adult_category(cat.category_name, cat.category_id)
+        if cat.is_allowed:
+            allowed_count += 1
+        else:
+            blocked_count += 1
+        if is_adult:
+            adult_count += 1
+        cat_rows.append(
+            {
+                "id": cat.id,
+                "account_id": cat.account_id,
+                "category_id": cat.category_id,
+                "category_type": cat.category_type,
+                "category_name": cat.category_name,
+                "is_allowed": cat.is_allowed,
+                "is_adult": is_adult,
+            }
+        )
+
+    account_dict = {
+        "id": account.id,
+        "label": account.label,
+        "category_filter_mode": filter_mode,
+    }
+
+    return {
+        "account": account_dict,
+        "categories": cat_rows,
+        "stats": {
+            "allowed_count": allowed_count,
+            "blocked_count": blocked_count,
+            "adult_count": adult_count,
+        },
+        "message": message,
+    }
+
+
+@router.get("/accounts/{account_id}/categories", response_class=HTMLResponse)
+async def admin_accounts_categories(
+    account_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    ctx = await _categories_ctx(db, account_id)
+    return templates.TemplateResponse(request, "admin/_categories_editor.html", ctx)
+
+
+@router.post("/accounts/{account_id}/categories/mode", response_class=HTMLResponse)
+async def admin_accounts_categories_mode(
+    account_id: str,
+    request: Request,
+    filter_mode: str = Form(...),
+    db: AsyncSession = Depends(get_db),
+):
+    if filter_mode not in ("all", "whitelist", "blacklist"):
+        raise HTTPException(400, "Mode de filtrage invalide")
+
+    account = (
+        await db.execute(select(XtreamAccount).where(XtreamAccount.id == account_id))
+    ).scalar_one_or_none()
+    if not account:
+        raise HTTPException(404, "Compte introuvable")
+
+    async def _work_mode(session: AsyncSession):
+        await category_service.update_filter_mode(session, account_id, filter_mode)
+        await session.commit()
+
+    await write_with_retry(
+        _work_mode,
+        session_factory=session_factory_for(db),
+        op="admin.update_category_filter_mode",
+    )
+    await category_service.update_media_category_visibility(db, account_id)
+
+    ctx = await _categories_ctx(
+        db, account_id, message=f"Mode de filtrage mis à jour : {filter_mode.upper()}."
+    )
+    return templates.TemplateResponse(request, "admin/_categories_editor.html", ctx)
+
+
+@router.post(
+    "/accounts/{account_id}/categories/{category_id}/toggle",
+    response_class=HTMLResponse,
+)
+async def admin_accounts_category_toggle(
+    account_id: str,
+    category_id: str,
+    request: Request,
+    category_type: str = Form(...),
+    db: AsyncSession = Depends(get_db),
+):
+    async def _work_toggle(session: AsyncSession) -> bool:
+        new_status = await category_service.toggle_category_allowed(
+            session, account_id, category_id, category_type
+        )
+        await session.commit()
+        return new_status
+
+    try:
+        new_allowed = await write_with_retry(
+            _work_toggle,
+            session_factory=session_factory_for(db),
+            op="admin.toggle_category_allowed",
+        )
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+
+    await category_service.update_media_category_visibility(db, account_id)
+
+    stmt = select(XtreamCategory).where(
+        XtreamCategory.account_id == account_id,
+        XtreamCategory.category_id == category_id,
+        XtreamCategory.category_type == category_type,
+    )
+    result = await db.execute(stmt)
+    cat = result.scalar_one_or_none()
+    if not cat:
+        raise HTTPException(404, "Catégorie introuvable")
+
+    is_adult = category_service.is_adult_category(cat.category_name, cat.category_id)
+    cat_dict = {
+        "id": cat.id,
+        "account_id": cat.account_id,
+        "category_id": cat.category_id,
+        "category_type": cat.category_type,
+        "category_name": cat.category_name,
+        "is_allowed": new_allowed,
+        "is_adult": is_adult,
+    }
+    return templates.TemplateResponse(
+        request, "admin/_category_row.html", {"cat": cat_dict}
+    )
+
+
+@router.post("/accounts/{account_id}/categories/refresh", response_class=HTMLResponse)
+async def admin_accounts_categories_refresh(
+    account_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        vod_categories, series_categories, new_allowed = (
+            await category_service.fetch_categories_from_provider(db, account_id)
+        )
+
+        async def _work_upsert(session: AsyncSession) -> tuple[int, int]:
+            counts = await category_service.upsert_categories_batch(
+                session,
+                account_id,
+                vod_categories,
+                series_categories,
+                new_allowed,
+            )
+            await session.commit()
+            return counts
+
+        vod_count, series_count = await write_with_retry(
+            _work_upsert,
+            session_factory=session_factory_for(db),
+            op="admin.refresh_categories",
+        )
+    except category_service.AccountNotFoundError:
+        raise HTTPException(404, "Compte introuvable")
+    except Exception as exc:
+        await db.rollback()
+        safe_msg = safe_xtream_error(exc)
+        ctx = await _categories_ctx(
+            db, account_id, message=f"Erreur lors du rafraîchissement : {safe_msg}"
+        )
+        return templates.TemplateResponse(request, "admin/_categories_editor.html", ctx)
+
+    ctx = await _categories_ctx(
+        db,
+        account_id,
+        message=f"Catégories synchronisées : {vod_count} VOD, {series_count} séries.",
+    )
+    return templates.TemplateResponse(request, "admin/_categories_editor.html", ctx)
+
+
+@router.post("/accounts/{account_id}/categories/block-adult", response_class=HTMLResponse)
+async def admin_accounts_categories_block_adult(
+    account_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    async def _work_block(session: AsyncSession) -> int:
+        count = await category_service.block_adult_categories_for_account(
+            session, account_id
+        )
+        await session.commit()
+        return count
+
+    count = await write_with_retry(
+        _work_block,
+        session_factory=session_factory_for(db),
+        op="admin.block_adult_categories",
+    )
+    await category_service.update_media_category_visibility(db, account_id)
+    await category_service.update_media_adult_flags(db, account_id)
+
+    ctx = await _categories_ctx(
+        db,
+        account_id,
+        message=f"{count} catégorie(s) adulte(s) bloquée(s) et catalogue mis à jour.",
+    )
+    return templates.TemplateResponse(request, "admin/_categories_editor.html", ctx)
+
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Pilotage & suivi temps réel des jobs et sauvegardes (T9.2)
+# ──────────────────────────────────────────────────────────────────────────────
+
+_SECRET_URL_CREDS_RE = re.compile(r"://[^:/\s@]+:[^@/\s]+@")
+_SECRET_XTREAM_PATH_RE = re.compile(
+    r"/(?P<type>movie|series|live)/[^/\s?#]+/[^/\s?#]+(?=/|$|\s)",
+    re.IGNORECASE,
+)
+_SECRET_KV_RE = re.compile(
+    r"(?i)(password|passwd|token|api_key|apikey|secret|authorization|x-api-key)\s*[:=]\s*\S+"
+)
+
+
+def _sanitize_job_message(raw: object, max_len: int = 160) -> str:
+    """Strip URL credentials and key=value secrets, then bound length."""
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    text = _SECRET_URL_CREDS_RE.sub("://***:***@", text)
+    text = _SECRET_XTREAM_PATH_RE.sub(r"/\g<type>/***/***", text)
+    text = _SECRET_KV_RE.sub(lambda m: f"{m.group(1)}=***", text)
+    text = " ".join(text.split())
+    if len(text) > max_len:
+        return text[: max_len - 1] + "…"
+    return text
+
+
+async def _exec_sync_job() -> None:
+    from app.workers import sync_worker
+
+    await sync_worker.run_all_accounts()
+
+
+async def _exec_epg_sync_job() -> None:
+    from app.services import epg_sync_service
+
+    await epg_sync_service.run_epg_sync_job()
+
+
+async def _exec_enrichment_job() -> None:
+    from app.workers import enrichment_worker
+
+    await enrichment_worker.run()
+
+
+async def _exec_health_check_job() -> None:
+    from app.workers import health_check_worker
+
+    await health_check_worker.run()
+
+
+async def _exec_plex_generate_job() -> None:
+    from app.services import plex_generation_service
+
+    await plex_generation_service.generate_plex_library_auto()
+
+
+async def _exec_backup_job() -> None:
+    from app.scripts import backup_db
+
+    await asyncio.to_thread(backup_db.run_backup)
+
+
+_ADMIN_JOB_SPECS: dict[str, dict[str, Any]] = {
+    "sync": {
+        "label": "Synchronisation Xtream",
+        "phase": "sync",
+        "phases": ("sync",),
+        "prefixes": ("sync_", "admin_sync_"),
+        "health_key": "pipeline",
+        "runner": _exec_sync_job,
+    },
+    "epg_sync": {
+        "label": "Synchro EPG (XMLTV)",
+        "phase": "epg_sync",
+        "phases": ("epg_sync",),
+        "prefixes": ("epg_sync_", "admin_epg_sync_"),
+        "health_key": "epg_sync",
+        "runner": _exec_epg_sync_job,
+    },
+    "enrichment": {
+        "label": "Enrichissement TMDB",
+        "phase": "enrichment",
+        "phases": ("enrichment",),
+        "prefixes": ("enrichment_", "admin_enrichment_"),
+        "health_key": None,
+        "runner": _exec_enrichment_job,
+    },
+    "health_check": {
+        "label": "Validation des flux",
+        "phase": "validation",
+        "phases": ("validation", "health_check"),
+        "prefixes": ("validation_", "health_check_", "admin_health_check_"),
+        "health_key": "health_check",
+        "runner": _exec_health_check_job,
+    },
+    "plex_generate": {
+        "label": "Génération bibliothèque Plex",
+        "phase": "generation",
+        "phases": ("generation", "plex_generate"),
+        "prefixes": ("plex_generate_", "admin_plex_generate_"),
+        "health_key": None,
+        "runner": _exec_plex_generate_job,
+    },
+    "backup": {
+        "label": "Sauvegarde BDD",
+        "phase": "backup",
+        "phases": ("backup", "db_backup"),
+        "prefixes": ("backup_", "admin_backup_"),
+        "health_key": "db_backup",
+        "runner": _exec_backup_job,
+    },
+}
+
+
+def _match_job_entry(job_name: str, entry: dict[str, Any]) -> bool:
+    spec = _ADMIN_JOB_SPECS[job_name]
+    job_id = str(entry.get("job_id") or "")
+    phase = str(entry.get("phase") or "")
+    return job_id.startswith(spec["prefixes"]) or phase in spec["phases"]
+
+
+def _is_job_running(job_name: str, all_jobs: list[dict[str, Any]] | None = None) -> bool:
+    task_name = f"admin_job_{job_name}"
+    if any(
+        not task.done() and task.get_name() == task_name
+        for task in app_tasks._background_tasks
+    ):
+        return True
+    entries = all_jobs if all_jobs is not None else job_registry.get_all_jobs()
+    return any(
+        _match_job_entry(job_name, entry) and entry.get("status") == "processing"
+        for entry in entries
+    )
+
+
+def _build_job_views(backup_status: dict[str, Any]) -> list[dict[str, Any]]:
+    all_jobs = job_registry.get_all_jobs()
+    views: list[dict[str, Any]] = []
+    for name, spec in _ADMIN_JOB_SPECS.items():
+        matched = [e for e in all_jobs if _match_job_entry(name, e)]
+        running = _is_job_running(name, all_jobs)
+
+        health_success = (
+            job_health.last_success_ms(spec["health_key"])
+            if spec["health_key"]
+            else None
+        )
+        registry_success = next(
+            (
+                e.get("finished_at") or e.get("started_at")
+                for e in matched
+                if e.get("status") == "completed"
+            ),
+            None,
+        )
+        success_candidates = [
+            ts for ts in (health_success, registry_success) if isinstance(ts, int)
+        ]
+        if name == "backup" and isinstance(backup_status.get("lastSuccessAt"), int):
+            success_candidates.append(backup_status["lastSuccessAt"])
+        last_success_at = max(success_candidates) if success_candidates else None
+
+        last_failed = next(
+            (e for e in matched if e.get("status") == "failed"), None
+        )
+        last_failure_at = (
+            (last_failed.get("finished_at") or last_failed.get("started_at"))
+            if last_failed
+            else None
+        )
+        latest = matched[0] if matched else None
+
+        if running:
+            status = "running"
+            message = "En cours d'exécution…"
+        elif latest and latest.get("status") == "failed":
+            status = "error"
+            message = _sanitize_job_message(latest.get("error")) or "Échec du dernier run"
+        elif (
+            last_failure_at is not None
+            and (last_success_at is None or last_failure_at > last_success_at)
+        ):
+            status = "error"
+            message = (
+                _sanitize_job_message(last_failed.get("error") if last_failed else None)
+                or "Échec du dernier run"
+            )
+        else:
+            status = "idle"
+            message = (
+                "Dernier run réussi"
+                if last_success_at is not None
+                else "Aucun run récent"
+            )
+
+        views.append(
+            {
+                "name": name,
+                "label": spec["label"],
+                "status": status,
+                "last_success_at": last_success_at,
+                "last_failure_at": last_failure_at,
+                "message": message,
+            }
+        )
+    return views
+
+
+async def _jobs_ctx(
+    *,
+    flash_message: str | None = None,
+    flash_error: str | None = None,
+) -> dict[str, Any]:
+    current_ms = now_ms()
+    backup_status = await asyncio.to_thread(
+        backup_status_service.compute_status, current_ms
+    )
+    return {
+        "jobs": _build_job_views(backup_status),
+        "backup_status": backup_status,
+        "is_master": job_health.is_master(),
+        "server_now_ms": current_ms,
+        "flash_message": flash_message,
+        "flash_error": flash_error,
+    }
+
+
+@router.get("/jobs", response_class=HTMLResponse)
+async def admin_jobs_index(request: Request):
+    return templates.TemplateResponse(request, "admin/jobs.html", await _jobs_ctx())
+
+
+@router.get("/jobs/panel", response_class=HTMLResponse)
+async def admin_jobs_panel(request: Request):
+    return templates.TemplateResponse(request, "admin/_jobs_panel.html", await _jobs_ctx())
+
+
+@router.post("/jobs/{job_name}/run", response_class=HTMLResponse)
+async def admin_jobs_run(job_name: str, request: Request):
+    spec = _ADMIN_JOB_SPECS.get(job_name)
+    if spec is None:
+        raise HTTPException(status_code=404, detail=f"Unknown job '{job_name}'")
+
+    if _is_job_running(job_name):
+        return templates.TemplateResponse(
+            request,
+            "admin/_jobs_panel.html",
+            await _jobs_ctx(
+                flash_error=f"Le job « {spec['label']} » est déjà en cours."
+            ),
+            status_code=409,
+        )
+
+    job_id = f"admin_{job_name}_{uuid.uuid4().hex[:8]}"
+    job_registry.create_job(job_id, phase=spec["phase"])
+    runner: Callable[[], Awaitable[None]] = spec["runner"]
+    health_key: str | None = spec["health_key"]
+
+    async def _tracked() -> None:
+        try:
+            await runner()
+            job_registry.update_job(job_id, status="completed", progress={})
+            if health_key:
+                job_health.mark_job_success(health_key)
+        except Exception as exc:
+            logger.error("Admin job %s (%s) failed: %s", job_name, job_id, exc)
+            job_registry.update_job(
+                job_id,
+                status="failed",
+                error=_sanitize_job_message(str(exc)) or "Job failed",
+            )
+
+    create_background_task(_tracked(), name=f"admin_job_{job_name}")
+    return templates.TemplateResponse(
+        request,
+        "admin/_jobs_panel.html",
+        await _jobs_ctx(flash_message=f"Job « {spec['label']} » démarré."),
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Vue audit lecture seule : metadata_edits + stats scrape_cache (T9.3)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _extract_edit_fields(before_raw: str | None, after_raw: str | None) -> str:
+    """Return a comma-separated summary of touched field names without secrets."""
+    try:
+        after_doc = json.loads(after_raw or "{}")
+        before_doc = json.loads(before_raw or "{}")
+    except (ValueError, TypeError):
+        return "—"
+    if not isinstance(after_doc, dict):
+        return "—"
+
+    changed: list[str] = []
+    after_variants = after_doc.get("variants")
+    before_variants = before_doc.get("variants") if isinstance(before_doc, dict) else None
+    if isinstance(after_variants, list) and after_variants:
+        for idx, av in enumerate(after_variants):
+            if not isinstance(av, dict):
+                continue
+            af = av.get("fields") if isinstance(av.get("fields"), dict) else {}
+            bf = (
+                before_variants[idx].get("fields")
+                if isinstance(before_variants, list)
+                and idx < len(before_variants)
+                and isinstance(before_variants[idx], dict)
+                and isinstance(before_variants[idx].get("fields"), dict)
+                else {}
+            )
+            for k, val in af.items():
+                if (not bf or bf.get(k) != val) and k not in changed:
+                    changed.append(str(k))
+            if av.get("lock") != (
+                before_variants[idx].get("lock")
+                if isinstance(before_variants, list)
+                and idx < len(before_variants)
+                and isinstance(before_variants[idx], dict)
+                else None
+            ) and "lock" not in changed:
+                changed.append("lock")
+    else:
+        for k in after_doc:
+            if k not in ("variants", "derived") and k not in changed:
+                changed.append(str(k))
+    return ", ".join(changed) if changed else "—"
+
+
+async def _audit_ctx(db: AsyncSession) -> dict[str, Any]:
+    """Read-only audit context: last 50 metadata_edits + scrape_cache breakdown."""
+    edits_stmt = (
+        select(MetadataEdit)
+        .order_by(MetadataEdit.at_ms.desc(), MetadataEdit.edit_id.desc())
+        .limit(50)
+    )
+    edit_rows = (await db.execute(edits_stmt)).scalars().all()
+    edits = [
+        {
+            "edit_id": e.edit_id,
+            "at_ms": e.at_ms,
+            "kind": e.kind,
+            "item_type": e.item_type,
+            "server_id": e.server_id,
+            "rating_key": e.rating_key,
+            "key_id": e.key_id,
+            "reason": e.reason,
+            "reverts": e.reverts,
+            "reverted_by": e.reverted_by,
+            "fields_summary": _extract_edit_fields(e.before_json, e.after_json),
+        }
+        for e in edit_rows
+    ]
+
+    current = now_ms()
+    cache_stmt = (
+        select(
+            ScrapeCacheEntry.family,
+            ScrapeCacheEntry.key_version,
+            func.count().label("total"),
+            func.coalesce(
+                func.sum(case((ScrapeCacheEntry.expires_at > current, 1), else_=0)), 0
+            ).label("active"),
+            func.coalesce(
+                func.sum(case((ScrapeCacheEntry.expires_at <= current, 1), else_=0)), 0
+            ).label("expired"),
+        )
+        .group_by(ScrapeCacheEntry.family, ScrapeCacheEntry.key_version)
+        .order_by(ScrapeCacheEntry.family, ScrapeCacheEntry.key_version)
+    )
+    cache_rows = (await db.execute(cache_stmt)).all()
+    cache_families = [
+        {
+            "family": r.family,
+            "key_version": r.key_version,
+            "total": int(r.total),
+            "active": int(r.active),
+            "expired": int(r.expired),
+        }
+        for r in cache_rows
+    ]
+    return {
+        "edits": edits,
+        "cache_families": cache_families,
+        "cache_total": sum(r["total"] for r in cache_families),
+        "cache_active": sum(r["active"] for r in cache_families),
+        "cache_expired": sum(r["expired"] for r in cache_families),
+    }
+
+
+@router.get("/audit", response_class=HTMLResponse)
+async def admin_audit_index(request: Request, db: AsyncSession = Depends(get_db)):
+    """Strictly read-only audit page for metadata edits and scrape_cache stats."""
+    return templates.TemplateResponse(request, "admin/audit.html", await _audit_ctx(db))
 
 
 __all__ = ["router"]

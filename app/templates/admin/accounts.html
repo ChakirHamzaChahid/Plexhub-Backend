@@ -1,0 +1,72 @@
+{% extends "admin/base.html" %}
+
+{% block title %}PlexHub Admin — Comptes Xtream{% endblock %}
+
+{% block content %}
+<section class="mb-6">
+  <h2 class="text-xl font-semibold mb-1">Comptes Xtream Codes</h2>
+  <p class="text-sm text-slate-500">
+    Gérez vos abonnements et serveurs Xtream IPTV. Configurez les filtres de catégories pour isoler les contenus autorisés sur PlexHub.
+  </p>
+</section>
+
+<!-- Formulaire d'ajout d'un compte Xtream -->
+<section class="bg-white p-5 rounded-lg shadow-sm border border-slate-200 mb-6">
+  <h3 class="text-sm font-semibold text-slate-800 uppercase tracking-wider mb-3">
+    Ajouter un compte Xtream
+  </h3>
+  <form hx-post="/admin/accounts"
+        hx-target="#create-account-result"
+        hx-swap="innerHTML"
+        class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3 items-end">
+    <div class="flex flex-col">
+      <label class="text-xs font-medium text-slate-600 mb-1" for="label">Nom / Libellé</label>
+      <input id="label" name="label" type="text" required
+             placeholder="ex. Fournisseur VIP"
+             class="border border-slate-300 rounded px-2.5 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500">
+    </div>
+    <div class="flex flex-col">
+      <label class="text-xs font-medium text-slate-600 mb-1" for="base_url">URL du serveur</label>
+      <input id="base_url" name="base_url" type="url" required
+             placeholder="http://iptv.example.com"
+             class="border border-slate-300 rounded px-2.5 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500">
+    </div>
+    <div class="flex flex-col">
+      <label class="text-xs font-medium text-slate-600 mb-1" for="port">Port</label>
+      <input id="port" name="port" type="number" value="80" required min="1" max="65535"
+             class="border border-slate-300 rounded px-2.5 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500">
+    </div>
+    <div class="flex flex-col">
+      <label class="text-xs font-medium text-slate-600 mb-1" for="username">Identifiant</label>
+      <input id="username" name="username" type="text" required
+             placeholder="Nom d'utilisateur"
+             class="border border-slate-300 rounded px-2.5 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500">
+    </div>
+    <div class="flex flex-col">
+      <label class="text-xs font-medium text-slate-600 mb-1" for="password">Mot de passe</label>
+      <input id="password" name="password" type="password" required
+             placeholder="••••••••"
+             class="border border-slate-300 rounded px-2.5 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500">
+    </div>
+    <div class="lg:col-span-5 flex justify-end mt-2">
+      <button type="submit"
+              class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-4 py-2 rounded shadow-sm">
+        Ajouter le compte
+      </button>
+    </div>
+  </form>
+  <div id="create-account-result" class="mt-3"></div>
+</section>
+
+<!-- Liste des comptes existants -->
+<section id="accounts-table-wrap"
+         hx-get="/admin/accounts/table"
+         hx-trigger="refresh-accounts from:body"
+         hx-swap="innerHTML"
+         class="mb-6">
+  {% include "admin/_accounts_table.html" %}
+</section>
+
+<!-- Éditeur de catégories dynamique -->
+<section id="categories-editor"></section>
+{% endblock %}

@@ -304,6 +304,12 @@ class Settings:
     # docs/20-impl-media-download.md §2. "" = feature disabled (config guard
     # in download_service.enqueue_selection / download_worker.run_drain_loop).
     DOWNLOAD_DIR: str = os.getenv("DOWNLOAD_DIR", "")
+    # Optional per-library target directories (when set, Movies/, Series/, and
+    # Anime/ relative dest_paths are confined under these directories instead of
+    # DOWNLOAD_DIR). "" = fall back to DOWNLOAD_DIR.
+    DOWNLOAD_MOVIES_DIR: str = os.getenv("DOWNLOAD_MOVIES_DIR", "").strip()
+    DOWNLOAD_SERIES_DIR: str = os.getenv("DOWNLOAD_SERIES_DIR", "").strip()
+    DOWNLOAD_ANIME_DIR: str = os.getenv("DOWNLOAD_ANIME_DIR", "").strip()
     DOWNLOAD_CONCURRENCY: int = _safe_int("DOWNLOAD_CONCURRENCY", 1)
     DOWNLOAD_CHUNK_BYTES: int = _safe_int("DOWNLOAD_CHUNK_BYTES", 1_048_576)        # 1 MiB
     DOWNLOAD_MAX_RETRIES: int = _safe_int("DOWNLOAD_MAX_RETRIES", 3)               # transient auto-retries

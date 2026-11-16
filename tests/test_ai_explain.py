@@ -160,6 +160,7 @@ async def test_explain_true_rank_populates_explanations(rank_client, monkeypatch
             "candidates": [{"tmdbId": 2}, {"tmdbId": 3}],
             "limit": 10,
             "mediaType": "movie",
+            "playableOnly": False,
             "explain": True,
         },
     )
@@ -203,6 +204,7 @@ async def test_explain_capped_at_explain_cap(rank_client, monkeypatch):
             "candidates": candidates,
             "limit": 50,
             "mediaType": "movie",
+            "playableOnly": False,
             "explain": True,
         },
     )
@@ -245,6 +247,7 @@ async def test_explain_false_no_llm_call(rank_client, monkeypatch):
             "candidates": [{"tmdbId": 11}],
             "limit": 5,
             "mediaType": "movie",
+            "playableOnly": False,
             # explain field omitted → defaults to false
         },
     )
@@ -281,6 +284,7 @@ async def test_explain_explicit_false_no_llm_call(rank_client, monkeypatch):
             "candidates": [{"tmdbId": 21}],
             "limit": 5,
             "mediaType": "movie",
+            "playableOnly": False,
             "explain": False,
         },
     )
@@ -312,6 +316,7 @@ async def test_explain_ollama_down_graceful(rank_client, monkeypatch):
             "candidates": [{"tmdbId": 31}],
             "limit": 5,
             "mediaType": "movie",
+            "playableOnly": False,
             "explain": True,
         },
     )
@@ -353,6 +358,7 @@ async def test_explain_ollama_timeout_graceful(rank_client, monkeypatch):
             "candidates": [{"tmdbId": 41}],
             "limit": 5,
             "mediaType": "movie",
+            "playableOnly": False,
             "explain": True,
         },
     )
@@ -394,6 +400,7 @@ async def test_explain_true_rank_multi(rank_client, monkeypatch):
             "candidates": [{"tmdbId": 52}, {"tmdbId": 53}],
             "limit": 10,
             "mediaType": "movie",
+            "playableOnly": False,
             "explain": True,
         },
     )
@@ -434,6 +441,7 @@ async def test_explain_false_rank_multi_no_llm_call(rank_client, monkeypatch):
             "candidates": [{"tmdbId": 61}],
             "limit": 5,
             "mediaType": "movie",
+            "playableOnly": False,
             # explain omitted -> defaults to false
         },
     )
@@ -465,6 +473,7 @@ async def test_rank_multi_ollama_down_graceful(rank_client, monkeypatch):
             "candidates": [{"tmdbId": 71}],
             "limit": 5,
             "mediaType": "movie",
+            "playableOnly": False,
             "explain": True,
         },
     )
@@ -502,6 +511,7 @@ async def test_camelcase_explanation_field(rank_client, monkeypatch):
             "candidates": [{"tmdbId": 81}],
             "limit": 5,
             "mediaType": "movie",
+            "playableOnly": False,
             "explain": True,
         },
     )
@@ -539,6 +549,7 @@ async def test_explain_response_shape_unchanged_when_off(rank_client, monkeypatc
             "candidates": [{"tmdbId": 91}],
             "limit": 5,
             "mediaType": "movie",
+            "playableOnly": False,
         },
     )
     assert resp.status_code == 200, resp.text

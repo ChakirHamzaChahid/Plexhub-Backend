@@ -16,9 +16,11 @@ from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.models.database import Media
+from app.services import account_outage_service
 from app.services.embedding_service import (
     EMBEDDING_DIM,
     EmbeddingUnavailableError,
@@ -242,6 +244,131 @@ async def hydrate_misses(
 # residual, tracked as CR-P08.
 KNN_OVERFETCH_FACTOR = 4
 KNN_OVERFETCH_CEILINGS = (200, 2000)  # escalation ladder; last value = hard cap
+_SQLITE_IN_CHUNK = 900
+
+
+def _genres_match(genre_text: str | None, req_genres: list[str]) -> bool:
+    """Return True if any requested genre (lowercase) appears in *genre_text*."""
+    if not genre_text:
+        return False
+    haystack = genre_text.lower()
+    return any(g in haystack for g in req_genres)
+
+
+async def filter_catalog_tmdb_ids(
+    db: AsyncSession,
+    tmdb_ids: list[int],
+    *,
+    media_type: str | None = None,
+    playable_only: bool = True,
+    genres: list[str] | None = None,
+    year_min: int | None = None,
+    year_max: int | None = None,
+    min_rating: float | None = None,
+    cached_genres_by_id: dict[int, str | None] | None = None,
+    masked_server_ids: frozenset[str] | None = None,
+) -> set[int]:
+    """Filter *tmdb_ids* against catalog availability and metadata criteria.
+
+    When *playable_only* is True, a tmdb_id is kept only if at least one
+    matching ``Media`` row exists with ``is_in_allowed_categories=True``,
+    ``is_broken=False``, and ``server_id`` not in ``account_outage_service``.
+    Optional ``genres``, ``year_min``, ``year_max``, and ``min_rating``
+    filters are applied on ``Media`` (or ``ai_tmdb_cache.genres`` when
+    ``playable_only=False`` and no year/rating filter requires ``Media``).
+    """
+    if not tmdb_ids:
+        return set()
+
+    req_genres = [g.strip().lower() for g in (genres or []) if g and g.strip()]
+    needs_media_query = (
+        playable_only
+        or year_min is not None
+        or year_max is not None
+        or min_rating is not None
+    )
+
+    if not needs_media_query:
+        if not req_genres:
+            return set(tmdb_ids)
+        genres_map = cached_genres_by_id
+        if genres_map is None:
+            genres_map = {}
+            for i in range(0, len(tmdb_ids), _SQLITE_IN_CHUNK):
+                chunk = tmdb_ids[i : i + _SQLITE_IN_CHUNK]
+                ph = ",".join(f":id{j}" for j in range(len(chunk)))
+                params = {f"id{j}": tid for j, tid in enumerate(chunk)}
+                rows = (
+                    await db.execute(
+                        text(f"SELECT tmdb_id, genres FROM ai_tmdb_cache WHERE tmdb_id IN ({ph})"),
+                        params,
+                    )
+                ).fetchall()
+                for tid, gtxt in rows:
+                    genres_map[tid] = gtxt
+        return {tid for tid in tmdb_ids if _genres_match(genres_map.get(tid), req_genres)}
+
+    masked = (
+        masked_server_ids
+        if masked_server_ids is not None
+        else (await account_outage_service.masked_server_ids(db) if playable_only else frozenset())
+    )
+
+    conditions = []
+    if media_type == "movie":
+        conditions.append(Media.type == "movie")
+    elif media_type == "tv":
+        conditions.append(Media.type == "show")
+    else:
+        conditions.append(Media.type.in_(("movie", "show")))
+
+    if playable_only:
+        conditions.append(Media.is_in_allowed_categories == True)  # noqa: E712
+        conditions.append(Media.is_broken == False)  # noqa: E712
+        if masked:
+            conditions.append(Media.server_id.notin_(masked))
+
+    if year_min is not None:
+        conditions.append(Media.year >= year_min)
+    if year_max is not None:
+        conditions.append(Media.year <= year_max)
+    if min_rating is not None:
+        conditions.append(Media.display_rating >= min_rating)
+
+    allowed: set[int] = set()
+    str_ids = [str(tid) for tid in tmdb_ids]
+    for i in range(0, len(str_ids), _SQLITE_IN_CHUNK):
+        chunk = str_ids[i : i + _SQLITE_IN_CHUNK]
+        if req_genres:
+            stmt = select(Media.tmdb_id, Media.genres).where(
+                Media.tmdb_id.in_(chunk),
+                *conditions,
+            ).distinct()
+            rows = (await db.execute(stmt)).fetchall()
+            for tid_str, media_genres in rows:
+                if tid_str is None:
+                    continue
+                try:
+                    tid_int = int(tid_str)
+                except ValueError:
+                    continue
+                fallback_genres = cached_genres_by_id.get(tid_int) if cached_genres_by_id else None
+                if _genres_match(media_genres, req_genres) or _genres_match(fallback_genres, req_genres):
+                    allowed.add(tid_int)
+        else:
+            stmt = select(Media.tmdb_id).where(
+                Media.tmdb_id.in_(chunk),
+                *conditions,
+            ).distinct()
+            rows = (await db.execute(stmt)).scalars().all()
+            for tid_str in rows:
+                if tid_str is None:
+                    continue
+                try:
+                    allowed.add(int(tid_str))
+                except ValueError:
+                    continue
+    return allowed
 
 
 async def _knn_search_filtered(
@@ -250,14 +377,20 @@ async def _knn_search_filtered(
     media_type: str | None,
     limit: int,
     want_overview: bool,
+    *,
+    playable_only: bool = False,
+    genres: list[str] | None = None,
+    year_min: int | None = None,
+    year_max: int | None = None,
+    min_rating: float | None = None,
 ) -> list[tuple[int, str | None, str, float, str | None]]:
-    """Adaptive-over-fetch KNN + post-hoc media_type filter (CR-P08).
+    """Adaptive-over-fetch KNN + post-hoc media_type/catalog filter (CR-P08, T10.1).
 
     Shared core for semantic_search / semantic_search_with_overview. Runs the
     native sqlite-vec KNN query (index scan, never a full table scan) at an
     escalating ladder of `k` ceilings (see KNN_OVERFETCH_CEILINGS above),
     stopping as soon as the post-filter yields >= limit rows of the
-    requested media_type, or the KNN itself returns fewer rows than asked
+    requested criteria, or the KNN itself returns fewer rows than asked
     (the whole vec table has already been scanned, escalating further would
     be a wasted round-trip).
 
@@ -271,10 +404,19 @@ async def _knn_search_filtered(
         "WHERE embedding MATCH :vec AND k = :k "
         "ORDER BY distance"
     )
-    overview_select = ", overview" if want_overview else ""
+    need_genres_col = bool(genres)
+    extra_cols = (", overview" if want_overview else "") + (", genres" if need_genres_col else "")
 
-    if media_type is None:
-        # No type filter -> no over-fetch needed, exactly `limit` rows.
+    has_post_filter = (
+        media_type is not None
+        or playable_only
+        or bool(genres)
+        or year_min is not None
+        or year_max is not None
+        or min_rating is not None
+    )
+    if not has_post_filter:
+        # No post-filter -> no over-fetch needed, exactly `limit` rows.
         attempt_ks = [limit]
     else:
         first_k = min(limit * KNN_OVERFETCH_FACTOR, KNN_OVERFETCH_CEILINGS[0])
@@ -282,6 +424,19 @@ async def _knn_search_filtered(
         # values (not re-multiplied by limit) so each retry is strictly
         # larger than the previous one, even for small `limit`.
         attempt_ks = [first_k] + [c for c in KNN_OVERFETCH_CEILINGS[1:] if c > first_k]
+
+    masked_ids = (
+        await account_outage_service.masked_server_ids(db)
+        if playable_only
+        else frozenset()
+    )
+    needs_catalog_filter = (
+        playable_only
+        or bool(genres)
+        or year_min is not None
+        or year_max is not None
+        or min_rating is not None
+    )
 
     results: list[tuple[int, str | None, str, float, str | None]] = []
     for k in attempt_ks:
@@ -295,21 +450,50 @@ async def _knn_search_filtered(
         placeholders = ",".join(f":id{i}" for i in range(len(knn_ids)))
         params: dict = {f"id{i}": tid for i, tid in enumerate(knn_ids)}
         cache_sql = text(
-            f"SELECT tmdb_id, title, media_type{overview_select} "
+            f"SELECT tmdb_id, title, media_type{extra_cols} "
             f"FROM ai_tmdb_cache "
             f"WHERE tmdb_id IN ({placeholders})"
         )
         cache_rows = (await db.execute(cache_sql, params)).fetchall()
 
-        results = []
+        type_matched: list[tuple[int, str | None, str, str | None]] = []
+        cached_genres: dict[int, str | None] = {}
         for row in cache_rows:
             tmdb_id, title, row_media_type = row[0], row[1], row[2]
             if media_type is not None and row_media_type != media_type:
                 continue
+            idx = 3
+            overview = None
+            if want_overview:
+                overview = row[idx]
+                idx += 1
+            if need_genres_col:
+                cached_genres[tmdb_id] = row[idx]
+            type_matched.append((tmdb_id, title, row_media_type, overview))
+
+        if needs_catalog_filter and type_matched:
+            allowed_ids = await filter_catalog_tmdb_ids(
+                db,
+                [item[0] for item in type_matched],
+                media_type=media_type,
+                playable_only=playable_only,
+                genres=genres,
+                year_min=year_min,
+                year_max=year_max,
+                min_rating=min_rating,
+                cached_genres_by_id=cached_genres if need_genres_col else None,
+                masked_server_ids=masked_ids,
+            )
+        else:
+            allowed_ids = {item[0] for item in type_matched}
+
+        results = []
+        for tmdb_id, title, row_media_type, overview in type_matched:
+            if tmdb_id not in allowed_ids:
+                continue
             dist = dist_by_id[tmdb_id]
             # L2-norm vectors: cosine_sim = 1 - dist^2 / 2
             score = round(1.0 - (dist ** 2) / 2.0, 6)
-            overview = row[3] if want_overview else None
             results.append((tmdb_id, title, row_media_type, score, overview))
 
         if len(results) >= limit or len(knn_rows) < k:
@@ -325,30 +509,27 @@ async def semantic_search(
     query_vec: list[float],
     media_type: str | None,
     limit: int,
+    *,
+    playable_only: bool = False,
+    genres: list[str] | None = None,
+    year_min: int | None = None,
+    year_max: int | None = None,
+    min_rating: float | None = None,
 ) -> list[tuple[int, str | None, str, float]]:
-    """KNN vector search against ai_embeddings, returning joined cache metadata.
-
-    Uses the native sqlite-vec KNN syntax:
-        WHERE embedding MATCH :vec AND k = :k ORDER BY distance
-
-    The vec0 distance metric is L2.  Because every embedding stored by this
-    project is L2-normalised (output of embed_passages / embed_query), the
-    conversion from L2 distance to cosine similarity is exact:
-        cosine_sim = 1.0 - (l2_distance ** 2) / 2.0
-
-    When media_type is given the vec0 table has no media_type column, so we
-    over-fetch from the KNN query using an adaptive ladder (initial ceiling
-    200, escalating once to a hard cap of 2000 if still short of `limit`
-    after filtering — see KNN_OVERFETCH_CEILINGS / CR-P08), then filter by
-    joining ai_tmdb_cache and truncate to limit.  When media_type is None no
-    extra filtering is needed and we fetch exactly limit rows.
-
-    Returns a list of (tmdb_id, title, media_type, score) tuples, sorted by
-    score descending.  Rows with no matching ai_tmdb_cache entry are dropped
-    (they cannot be hydrated into a usable result).
-    """
+    """KNN vector search against ai_embeddings, returning joined cache metadata."""
     vec_blob = serialize_vec(query_vec)
-    rows = await _knn_search_filtered(db, vec_blob, media_type, limit, want_overview=False)
+    rows = await _knn_search_filtered(
+        db,
+        vec_blob,
+        media_type,
+        limit,
+        want_overview=False,
+        playable_only=playable_only,
+        genres=genres,
+        year_min=year_min,
+        year_max=year_max,
+        min_rating=min_rating,
+    )
     return [(tmdb_id, title, row_media_type, score) for tmdb_id, title, row_media_type, score, _overview in rows]
 
 
@@ -357,15 +538,27 @@ async def semantic_search_with_overview(
     query_vec: list[float],
     media_type: str | None,
     limit: int,
+    *,
+    playable_only: bool = False,
+    genres: list[str] | None = None,
+    year_min: int | None = None,
+    year_max: int | None = None,
+    min_rating: float | None = None,
 ) -> list[tuple[int, str | None, str, float, str | None]]:
-    """Like semantic_search but also returns the overview column from ai_tmdb_cache.
-
-    Returns a list of (tmdb_id, title, media_type, score, overview) tuples,
-    sorted by score descending.  overview may be None when not yet fetched.
-    Uses the same adaptive over-fetch ladder as semantic_search (CR-P08).
-    """
+    """Like semantic_search but also returns the overview column from ai_tmdb_cache."""
     vec_blob = serialize_vec(query_vec)
-    return await _knn_search_filtered(db, vec_blob, media_type, limit, want_overview=True)
+    return await _knn_search_filtered(
+        db,
+        vec_blob,
+        media_type,
+        limit,
+        want_overview=True,
+        playable_only=playable_only,
+        genres=genres,
+        year_min=year_min,
+        year_max=year_max,
+        min_rating=min_rating,
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────

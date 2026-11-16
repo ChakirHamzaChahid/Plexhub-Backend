@@ -93,6 +93,8 @@ async def list_unified(
     media_type: str,
     search: str | None = None,
     genre: str | None = None,
+    plex_server_id: str | None = None,
+    id_filter: str = "all",
     limit: int = 24,
     offset: int = 0,
     cap: int = DEFAULT_MERGE_CAP,
@@ -110,7 +112,7 @@ async def list_unified(
         db, media_type=media_type, limit=cap, offset=0, search=search, genre=genre,
     )
     p_items, p_total = await plex_catalog_service.list_unified(
-        db, media_type, search, cap, 0, genre=genre,
+        db, media_type, search, cap, 0, genre=genre, server_id=plex_server_id or None,
     )
 
     merged: dict[str, UnifiedCard] = {}
@@ -141,6 +143,17 @@ async def list_unified(
         )
 
     cards = list(merged.values())
+    if plex_server_id:
+        cards = [c for c in cards if ORIGIN_PLEX in c.origins]
+    if id_filter == "has_id":
+        cards = [c for c in cards if c.unification_id.startswith(("imdb://", "tmdb://"))]
+    elif id_filter == "imdb":
+        cards = [c for c in cards if c.unification_id.startswith("imdb://")]
+    elif id_filter == "tmdb":
+        cards = [c for c in cards if c.unification_id.startswith("tmdb://")]
+    elif id_filter == "none":
+        cards = [c for c in cards if not c.unification_id.startswith(("imdb://", "tmdb://"))]
+
     for c in cards:
         c.origins.sort()
     cards.sort(key=lambda c: ((c.title or "").casefold(), c.unification_id))

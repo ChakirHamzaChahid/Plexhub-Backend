@@ -133,3 +133,5 @@ class TestLot13TitleCleaningRegressions:
         assert clean_title("Les Demoiselles du téléphone Integrale MMCC") == (
             "Les Demoiselles du téléphone", None,
         )
+        assert clean_title("Hartley Coeurs A Vif L'integrale") == ("Hartley Coeurs A Vif", None)
+        assert clean_title("Over There L'intégrale de la série") == ("Over There", None)

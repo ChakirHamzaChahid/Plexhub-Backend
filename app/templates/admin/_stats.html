@@ -1,49 +1,42 @@
 {% macro type_stats(label, s) %}
-<div class="flex flex-wrap items-center gap-6">
-  <div>
-    <span class="text-xs uppercase text-slate-500">{{ label }}</span>
-    <span class="text-2xl font-semibold text-slate-900 ml-2">{{ s.total }}</span>
-  </div>
-  <div>
-    <span class="text-xs uppercase text-slate-500">Sans IMDb</span>
-    <span class="text-2xl font-semibold {{ 'text-amber-600' if s.missing_imdb else 'text-emerald-600' }} ml-2">
-      {{ s.missing_imdb }}
+{% set pct = (s.with_both * 100 // s.total) if s.total else 0 %}
+<div class="bg-slate-50 border border-slate-200 rounded-lg p-3">
+  <div class="flex items-center justify-between mb-2">
+    <span class="text-xs font-semibold uppercase tracking-wide text-slate-600">{{ label }}</span>
+    <span class="text-xs font-medium text-slate-500">
+      {{ pct }} % complets ({{ s.with_both }} / {{ s.total }})
     </span>
   </div>
-  <div>
-    <span class="text-xs uppercase text-slate-500">Sans TMDB</span>
-    <span class="text-2xl font-semibold {{ 'text-amber-600' if s.missing_tmdb else 'text-emerald-600' }} ml-2">
-      {{ s.missing_tmdb }}
-    </span>
+  <div class="w-full h-1.5 bg-slate-200 rounded-full overflow-hidden mb-2.5">
+    <div class="h-full bg-emerald-500 rounded-full" style="width: {{ pct }}%"></div>
   </div>
-  <div>
-    <span class="text-xs uppercase text-slate-500">Les deux</span>
-    <span class="text-2xl font-semibold text-emerald-600 ml-2">{{ s.with_both }}</span>
+  <div class="grid grid-cols-4 gap-2 text-center">
+    <div class="bg-white rounded border border-slate-200 py-1.5 px-1">
+      <div class="text-[10px] uppercase text-slate-400">Sans IMDb</div>
+      <div class="text-base font-semibold {{ 'text-amber-600' if s.missing_imdb else 'text-emerald-600' }}">{{ s.missing_imdb }}</div>
+    </div>
+    <div class="bg-white rounded border border-slate-200 py-1.5 px-1">
+      <div class="text-[10px] uppercase text-slate-400">Sans TMDB</div>
+      <div class="text-base font-semibold {{ 'text-amber-600' if s.missing_tmdb else 'text-emerald-600' }}">{{ s.missing_tmdb }}</div>
+    </div>
+    <div class="bg-white rounded border border-slate-200 py-1.5 px-1">
+      <div class="text-[10px] uppercase text-slate-400">Verrouillés</div>
+      <div class="text-base font-semibold text-slate-700">{{ s.locked }}</div>
+    </div>
+    <div class="bg-white rounded border border-slate-200 py-1.5 px-1">
+      <div class="text-[10px] uppercase text-slate-400">À vérifier</div>
+      <div class="text-base font-semibold {{ 'text-amber-600' if s.review_pending else 'text-slate-400' }}">{{ s.review_pending }}</div>
+    </div>
   </div>
-  <div>
-    <span class="text-xs uppercase text-slate-500">Verrouillés</span>
-    <span class="text-2xl font-semibold text-slate-700 ml-2">{{ s.locked }}</span>
-  </div>
-  <div>
-    <span class="text-xs uppercase text-slate-500">À vérifier</span>
-    <span class="text-2xl font-semibold {{ 'text-amber-600' if s.review_pending else 'text-slate-400' }} ml-2">
-      {{ s.review_pending }}
-    </span>
-  </div>
-  {% if s.total %}
-  <div class="text-xs text-slate-500">
-    {{ (s.with_both * 100 // s.total) }} % avec les deux identifiants
-  </div>
-  {% endif %}
 </div>
 {% endmacro %}
 
 <div hx-get="/admin/stats"
      hx-trigger="refresh-stats from:body"
      hx-swap="outerHTML"
-     class="flex flex-col gap-3 bg-white border border-slate-200 rounded p-3 shadow-sm">
-  {{ type_stats("Films", movie_stats) }}
-  <div class="border-t border-slate-100 pt-2">
+     class="flex flex-col gap-3 bg-white border border-slate-200 rounded-lg p-3 shadow-sm">
+  <div class="grid gap-3 md:grid-cols-2">
+    {{ type_stats("Films", movie_stats) }}
     {{ type_stats("Séries", show_stats) }}
   </div>
   {% if outages %}
